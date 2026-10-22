@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react"
+import { useRef, useState } from "react"
 import { Link } from "wouter"
 import { AlertTriangle, Bot, RotateCcw, Send, Square, Wrench } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useSendChat } from "../lib/queries"
 import { Button, Markdown, cx } from "./ui"
+import { StickyScroll } from "./StickyScroll"
 import type { ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -18,12 +19,7 @@ export function ChatPanel() {
   const send = useSendChat()
   const control = useChatControl()
   const [draft, setDraft] = useState("")
-  const bottom = useRef<HTMLDivElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
-
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" })
-  }, [chat.data?.length, stream.data])
 
   const submit = (text = draft) => {
     const content = text.trim()
@@ -60,7 +56,7 @@ export function ChatPanel() {
         </div>
       </header>
 
-      <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      <StickyScroll count={messages.length} className="px-4 py-4" contentClassName="space-y-3">
         {messages.length === 0 && !chat.isLoading && (
           <div className="space-y-3 pt-6 text-center">
             <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
@@ -92,8 +88,7 @@ export function ChatPanel() {
             ))}
           </div>
         )}
-        <div ref={bottom} />
-      </div>
+      </StickyScroll>
 
       <form
         className="border-t border-zinc-900 p-3"
