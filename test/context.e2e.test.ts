@@ -152,7 +152,7 @@ describe("settings reach the CLI", () => {
     const r = await start()
     const connect = async () => {
       const server = buildMcpServer({
-        store: r.yard.store, tasks: r.yard.tasks, hub: r.yard.hub, artifacts: null as never, scheduler: r.yard.scheduler, settings: r.yard.settings, publicUrl: () => "",
+        store: r.yard.store, tasks: r.yard.tasks, hub: r.yard.hub, artifacts: null as never, uploads: { resolveAll: () => [] }, scheduler: r.yard.scheduler, settings: r.yard.settings, publicUrl: () => "",
       } as never)
       const [a, b] = InMemoryTransport.createLinkedPair()
       const client = new Client({ name: "t", version: "0" })

@@ -3,6 +3,7 @@ import { api, clientId } from "./api"
 import { toast } from "./toast"
 import type {
   Artifact,
+  Attachment,
   BoxInfo,
   ChatMessage,
   Health,
@@ -11,6 +12,8 @@ import type {
   SettingsInfo,
   Project,
   Schedule,
+  ScheduleRun,
+  ScheduleTarget,
   CatchUp,
   Task,
   TaskMessage,
@@ -29,6 +32,7 @@ export const keys = {
   artifacts: ["artifacts"] as const,
   boxes: ["boxes"] as const,
   schedules: ["schedules"] as const,
+  scheduleRuns: ["schedule-runs"] as const,
   settings: ["settings"] as const,
   orchestrator: ["orchestrator"] as const,
   agentSettings: ["agent-settings"] as const,
@@ -67,10 +71,11 @@ export const useTaskMessages = (id: string) =>
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
 export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
 export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
+export const useScheduleRuns = () => useQuery({ queryKey: keys.scheduleRuns, queryFn: () => api<ScheduleRun[]>("/api/schedule-runs") })
 export const useSettings = () =>
   useQuery({
     queryKey: keys.settings,
-    queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash" }>("/api/settings"),
+    queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash"; maxUploadMb: number }>("/api/settings"),
     staleTime: Infinity,
   })
 export const useOrchestratorState = () =>
@@ -245,8 +250,9 @@ export function useCreateTask() {
 export function useSendTaskMessage(taskId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (content: string) => api<Task>(`/api/tasks/${taskId}/messages`, { body: { content } }),
-    onMutate: async (content) => {
+    mutationFn: (input: { content: string; attachments?: Attachment[] }) =>
+      api<Task>(`/api/tasks/${taskId}/messages`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
+    onMutate: async ({ content, attachments }) => {
       const undoTasks = snapshot<Task[]>(qc, keys.tasks)
       const undoMsgs = snapshot<TaskMessage[]>(qc, keys.taskMessages(taskId))
       const task = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.id === taskId)
@@ -254,7 +260,7 @@ export function useSendTaskMessage(taskId: string) {
       patchTask(qc, taskId, running ? { pendingCount: (task?.pendingCount ?? 0) + 1 } : { status: "queued", question: null })
       qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => [
         ...(list ?? []),
-        { id: `tmp-${Date.now()}`, taskId, role: "user", content, meta: { pending: true }, createdAt: Date.now() },
+        { id: `tmp-${Date.now()}`, taskId, role: "user", content, meta: { pending: true, ...(attachments?.length ? { attachments } : {}) }, createdAt: Date.now() },
       ])
       return { undo: () => (undoTasks(), undoMsgs()) }
     },
@@ -307,7 +313,9 @@ export function useDeleteTask() {
 
 export interface ScheduleInput {
   id: string
-  projectId: string
+  target: ScheduleTarget
+  /** Null for orchestrator schedules. */
+  projectId: string | null
   name: string
   cron: string
   timezone: string
@@ -351,7 +359,7 @@ export function useCreateSchedule() {
 export function useUpdateSchedule() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, ...patch }: { id: string } & Partial<Omit<ScheduleInput, "id" | "projectId">> & { enabled?: boolean }) =>
+    mutationFn: ({ id, ...patch }: { id: string } & Partial<Omit<ScheduleInput, "id" | "projectId" | "target">> & { enabled?: boolean }) =>
       api<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, ...patch }) => {
       const undo = snapshot<Schedule[]>(qc, keys.schedules)
@@ -385,21 +393,31 @@ export function useDeleteSchedule() {
 export function useRunSchedule() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) => api<Task>(`/api/schedules/${id}/run`, { method: "POST" }),
+    mutationFn: (id: string) => api<Task | ScheduleRun>(`/api/schedules/${id}/run`, { method: "POST" }),
     onError: fail("Couldn't start a run"),
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (run) => {
+      if ("dueAt" in run) qc.setQueryData<ScheduleRun[]>(keys.scheduleRuns, (list) => upsert(list, run, true))
+      else qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, run))
+    },
   })
 }
 
 export function useSendChat() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; content: string }) => api<ChatMessage>("/api/chat", { body: input }),
+    mutationFn: (input: { id: string; content: string; attachments?: Attachment[] }) =>
+      api<ChatMessage>("/api/chat", { body: { ...input, attachments: input.attachments?.map((a) => a.id) } }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.chat })
       const undo = snapshot<ChatMessage[]>(qc, keys.chat)
       qc.setQueryData<ChatMessage[]>(keys.chat, (list) =>
-        upsert(list, { id: input.id, role: "user", content: input.content, meta: { pending: true }, createdAt: Date.now() }),
+        upsert(list, {
+          id: input.id,
+          role: "user",
+          content: input.content,
+          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+          createdAt: Date.now(),
+        }),
       )
       qc.setQueryData(keys.chatBusy, true)
       return { undo }

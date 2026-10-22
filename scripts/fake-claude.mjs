@@ -180,6 +180,12 @@ async function orchestrator(mcp, prompt) {
     const r = await useTool(mcp, "create_schedule", { project: m[1].trim(), cron: m[2], name: m[3].trim(), prompt: (m[4] ?? m[3]).trim() })
     lines.push(r.startsWith("{") ? `Scheduled **${m[3].trim()}** in ${m[1].trim()} (\`${m[2]}\`).` : `Couldn't create that schedule: ${r}`)
   }
+  // Orchestrator schedule (no project): `oschedule "<cron>": <name> -- <prompt>`
+  const oscheduleRe = /^oschedule\s+"([^"]+)":\s*(.+?)(?:\s+--\s+(.+))?$/gim
+  while ((m = oscheduleRe.exec(text))) {
+    const r = await useTool(mcp, "create_schedule", { cron: m[1], name: m[2].trim(), prompt: (m[3] ?? m[2]).trim() })
+    lines.push(r.startsWith("{") ? `Scheduled **${m[2].trim()}** for the orchestrator (\`${m[1]}\`).` : `Couldn't create that schedule: ${r}`)
+  }
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
   }
@@ -195,6 +201,7 @@ async function orchestrator(mcp, prompt) {
       "_This is the mock Claude. Try `create project demo`, then `task demo: Write a haiku -- write a haiku about boxes [artifact]`, or `schedule demo \"*/5 * * * *\": Haiku drop -- write a haiku [artifact]`._",
     )
   }
+  if (/\[slow\]/i.test(text)) await sleep(2000)
   await say(lines.join("\n"))
   return lines.join("\n")
 }

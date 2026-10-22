@@ -6,7 +6,8 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import type { ChatMessage, ContextUsage, OrchestratorState } from "../shared/types.js"
+import type { Attachment, ChatMessage, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
+import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
@@ -46,6 +47,13 @@ interface RunResult {
 }
 type RunKind = "turn" | "summary" | "compact" | "context"
 
+/** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
+function attachmentNote(files: unknown): string {
+  if (!Array.isArray(files) || !files.length) return ""
+  const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
+  return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
+}
+
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
  * tools. Every chat message runs `claude -p --resume <session>` so the
@@ -57,6 +65,8 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
+  private readonly runNotes = new Map<string, string>()
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
   private compacting = false
@@ -97,13 +107,28 @@ export class Orchestrator {
   }
 
   /** Save Cody's message and make sure a turn will pick it up. */
-  send(content: string, id?: string): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), null, id)
+  send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
+    const msg = this.store.addChat("user", content.trim(), attachments.length ? { attachments } : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     this.autoTurns = 0
     void this.drain()
     return msg
+  }
+
+  /**
+   * Queue a scheduled prompt (a `queued` schedule_runs row). It is injected into
+   * the chat once no turn is running, so two orchestrator turns never overlap.
+   */
+  enqueueScheduled(runId: string, notes?: string) {
+    if (notes) this.runNotes.set(runId, notes)
+    void this.drain()
+  }
+
+  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered. */
+  resumeScheduled() {
+    for (const r of this.store.listScheduleRuns({ status: ["running"] })) this.finishScheduledRun(r.id, "Box Yard restarted before this run finished.")
+    if (this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
   }
 
   /**
@@ -177,7 +202,11 @@ export class Orchestrator {
   }
 
   private publishState() {
-    this.hub.broadcast({ type: "orchestrator.state", state: this.state() })
+    try {
+      this.hub.broadcast({ type: "orchestrator.state", state: this.state() })
+    } catch {
+      // The database is closed (shutdown while a turn was finishing).
+    }
   }
 
   /** Compact the orchestrator's session: right now if it is idle, otherwise right after the current turn. */
@@ -193,6 +222,14 @@ export class Orchestrator {
 
   /** After a turn: queue a compaction when usage passed the configured threshold. */
   private checkAutoCompact() {
+    try {
+      this.checkAutoCompactNow()
+    } catch {
+      // Shutting down; nothing to compact.
+    }
+  }
+
+  private checkAutoCompactNow() {
     if (this.compactWanted || this.compacting) return
     const { orchestratorAutoCompact: ac } = this.settings.get()
     const u = this.usage()
@@ -271,13 +308,15 @@ export class Orchestrator {
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted) {
+      while (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun()) {
         if (this.compactWanted) {
           await this.doCompact()
         } else if (this.pending) {
           this.pending = false
           this.wakeWanted = false
           await this.turn()
+        } else if (this.nextScheduledRun()) {
+          await this.scheduledTurn(this.nextScheduledRun()!)
         } else {
           this.wakeWanted = false
           await this.autoTurn()
@@ -290,13 +329,47 @@ export class Orchestrator {
     }
   }
 
+  /** The oldest queued scheduled run, if any. */
+  private nextScheduledRun() {
+    const queued = this.store.listScheduleRuns({ status: ["queued"] })
+    return queued.length ? queued[queued.length - 1]! : null
+  }
+
+  private finishScheduledRun(id: string, error?: string) {
+    const run = this.store.updateScheduleRun(id, { status: error ? "failed" : "done", error: error ?? null, finishedAt: Date.now() })
+    this.runNotes.delete(id)
+    this.hub.broadcast({ type: "schedule.run", run })
+  }
+
+  /** Inject a scheduled prompt into the chat as a labeled message and handle it like a message from Cody. */
+  private async scheduledTurn(queued: ScheduleRun) {
+    const msg = this.store.addChat("user", queued.prompt, { scheduleId: queued.scheduleId, scheduleRunId: queued.id })
+    this.hub.broadcast({ type: "chat.message", message: msg })
+    const run = this.store.updateScheduleRun(queued.id, { status: "running", startedAt: Date.now(), chatMessageId: msg.id })
+    this.hub.broadcast({ type: "schedule.run", run })
+    // This message is answered by this turn, not by Cody's next one.
+    this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
+    const notices = this.store.takeUnseenNotices()
+    const notes = this.runNotes.get(queued.id)
+    const prompt = [
+      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      queued.prompt,
+      `(This is a scheduled message from Box Yard, not a new message from Cody. ${notes ?? ""} Handle it as if Cody had sent it: do the work, and reply with what he should see.)`,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+    const result = await this.runPrompt(prompt)
+    this.finishScheduledRun(queued.id, result.ok ? undefined : result.error.slice(0, 500))
+  }
+
   /** Messages Cody sent since the orchestrator last replied. */
   private unansweredUserMessages(): string[] {
     const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
     return this.store
       .listChat(200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content)
+      .map((m) => m.content + attachmentNote(m.meta?.attachments))
+      .filter((text) => text.trim())
   }
 
   /** A turn with only task updates in it: report them and keep Cody's work moving. */
@@ -338,7 +411,7 @@ export class Orchestrator {
     return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
   }
 
-  private async runPrompt(body: string) {
+  private async runPrompt(body: string): Promise<{ ok: boolean; error: string }> {
     const prompt = `${this.yardNow()}\n\n${body}`
     const s = this.session()
     let result = await this.run(prompt, s.id, s.started)
@@ -358,6 +431,7 @@ export class Orchestrator {
       this.hub.broadcast({ type: "chat.message", message: msg })
     }
     this.checkAutoCompact()
+    return result
   }
 
   /** Arguments for the claude CLI, by kind of run. Settings are read here, so changes apply from the next run. */
@@ -394,7 +468,8 @@ export class Orchestrator {
 
   /** Read access is limited to these folders (absolute paths use a `//` prefix in permission rules). */
   private readRules(): string[] {
-    return [`Read(/${this.compactionsDir}/**)`]
+    // The uploads folder holds files Cody attached in the chat.
+    return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
   }
 
   private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
-import type { Artifact, ChatMessage, Project, Schedule, Task, TaskMessage, UiEvent } from "../../../shared/types"
+import type { Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -99,6 +99,9 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))
+          break
+        case "schedule.run":
+          qc.setQueryData<ScheduleRun[]>(keys.scheduleRuns, (list) => (list ? upsert(list, ev.run, true) : list))
           break
         case "schedule.deleted":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.id !== ev.scheduleId))

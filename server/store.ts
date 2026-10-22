@@ -10,6 +10,9 @@ import type {
   ProjectNote,
   CatchUp,
   Schedule,
+  ScheduleRun,
+  ScheduleRunStatus,
+  ScheduleTarget,
   Task,
   TaskMessage,
   TaskMessageRole,
@@ -72,9 +75,24 @@ export interface TaskRow {
   effort: Effort | null
 }
 
+interface ScheduleRunRow {
+  id: string
+  schedule_id: string
+  status: ScheduleRunStatus
+  reason: ScheduleRun["reason"]
+  prompt: string
+  due_at: number
+  chat_message_id: string | null
+  error: string | null
+  created_at: number
+  started_at: number | null
+  finished_at: number | null
+}
+
 interface ScheduleRow {
   id: string
-  project_id: string
+  target: ScheduleTarget
+  project_id: string | null
   name: string
   cron: string
   timezone: string
@@ -457,17 +475,18 @@ export class Store {
 
   // pending inputs: messages for a task that wait for its next turn
 
-  queueInput(taskId: string, source: string, content: string) {
+  queueInput(taskId: string, source: string, content: string, attachments: string[] = []) {
     this.db
-      .prepare("INSERT INTO task_inputs (id, task_id, source, content, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(newId("in"), taskId, source, content, Date.now())
+      .prepare("INSERT INTO task_inputs (id, task_id, source, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(newId("in"), taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, Date.now())
   }
 
   /** Queued inputs, oldest first. Delete them with deleteInputs once a turn has started. */
-  peekInputs(taskId: string): { id: string; source: string; content: string }[] {
-    return this.db
-      .prepare("SELECT id, source, content FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
-      .all(taskId) as { id: string; source: string; content: string }[]
+  peekInputs(taskId: string): { id: string; source: string; content: string; attachments: string[] }[] {
+    const rows = this.db
+      .prepare("SELECT id, source, content, attachments FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(taskId) as { id: string; source: string; content: string; attachments: string | null }[]
+    return rows.map((r) => ({ ...r, attachments: r.attachments ? (JSON.parse(r.attachments) as string[]) : [] }))
   }
 
   deleteInputs(ids: string[]) {
@@ -690,6 +709,7 @@ export class Store {
   private scheduleFromRow(r: ScheduleRow): Schedule {
     return {
       id: r.id,
+      target: r.target,
       projectId: r.project_id,
       name: r.name,
       cron: r.cron,
@@ -709,10 +729,12 @@ export class Store {
     }
   }
 
-  listSchedules(filter: { projectId?: string } = {}): Schedule[] {
-    const rows = filter.projectId
-      ? this.db.prepare("SELECT * FROM schedules WHERE project_id = ? ORDER BY created_at ASC").all(filter.projectId)
-      : this.db.prepare("SELECT * FROM schedules ORDER BY created_at ASC").all()
+  listSchedules(filter: { projectId?: string; target?: ScheduleTarget } = {}): Schedule[] {
+    const where: string[] = []
+    const args: string[] = []
+    if (filter.projectId) (where.push("project_id = ?"), args.push(filter.projectId))
+    if (filter.target) (where.push("target = ?"), args.push(filter.target))
+    const rows = this.db.prepare(`SELECT * FROM schedules ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at ASC`).all(...args)
     return (rows as ScheduleRow[]).map((r) => this.scheduleFromRow(r))
   }
 
@@ -738,7 +760,8 @@ export class Store {
 
   createSchedule(input: {
     id?: string
-    projectId: string
+    target?: ScheduleTarget
+    projectId: string | null
     name: string
     cron: string
     timezone: string
@@ -752,11 +775,12 @@ export class Store {
     const id = input.id ?? newId("sch")
     this.db
       .prepare(
-        `INSERT INTO schedules (id, project_id, name, cron, timezone, prompt, enabled, catch_up, allow_overlap, next_run_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO schedules (id, target, project_id, name, cron, timezone, prompt, enabled, catch_up, allow_overlap, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
+        input.target ?? "project",
         input.projectId,
         input.name.trim(),
         input.cron.trim(),
@@ -801,6 +825,62 @@ export class Store {
 
   deleteSchedule(id: string) {
     this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id)
+  }
+
+  // ---------- orchestrator schedule runs ----------
+
+  private runFromRow(r: ScheduleRunRow): ScheduleRun {
+    return {
+      id: r.id,
+      scheduleId: r.schedule_id,
+      status: r.status,
+      reason: r.reason,
+      prompt: r.prompt,
+      dueAt: r.due_at,
+      chatMessageId: r.chat_message_id,
+      error: r.error,
+      createdAt: r.created_at,
+      startedAt: r.started_at,
+      finishedAt: r.finished_at,
+    }
+  }
+
+  createScheduleRun(input: { scheduleId: string; prompt: string; reason: ScheduleRun["reason"]; dueAt: number }): ScheduleRun {
+    const id = newId("run")
+    this.db
+      .prepare("INSERT INTO schedule_runs (id, schedule_id, status, reason, prompt, due_at, created_at) VALUES (?, ?, 'queued', ?, ?, ?, ?)")
+      .run(id, input.scheduleId, input.reason, input.prompt, input.dueAt, Date.now())
+    return this.getScheduleRun(id)!
+  }
+
+  getScheduleRun(id: string): ScheduleRun | null {
+    const row = this.db.prepare("SELECT * FROM schedule_runs WHERE id = ?").get(id) as ScheduleRunRow | undefined
+    return row ? this.runFromRow(row) : null
+  }
+
+  updateScheduleRun(id: string, patch: Partial<Pick<ScheduleRun, "status" | "chatMessageId" | "error" | "startedAt" | "finishedAt">>): ScheduleRun {
+    const cols = { status: "status", chatMessageId: "chat_message_id", error: "error", startedAt: "started_at", finishedAt: "finished_at" } as const
+    const sets: string[] = []
+    const args: unknown[] = []
+    for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
+      if (v === undefined) continue
+      sets.push(`${cols[k]} = ?`)
+      args.push(v)
+    }
+    if (sets.length) this.db.prepare(`UPDATE schedule_runs SET ${sets.join(", ")} WHERE id = ?`).run(...args, id)
+    return this.getScheduleRun(id)!
+  }
+
+  /** Runs of one schedule (or all of them), newest first. */
+  listScheduleRuns(filter: { scheduleId?: string; status?: ScheduleRunStatus[]; limit?: number } = {}): ScheduleRun[] {
+    const where: string[] = []
+    const args: unknown[] = []
+    if (filter.scheduleId) (where.push("schedule_id = ?"), args.push(filter.scheduleId))
+    if (filter.status?.length) (where.push(`status IN (${filter.status.map(() => "?").join(",")})`), args.push(...filter.status))
+    const rows = this.db
+      .prepare(`SELECT * FROM schedule_runs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(...args, filter.limit ?? 200) as ScheduleRunRow[]
+    return rows.map((r) => this.runFromRow(r))
   }
 
   // ---------- kv ----------

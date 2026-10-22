@@ -37,7 +37,8 @@ import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { ContextMeter } from "./ContextMeter"
-import type { TaskMessage } from "../../../shared/types"
+import { AttachmentList } from "./Attachments"
+import type { Attachment, TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
   const tasks = useTasks()
@@ -66,9 +67,9 @@ export function TaskView({ id }: { id: string }) {
   const files = (artifacts.data ?? []).filter((a) => a.taskId === id)
   const shown = (messages.data ?? []).filter((m) => showTools || m.role !== "tool")
 
-  const submit = () => {
-    if (!draft.trim()) return
-    send.mutate(draft.trim())
+  const submit = (attachments: Attachment[]) => {
+    if (!draft.trim() && !attachments.length) return
+    send.mutate({ content: draft.trim(), attachments })
     setDraft("")
   }
 
@@ -233,7 +234,8 @@ function Line({ m }: { m: TaskMessage }) {
             {m.meta?.kind === "task_prompt" ? "Task" : m.meta?.source === "orchestrator" ? "Orchestrator" : "Cody"}
             {time}
           </div>
-          <div className="text-sm whitespace-pre-wrap text-zinc-200">{m.content}</div>
+          {m.content && <div className="text-sm whitespace-pre-wrap text-zinc-200">{m.content}</div>}
+          <AttachmentList files={m.meta?.attachments} />
         </div>
       )
     case "assistant":

@@ -1,3 +1,5 @@
+import type { Attachment } from "../../../shared/types"
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -33,6 +35,27 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
     throw new ApiError(message, res.status)
   }
   return data as T
+}
+
+/** Upload one file (raw body) and get back its id to attach to a message. */
+export async function uploadFile(file: File): Promise<Attachment> {
+  let res: Response
+  try {
+    res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name || "pasted-file")}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+      credentials: "same-origin",
+    })
+  } catch {
+    throw new ApiError("Can't reach the Box Yard server. Is it running?", 0)
+  }
+  const data = (await res.json().catch(() => null)) as (Attachment & { error?: string }) | null
+  if (!res.ok || !data) {
+    if (res.status === 401) window.dispatchEvent(new Event("box-yard:unauthorized"))
+    throw new ApiError(data?.error ?? `Upload failed (${res.status})`, res.status)
+  }
+  return data
 }
 
 /** Ids the server accepts from the client, so optimistic rows keep their id. */

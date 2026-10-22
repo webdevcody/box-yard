@@ -52,6 +52,9 @@ export const config = {
   workerRuntime: env.WORKER_RUNTIME ?? "node",
   workerSize: (env.WORKER_SIZE ?? "small") as "small" | "medium" | "large",
 
+  /** Largest file Cody can attach to a message, in MB. */
+  maxUploadMb: int("BOXYARD_MAX_UPLOAD_MB", 20),
+
   /** Max worker boxes alive at once (the free plan allows about 5). */
   maxBoxes: int("BOX_POOL_MAX", 5),
   /** Claude turns that may run at the same time inside one box. */
