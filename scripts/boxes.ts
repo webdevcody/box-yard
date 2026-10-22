@@ -4,6 +4,7 @@
  *   npx tsx scripts/boxes.ts                 # list boxes
  *   npx tsx scripts/boxes.ts rm <id> [id...] # delete boxes
  *   npx tsx scripts/boxes.ts rm --label boxyard-smoke   # delete every box with a label
+ *   npx tsx scripts/boxes.ts exec <id> <command...>      # run a shell command in a box
  */
 import { Box } from "@upstash/box"
 import { config } from "../server/config.js"
@@ -13,6 +14,14 @@ if (!apiKey) throw new Error("UPSTASH_BOX_API_KEY is not set")
 const [cmd, ...rest] = process.argv.slice(2)
 
 async function main() {
+  if (cmd === "exec") {
+    const [id, ...command] = rest
+    const box = await Box.get(id!, { apiKey })
+    const run = await box.exec.command(`bash -c ${JSON.stringify(command.join(" "))}`)
+    process.stdout.write(run.stdout || run.result || "")
+    if (run.stderr) process.stderr.write(run.stderr)
+    process.exit(run.exitCode ?? 0)
+  }
   if (cmd === "rm") {
     let ids = rest
     if (rest[0] === "--label") {

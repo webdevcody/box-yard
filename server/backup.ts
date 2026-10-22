@@ -1,4 +1,5 @@
 import { Box } from "@upstash/box"
+import { execFile } from "node:child_process"
 import type { Config } from "./config.js"
 import { checkpoint, type DB } from "./db.js"
 import { errorMessage } from "./util/retry.js"
@@ -44,21 +45,27 @@ export function startSelfSnapshots(c: Config, db: DB): (() => void) | null {
  */
 export function startSelfHold(c: Config, isBusy: () => boolean): (() => void) | null {
   if (!c.selfBoxId || !c.upstashBoxApiKey || !c.selfHold) return null
-  let active: { cancel: () => Promise<void> } | null = null
+  // Cancelling an exec stream does not stop the process in the box, so the hold
+  // command ends by itself after 10 minutes (it's reopened while still busy),
+  // and we kill it by its marker when the work is done. We run inside that box.
+  const MARKER = "boxyard-self-hold"
+  const killHolds = () => execFile("pkill", ["-f", MARKER], () => {})
+  let active = false
   let opening = false
   let stopped = false
+  killHolds() // leftovers from a previous server process
   const open = async () => {
     opening = true
     try {
       const box = await Box.get(c.selfBoxId, { apiKey: c.upstashBoxApiKey })
-      const run = await box.exec.stream(`bash -c "while true; do sleep 15; echo .; done"`)
-      active = run
+      const run = await box.exec.stream(`bash -c ": ${MARKER}; for i in \$(seq 1 40); do sleep 15; echo .; done"`)
+      active = true
       console.log("[box-yard] work in flight: holding this box awake")
       void (async () => {
         try {
-          for await (const _chunk of run) if (stopped) break
+          for await (const _chunk of run) if (stopped || !active) break
         } catch {}
-        if (active === run) active = null
+        active = false
       })()
     } catch (err) {
       console.warn(`[box-yard] self hold failed: ${errorMessage(err)}`)
@@ -71,10 +78,9 @@ export function startSelfHold(c: Config, isBusy: () => boolean): (() => void) | 
     const busy = isBusy()
     if (busy && !active && !opening) void open()
     if (!busy && active) {
-      const run = active
-      active = null
+      active = false
       console.log("[box-yard] idle: releasing the box so it can pause")
-      void run.cancel().catch(() => {})
+      killHolds()
     }
   }
   const timer = setInterval(tick, 10_000)
@@ -83,6 +89,6 @@ export function startSelfHold(c: Config, isBusy: () => boolean): (() => void) | 
   return () => {
     stopped = true
     clearInterval(timer)
-    void active?.cancel().catch(() => {})
+    killHolds()
   }
 }
