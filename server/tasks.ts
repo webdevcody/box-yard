@@ -20,11 +20,12 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { DEFAULT_EFFORT, type Attachment, type BoxInfo, type Effort, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
+import { DEFAULT_EFFORT, isFinalPrState, type Attachment, type BoxInfo, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
+import { PrTracker, prNumber, type PrChange } from "./prs.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -87,6 +88,8 @@ export class TaskManager {
   private readonly uploads: Uploads
   private readonly reader: EventReader
   private readonly settings: SettingsStore
+  /** Polls GitHub for the state of every open PR. */
+  readonly prs: PrTracker
 
   private timers: NodeJS.Timeout[] = []
   private scheduling = false
@@ -119,6 +122,12 @@ export class TaskManager {
     this.settings = deps.settings
     this.uploads = deps.uploads
     this.reader = new EventReader(deps.provider, deps.redis)
+    this.prs = new PrTracker({
+      store: deps.store,
+      token: (projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.c.githubToken) || null),
+      onChange: (change) => this.prChanged(change),
+      log: (msg) => console.warn(msg),
+    })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
   }
 
@@ -138,11 +147,13 @@ export class TaskManager {
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
+    this.prs.start()
     this.schedule()
   }
 
   stop() {
     this.stopped = true
+    this.prs.stop()
     for (const t of this.timers) clearInterval(t)
     if (this.emitBoxesTimer) clearTimeout(this.emitBoxesTimer)
     if (this.directoryTimer) clearTimeout(this.directoryTimer)
@@ -967,9 +978,16 @@ export class TaskManager {
       case "pr": {
         const url = String(ev.url ?? "")
         const first = row.pr_url !== url
-        this.store.updateTask(taskId, { prUrl: url, branch: String(ev.branch ?? row.branch ?? "") || row.branch, turnFlags: { ...flags, sawPr: true } })
+        this.store.updateTask(taskId, {
+          prUrl: url,
+          branch: String(ev.branch ?? row.branch ?? "") || row.branch,
+          turnFlags: { ...flags, sawPr: true },
+          // A new PR starts open; the check below tells draft from open.
+          ...(first ? { prState: "open", prMergedAt: null, prMergedBy: null } : {}),
+        })
         say("event", `${first ? "Opened" : "Updated"} pull request: ${url}`, { kind: "pr", url })
         if (first) this.notice(`🔀 **${row.title}** opened a pull request: ${url}`, { taskId })
+        this.prs.refresh(taskId)
         return this.emitTask(taskId)
       }
       case "preview": {
@@ -1011,7 +1029,7 @@ export class TaskManager {
         return
       case "turn_end": {
         // The agent may have merged or closed its PR during the turn; ask GitHub.
-        const pr = row.pr_url && row.current_turn_id ? await this.prState(row) : null
+        const pr = row.pr_url && row.current_turn_id ? await this.prs.check(taskId) : null
         return this.finishTurn(this.store.getTaskRow(taskId) ?? row, ev, pr)
       }
       default:
@@ -1019,25 +1037,17 @@ export class TaskManager {
     }
   }
 
-  /** open / closed / merged for the task's PR, or null if we can't tell. */
-  private async prState(row: TaskRow): Promise<"open" | "closed" | "merged" | null> {
-    const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(row.pr_url ?? "")
-    const token = this.store.projectEnv(row.project_id).GITHUB_TOKEN ?? this.c.githubToken
-    if (!m || !token || this.c.mock) return null
-    try {
-      const res = await fetch(`https://api.github.com/repos/${m[1]}/pulls/${m[2]}`, {
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "box-yard" },
-        signal: AbortSignal.timeout(10_000),
-      })
-      if (!res.ok) return null
-      const pr = (await res.json()) as { state?: string; merged?: boolean }
-      return pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open"
-    } catch {
-      return null
-    }
+  /** The tracker saw a PR change state (and maybe moved the task off pr_ready): tell the transcript and the UI. */
+  private prChanged({ taskId, info, status }: PrChange) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    if (info.state === "merged") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was merged${info.mergedBy ? ` by ${info.mergedBy}` : ""}: ${row.pr_url}`)
+    else if (info.state === "closed") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was closed without merging: ${row.pr_url}`)
+    this.emitTask(taskId)
+    if (status) this.publishDirectory()
   }
 
-  private finishTurn(row: TaskRow, ev: WorkerEvent, pr: "open" | "closed" | "merged" | null = null) {
+  private finishTurn(row: TaskRow, ev: WorkerEvent, pr: PrState | null = null) {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
     if (row.compacting) return this.finishCompact(row, ev)
@@ -1048,8 +1058,8 @@ export class TaskManager {
     this.holds.delete(row.id)
 
     // A merged PR means the work landed; a closed one means there's no PR to review.
-    const openPr = Boolean(row.pr_url) && pr !== "closed" && pr !== "merged"
-    if (row.pr_url && (pr === "closed" || pr === "merged")) this.addEvent(row.id, `Pull request ${pr}: ${row.pr_url}`)
+    // (The tracker already wrote "Pull request ... was merged" to the transcript when it saw the change.)
+    const openPr = Boolean(row.pr_url) && !isFinalPrState(pr)
     let status: TaskStatus
     let error: string | null = null
     if (stopped) status = openPr ? "pr_ready" : "idle"
@@ -1103,7 +1113,9 @@ export class TaskManager {
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
     this.stopRequested.delete(row.id)
     const prev = row.compact_prev_status
-    const status: TaskStatus = prev && !["queued", "starting", "working"].includes(prev) ? prev : row.pr_url ? "pr_ready" : "idle"
+    let status: TaskStatus = prev && !["queued", "starting", "working"].includes(prev) ? prev : row.pr_url ? "pr_ready" : "idle"
+    // The PR may have been merged or closed while the compaction ran.
+    if (status === "pr_ready" && isFinalPrState(row.pr_state)) status = row.pr_state === "merged" ? "done" : "idle"
     const usage = usageFields(ev.usage)
     this.store.updateTask(row.id, {
       status,

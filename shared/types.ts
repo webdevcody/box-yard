@@ -16,6 +16,11 @@ export type TaskStatus = (typeof TASK_STATUSES)[number]
 /** Statuses where a task needs nothing from anyone right now. */
 export const RESTING_STATUSES: TaskStatus[] = ["idle", "pr_ready", "done", "failed", "needs_input", "waiting"]
 
+/** A task's pull request as GitHub sees it. Merged and closed are final: polling stops there. */
+export const PR_STATES = ["open", "draft", "merged", "closed"] as const
+export type PrState = (typeof PR_STATES)[number]
+export const isFinalPrState = (s: PrState | null | undefined) => s === "merged" || s === "closed"
+
 export interface Project {
   id: string
   name: string
@@ -54,6 +59,11 @@ export interface Task {
   sessionId: string
   branch: string | null
   prUrl: string | null
+  /** Null until the server has asked GitHub (or the task has no PR). */
+  prState: PrState | null
+  prMergedAt: number | null
+  /** GitHub login of whoever merged the PR. */
+  prMergedBy: string | null
   previews: PreviewLink[]
   question: string | null
   summary: string | null

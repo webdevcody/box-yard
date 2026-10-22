@@ -8,6 +8,7 @@ import type {
   ChatMessage,
   ChatRole,
   Effort,
+  PrState,
   PreviewLink,
   Project,
   ProjectNote,
@@ -54,6 +55,9 @@ export interface TaskRow {
   session_started: number
   branch: string | null
   pr_url: string | null
+  pr_state: PrState | null
+  pr_merged_at: number | null
+  pr_merged_by: string | null
   previews_json: string
   question: string | null
   summary: string | null
@@ -172,6 +176,9 @@ type TaskPatch = Partial<{
   sessionStarted: boolean
   branch: string | null
   prUrl: string | null
+  prState: PrState | null
+  prMergedAt: number | null
+  prMergedBy: string | null
   previews: PreviewLink[]
   question: string | null
   summary: string | null
@@ -200,6 +207,9 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   sessionStarted: "session_started",
   branch: "branch",
   prUrl: "pr_url",
+  prState: "pr_state",
+  prMergedAt: "pr_merged_at",
+  prMergedBy: "pr_merged_by",
   previews: "previews_json",
   question: "question",
   summary: "summary",
@@ -386,6 +396,9 @@ export class Store {
       sessionId: row.session_id,
       branch: row.branch,
       prUrl: row.pr_url,
+      prState: row.pr_state ?? null,
+      prMergedAt: row.pr_merged_at ?? null,
+      prMergedBy: row.pr_merged_by ?? null,
       previews: json<PreviewLink[]>(row.previews_json, []),
       question: row.question,
       summary: row.summary,
@@ -449,6 +462,14 @@ export class Store {
     return this.db.prepare(sql).all(...args) as TaskRow[]
   }
 
+  /** Tasks whose pull request may still change: it has a URL and isn't merged or closed yet. */
+  listOpenPrRows(ids?: string[]): TaskRow[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE pr_url IS NOT NULL AND pr_url != '' AND (pr_state IS NULL OR pr_state IN ('open', 'draft')) ORDER BY created_at ASC")
+      .all() as TaskRow[]
+    return ids ? rows.filter((r) => ids.includes(r.id)) : rows
+  }
+
   createTask(input: {
     id?: string
     projectId: string
@@ -495,8 +516,9 @@ export class Store {
   /**
    * `quiet` skips the notification for a status change Cody caused himself (stop, close).
    * Compaction turns never notify: they hand back the status from before the compaction.
+   * `touch: false` keeps updated_at (the "last active" time) as it was.
    */
-  updateTask(id: string, patch: TaskPatch, opts: { quiet?: boolean } = {}): Task {
+  updateTask(id: string, patch: TaskPatch, opts: { quiet?: boolean; touch?: boolean } = {}): Task {
     const before =
       patch.status !== undefined && !opts.quiet
         ? (this.db.prepare("SELECT status, compacting FROM tasks WHERE id = ?").get(id) as { status: TaskStatus; compacting: number } | undefined)
@@ -510,8 +532,12 @@ export class Store {
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
     }
-    sets.push("updated_at = ?")
-    args.push(Date.now(), id)
+    if (opts.touch !== false) {
+      sets.push("updated_at = ?")
+      args.push(Date.now())
+    }
+    if (!sets.length) sets.push("id = id")
+    args.push(id)
     const res = this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...args)
     if (res.changes === 0) throw new NotFoundError(`Task ${id} not found`)
     const task = this.getTask(id)!
@@ -951,7 +977,8 @@ export class Store {
 
   // ---------- notifications ----------
 
-  addNotification(task: Task): AppNotification | null {
+  /** `summary` replaces the task's own one-liner, e.g. "PR #23 merged by cody". */
+  addNotification(task: Task, summary?: string): AppNotification | null {
     if (!(["done", "pr_ready", "needs_input", "failed", "idle"] as TaskStatus[]).includes(task.status)) return null
     const project = this.db.prepare("SELECT name FROM projects WHERE id = ?").get(task.projectId) as { name: string } | undefined
     const text = task.status === "needs_input" ? task.question : task.status === "failed" ? task.error : task.summary
@@ -962,7 +989,7 @@ export class Store {
       title: task.title,
       projectName: project?.name ?? "",
       status: task.status as AppNotification["status"],
-      summary: oneLine(text),
+      summary: oneLine(summary ?? text),
       createdAt: Date.now(),
       readAt: null,
     }

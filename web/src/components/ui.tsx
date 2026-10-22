@@ -3,10 +3,11 @@ import ReactMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { Loader2 } from "lucide-react"
+import { GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, linkTarget, remarkEntityLinks } from "../lib/linkify"
-import type { TaskStatus } from "../../../shared/types"
+import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
+import type { PrState, TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -24,13 +25,54 @@ export const STATUS: Record<TaskStatus, { label: string; dot: string; chip: stri
   failed: { label: "Failed", dot: "bg-red-500", chip: "bg-red-500/10 text-red-300" },
 }
 
-export function StatusBadge({ status }: { status: TaskStatus }) {
-  const s = STATUS[status]
+/** The pill for a task that is done because its PR merged (see badgeStatus in lib/prState). */
+export const MERGED_BADGE = { label: "Merged", dot: "bg-merged", chip: "bg-merged/15 text-merged-fg" }
+
+/** Pass `badgeStatus(task)` to show a purple Merged pill instead of Done when the task's PR merged. */
+export function StatusBadge({ status }: { status: BadgeStatus }) {
+  const s = status === "merged" ? MERGED_BADGE : STATUS[status]
   return (
     <span className={cx("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium", s.chip)}>
       <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", s.dot)} />
       {s.label}
     </span>
+  )
+}
+
+/** GitHub's PR colors and icons: open green, draft gray, merged purple, closed red. */
+export const PR_STYLE: Record<PrState, { icon: LucideIcon; chip: string; link: string }> = {
+  open: { icon: GitPullRequest, chip: "border-emerald-900/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20", link: "text-emerald-400" },
+  draft: { icon: GitPullRequestDraft, chip: "border-zinc-700 bg-zinc-800/60 text-zinc-300 hover:bg-zinc-800", link: "text-zinc-400" },
+  merged: { icon: GitMerge, chip: "border-merged/50 bg-merged/15 text-merged-fg hover:bg-merged/25", link: "text-merged-fg" },
+  closed: { icon: GitPullRequestClosed, chip: "border-red-900/60 bg-red-500/10 text-red-300/80 hover:bg-red-500/15", link: "text-red-400/80" },
+}
+
+/**
+ * A task's pull request: "PR #23", "Draft #23", "Merged #23" or "Closed #23" in GitHub's colors. `chip` is the
+ * bordered pill (task header), `link` the plain inline link (card footers). Renders nothing without a PR.
+ */
+export function PrChip({ task, variant = "chip", className }: { task: PrTask; variant?: "chip" | "link"; className?: string }) {
+  const state = prStateOf(task)
+  if (!state || !task.prUrl) return null
+  const s = PR_STYLE[state]
+  const Icon = s.icon
+  return (
+    <a
+      href={task.prUrl}
+      target="_blank"
+      rel="noreferrer"
+      title={prTooltip(task) ?? undefined}
+      data-pr-state={state}
+      // Cards are links themselves: open the PR, not the task.
+      onClick={(e) => e.stopPropagation()}
+      className={cx(
+        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap",
+        variant === "chip" ? cx("rounded-md border px-1.5 py-0.5 font-medium transition", s.chip) : cx("hover:underline", s.link),
+        className,
+      )}
+    >
+      <Icon className={variant === "chip" ? "h-3 w-3" : "h-3.5 w-3.5"} /> {prLabel(task)}
+    </a>
   )
 }
 

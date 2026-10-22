@@ -1,8 +1,9 @@
 import { Link } from "wouter"
-import { Activity, AlarmClock, Check, GitPullRequest, Globe, MessageCircleQuestion } from "lucide-react"
+import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
 import type { PreviewLink, Task } from "../../../shared/types"
+import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
-import { StatusBadge, TimeAgo, cx } from "./ui"
+import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
@@ -29,7 +30,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
           <div className="line-clamp-2 break-words font-medium text-zinc-100">{task.title}</div>
         </div>
         <span className="mt-0.5 shrink-0">
-          <StatusBadge status={task.status} />
+          <StatusBadge status={badgeStatus(task)} />
         </span>
       </div>
 
@@ -60,11 +61,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
       )}
 
       <div className="mt-auto flex min-w-0 items-center gap-2 whitespace-nowrap pt-3 text-xs text-zinc-500">
-        {task.prUrl && (
-          <a href={task.prUrl} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="inline-flex shrink-0 items-center gap-1 text-emerald-400 hover:underline">
-            <GitPullRequest className="h-3.5 w-3.5" /> PR #{task.prUrl.split("/").pop()}
-          </a>
-        )}
+        <PrChip task={task} variant="link" />
         {task.scheduleId && (
           <span className="inline-flex shrink-0 items-center gap-1" title="Started by a schedule">
             <AlarmClock className="h-3.5 w-3.5" /> scheduled
