@@ -15,7 +15,7 @@ export type TaskFilter = (typeof TASK_FILTERS)[number]["key"]
 export const DEFAULT_FILTER: TaskFilter = "open"
 
 export const TASK_SORTS = [
-  { key: "attention", label: "Needs attention first" },
+  { key: "attention", label: "Attention first" },
   { key: "recent", label: "Last active" },
   { key: "newest", label: "Newest" },
 ] as const
