@@ -1,10 +1,11 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "wouter"
-import { Boxes, ExternalLink, Globe, Settings } from "lucide-react"
+import { Boxes, ChevronRight, ExternalLink, Globe, Settings } from "lucide-react"
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
-import { useScrollToHash } from "../lib/hash"
-import { Empty, StatusBadge, TimeAgo, cx } from "./ui"
-import { SettingsDialog } from "./SettingsDialog"
+import { useHash, useScrollToHash } from "../lib/hash"
+import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
+import { Empty, StatusBadge, cx, timeAgo } from "./ui"
+import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
@@ -19,13 +20,34 @@ const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string }> = {
 function Stat({ label, value, max }: { label: string; value: number; max: number }) {
   const over = value > max
   return (
-    <div className={cx("rounded-xl border bg-zinc-900/40 p-4", over ? "border-amber-500/40" : "border-zinc-800/80")}>
-      <div className="text-xs font-medium tracking-wide text-zinc-500 uppercase">{label}</div>
-      <div className="mt-1 text-2xl font-semibold text-zinc-50">
-        {value}
-        <span className="text-zinc-500"> / {max}</span>
+    <div className={cx("rounded-xl border bg-zinc-900/40 px-4 py-2.5", over ? "border-amber-500/40" : "border-zinc-800/80")}>
+      <div className="flex items-center gap-3">
+        <span className="text-xs font-medium tracking-wide text-zinc-500 uppercase">{label}</span>
+        <span className="text-lg font-semibold text-zinc-50 tabular-nums">
+          {value}
+          <span className="text-zinc-500"> / {max}</span>
+        </span>
+        <Meter used={value} total={max} className="ml-auto w-24" />
       </div>
       {over && <div className="mt-1 text-xs font-medium text-amber-300">Over limit: running work continues, nothing new is placed until usage drops.</div>}
+    </div>
+  )
+}
+
+/** A thin bar; segmented when there are few enough slots to count at a glance. */
+function Meter({ used, total, className }: { used: number; total: number; className?: string }) {
+  const cells = Math.max(total, used)
+  if (cells > 0 && cells <= 6)
+    return (
+      <div className={cx("flex gap-0.5", className)}>
+        {Array.from({ length: cells }, (_, i) => (
+          <div key={i} className={cx("h-1.5 flex-1 rounded-sm", i < used ? (i < total ? "bg-yard-500" : "bg-amber-400") : "bg-zinc-700")} />
+        ))}
+      </div>
+    )
+  return (
+    <div className={cx("h-1.5 overflow-hidden rounded-sm bg-zinc-700", className)}>
+      <div className={cx("h-full", used > total ? "bg-amber-400" : "bg-yard-500")} style={{ width: `${total ? Math.min(100, (used / total) * 100) : 0}%` }} />
     </div>
   )
 }
@@ -36,7 +58,8 @@ export function BoxesView() {
   const projects = useProjects()
   const health = useHealth()
   useScrollToHash(Boolean(boxes.data), "box-")
-  const [editing, setEditing] = useState(false)
+  const hash = useHash()
+  const openSettings = useOpenSettings()
 
   const pool = health.data?.pool
   const list = boxes.data ?? []
@@ -46,7 +69,7 @@ export function BoxesView() {
   const queued = all.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt)
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
       <header className="flex items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
@@ -54,14 +77,13 @@ export function BoxesView() {
             Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
           </p>
         </div>
-        <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 text-sm text-sky-400 hover:underline">
+        <button onClick={() => openSettings("limits")} className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm text-sky-400 hover:underline">
           <Settings className="h-3.5 w-3.5" /> Edit limits
         </button>
       </header>
-      {editing && <SettingsDialog onClose={() => setEditing(false)} />}
 
       {pool && (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-2 sm:grid-cols-2">
           <Stat label="Boxes" value={list.length} max={pool.maxBoxes} />
           <Stat label="Agents running" value={running} max={agentCapacity(pool)} />
         </div>
@@ -72,9 +94,9 @@ export function BoxesView() {
           Boxes are created when a task needs one.
         </Empty>
       ) : (
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="space-y-3">
           {list.map((box) => (
-            <BoxCard key={box.id} box={box} tasks={all.filter((t) => t.boxId === box.id)} projectName={projectName} />
+            <BoxCard key={box.id} box={box} highlighted={hash === box.id} tasks={all.filter((t) => t.boxId === box.id)} projectName={projectName} />
           ))}
         </div>
       )}
@@ -97,72 +119,120 @@ export function BoxesView() {
   )
 }
 
-function TaskRow({ task, projectName }: { task: Task; projectName: string }) {
+function TaskRow({ task, projectName, muted }: { task: Task; projectName: string; muted?: boolean }) {
   return (
-    <Link href={`/tasks/${task.id}`} className="flex items-center justify-between gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
-      <div className="min-w-0">
-        <div className="truncate text-zinc-100">{task.title}</div>
-        <div className="truncate text-xs text-zinc-500">{projectName}</div>
+    <Link href={`/tasks/${task.id}`} className="group flex items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
+      <div className="min-w-0 flex-1 sm:flex sm:items-baseline sm:gap-3">
+        <div className={cx("truncate", muted ? "text-zinc-400" : "text-zinc-100")} title={task.title}>
+          {task.title}
+        </div>
+        <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
       </div>
       <StatusBadge status={task.status} />
+      <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600 transition group-hover:translate-x-0.5 group-hover:text-zinc-300" />
     </Link>
   )
 }
 
-function BoxCard({ box, tasks, projectName }: { box: BoxInfo; tasks: Task[]; projectName: (id: string) => string }) {
-  const st = BOX_STATUS[box.status]
-  const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
+function BoxTimes({ createdAt, lastUsedAt }: { createdAt: number; lastUsedAt: number }) {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 30_000)
+    return () => clearInterval(t)
+  }, [])
   return (
-    <div id={`box-${box.id}`} className="scroll-mt-6 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="truncate font-mono text-sm font-medium text-zinc-100" title={box.id}>
+    <span className="whitespace-nowrap text-xs text-zinc-500">
+      <span title={`Up since ${new Date(createdAt).toLocaleString()}`}>up {shortDuration(Date.now() - createdAt)}</span>
+      {" · "}
+      <span title={`Last active ${new Date(lastUsedAt).toLocaleString()}`}>active {timeAgo(lastUsedAt)}</span>
+    </span>
+  )
+}
+
+function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks: Task[]; projectName: (id: string) => string; highlighted: boolean }) {
+  const st = BOX_STATUS[box.status]
+  const [showFinished, setShowFinished] = useState(false)
+  const { active, finished } = splitBoxTasks(tasks)
+  const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
+  const over = box.runningTurns > box.slots
+  return (
+    <div
+      id={`box-${box.id}`}
+      className={cx(
+        "scroll-mt-6 rounded-xl border bg-zinc-900/40 p-4 transition",
+        highlighted ? "border-yard-500/60 ring-2 ring-yard-500/20" : "border-zinc-800/80",
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
+          <span className="truncate font-mono text-sm font-medium text-zinc-100" title={box.id}>
             {box.id}
-          </div>
-          <div className="text-xs text-zinc-500">{box.provider}</div>
+          </span>
+          <span className="text-xs text-zinc-500">{box.provider}</span>
+          <span className={cx("rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", st.chip)}>{st.label}</span>
+          <span className="flex items-center gap-2 text-xs whitespace-nowrap">
+            <span className={over ? "font-medium text-amber-300" : "text-zinc-300"}>
+              {box.runningTurns}/{box.slots} agents busy
+            </span>
+            <Meter used={box.runningTurns} total={box.slots} className="w-16" />
+          </span>
         </div>
-        <span className={cx("rounded-full px-2 py-0.5 text-xs font-medium", st.chip)}>{st.label}</span>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 sm:ml-auto">
+          {box.projects.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {box.projects.map((p) => (
+                <span key={p} className="rounded-md bg-zinc-800/80 px-1.5 py-0.5 text-xs text-zinc-300">
+                  {p}
+                </span>
+              ))}
+            </div>
+          )}
+          <BoxTimes createdAt={box.createdAt} lastUsedAt={box.lastUsedAt} />
+        </div>
       </div>
 
-      <div className="mt-3 flex items-center gap-3 text-xs text-zinc-500">
-        <span className="text-zinc-300">
-          {box.runningTurns}/{box.slots} agents busy
-        </span>
-        <div className="flex flex-1 gap-1">
-          {Array.from({ length: Math.max(box.slots, box.runningTurns) }, (_, i) => (
-            <div key={i} className={cx("h-1.5 flex-1 rounded-sm", i < box.runningTurns ? "bg-yard-500" : "bg-zinc-700")} />
-          ))}
-        </div>
-        {box.runningTurns > box.slots && <span className="font-medium text-amber-300">Over limit</span>}
-      </div>
-
-      <dl className="mt-3 space-y-1 text-xs text-zinc-500">
-        <div className="flex gap-2">
-          <dt className="w-20 shrink-0">Projects</dt>
-          <dd className="text-zinc-300">{box.projects.length ? box.projects.join(", ") : "none yet"}</dd>
-        </div>
-        <div className="flex gap-2">
-          <dt className="w-20 shrink-0">Up since</dt>
-          <dd className="text-zinc-300"><TimeAgo ts={box.createdAt} /></dd>
-        </div>
-        <div className="flex gap-2">
-          <dt className="w-20 shrink-0">Last active</dt>
-          <dd className="text-zinc-300"><TimeAgo ts={box.lastUsedAt} /></dd>
-        </div>
-      </dl>
-
-      <div className="mt-3 divide-y divide-zinc-800/80 rounded-lg border border-zinc-800/80">
-        {tasks.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-zinc-500">No agents on this box.</div>
+      <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/80">
+        {active.length === 0 ? (
+          <div className="px-3 py-2 text-xs text-zinc-500">No agents running</div>
         ) : (
-          tasks.map((t) => <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} />)
+          <div className="divide-y divide-zinc-800/80">
+            {active.map((t) => (
+              <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} />
+            ))}
+          </div>
+        )}
+        {finished.length > 0 && (
+          <>
+            <button
+              onClick={() => setShowFinished((v) => !v)}
+              aria-expanded={showFinished}
+              className="flex w-full items-center gap-1.5 border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              <ChevronRight className={cx("h-3.5 w-3.5 transition", showFinished && "rotate-90")} />
+              {finished.length} finished
+            </button>
+            {showFinished && (
+              <div className="divide-y divide-zinc-800/80 border-t border-zinc-800/80">
+                {finished.map((t) => (
+                  <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} muted />
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
 
       {previews.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <div className="mt-3 flex flex-wrap gap-1.5 text-xs">
           {previews.map((p) => (
-            <a key={`${p.port}-${p.url}`} href={p.url} target="_blank" rel="noreferrer" title={p.taskTitle} className="inline-flex items-center gap-1 text-sky-400 hover:underline">
+            <a
+              key={`${p.port}-${p.url}`}
+              href={p.url}
+              target="_blank"
+              rel="noreferrer"
+              title={p.taskTitle}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300"
+            >
               <Globe className="h-3.5 w-3.5" /> {p.label}
               <ExternalLink className="h-3 w-3" />
             </a>

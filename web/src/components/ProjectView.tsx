@@ -16,14 +16,15 @@ import {
 import {
   DEFAULT_FILTER,
   TASK_FILTERS,
+  compareTasks,
   filterCounts,
+  isVisible,
   parseFilter,
   parseSort,
-  visibleTasks,
   type TaskFilter,
 } from "../lib/projectTasks"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
-import { TaskCard } from "./TaskCard"
+import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
@@ -203,11 +204,18 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
   const setParam = useSetParam()
 
   const counts = filterCounts(tasks, query)
-  const shown = visibleTasks(tasks, { filter, query, sort })
+  // Sorted once, then held still: live updates change cards in place; the pill re-sorts.
+  const stable = useStableTasks(tasks, {
+    compare: compareTasks(sort),
+    include: (t) => isVisible(t, { filter, query }),
+    resetKey: `${filter}|${sort}|${query}`,
+  })
+  const shown = stable.entries
   const filterLabel = TASK_FILTERS.find((f) => f.key === filter)!.label
 
   return (
-    <div className="space-y-4">
+    // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
+    <div className="space-y-4 pb-6">
       {showNew && <NewTaskForm projectId={projectId} onDone={onCloseNew} />}
 
       {tasks.length === 0 ? (
@@ -265,11 +273,7 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
               )}
             </Empty>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              {shown.map((t) => (
-                <TaskCard key={t.id} task={t} />
-              ))}
-            </div>
+            <TaskGrid stable={stable} pillClassName="top-14" />
           )}
 
           {filter === "open" && counts.done > 0 && shown.length > 0 && (

@@ -14,6 +14,7 @@ import { SchedulesView } from "./components/Schedules"
 import { CommandPalette } from "./components/CommandPalette"
 import { Toasts } from "./components/Toasts"
 import { NotificationEffects } from "./components/NotificationEffects"
+import { SettingsHost } from "./components/SettingsDialog"
 import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
@@ -105,6 +106,7 @@ export function App() {
         </button>
       )}
       <CommandPalette />
+      <SettingsHost />
       <NotificationEffects />
     </div>
   )
