@@ -71,9 +71,33 @@ export interface Task {
 /** What to do when runs were missed (the server was down or its box was paused). */
 export type CatchUp = "once" | "skip"
 
+/** Where a schedule's runs go: a fresh task in a project, or a message to the orchestrator chat. */
+export type ScheduleTarget = "project" | "orchestrator"
+
+export type ScheduleRunStatus = "queued" | "running" | "done" | "failed"
+
+/** One run of an orchestrator schedule. (Project schedule runs are ordinary tasks.) */
+export interface ScheduleRun {
+  id: string
+  scheduleId: string
+  status: ScheduleRunStatus
+  reason: "scheduled" | "manual" | "catch-up"
+  /** The text injected into the chat, e.g. "[Scheduled: Morning digest] ...". */
+  prompt: string
+  dueAt: number
+  /** The chat message this run injected, once delivered. */
+  chatMessageId: string | null
+  error: string | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
 export interface Schedule {
   id: string
-  projectId: string
+  target: ScheduleTarget
+  /** Null for orchestrator schedules. */
+  projectId: string | null
   name: string
   /** 5-field cron expression or a macro like @daily. */
   cron: string
@@ -178,4 +202,5 @@ export type UiEvent =
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "schedule"; schedule: Schedule }
+  | { type: "schedule.run"; run: ScheduleRun }
   | { type: "schedule.deleted"; scheduleId: string }

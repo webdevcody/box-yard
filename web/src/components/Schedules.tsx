@@ -7,6 +7,7 @@ import {
   useDeleteSchedule,
   useProjects,
   useRunSchedule,
+  useScheduleRuns,
   useSchedules,
   useSettings,
   useTaskMessages,
@@ -15,7 +16,7 @@ import {
 } from "../lib/queries"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
 import { Button, Empty, Field, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
-import type { CatchUp, Schedule, Task } from "../../../shared/types"
+import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
 
 const PRESETS: { label: string; cron: string }[] = [
   { label: "Every 15 min", cron: "*/15 * * * *" },
@@ -35,6 +36,10 @@ export function SchedulesView() {
   const settings = useSettings()
   const [creating, setCreating] = useState(false)
   const list = schedules.data ?? []
+  const orchestratorList = list.filter((s) => s.target === "orchestrator")
+  const groups = (projects.data ?? [])
+    .map((project) => ({ project, schedules: list.filter((s) => s.target === "project" && s.projectId === project.id) }))
+    .filter((g) => g.schedules.length > 0)
 
   return (
     <div className="space-y-6">
@@ -44,7 +49,8 @@ export function SchedulesView() {
             <AlarmClock className="h-6 w-6 text-yard-400" /> Schedules
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-500">
-            Recurring jobs. Each run starts a fresh task in its project, and you can watch the agent work live, like any task.
+            Recurring jobs. A project schedule starts a fresh task in its project each run, which you can watch live like any task. An orchestrator schedule
+            sends its prompt to the orchestrator chat, for cross-project work like digests and reminders.
             {settings.data && (
               <span className="ml-1">
                 Triggered by {settings.data.scheduler === "qstash" ? "Upstash QStash and the server's own timer" : "the server's own timer"}.
@@ -52,7 +58,7 @@ export function SchedulesView() {
             )}
           </p>
         </div>
-        <Button variant="primary" onClick={() => setCreating(true)} disabled={!projects.data?.length}>
+        <Button variant="primary" onClick={() => setCreating(true)}>
           <Plus className="h-4 w-4" /> New schedule
         </Button>
       </header>
@@ -61,14 +67,15 @@ export function SchedulesView() {
 
       {schedules.isLoading ? null : list.length === 0 ? (
         <Empty icon={<AlarmClock className="h-8 w-8" />} title="No schedules yet">
-          {projects.data?.length
-            ? 'Create one here, or tell the orchestrator something like "every weekday at 9, triage new issues in my-app".'
-            : "Create a project first; schedules run tasks inside a project."}
+          Create one here, or tell the orchestrator something like "every morning, summarize open PRs across all repos".
         </Empty>
       ) : (
-        <div className="space-y-3">
-          {list.map((s) => (
-            <ScheduleCard key={s.id} schedule={s} showProject />
+        <div className="space-y-6">
+          {orchestratorList.length > 0 && (
+            <ScheduleGroup title="Orchestrator" icon={<Bot className="h-4 w-4" />} schedules={orchestratorList} />
+          )}
+          {groups.map((g) => (
+            <ScheduleGroup key={g.project.id} title={g.project.name} href={`/projects/${g.project.id}`} schedules={g.schedules} />
           ))}
         </div>
       )}
@@ -76,11 +83,34 @@ export function SchedulesView() {
   )
 }
 
+function ScheduleGroup({ title, href, icon, schedules }: { title: string; href?: string; icon?: React.ReactNode; schedules: Schedule[] }) {
+  return (
+    <section>
+      <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-300">
+        {icon}
+        {href ? (
+          <Link href={href} className="hover:text-zinc-100">
+            {title}
+          </Link>
+        ) : (
+          title
+        )}
+        <span className="text-xs font-normal text-zinc-600">{schedules.length}</span>
+      </h2>
+      <div className="space-y-3">
+        {schedules.map((s) => (
+          <ScheduleCard key={s.id} schedule={s} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
 /** The schedules section on a project page. */
 export function ProjectSchedules({ projectId }: { projectId: string }) {
   const schedules = useSchedules()
   const [creating, setCreating] = useState(false)
-  const list = (schedules.data ?? []).filter((s) => s.projectId === projectId)
+  const list = (schedules.data ?? []).filter((s) => s.target === "project" && s.projectId === projectId)
   return (
     <section>
       <div className="mb-3 flex items-center justify-between">
@@ -111,30 +141,32 @@ export function ProjectSchedules({ projectId }: { projectId: string }) {
   )
 }
 
-function ScheduleCard({ schedule: s, showProject }: { schedule: Schedule; showProject?: boolean }) {
-  const projects = useProjects()
+function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
   const tasks = useTasks()
   const update = useUpdateSchedule()
   const remove = useDeleteSchedule()
   const run = useRunSchedule()
   const [open, setOpen] = useState(false)
-  const project = projects.data?.find((p) => p.id === s.projectId)
+  const allRuns = useScheduleRuns()
+  const orchestrator = s.target === "orchestrator"
   const runs = (tasks.data ?? []).filter((t) => t.scheduleId === s.id).sort((a, b) => b.createdAt - a.createdAt)
-  const latest = runs[0]
-  const live = latest && ACTIVE.has(latest.status) ? latest : null
+  const chatRuns = (allRuns.data ?? []).filter((r) => r.scheduleId === s.id).sort((a, b) => b.createdAt - a.createdAt)
+  const latest = orchestrator ? chatRuns[0] : runs[0]
+  const live = !orchestrator && runs[0] && ACTIVE.has(runs[0].status) ? runs[0] : null
+  const chatLive = orchestrator && chatRuns[0] && (chatRuns[0].status === "queued" || chatRuns[0].status === "running") ? chatRuns[0] : null
 
   return (
-    <div id={s.id} className={cx("rounded-xl border bg-zinc-900/40 p-4", live ? "border-sky-500/40" : "border-zinc-800/80")}>
+    <div id={s.id} className={cx("rounded-xl border bg-zinc-900/40 p-4", live || chatLive ? "border-sky-500/40" : "border-zinc-800/80")}>
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
-          {showProject && project && (
-            <Link href={`/projects/${project.id}`} className="mb-0.5 block truncate text-xs text-zinc-500 hover:text-zinc-300">
-              {project.name}
-            </Link>
-          )}
           <div className="flex items-center gap-2">
             <span className="truncate font-medium text-zinc-100">{s.name}</span>
             {!s.enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 uppercase">Paused</span>}
+            {chatLive && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {chatLive.status === "queued" ? "Queued in chat" : "Running in chat"}
+              </span>
+            )}
             {live && (
               <Link href={`/tasks/${live.id}`} className="inline-flex items-center gap-1.5 rounded-full bg-sky-500/10 px-2 py-0.5 text-xs text-sky-300 hover:bg-sky-500/20">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> Running now
@@ -190,12 +222,47 @@ function ScheduleCard({ schedule: s, showProject }: { schedule: Schedule; showPr
         <div className="mt-2 space-y-3">
           <div className="rounded-lg bg-zinc-950/60 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-300">{s.prompt}</div>
           <div className="text-xs text-zinc-500">
-            Missed runs: {s.catchUp === "once" ? "catch up once" : "skip"} · Overlap: {s.allowOverlap ? "allowed" : "skip if the last run is still going"}
+            Missed runs: {s.catchUp === "once" ? "catch up once" : "skip"} · Overlap: {s.allowOverlap ? "allowed" : orchestrator ? "skip if the last prompt is still queued or running" : "skip if the last run is still going"}
           </div>
-          <RunList runs={runs} />
+          {orchestrator ? <ChatRunList runs={chatRuns} /> : <RunList runs={runs} />}
         </div>
       )}
     </div>
+  )
+}
+
+/** Runs of an orchestrator schedule: each links to the chat message it injected. */
+function ChatRunList({ runs }: { runs: ScheduleRun[] }) {
+  if (!runs.length) return <p className="text-xs text-zinc-500">No runs yet.</p>
+  const tone: Record<ScheduleRun["status"], string> = {
+    queued: "bg-zinc-800 text-zinc-300",
+    running: "bg-sky-500/15 text-sky-300",
+    done: "bg-emerald-500/15 text-emerald-300",
+    failed: "bg-red-500/15 text-red-300",
+  }
+  return (
+    <ul className="divide-y divide-zinc-900 rounded-lg border border-zinc-800/80">
+      {runs.slice(0, 15).map((r) => (
+        <li key={r.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+          <span className="min-w-0 flex-1 truncate text-zinc-200">
+            {new Date(r.dueAt).toLocaleString()}
+            {r.reason !== "scheduled" && <span className="ml-2 text-xs text-zinc-500">({r.reason})</span>}
+            {r.error && <span className="ml-2 text-xs text-red-300/80">{r.error}</span>}
+          </span>
+          <span className={cx("rounded px-1.5 py-0.5 text-[11px] font-medium", tone[r.status])}>{r.status}</span>
+          {r.chatMessageId ? (
+            <button
+              className="text-xs text-sky-400 hover:text-sky-300"
+              onClick={() => document.getElementById(`chat-${r.chatMessageId}`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+            >
+              View in chat
+            </button>
+          ) : (
+            <span className="text-xs text-zinc-600">waiting</span>
+          )}
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -246,6 +313,7 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
   const projects = useProjects()
   const settings = useSettings()
   const create = useCreateSchedule()
+  const [target, setTarget] = useState<ScheduleTarget>("project")
   const [project, setProject] = useState(projectId ?? projects.data?.[0]?.id ?? "")
   const [name, setName] = useState("")
   const [cron, setCron] = useState("0 9 * * 1-5")
@@ -276,7 +344,8 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
 
   const fmt = (ts: number) =>
     new Intl.DateTimeFormat(undefined, { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(ts)
-  const valid = Boolean(project && name.trim() && prompt.trim() && !preview.error)
+  const orchestrator = !projectId && target === "orchestrator"
+  const valid = Boolean((orchestrator || project) && name.trim() && prompt.trim() && !preview.error)
 
   return (
     <form
@@ -284,15 +353,31 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
       onSubmit={(e) => {
         e.preventDefault()
         if (!valid) return
-        create.mutate({ id: newClientId("sch"), projectId: project, name: name.trim(), cron: cron.trim(), timezone: tz, prompt: prompt.trim(), catchUp, allowOverlap })
+        create.mutate({ id: newClientId("sch"), target: orchestrator ? "orchestrator" : "project", projectId: orchestrator ? null : project, name: name.trim(), cron: cron.trim(), timezone: tz, prompt: prompt.trim(), catchUp, allowOverlap })
         onDone()
       }}
     >
-      <div className={cx("grid gap-3", !projectId && "sm:grid-cols-2")}>
+      {!projectId && (
+        <Field label="Target">
+          <div className="flex gap-2">
+            {(["project", "orchestrator"] as const).map((t) => (
+              <button
+                type="button"
+                key={t}
+                onClick={() => setTarget(t)}
+                className={cx("rounded-md px-3 py-1 text-xs", target === t ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
+              >
+                {t === "project" ? "Project (starts a task)" : "Orchestrator (message in chat)"}
+              </button>
+            ))}
+          </div>
+        </Field>
+      )}
+      <div className={cx("grid gap-3", !projectId && !orchestrator && "sm:grid-cols-2")}>
         <Field label="Name">
           <input autoFocus className={inputClass} value={name} onChange={(e) => setName(e.target.value)} placeholder="Morning issue triage" />
         </Field>
-        {!projectId && (
+        {!projectId && !orchestrator && (
           <Field label="Project">
             <select className={inputClass} value={project} onChange={(e) => setProject(e.target.value)}>
               {projects.data?.map((p) => (
@@ -338,7 +423,14 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
         </span>
       </Field>
 
-      <Field label="What should the agent do each run?" hint="Each run is a new task with this prompt, plus a note on how the previous run ended.">
+      <Field
+        label={orchestrator ? "What should the orchestrator do each run?" : "What should the agent do each run?"}
+        hint={
+          orchestrator
+            ? 'Each run posts "[Scheduled: name] <this prompt>" in the chat; it waits until the orchestrator is free.'
+            : "Each run is a new task with this prompt, plus a note on how the previous run ended."
+        }
+      >
         <textarea className={inputClass} rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Look at issues opened since the last run, label them, and post a summary as an artifact." />
       </Field>
 

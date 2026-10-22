@@ -62,7 +62,8 @@ const schemas = {
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
-    projectId: z.string().min(1),
+    target: z.enum(["project", "orchestrator"]).optional(),
+    projectId: z.string().min(1).nullish(),
     name: z.string().trim().min(1).max(120),
     cron: z.string().trim().min(1).max(200),
     timezone: z.string().max(100).optional(),
@@ -121,9 +122,9 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
-  const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken })
+  const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   tasks.onNotice = () => orchestrator.nudge()
   const auth = new Auth(c.password, store)
   const publicUrl = () => c.publicUrl
@@ -281,7 +282,11 @@ export function createBoxYard(
   // ---- schedules
   api.get("/schedules", (req, res) => {
     const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined
-    res.json(scheduler.list(projectId))
+    const target = req.query.target === "project" || req.query.target === "orchestrator" ? req.query.target : undefined
+    res.json(scheduler.list({ projectId, target }))
+  })
+  api.get("/schedule-runs", (_req, res) => {
+    res.json(store.listScheduleRuns({ limit: 300 }))
   })
   api.get("/schedules/preview", (req, res) => {
     // Validate a cron + time zone and show the next runs, for the create form.
@@ -430,6 +435,7 @@ export function createBoxYard(
     async start() {
       await tasks.start()
       scheduler.start()
+      orchestrator.resumeScheduled()
       stopSnapshots = startSelfSnapshots(c, db)
       stopHold = startSelfHold(c, () => {
         if (orchestrator.busy) return true

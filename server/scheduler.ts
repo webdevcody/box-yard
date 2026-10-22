@@ -6,7 +6,7 @@ import { BadRequestError, NotFoundError } from "./store.js"
 import { QStash } from "./qstash.js"
 import { describeCron, expandCron, isValidTimeZone, nextRun, parseCron, CronError } from "../shared/cron.js"
 import { errorMessage } from "./util/retry.js"
-import type { CatchUp, Schedule, Task, TaskStatus } from "../shared/types.js"
+import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task, TaskStatus } from "../shared/types.js"
 
 /** A run that is still going blocks the next one unless overlap is allowed. */
 const ACTIVE: TaskStatus[] = ["queued", "starting", "working", "waiting"]
@@ -16,7 +16,10 @@ const EARLY_MS = 90_000
 
 export interface ScheduleInput {
   id?: string
-  projectId: string
+  /** Defaults to "project" when projectId is given, otherwise "orchestrator". */
+  target?: ScheduleTarget
+  /** Required for project schedules, must be absent for orchestrator ones. */
+  projectId?: string | null
   name: string
   cron: string
   timezone?: string
@@ -26,20 +29,28 @@ export interface ScheduleInput {
   allowOverlap?: boolean
 }
 
-export type ScheduleUpdate = Partial<Omit<ScheduleInput, "id" | "projectId">>
+export type ScheduleUpdate = Partial<Omit<ScheduleInput, "id" | "projectId" | "target">>
+
+/** What the scheduler needs from the orchestrator: take a queued run and deliver it when the chat is free. */
+export interface ScheduleSink {
+  enqueueScheduled(runId: string, notes?: string): void
+}
 
 export interface SchedulerDeps {
   config: Config
   store: Store
   tasks: TaskManager
   hub: Hub
+  orchestrator?: ScheduleSink
   qstash?: QStash | null
   now?: () => number
 }
 
 /**
- * Runs schedules. Each due run creates an ordinary task in the schedule's
- * project, so it streams in the UI like any other task.
+ * Runs schedules. Each due run of a project schedule creates an ordinary task
+ * in the schedule's project, so it streams in the UI like any other task. A run
+ * of an orchestrator schedule is a message injected into the orchestrator chat
+ * (queued while the orchestrator is busy).
  *
  * The in-process timer always runs. When QStash is configured it also fires
  * each schedule over HTTP; both paths go through `claimRun`, so a run only
@@ -51,6 +62,7 @@ export class Scheduler {
   private readonly store: Store
   private readonly tasks: TaskManager
   private readonly hub: Hub
+  private readonly orchestrator: ScheduleSink | null
   readonly qstash: QStash | null
   private readonly now: () => number
   private timer: NodeJS.Timeout | null = null
@@ -61,6 +73,7 @@ export class Scheduler {
     this.store = deps.store
     this.tasks = deps.tasks
     this.hub = deps.hub
+    this.orchestrator = deps.orchestrator ?? null
     this.qstash = deps.qstash ?? null
     this.now = deps.now ?? Date.now
   }
@@ -92,13 +105,21 @@ export class Scheduler {
 
   // ------------------------------------------------------------------ CRUD
 
-  list(projectId?: string): Schedule[] {
-    return this.store.listSchedules({ projectId })
+  list(filter: { projectId?: string; target?: ScheduleTarget } = {}): Schedule[] {
+    return this.store.listSchedules(filter)
   }
 
   async create(input: ScheduleInput): Promise<Schedule> {
-    const project = this.store.getProject(input.projectId)
-    if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
+    const target: ScheduleTarget = input.target ?? (input.projectId ? "project" : "orchestrator")
+    let projectId: string | null = null
+    if (target === "project") {
+      if (!input.projectId) throw new BadRequestError("projectId is required for a project schedule")
+      const project = this.store.getProject(input.projectId)
+      if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
+      projectId = project.id
+    } else if (input.projectId) {
+      throw new BadRequestError("An orchestrator schedule has no project; leave projectId out or use a project schedule")
+    }
     const name = input.name.trim()
     if (!name) throw new BadRequestError("name is required")
     if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
@@ -107,7 +128,8 @@ export class Scheduler {
     const enabled = input.enabled !== false
     const schedule = this.store.createSchedule({
       id: input.id,
-      projectId: project.id,
+      target,
+      projectId,
       name,
       cron,
       timezone,
@@ -156,14 +178,16 @@ export class Scheduler {
   }
 
   /** Start a run right away, whatever the cron says. Doesn't move the next planned run. */
-  runNow(ref: string): Task {
+  runNow(ref: string): Task | ScheduleRun {
     const s = this.require(ref)
     return this.startRun(s, { reason: "manual" })
   }
 
-  /** The run history of a schedule, newest first. */
-  runs(ref: string, limit = 50): Task[] {
-    const id = this.require(ref).id
+  /** The run history of a schedule, newest first: tasks for a project schedule, chat runs for an orchestrator one. */
+  runs(ref: string, limit = 50): (Task | ScheduleRun)[] {
+    const s = this.require(ref)
+    const id = s.id
+    if (s.target === "orchestrator") return this.store.listScheduleRuns({ scheduleId: id, limit })
     return this.store
       .listTasks()
       .filter((t) => t.scheduleId === id)
@@ -219,7 +243,12 @@ export class Scheduler {
       this.skip(s, `Skipped ${plural(missed, "missed run")} while Box Yard was offline.`)
       return false
     }
-    if (!s.allowOverlap && s.lastTaskId) {
+    if (!s.allowOverlap && s.target === "orchestrator") {
+      if (this.store.listScheduleRuns({ scheduleId: s.id, status: ["queued", "running"], limit: 1 }).length) {
+        this.skip(s, `Skipped the ${fmtTime(dueAt, s.timezone)} run: the previous scheduled prompt is still queued or running.`)
+        return false
+      }
+    } else if (!s.allowOverlap && s.lastTaskId) {
       const last = this.store.getTask(s.lastTaskId)
       if (last && ACTIVE.includes(last.status)) {
         this.skip(s, `Skipped the ${fmtTime(dueAt, s.timezone)} run: the previous run is still going.`)
@@ -235,9 +264,11 @@ export class Scheduler {
     this.emit(s.id)
   }
 
-  private startRun(s: Schedule, opts: { reason: "scheduled" | "manual" | "catch-up"; dueAt?: number; missed?: number }): Task {
+  private startRun(s: Schedule, opts: { reason: "scheduled" | "manual" | "catch-up"; dueAt?: number; missed?: number }): Task | ScheduleRun {
     const at = opts.dueAt ?? this.now()
     const runNumber = s.runCount + 1
+    if (s.target === "orchestrator") return this.startOrchestratorRun(s, opts.reason, at, runNumber, opts.missed)
+    const projectId = s.projectId!
     const previous = s.lastTaskId ? this.store.getTask(s.lastTaskId) : null
     const lines = [
       s.prompt,
@@ -261,7 +292,7 @@ export class Scheduler {
     lines.push("Do this run's work, then call mark_done. Save anything later runs should know with save_note.")
 
     const task = this.tasks.createTask({
-      projectId: s.projectId,
+      projectId,
       title: `${s.name} · ${fmtTime(at, s.timezone, true)}`,
       prompt: lines.join("\n"),
       scheduleId: s.id,
@@ -273,12 +304,28 @@ export class Scheduler {
       lastSkipReason: null,
     })
     this.emit(s.id)
-    const project = this.store.getProject(s.projectId)
+    const project = this.store.getProject(projectId)
     this.tasks.notice(
       `Schedule "${s.name}"${project ? ` in ${project.name}` : ""} started ${opts.reason === "catch-up" ? "a catch-up run" : "a run"}: task ${task.id}.`,
       { scheduleId: s.id, taskId: task.id },
     )
     return task
+  }
+
+  /** Queue the schedule's prompt for the orchestrator chat; it is delivered when the orchestrator is free. */
+  private startOrchestratorRun(s: Schedule, reason: "scheduled" | "manual" | "catch-up", at: number, runNumber: number, missed?: number): ScheduleRun {
+    if (!this.orchestrator) throw new BadRequestError("The orchestrator isn't available to run this schedule")
+    const parts = [`[Scheduled: ${s.name}] ${s.prompt}`]
+    const notes = [`Run #${runNumber} of the schedule "${s.name}" (${describeCron(s.cron).toLowerCase()}, ${s.timezone}), for ${fmtTime(at, s.timezone)}.`]
+    if (reason === "manual") notes.push("Cody started this run by hand.")
+    if (reason === "catch-up") notes.push(`Box Yard was offline at the planned time${missed && missed > 1 ? ` and missed ${missed} runs` : ""}; this one run catches up.`)
+    const run = this.store.createScheduleRun({ scheduleId: s.id, prompt: parts[0]!, reason, dueAt: at })
+    // The notes go to the model only (the chat shows just the labeled prompt).
+    this.store.updateSchedule(s.id, { lastRunAt: this.now(), runCount: runNumber, lastSkipReason: null })
+    this.emit(s.id)
+    this.hub.broadcast({ type: "schedule.run", run })
+    this.orchestrator.enqueueScheduled(run.id, notes.join(" "))
+    return run
   }
 
   private countMissed(s: Schedule, dueAt: number, now: number): number {
