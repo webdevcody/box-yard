@@ -9,7 +9,7 @@ import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { AttachmentList } from "./Attachments"
 import { ContextMeter } from "./ContextMeter"
-import { SettingsDialog } from "./SettingsDialog"
+import { useOpenSettings } from "./SettingsDialog"
 import type { Attachment, ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -26,7 +26,7 @@ export function ChatPanel() {
   const control = useChatControl()
   const orch = useOrchestratorState()
   const compact = useCompactOrchestrator()
-  const [showSettings, setShowSettings] = useState(false)
+  const openSettings = useOpenSettings()
   const [draft, setDraft] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
@@ -48,7 +48,7 @@ export function ChatPanel() {
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
         {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex gap-1">
-          <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => setShowSettings(true)}>
+          <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
             <SettingsIcon className="h-3.5 w-3.5" />
           </Button>
           {busy.data && (
@@ -76,7 +76,6 @@ export function ChatPanel() {
         queued={Boolean(orch.data?.compactQueued) || compact.isPending}
         onCompact={() => compact.mutate()}
       />
-      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
 
       <StickyScroll count={messages.length} className="px-4 py-4" contentClassName="space-y-3">
         {messages.length === 0 && !chat.isLoading && (

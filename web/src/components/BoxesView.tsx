@@ -1,10 +1,9 @@
-import { useState } from "react"
 import { Link } from "wouter"
 import { Boxes, ExternalLink, Globe, Settings } from "lucide-react"
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
 import { useScrollToHash } from "../lib/hash"
 import { Empty, StatusBadge, TimeAgo, cx } from "./ui"
-import { SettingsDialog } from "./SettingsDialog"
+import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
@@ -36,7 +35,7 @@ export function BoxesView() {
   const projects = useProjects()
   const health = useHealth()
   useScrollToHash(Boolean(boxes.data), "box-")
-  const [editing, setEditing] = useState(false)
+  const openSettings = useOpenSettings()
 
   const pool = health.data?.pool
   const list = boxes.data ?? []
@@ -54,11 +53,10 @@ export function BoxesView() {
             Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
           </p>
         </div>
-        <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 text-sm text-sky-400 hover:underline">
+        <button onClick={() => openSettings("limits")} className="inline-flex items-center gap-1.5 text-sm text-sky-400 hover:underline">
           <Settings className="h-3.5 w-3.5" /> Edit limits
         </button>
       </header>
-      {editing && <SettingsDialog onClose={() => setEditing(false)} />}
 
       {pool && (
         <div className="grid gap-3 sm:grid-cols-2">
