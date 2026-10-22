@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useState } from "react"
 import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
@@ -34,6 +34,7 @@ import {
 import { api } from "../lib/api"
 import { toast } from "../lib/toast"
 import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { StickyScroll } from "./StickyScroll"
 import type { TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
@@ -51,14 +52,9 @@ export function TaskView({ id }: { id: string }) {
   const [draft, setDraft] = useState("")
   const [port, setPort] = useState("")
   const [showTools, setShowTools] = useState(false)
-  const bottom = useRef<HTMLDivElement>(null)
   const task = tasks.data?.find((t) => t.id === id)
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
-
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" })
-  }, [messages.data?.length])
 
   if (tasks.isLoading) return null
   if (!task) return <Empty title="Task not found">It may have been deleted.</Empty>
@@ -182,7 +178,7 @@ export function TaskView({ id }: { id: string }) {
         <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap text-red-200">{task.error}</div>
       )}
 
-      <div className="scroll-thin min-h-0 flex-1 space-y-2.5 overflow-y-auto rounded-xl border border-zinc-900 bg-zinc-950 p-4">
+      <StickyScroll count={shown.length} resetKey={id} className="rounded-xl border border-zinc-900 bg-zinc-950 p-4" contentClassName="space-y-2.5">
         {messages.isLoading && <div className="text-sm text-zinc-500">Loading transcript…</div>}
         {shown.map((m) => (
           <Line key={m.id} m={m} />
@@ -192,8 +188,7 @@ export function TaskView({ id }: { id: string }) {
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {task.status === "starting" ? "Preparing the box…" : "Agent is working…"}
           </div>
         )}
-        <div ref={bottom} />
-      </div>
+      </StickyScroll>
 
       <form
         className="mt-3"
