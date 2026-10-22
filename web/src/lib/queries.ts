@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api, clientId } from "./api"
 import { toast } from "./toast"
+import { deferReview, undoReview, UNDO_MS } from "./review"
 import type {
   Artifact,
   Attachment,
@@ -294,6 +295,15 @@ export const useStopTask = () =>
   useTaskAction("stop", (t) => (t.status === "queued" ? { status: (t.turnCount ? "idle" : "failed") as TaskStatus } : {}), "stop the task")
 export const useCloseTask = () => useTaskAction("close", () => ({ status: "done" as TaskStatus, question: null }), "close the task")
 export const useRetryTask = () => useTaskAction("retry", () => ({ status: "queued" as TaskStatus, error: null }), "retry the task")
+
+/** Inbox "Mark reviewed": the same close as "Mark done", sent after a short undo window. */
+export function useMarkReviewed() {
+  const close = useCloseTask()
+  return (task: Task) => {
+    if (!deferReview(task.id, () => close.mutateAsync(task.id))) return
+    toast.info("Marked reviewed", task.title, { action: { label: "Undo", onClick: () => undoReview(task.id) }, duration: UNDO_MS })
+  }
+}
 
 export function useDeleteTask() {
   const qc = useQueryClient()
