@@ -12,6 +12,10 @@ export type BoxHealth = "running" | "paused" | "gone" | "error" | "unknown"
  */
 export interface BoxProvider {
   readonly name: string
+  /** Node binary inside the box, used to run the worker runner. */
+  readonly nodeBin: string
+  /** Claude binary inside the box. */
+  readonly claudeBin: string
   /** Folder inside a box that holds `.boxyard/` and `tasks/`. */
   root(boxId: string): string
   /** Create a worker box with Claude Code and git ready. Returns its id. */
@@ -30,6 +34,8 @@ export interface BoxProvider {
   uploadFile(boxId: string, localPath: string, destination: string): Promise<void>
   publicUrl(boxId: string, port: number): Promise<string>
   destroy(boxId: string): Promise<void>
+  /** Ids of boxes carrying a label, to clean up boxes a crash left behind. */
+  listIds?(label: string): Promise<string[]>
 }
 
 /** Quote a string for a POSIX shell. */

@@ -30,6 +30,8 @@ export interface TurnFlags {
   done?: string
   waitingOn?: string[]
   sawPr?: boolean
+  /** How many times in a row a turn died and was retried. */
+  interrupts?: number
 }
 
 export interface TaskRow {
@@ -310,6 +312,7 @@ export class Store {
   }
 
   createTask(input: {
+    id?: string
     projectId: string
     title: string
     prompt: string
@@ -317,7 +320,7 @@ export class Store {
     branch?: string | null
   }): Task {
     const now = Date.now()
-    const id = newId("task")
+    const id = input.id ?? newId("task")
     this.db
       .prepare(
         `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, created_at, updated_at, last_active_at)
@@ -376,24 +379,20 @@ export class Store {
       .run(newId("in"), taskId, source, content, Date.now())
   }
 
-  /** Remove and return every queued input for a task, oldest first. */
-  takeInputs(taskId: string): { source: string; content: string }[] {
-    return this.db.transaction(() => {
-      const rows = this.db
-        .prepare("SELECT source, content FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC")
-        .all(taskId) as { source: string; content: string }[]
-      this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
-      return rows
-    })()
+  /** Queued inputs, oldest first. Delete them with deleteInputs once a turn has started. */
+  peekInputs(taskId: string): { id: string; source: string; content: string }[] {
+    return this.db
+      .prepare("SELECT id, source, content FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(taskId) as { id: string; source: string; content: string }[]
   }
 
-  /** Put inputs back (when a turn failed to start), keeping them first in line. */
-  restoreInputs(taskId: string, inputs: { source: string; content: string }[]) {
-    const base = Date.now() - inputs.length - 1_000_000
-    const stmt = this.db.prepare(
-      "INSERT INTO task_inputs (id, task_id, source, content, created_at) VALUES (?, ?, ?, ?, ?)",
-    )
-    inputs.forEach((input, i) => stmt.run(newId("in"), taskId, input.source, input.content, base + i))
+  deleteInputs(ids: string[]) {
+    const stmt = this.db.prepare("DELETE FROM task_inputs WHERE id = ?")
+    this.db.transaction(() => ids.forEach((id) => stmt.run(id)))()
+  }
+
+  clearInputs(taskId: string) {
+    this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
   }
 
   hasInputs(taskId: string) {

@@ -11,7 +11,11 @@ import type { BoxHealth, BoxProvider, ExecResult } from "./types.js"
  */
 export class LocalProvider implements BoxProvider {
   readonly name = "local"
-  constructor(private readonly baseDir: string) {
+  readonly nodeBin = process.execPath
+  constructor(
+    private readonly baseDir: string,
+    readonly claudeBin = "claude",
+  ) {
     fs.mkdirSync(baseDir, { recursive: true })
   }
 

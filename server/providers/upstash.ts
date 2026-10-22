@@ -23,6 +23,8 @@ export function workerSetupScript(c: Pick<Config, "gitUserName" | "gitUserEmail"
 
 export class UpstashProvider implements BoxProvider {
   readonly name = "upstash"
+  readonly nodeBin = "node"
+  readonly claudeBin = "claude"
   private cache = new Map<string, Box>()
 
   constructor(private readonly c: Config) {}
@@ -150,6 +152,11 @@ export class UpstashProvider implements BoxProvider {
     const box = await this.box(boxId)
     const res = await retry(() => box.getPublicURL(port))
     return res.url
+  }
+
+  async listIds(label: string): Promise<string[]> {
+    const boxes = await retry(() => Box.list({ apiKey: this.c.upstashBoxApiKey, label }))
+    return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
   }
 
   async destroy(boxId: string) {
