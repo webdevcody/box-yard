@@ -112,6 +112,8 @@ export class TaskManager {
   stop() {
     this.stopped = true
     for (const t of this.timers) clearInterval(t)
+    if (this.emitBoxesTimer) clearTimeout(this.emitBoxesTimer)
+    if (this.directoryTimer) clearTimeout(this.directoryTimer)
     for (const h of this.holds.values()) h.abort()
     this.holds.clear()
   }
@@ -1099,6 +1101,7 @@ export class TaskManager {
   }
 
   emitTask(taskId: string) {
+    if (this.stopped) return
     const task = this.store.getTask(taskId)
     if (task) this.hub.broadcast({ type: "task", task })
     this.emitBoxes()
@@ -1109,6 +1112,7 @@ export class TaskManager {
     if (this.emitBoxesTimer) return
     this.emitBoxesTimer = setTimeout(() => {
       this.emitBoxesTimer = null
+      if (this.stopped) return
       this.hub.broadcast({ type: "boxes", boxes: this.boxes() })
     }, 250)
     this.emitBoxesTimer.unref?.()
@@ -1127,6 +1131,7 @@ export class TaskManager {
     if (!this.redis || this.directoryTimer) return
     this.directoryTimer = setTimeout(() => {
       this.directoryTimer = null
+      if (this.stopped) return
       void this.redis!.cmd("SET", "boxyard:directory", JSON.stringify(this.directory())).catch(() => {})
     }, 1000)
     this.directoryTimer.unref?.()
