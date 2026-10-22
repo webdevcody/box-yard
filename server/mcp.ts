@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Request, Response } from "express"
 import { z } from "zod"
+import { capReply, preview } from "./replies.js"
 import type { Store } from "./store.js"
 import type { TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
@@ -36,8 +37,6 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
     }
   }
 }
-
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
 
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
@@ -74,8 +73,18 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     box: t.boxId ?? undefined,
     turns: t.turnCount,
     lastActive: ago(t.updatedAt),
-    summary: t.summary ? clip(t.summary, 300) : undefined,
+    summary: t.summary ? preview(t.summary, 300, "call get_task or wait_for_tasks for the full reply") : undefined,
   })
+  /**
+   * The agent's latest reply, to be sent once and in full (capped). `summary` is only
+   * added when it says something different (e.g. the text passed to mark_done).
+   */
+  const replyFields = (t: Task, offset = 0) => {
+    const last = store.listTaskMessages(t.id, 50).filter((m) => m.role === "assistant").pop()
+    const reply = t.summary && (!last || t.summary.length > last.content.length) ? t.summary : (last?.content ?? null)
+    const summary = t.summary && t.summary !== reply ? capReply(t.summary) : undefined
+    return { reply, fields: { ...brief(t), summary, lastReply: reply === null ? undefined : capReply(reply, offset) } }
+  }
   const BUSY = new Set(["queued", "starting", "working"])
   /** What happens to a message sent to this task right now. */
   const delivery = (t: Task) => {
@@ -195,13 +204,27 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   server.registerTool(
     "get_task",
     {
-      description: "Get one task with its latest transcript lines.",
-      inputSchema: { task: z.string(), last_messages: z.number().int().min(0).max(200).optional() },
+      description:
+        "Get one task with its latest transcript lines. `lastReply` is the agent's latest reply in full (up to 20k chars); older transcript lines are short previews. If a reply ends with a [truncated: N more chars …] marker, call again with full_reply=true and the offset from the marker — never ask the agent to repeat itself.",
+      inputSchema: {
+        task: z.string(),
+        last_messages: z.number().int().min(0).max(200).optional(),
+        full_reply: z.boolean().optional().describe("Return only the agent's latest reply, starting at `offset`, up to 20k chars"),
+        offset: z.number().int().min(0).optional().describe("Char offset into the latest reply (with full_reply)"),
+      },
     },
-    safe(async (a: { task: string; last_messages?: number }) => {
+    safe(async (a: { task: string; last_messages?: number; full_reply?: boolean; offset?: number }) => {
       const t = task(a.task)
-      const messages = store.listTaskMessages(t.id, a.last_messages ?? 20).map((m) => `[${m.role}] ${m.content.slice(0, 1200)}`)
-      return ok({ ...brief(t), prompt: t.prompt, summary: t.summary, branch: t.branch, messages })
+      const { reply, fields } = replyFields(t, a.offset ?? 0)
+      if (a.full_reply) return ok({ ...fields, summary: undefined, totalChars: reply?.length ?? 0, offset: a.offset ?? 0 })
+      const all = store.listTaskMessages(t.id, Math.max(a.last_messages ?? 20, 50))
+      const lastAssistant = [...all].reverse().find((m) => m.role === "assistant")
+      const messages = all.slice(-(a.last_messages ?? 20)).map((m) => {
+        // The latest reply is returned once, in full, as lastReply.
+        if (m === lastAssistant && reply === m.content) return "[assistant] (latest reply: see lastReply)"
+        return `[${m.role}] ${preview(m.content, 600, "call get_task with full_reply for the latest reply")}`
+      })
+      return ok({ ...fields, prompt: t.prompt, branch: t.branch, messages })
     }),
   )
 
@@ -227,7 +250,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       if (a.related_tasks?.length) {
         const context = a.related_tasks.map((ref) => {
           const r = task(ref)
-          return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${clip(r.summary, 1200)}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
+          return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${preview(r.summary, 1200, "call get_task for the full reply")}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
             .filter(Boolean)
             .join("\n")
         })
@@ -258,7 +281,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "wait_for_tasks",
     {
       description:
-        "Wait until the given tasks finish their current work (no longer queued/starting/working), up to timeout_seconds. Returns each task's status and the agent's latest reply. " +
+        "Wait until the given tasks finish their current work (no longer queued/starting/working), up to timeout_seconds. Returns each task's status and the agent's latest reply in full as lastReply (up to 20k chars; a [truncated: …] marker says how to read the rest with get_task full_reply/offset). Never ask an agent to repeat a reply. " +
         "Use this instead of polling get_task. If it times out, the tasks keep running: end your turn, and you'll be woken with an update when they finish.",
       inputSchema: {
         tasks: z.array(z.string()).min(1),
@@ -279,13 +302,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       store.markNoticesSeen(settled.map((t) => t.id))
       return ok({
         allFinished: settled.length === list.length,
-        tasks: list.map((t) => {
-          const reply = store
-            .listTaskMessages(t.id, 40)
-            .filter((m) => m.role === "assistant")
-            .pop()
-          return { ...brief(t), stillRunning: !settled.includes(t), lastReply: reply ? clip(reply.content, 2000) : undefined }
-        }),
+        tasks: list.map((t) => ({ ...replyFields(t).fields, stillRunning: !settled.includes(t) })),
       })
     }),
   )

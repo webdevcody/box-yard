@@ -21,6 +21,7 @@ import {
 } from "./prompts.js"
 import type { BoxInfo, PreviewLink, Task, TaskStatus } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
+import { capReply, preview } from "./replies.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -777,8 +778,12 @@ export class TaskManager {
     }
   }
 
-  private async applyEvents(taskId: string, events: WorkerEvent[], cursor: Cursor) {
+  async applyEvents(taskId: string, events: WorkerEvent[], cursor: Cursor) {
     for (const ev of events) {
+      // Another reader (poll vs. stalled-turn fallback) may have applied this already.
+      const stored = parseCursor(this.store.getTaskRow(taskId)?.event_cursor ?? null)
+      if (ev.seq <= stored.seq) continue
+      this.store.updateTask(taskId, { eventCursor: JSON.stringify({ ...stored, seq: ev.seq }) })
       this.lastEventAt.set(taskId, Date.now())
       try {
         await this.apply(taskId, ev)
@@ -786,8 +791,10 @@ export class TaskManager {
         console.error(`[box-yard] applying ${ev.t} for ${taskId} failed: ${errorMessage(err)}`)
       }
     }
-    if (this.store.getTaskRow(taskId)) {
-      this.store.updateTask(taskId, { eventCursor: JSON.stringify(cursor) })
+    const row = this.store.getTaskRow(taskId)
+    if (row) {
+      const stored = parseCursor(row.event_cursor)
+      this.store.updateTask(taskId, { eventCursor: JSON.stringify({ ...cursor, seq: Math.max(cursor.seq, stored.seq) }) })
     }
   }
 
@@ -932,7 +939,7 @@ export class TaskManager {
       status,
       error,
       currentTurnId: null,
-      summary: flags.done ?? (result ? result.slice(0, 4000) : row.summary),
+      summary: flags.done ?? (result ? capReply(result) : row.summary),
       sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
       lastActiveAt: Date.now(),
       question: status === "needs_input" ? (flags.asked ?? null) : null,
@@ -944,11 +951,11 @@ export class TaskManager {
     this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`)
     // What the agent said at the end of the turn, for the orchestrator.
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
-    const gist = said.length > 600 ? `${said.slice(0, 600)}…` : said
+    const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
     const more = this.store.hasInputs(row.id) ? " (more messages are queued for it)" : ""
     if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
     else if (status === "done") this.notice(`✅ **${row.title}** is done: ${gist}`, { taskId: row.id })
-    else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${(error ?? "").slice(0, 300)}`, { taskId: row.id })
+    else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${preview(error ?? "", 300, "call get_task for the full error")}`, { taskId: row.id })
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
       this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
