@@ -28,6 +28,7 @@ import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -491,8 +492,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         <Button
           type="button"
           variant="danger"
-          onClick={() => {
-            if (confirm(`Delete ${project.name} and all its tasks? This can't be undone.`)) {
+          onClick={async () => {
+            if (await confirmDialog({ title: "Delete project?", body: `Delete ${project.name} and all its tasks? This can't be undone.`, confirmLabel: "Delete project", danger: true })) {
               remove.mutate(project.id)
               navigate("/")
             }

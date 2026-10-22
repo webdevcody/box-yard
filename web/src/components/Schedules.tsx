@@ -20,6 +20,7 @@ import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../sha
 import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 const PRESETS: { label: string; cron: string }[] = [
   { label: "Every 15 min", cron: "*/15 * * * *" },
@@ -211,7 +212,9 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
             variant="ghost"
             title="Delete schedule"
             onClick={() => {
-              if (confirm(`Delete the schedule "${s.name}"? Past runs stay.`)) remove.mutate(s.id)
+              void confirmDialog({ title: "Delete schedule?", body: `Delete the schedule "${s.name}"? Past runs stay.`, confirmLabel: "Delete schedule", danger: true }).then(
+                (ok) => ok && remove.mutate(s.id),
+              )
             }}
           >
             <Trash2 className="h-3.5 w-3.5" />
