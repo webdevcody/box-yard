@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, X } from "lucide-react"
+import { AlarmClock, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2 } from "lucide-react"
 import {
   newClientId,
   useAddNote,
@@ -15,9 +15,7 @@ import {
 } from "../lib/queries"
 import {
   DEFAULT_FILTER,
-  DEFAULT_SORT,
   TASK_FILTERS,
-  TASK_SORTS,
   compareTasks,
   filterCounts,
   isVisible,
@@ -29,6 +27,7 @@ import { useStableOrder } from "../lib/useStableOrder"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { TaskCard } from "./TaskCard"
 import { ResortPill } from "./ResortPill"
+import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 
@@ -48,14 +47,6 @@ const FILTER_DOT: Partial<Record<TaskFilter, string>> = {
   pr_ready: STATUS.pr_ready.dot,
   failed: STATUS.failed.dot,
   done: STATUS.done.dot,
-}
-
-/** A copy of `params` with `key` set, or removed when `value` is empty. */
-function withParam(params: URLSearchParams, key: string, value: string | null) {
-  const next = new URLSearchParams(params)
-  if (value) next.set(key, value)
-  else next.delete(key)
-  return next
 }
 
 /** `/projects/<id>` plus the given query params, dropping empty ones and defaults. */
@@ -79,6 +70,14 @@ export function ProjectView({ id }: { id: string }) {
   // A new task form left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
 
+  // `?new=task` (from the command palette) opens the new task form once.
+  const wantsNew = params.get("new") === "task"
+  useEffect(() => {
+    if (!wantsNew) return
+    setShowNew(true)
+    setParams((p) => withParam(p, "new", null), { replace: true })
+  }, [wantsNew, setParams])
+
   if (projects.isLoading) return null
   if (!project) return <Empty title="Project not found">It may have been deleted.</Empty>
 
@@ -86,6 +85,7 @@ export function ProjectView({ id }: { id: string }) {
   const files = (artifacts.data ?? []).filter((a) => a.projectId === id)
   const scheduleCount = (schedules.data ?? []).filter((s) => s.target === "project" && s.projectId === id).length
   const openCount = list.filter((t) => t.status !== "done").length
+  const needsYou = list.some((t) => t.status === "needs_input")
 
   /** The current URL with a different tab; tasks filters stay so coming back to Tasks keeps them. */
   const tabHref = (key: Tab) =>
@@ -103,37 +103,16 @@ export function ProjectView({ id }: { id: string }) {
         }}
       />
 
-      <nav className="sticky top-0 z-10 -mx-6 -mt-1 border-b border-zinc-900 bg-zinc-950/90 px-6 backdrop-blur">
-        <div className="scroll-thin -mb-px flex gap-1 overflow-x-auto">
-          {TABS.map((t) => {
-            const Icon = t.icon
-            const selected = t.key === tab
-            const count = counts[t.key]
-            return (
-              <Link
-                key={t.key}
-                href={tabHref(t.key)}
-                aria-current={selected ? "page" : undefined}
-                className={cx(
-                  "inline-flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5 text-sm font-medium whitespace-nowrap transition",
-                  selected ? "border-yard-500 text-zinc-50" : "border-transparent text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
-                )}
-              >
-                <Icon className="h-4 w-4" />
-                {t.label}
-                {count !== undefined && (
-                  <span className={cx("rounded-full px-1.5 text-[11px] tabular-nums", selected ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400")}>
-                    {count}
-                  </span>
-                )}
-                {t.key === "tasks" && list.some((x) => x.status === "needs_input") && (
-                  <span className="h-1.5 w-1.5 rounded-full bg-amber-400" title="A task needs you" />
-                )}
-              </Link>
-            )
-          })}
-        </div>
-      </nav>
+      <TabBar
+        label="Project sections"
+        selected={tab}
+        tabs={TABS.map((t) => ({
+          ...t,
+          href: tabHref(t.key),
+          count: counts[t.key],
+          ...(t.key === "tasks" && needsYou && { dot: "bg-amber-400", title: "A task needs you" }),
+        }))}
+      />
 
       {tab === "tasks" && <TasksTab projectId={id} tasks={list} showNew={showNew} onCloseNew={() => setShowNew(false)} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
@@ -220,33 +199,11 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
 }
 
 function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string; tasks: Task[]; showNew: boolean; onCloseNew: () => void }) {
-  const [params, setParams] = useSearchParams()
+  const [params] = useSearchParams()
   const filter = parseFilter(params.get("status"))
   const sort = parseSort(params.get("sort"))
-  const urlQuery = params.get("q") ?? ""
-  // Typing stays local and snappy; the URL follows with replace so it doesn't flood history.
-  const [query, setQuery] = useState(urlQuery)
-  const search = useRef<HTMLInputElement>(null)
-  useEffect(() => setQuery(urlQuery), [urlQuery])
-
-  const setParam = (key: string, value: string | null) => setParams((p) => withParam(p, key, value), { replace: true })
-
-  const onQuery = (q: string) => {
-    setQuery(q)
-    setParam("q", q.trim() ? q : null)
-  }
-
-  // "/" jumps to the search box, like most list views.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement
-      if (e.key !== "/" || e.metaKey || e.ctrlKey || el.closest("input, textarea, select, [contenteditable=true]")) return
-      e.preventDefault()
-      search.current?.focus()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [])
+  const [query, onQuery] = useUrlQuery()
+  const setParam = useSetParam()
 
   const counts = filterCounts(tasks, query)
   // Sorted once, then held still: live updates change cards in place; the pill re-sorts.
@@ -270,40 +227,8 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
       ) : (
         <>
           <div className="flex items-center gap-2">
-            <div className="relative min-w-0 flex-1">
-              <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-zinc-500" />
-              <input
-                ref={search}
-                className={cx(inputClass, "pr-8 pl-9")}
-                value={query}
-                onChange={(e) => onQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    onQuery("")
-                    e.currentTarget.blur()
-                  }
-                }}
-                placeholder="Search tasks  ( / )"
-                aria-label="Search tasks"
-              />
-              {query && (
-                <button onClick={() => onQuery("")} className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-1 text-zinc-500 hover:text-zinc-200" title="Clear search">
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
-            <select
-              className="w-32 shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-300 focus:border-yard-500/60 focus:outline-none sm:w-auto sm:px-3"
-              value={sort}
-              onChange={(e) => setParam("sort", e.target.value === DEFAULT_SORT ? null : e.target.value)}
-              aria-label="Sort tasks"
-            >
-              {TASK_SORTS.map((s) => (
-                <option key={s.key} value={s.key}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+            <SearchBox value={query} onChange={onQuery} />
+            <SortSelect sort={sort} />
           </div>
 
           <div className="scroll-thin -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Filter by status">

@@ -146,10 +146,11 @@ async function say(text) {
 }
 
 async function useTool(mcp, name, input) {
-  out({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: `t${Date.now()}`, name: `mcp__boxyard__${name}`, input }] } })
+  const id = `t${Date.now()}`
+  out({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name: `mcp__boxyard__${name}`, input }] } })
   const result = await mcp.tool(name, input)
   const text = result?.content?.map((c) => c.text).join("") ?? ""
-  out({ type: "user", message: { role: "user", content: [{ type: "tool_result", content: text, is_error: Boolean(result?.isError) }] } })
+  out({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: text, is_error: Boolean(result?.isError) }] } })
   return text
 }
 

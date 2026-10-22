@@ -555,6 +555,15 @@ export class Store {
     return msg
   }
 
+  /** Replace a chat message's meta (e.g. a tool line learning the id it created). */
+  setChatMeta(id: string, meta: Record<string, unknown>): ChatMessage | null {
+    this.db.prepare("UPDATE chat_messages SET meta_json = ? WHERE id = ?").run(JSON.stringify(meta), id)
+    const r = this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(id) as
+      | { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
+      | undefined
+    return r ? { id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
+  }
+
   listChat(limit = 300): ChatMessage[] {
     const rows = this.db
       .prepare(

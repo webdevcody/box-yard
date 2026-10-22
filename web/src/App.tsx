@@ -12,7 +12,9 @@ import { ProjectView } from "./components/ProjectView"
 import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
 import { SchedulesView } from "./components/Schedules"
-import { HealthBanner, HomeView, InboxView, Login } from "./components/Views"
+import { CommandPalette } from "./components/CommandPalette"
+import { HealthBanner, InboxView, Login } from "./components/Views"
+import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
 
@@ -62,14 +64,14 @@ export function App() {
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto h-full max-w-6xl px-6 py-6">
             <Switch>
-              <Route path="/" component={HomeView} />
+              <Route path="/" component={YardView} />
               <Route path="/inbox" component={InboxView} />
               <Route path="/boxes" component={BoxesView} />
               <Route path="/schedules" component={SchedulesView} />
               <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
               <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>
               <Route>
-                <HomeView />
+                <YardView />
               </Route>
             </Switch>
           </div>
@@ -99,6 +101,7 @@ export function App() {
           <MessageSquare className="h-5 w-5" />
         </button>
       )}
+      <CommandPalette />
       <Toasts />
     </div>
   )

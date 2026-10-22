@@ -1,11 +1,12 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
-import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus } from "lucide-react"
+import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
+import { MOD_KEY, openPalette } from "./CommandPalette"
 import type { Connection } from "../lib/stream"
 
 export function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
@@ -52,6 +53,20 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
           title={connection === "live" ? "Live updates on" : "Reconnecting…"}
           className={cx("ml-auto h-2 w-2 rounded-full", connection === "live" ? "bg-emerald-500" : "animate-pulse bg-amber-500")}
         />
+      </div>
+
+      <div className="px-2 pb-2">
+        <button
+          onClick={() => {
+            onNavigate?.()
+            openPalette()
+          }}
+          title={`Search everything (${MOD_KEY.trim()}+K or /)`}
+          className="flex w-full items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2.5 py-1.5 text-sm text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-300"
+        >
+          <Search className="h-4 w-4" /> Search…
+          <kbd className="ml-auto rounded border border-zinc-800 bg-zinc-900 px-1.5 font-sans text-[10px] text-zinc-500">{MOD_KEY}K</kbd>
+        </button>
       </div>
 
       <nav className="space-y-0.5 px-2" onClick={onNavigate}>
