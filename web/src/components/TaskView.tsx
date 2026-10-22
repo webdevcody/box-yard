@@ -1,45 +1,20 @@
-import { useEffect, useRef, useState } from "react"
-import { Link, useLocation } from "wouter"
-import {
-  AlarmClock,
-  ArrowLeft,
-  Bot,
-  Box,
-  CircleStop,
-  ExternalLink,
-  FileText,
-  GitBranch,
-  GitPullRequest,
-  Globe,
-  MessageCircleQuestion,
-  Plug,
-  RefreshCcw,
-  Trash2,
-  Users,
-  Wrench,
-  CheckCircle2,
-} from "lucide-react"
+import { useRef, useState } from "react"
+import { Link } from "wouter"
+import { Bot, MessageCircleQuestion, Users } from "lucide-react"
 import {
   useArtifacts,
-  useCloseTask,
-  useCompactTask,
-  useDeleteTask,
   useProjects,
-  useRetryTask,
   useSchedules,
   useSendTaskMessage,
-  useStopTask,
   useTaskMessages,
   useTasks,
 } from "../lib/queries"
-import { api } from "../lib/api"
-import { toast } from "../lib/toast"
-import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
+import { Empty, Markdown, TimeAgo, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
-import { ContextMeter } from "./ContextMeter"
+import { TaskHeader, useStoredFlag } from "./TaskHeader"
 import { AttachmentList } from "./Attachments"
-import type { Attachment, PreviewLink, TaskMessage } from "../../../shared/types"
+import type { Attachment, TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
   const tasks = useTasks()
@@ -48,14 +23,8 @@ export function TaskView({ id }: { id: string }) {
   const messages = useTaskMessages(id)
   const artifacts = useArtifacts()
   const send = useSendTaskMessage(id)
-  const stop = useStopTask()
-  const close = useCloseTask()
-  const retry = useRetryTask()
-  const compact = useCompactTask()
-  const del = useDeleteTask()
-  const [, navigate] = useLocation()
   const [draft, setDraft] = useState("")
-  const [showTools, setShowTools] = useState(false)
+  const [showTools, setShowTools] = useStoredFlag("boxyard:show-tool-calls")
   const panel = useRef<HTMLDivElement>(null)
   const task = tasks.data?.find((t) => t.id === id)
   const project = projects.data?.find((p) => p.id === task?.projectId)
@@ -76,87 +45,7 @@ export function TaskView({ id }: { id: string }) {
 
   return (
     <div ref={panel} className="relative flex h-full flex-col">
-      <div className="mb-4">
-        <Link href={project ? `/projects/${project.id}` : "/"} className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300">
-          <ArrowLeft className="h-3.5 w-3.5" /> {project?.name ?? "Back"}
-        </Link>
-        <div className="mt-1 flex flex-wrap items-start gap-3">
-          <h1 className="min-w-0 flex-1 text-xl font-semibold tracking-tight text-zinc-50">{task.title}</h1>
-          <StatusBadge status={task.status} />
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
-          {task.scheduleId && (
-            <Link href="/schedules" className="inline-flex items-center gap-1 text-yard-400 hover:underline">
-              <AlarmClock className="h-3.5 w-3.5" /> {schedule ? `Schedule: ${schedule.name}` : "From a deleted schedule"}
-            </Link>
-          )}
-          {task.branch && (
-            <span className="inline-flex items-center gap-1 font-mono">
-              <GitBranch className="h-3.5 w-3.5" /> {task.branch}
-            </span>
-          )}
-          {task.prUrl && (
-            <a href={task.prUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-emerald-400 hover:underline">
-              <GitPullRequest className="h-3.5 w-3.5" /> Pull request
-            </a>
-          )}
-          {files.map((a) => (
-            <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-yard-400 hover:underline">
-              <FileText className="h-3.5 w-3.5" /> {a.title}
-            </a>
-          ))}
-          <span className="inline-flex items-center gap-1" title="Worker box">
-            <Box className="h-3.5 w-3.5" /> {task.boxId ?? (task.lastArchivedAt ? "archived" : "no box yet")}
-          </span>
-          <span>{task.turnCount} turns</span>
-        </div>
-        <ContextMeter
-          className="mt-3"
-          tokens={task.contextTokens}
-          window={task.contextWindow}
-          compacting={task.compacting}
-          queued={task.compactPending}
-          canCompact={task.turnCount > 0 && task.status !== "failed"}
-          onCompact={() => compact.mutate(id)}
-        />
-        <div className="mt-3 flex flex-wrap gap-2">
-          {running && (
-            <Button size="sm" variant="subtle" onClick={() => stop.mutate(id)}>
-              <CircleStop className="h-3.5 w-3.5" /> Stop
-            </Button>
-          )}
-          {task.status === "failed" && (
-            <Button size="sm" variant="subtle" onClick={() => retry.mutate(id)}>
-              <RefreshCcw className="h-3.5 w-3.5" /> Retry
-            </Button>
-          )}
-          {task.status !== "done" && (
-            <Button size="sm" variant="subtle" onClick={() => close.mutate(id)}>
-              <CheckCircle2 className="h-3.5 w-3.5" /> Mark done
-            </Button>
-          )}
-          {task.previews.map((p) => (
-            <PreviewChip key={p.port} preview={p} />
-          ))}
-          <OpenPort taskId={id} />
-          <Button size="sm" variant="ghost" onClick={() => setShowTools((v) => !v)}>
-            <Wrench className="h-3.5 w-3.5" /> {showTools ? "Hide" : "Show"} tool calls
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto"
-            onClick={() => {
-              if (confirm("Delete this task, its workspace and its archive?")) {
-                del.mutate(id)
-                navigate(project ? `/projects/${project.id}` : "/")
-              }
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
+      <TaskHeader task={task} project={project} schedule={schedule} files={files} showTools={showTools} onShowTools={setShowTools} />
 
       {task.status === "needs_input" && task.question && (
         <div className="mb-4 flex gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-100">
@@ -265,85 +154,4 @@ function Line({ m }: { m: TaskMessage }) {
       )
     }
   }
-}
-
-/** A preview the agent registered (report_preview) or Cody opened: opens in a new tab. */
-function PreviewChip({ preview }: { preview: PreviewLink }) {
-  return (
-    <a
-      href={preview.url}
-      target="_blank"
-      rel="noreferrer"
-      title={preview.label}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-sky-900/60 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20"
-    >
-      <Globe className="h-3.5 w-3.5" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-70" />
-    </a>
-  )
-}
-
-/** "Open a port…": a small popover to get a preview URL for any port in the box. */
-function OpenPort({ taskId }: { taskId: string }) {
-  const [open, setOpen] = useState(false)
-  const [port, setPort] = useState("")
-  const root = useRef<HTMLDivElement>(null)
-  const trigger = useRef<HTMLButtonElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener("mousedown", onDown)
-    return () => document.removeEventListener("mousedown", onDown)
-  }, [open])
-
-  return (
-    <div
-      ref={root}
-      className="relative"
-      onKeyDown={(e) => {
-        if (e.key !== "Escape" || !open) return
-        setOpen(false)
-        trigger.current?.focus()
-      }}
-    >
-      <Button ref={trigger} size="sm" variant="ghost" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((v) => !v)}>
-        <Plug className="h-3.5 w-3.5" /> Open a port…
-      </Button>
-      {open && (
-        <form
-          role="dialog"
-          aria-label="Open a port"
-          className="absolute top-full left-0 z-20 mt-1 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 shadow-xl"
-          onSubmit={async (e) => {
-            e.preventDefault()
-            const n = Number(port)
-            if (!n) return
-            try {
-              const link = await api<{ url: string }>(`/api/tasks/${taskId}/preview`, { body: { port: n } })
-              window.open(link.url, "_blank")
-              setPort("")
-              setOpen(false)
-            } catch (err) {
-              toast.error("Couldn't open a preview", (err as Error).message)
-            }
-          }}
-        >
-          <input
-            autoFocus
-            inputMode="numeric"
-            aria-label="Port"
-            value={port}
-            onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
-            placeholder="port"
-            className="w-20 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs"
-          />
-          <Button size="sm" variant="subtle" type="submit" disabled={!port}>
-            <Globe className="h-3.5 w-3.5" /> Open
-          </Button>
-        </form>
-      )}
-    </div>
-  )
 }
