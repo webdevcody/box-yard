@@ -107,7 +107,7 @@ export function App() {
 function Toasts() {
   const toasts = useToasts()
   return (
-    <div className="pointer-events-none fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 flex-col gap-2">
+    <div role="status" aria-live="polite" className="pointer-events-none fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 flex-col gap-2">
       {toasts.map((t) => (
         <div
           key={t.id}
@@ -117,8 +117,25 @@ function Toasts() {
             t.kind === "error" ? "border-red-900 bg-red-950 text-red-100" : "border-zinc-800 bg-zinc-900 text-zinc-100",
           )}
         >
-          <div className="font-medium">{t.title}</div>
-          {t.body && <div className="mt-0.5 text-xs opacity-80">{t.body}</div>}
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="font-medium">{t.title}</div>
+              {t.body && <div className="mt-0.5 truncate text-xs opacity-80">{t.body}</div>}
+            </div>
+            {t.action && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  t.action!.onClick()
+                  dismiss(t.id)
+                }}
+                className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-yard-400 hover:bg-zinc-800 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none"
+              >
+                {t.action.label}
+              </button>
+            )}
+          </div>
         </div>
       ))}
     </div>
