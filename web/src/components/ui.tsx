@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
-import ReactMarkdown, { type Components, type Options } from "react-markdown"
+import { memo, useSyncExternalStore, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
+import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
 import { Loader2 } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
-import { followAppLink, linkTarget, remarkEntityLinks } from "../lib/linkify"
+import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
 import type { TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
@@ -61,17 +61,82 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
   )
 }
 
-export function Markdown({ children, linkify = true }: { children: string; linkify?: boolean }) {
+// Parsed markdown by source text. Long threads re-mount messages (switching tasks, loading earlier ones),
+// and parsing + GFM + entity links is the most expensive part of rendering a message. Linked output
+// depends on the entity index, which only changes when an entity is added, removed or renamed, so
+// there's one cache per index (plus one for markdown without entity links).
+type Parser = { plugins: Options["remarkPlugins"]; cache: Map<string, ReactNode> }
+const MARKDOWN_CACHE_MAX = 3000
+const plainParser: Parser = { plugins: [remarkGfm], cache: new Map() }
+let linkedParser: Parser & { index: EntityIndex | null } = { index: null, plugins: [], cache: new Map() }
+
+function parserFor(index: EntityIndex | null): Parser {
+  if (!index) return plainParser
+  if (linkedParser.index !== index) linkedParser = { index, plugins: [remarkGfm, [remarkEntityLinks, index]], cache: new Map() }
+  return linkedParser
+}
+
+function parsedMarkdown(text: string, index: EntityIndex | null): ReactNode {
+  const { plugins, cache } = parserFor(index)
+  let out = cache.get(text)
+  if (out !== undefined) {
+    // Refresh its spot so the cache drops the least recently used entry first.
+    cache.delete(text)
+  } else {
+    out = renderMarkdown({ children: text, remarkPlugins: plugins, components: MARKDOWN_COMPONENTS })
+    if (cache.size >= MARKDOWN_CACHE_MAX) cache.delete(cache.keys().next().value!)
+  }
+  cache.set(text, out)
+  return out
+}
+
+// Texts waiting to be parsed in idle time, and the index to link them with.
+const warmQueue = new Set<string>()
+let warmIndex: EntityIndex | null = null
+let warming = false
+const idle: (cb: (deadline?: { timeRemaining(): number }) => void) => void =
+  typeof requestIdleCallback === "function" ? (cb) => requestIdleCallback(cb, { timeout: 2000 }) : (cb) => setTimeout(cb, 50)
+
+/**
+ * Parse markdown that isn't on screen yet (older messages) while the browser is idle,
+ * so scrolling up into them only costs building the DOM.
+ */
+export function warmMarkdown(texts: string[], index: EntityIndex) {
+  if (warmIndex !== index) warmQueue.clear()
+  warmIndex = index
+  const { cache } = parserFor(index)
+  // Newest first: those are the next ones scrolled into.
+  for (let i = texts.length - 1; i >= 0; i--) if (!cache.has(texts[i]!)) warmQueue.add(texts[i]!)
+  if (warming || !warmQueue.size) return
+  warming = true
+  const step = (deadline?: { timeRemaining(): number }) => {
+    const until = performance.now() + (deadline ? Math.min(deadline.timeRemaining(), 12) : 8)
+    const { cache } = parserFor(warmIndex)
+    for (const text of warmQueue) {
+      if (performance.now() >= until) break
+      warmQueue.delete(text)
+      if (!cache.has(text) && cache.size < MARKDOWN_CACHE_MAX - 100) parsedMarkdown(text, warmIndex)
+    }
+    if (warmQueue.size) idle(step)
+    else warming = false
+  }
+  idle(step)
+}
+
+/**
+ * Rendered markdown, with Box Yard entity mentions linked unless `linkify` is off. Memoized on the
+ * text, and the parsed output is cached across mounts. `live` text (a reply still streaming in)
+ * changes on every chunk, so it skips the cache.
+ */
+export const Markdown = memo(function Markdown({ children, linkify = true, live }: { children: string; linkify?: boolean; live?: boolean }) {
   const index = useEntityIndex()
-  const plugins = useMemo<Options["remarkPlugins"]>(() => (linkify ? [remarkGfm, [remarkEntityLinks, index]] : [remarkGfm]), [linkify, index])
+  const parser = linkify ? index : null
   return (
     <div className="prose-chat break-words">
-      <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>
-        {children}
-      </ReactMarkdown>
+      {live ? renderMarkdown({ children, remarkPlugins: parserFor(parser).plugins, components: MARKDOWN_COMPONENTS }) : parsedMarkdown(children, parser)}
     </div>
   )
-}
+})
 
 const MARKDOWN_COMPONENTS: Components = {
   a: ({ href = "", title, children }) => (
@@ -122,14 +187,40 @@ export function timeAgo(ts: number, now = Date.now()) {
   return `${Math.round(h / 24)}d ago`
 }
 
-export function TimeAgo({ ts }: { ts: number }) {
-  const [, tick] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => tick((n) => n + 1), 30_000)
-    return () => clearInterval(t)
-  }, [])
-  return <time title={new Date(ts).toLocaleString()}>{timeAgo(ts)}</time>
+// One shared clock for every <TimeAgo>, instead of a timer per instance (a long thread has hundreds).
+let clockNow = Date.now()
+const clockListeners = new Set<() => void>()
+let clockTimer: ReturnType<typeof setInterval> | null = null
+
+/** The shared clock's time; fresh when nothing is ticking yet (the first mount). */
+function clockTime() {
+  if (!clockTimer) clockNow = Date.now()
+  return clockNow
 }
+
+function subscribeClock(listener: () => void) {
+  clockListeners.add(listener)
+  if (!clockTimer) {
+    clockNow = Date.now()
+    clockTimer = setInterval(() => {
+      clockNow = Date.now()
+      clockListeners.forEach((l) => l())
+    }, 30_000)
+  }
+  return () => {
+    clockListeners.delete(listener)
+    if (!clockListeners.size && clockTimer) {
+      clearInterval(clockTimer)
+      clockTimer = null
+    }
+  }
+}
+
+/** "4m ago" that updates itself. Re-renders only when its label changes. */
+export const TimeAgo = memo(function TimeAgo({ ts }: { ts: number }) {
+  const label = useSyncExternalStore(subscribeClock, () => timeAgo(ts, clockTime()))
+  return <time title={new Date(ts).toLocaleString()}>{label}</time>
+})
 
 export function Empty({ icon, title, children }: { icon?: ReactNode; title: string; children?: ReactNode }) {
   return (
