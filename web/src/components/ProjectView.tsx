@@ -23,11 +23,13 @@ import {
   parseSort,
   type TaskFilter,
 } from "../lib/projectTasks"
+import { Modal } from "./Modal"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -65,10 +67,10 @@ export function ProjectView({ id }: { id: string }) {
   const project = projects.data?.find((p) => p.id === id)
   const tab: Tab = TABS.find((t) => t.key === params.get("tab"))?.key ?? "tasks"
 
-  // A new task form left open shouldn't follow you to another project.
+  // A new task dialog left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
 
-  // `?new=task` (from the command palette) opens the new task form once.
+  // `?new=task` (from the command palette) opens the new task dialog once.
   const wantsNew = params.get("new") === "task"
   useEffect(() => {
     if (!wantsNew) return
@@ -95,10 +97,7 @@ export function ProjectView({ id }: { id: string }) {
       <ProjectHeader
         project={project}
         tasks={list}
-        onNewTask={() => {
-          setShowNew(true)
-          if (tab !== "tasks") setParams((p) => withParam(p, "tab", null))
-        }}
+        onNewTask={() => setShowNew(true)}
       />
 
       <TabBar
@@ -112,11 +111,12 @@ export function ProjectView({ id }: { id: string }) {
         }))}
       />
 
-      {tab === "tasks" && <TasksTab projectId={id} tasks={list} showNew={showNew} onCloseNew={() => setShowNew(false)} />}
+      {tab === "tasks" && <TasksTab tasks={list} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
       {tab === "notes" && <Notes project={project} />}
       {tab === "files" && <Files files={files} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
+      {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
   )
 }
@@ -196,7 +196,7 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
   )
 }
 
-function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string; tasks: Task[]; showNew: boolean; onCloseNew: () => void }) {
+function TasksTab({ tasks }: { tasks: Task[] }) {
   const [params] = useSearchParams()
   const filter = parseFilter(params.get("status"))
   const sort = parseSort(params.get("sort"))
@@ -216,8 +216,6 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
   return (
     // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
     <div className="space-y-4 pb-6">
-      {showNew && <NewTaskForm projectId={projectId} onDone={onCloseNew} />}
-
       {tasks.length === 0 ? (
         <Empty icon={<ListTodo className="h-8 w-8" />} title="No tasks yet">
           Add one with New task, or ask the orchestrator to split up some work.
@@ -387,7 +385,7 @@ function Files({ files }: { files: Artifact[] }) {
   )
 }
 
-function NewTaskForm({ projectId, onDone }: { projectId: string; onDone: () => void }) {
+function NewTaskDialog({ projectId, onDone }: { projectId: string; onDone: () => void }) {
   const create = useCreateTask()
   const [, navigate] = useLocation()
   const [title, setTitle] = useState("")
@@ -395,8 +393,11 @@ function NewTaskForm({ projectId, onDone }: { projectId: string; onDone: () => v
   const [env, setEnv] = useState("")
   const [showEnv, setShowEnv] = useState(false)
   return (
-    <form
-      className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
+    <Modal
+      size="lg"
+      title="New task"
+      dirty={Boolean(title || prompt || env)}
+      onClose={onDone}
       onSubmit={(e) => {
         e.preventDefault()
         if (!title.trim() || !prompt.trim()) return
@@ -405,6 +406,16 @@ function NewTaskForm({ projectId, onDone }: { projectId: string; onDone: () => v
         onDone()
         navigate(`/tasks/${id}`)
       }}
+      footer={
+        <>
+          <Button type="button" variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={!title.trim() || !prompt.trim()}>
+            Start agent
+          </Button>
+        </>
+      }
     >
       <Field label="Title">
         <input autoFocus className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a dark mode toggle" />
@@ -417,19 +428,11 @@ function NewTaskForm({ projectId, onDone }: { projectId: string; onDone: () => v
           <textarea className={`${inputClass} font-mono text-xs`} rows={2} value={env} onChange={(e) => setEnv(e.target.value)} />
         </Field>
       ) : (
-        <button type="button" className="text-xs text-zinc-500 hover:text-zinc-300" onClick={() => setShowEnv(true)}>
+        <button type="button" className="text-xs whitespace-nowrap text-zinc-500 hover:text-zinc-300" onClick={() => setShowEnv(true)}>
           + env vars
         </button>
       )}
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-        <Button type="submit" variant="primary" disabled={!title.trim() || !prompt.trim()}>
-          Start agent
-        </Button>
-      </div>
-    </form>
+    </Modal>
   )
 }
 
@@ -491,8 +494,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         <Button
           type="button"
           variant="danger"
-          onClick={() => {
-            if (confirm(`Delete ${project.name} and all its tasks? This can't be undone.`)) {
+          onClick={async () => {
+            if (await confirmDialog({ title: "Delete project?", body: `Delete ${project.name} and all its tasks? This can't be undone.`, confirmLabel: "Delete project", danger: true })) {
               remove.mutate(project.id)
               navigate("/")
             }

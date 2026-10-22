@@ -18,8 +18,10 @@ import { useScrollToHash } from "../lib/hash"
 import { revealChatMessage } from "../lib/reveal"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
 import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { Modal } from "./Modal"
 import { badgeStatus } from "../lib/prState"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 const PRESETS: { label: string; cron: string }[] = [
   { label: "Every 15 min", cron: "*/15 * * * *" },
@@ -29,6 +31,8 @@ const PRESETS: { label: string; cron: string }[] = [
   { label: "Mondays 10:00", cron: "0 10 * * 1" },
   { label: "Monthly 1st", cron: "0 8 1 * *" },
 ]
+
+const DEFAULT_CRON = "0 9 * * 1-5"
 
 const ACTIVE = new Set(["queued", "starting", "working", "waiting"])
 
@@ -42,7 +46,7 @@ export function SchedulesView() {
   const list = schedules.data ?? []
   useScrollToHash(Boolean(schedules.data))
 
-  // `?new=schedule` (from the command palette) opens the form once.
+  // `?new=schedule` (from the command palette) opens the dialog once.
   const wantsNew = params.get("new") === "schedule"
   useEffect(() => {
     if (!wantsNew) return
@@ -80,7 +84,7 @@ export function SchedulesView() {
         </Button>
       </header>
 
-      {creating && <ScheduleForm onDone={() => setCreating(false)} />}
+      {creating && <NewScheduleDialog onDone={() => setCreating(false)} />}
 
       {schedules.isLoading ? null : list.length === 0 ? (
         <Empty icon={<AlarmClock className="h-8 w-8" />} title="No schedules yet">
@@ -133,14 +137,12 @@ export function ProjectSchedules({ projectId }: { projectId: string }) {
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-zinc-500">Each run starts a fresh task in this project. Watch it live like any task.</p>
-        {!creating && (
-          <Button variant="primary" onClick={() => setCreating(true)}>
-            <Plus className="h-4 w-4" /> New schedule
-          </Button>
-        )}
+        <Button variant="primary" onClick={() => setCreating(true)}>
+          <Plus className="h-4 w-4" /> New schedule
+        </Button>
       </div>
-      {creating && <ScheduleForm projectId={projectId} onDone={() => setCreating(false)} />}
-      {schedules.isLoading ? null : list.length === 0 && !creating ? (
+      {creating && <NewScheduleDialog projectId={projectId} onDone={() => setCreating(false)} />}
+      {schedules.isLoading ? null : list.length === 0 ? (
         <Empty icon={<AlarmClock className="h-8 w-8" />} title="No schedules yet">
           Run a task on a timer: nightly reports, weekly dependency bumps, hourly checks.
         </Empty>
@@ -211,7 +213,9 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
             variant="ghost"
             title="Delete schedule"
             onClick={() => {
-              if (confirm(`Delete the schedule "${s.name}"? Past runs stay.`)) remove.mutate(s.id)
+              void confirmDialog({ title: "Delete schedule?", body: `Delete the schedule "${s.name}"? Past runs stay.`, confirmLabel: "Delete schedule", danger: true }).then(
+                (ok) => ok && remove.mutate(s.id),
+              )
             }}
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -323,14 +327,14 @@ function RunList({ runs }: { runs: Task[] }) {
   )
 }
 
-function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () => void }) {
+function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: () => void }) {
   const projects = useProjects()
   const settings = useSettings()
   const create = useCreateSchedule()
   const [target, setTarget] = useState<ScheduleTarget>("project")
   const [project, setProject] = useState(projectId ?? projects.data?.[0]?.id ?? "")
   const [name, setName] = useState("")
-  const [cron, setCron] = useState("0 9 * * 1-5")
+  const [cron, setCron] = useState(DEFAULT_CRON)
   const [timezone, setTimezone] = useState<string | null>(null)
   const [prompt, setPrompt] = useState("")
   const [catchUp, setCatchUp] = useState<CatchUp>("once")
@@ -360,16 +364,30 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
     new Intl.DateTimeFormat(undefined, { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(ts)
   const orchestrator = !projectId && target === "orchestrator"
   const valid = Boolean((orchestrator || project) && name.trim() && prompt.trim() && !preview.error)
+  const dirty = Boolean(name || prompt || cron !== DEFAULT_CRON || timezone !== null)
 
   return (
-    <form
-      className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
+    <Modal
+      size="lg"
+      title="New schedule"
+      dirty={dirty}
+      onClose={onDone}
       onSubmit={(e) => {
         e.preventDefault()
         if (!valid) return
         create.mutate({ id: newClientId("sch"), target: orchestrator ? "orchestrator" : "project", projectId: orchestrator ? null : project, name: name.trim(), cron: cron.trim(), timezone: tz, prompt: prompt.trim(), catchUp, allowOverlap })
         onDone()
       }}
+      footer={
+        <>
+          <Button type="button" variant="ghost" onClick={onDone}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" disabled={!valid}>
+            Create schedule
+          </Button>
+        </>
+      }
     >
       {!projectId && (
         <Field label="Target">
@@ -461,16 +479,7 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
           Start even if the last run is still going
         </label>
       </div>
-
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="ghost" onClick={onDone}>
-          Cancel
-        </Button>
-        <Button type="submit" variant="primary" disabled={!valid}>
-          Create schedule
-        </Button>
-      </div>
-    </form>
+    </Modal>
   )
 }
 

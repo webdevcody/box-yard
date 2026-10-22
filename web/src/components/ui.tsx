@@ -88,7 +88,7 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
       {...rest}
       disabled={disabled || loading}
       className={cx(
-        "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium whitespace-nowrap transition disabled:cursor-not-allowed disabled:opacity-50",
         size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm",
         variant === "primary" && "bg-yard-500 text-zinc-950 hover:bg-yard-400",
         variant === "subtle" && "bg-zinc-800 text-zinc-200 hover:bg-zinc-700",
@@ -299,7 +299,7 @@ export function Select({ size = "md", className, ...props }: Omit<ComponentProps
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block space-y-1.5">
-      <span className="text-xs font-medium tracking-wide text-zinc-400 uppercase">{label}</span>
+      <span className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">{label}</span>
       {children}
       {hint && <span className="block text-xs text-zinc-500">{hint}</span>}
     </label>
