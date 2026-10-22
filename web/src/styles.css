@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --color-yard-50: #fffbeb;
+  --color-yard-400: #fbbf24;
+  --color-yard-500: #f59e0b;
+  --color-yard-600: #d97706;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-200 antialiased;
+}
+
+::selection {
+  @apply bg-yard-500/30;
+}
+
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(63 63 70) transparent;
+}
+
+.prose-chat p {
+  @apply my-1.5 leading-relaxed;
+}
+.prose-chat ul {
+  @apply my-1.5 list-disc pl-5;
+}
+.prose-chat ol {
+  @apply my-1.5 list-decimal pl-5;
+}
+.prose-chat a {
+  @apply text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400;
+}
+.prose-chat code {
+  @apply rounded bg-zinc-800 px-1 py-0.5 font-mono text-[0.85em];
+}
+.prose-chat pre {
+  @apply my-2 overflow-x-auto rounded-lg bg-zinc-900 p-3 text-xs;
+}
+.prose-chat pre code {
+  @apply bg-transparent p-0;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  @apply mt-3 mb-1 font-semibold text-zinc-100;
+}
+.prose-chat table {
+  @apply my-2 text-sm;
+}
+.prose-chat th,
+.prose-chat td {
+  @apply border border-zinc-800 px-2 py-1;
+}

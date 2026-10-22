@@ -1,0 +1,179 @@
+import { useEffect, useRef, useState } from "react"
+import { Link } from "wouter"
+import { AlertTriangle, Bot, RotateCcw, Send, Square, Wrench } from "lucide-react"
+import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useSendChat } from "../lib/queries"
+import { Button, Markdown, cx } from "./ui"
+import type { ChatMessage } from "../../../shared/types"
+
+const SUGGESTIONS = [
+  "What's everyone working on?",
+  "Create a project for webdevcody/box-yard and add a dark mode toggle",
+  "Spin up 3 agents to research Upstash Box pricing, write a summary, and draft a tweet",
+]
+
+export function ChatPanel() {
+  const chat = useChat()
+  const stream = useChatStream()
+  const busy = useChatBusy()
+  const send = useSendChat()
+  const control = useChatControl()
+  const [draft, setDraft] = useState("")
+  const bottom = useRef<HTMLDivElement>(null)
+  const box = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "end" })
+  }, [chat.data?.length, stream.data])
+
+  const submit = (text = draft) => {
+    const content = text.trim()
+    if (!content) return
+    send.mutate({ id: newClientId("chat"), content })
+    setDraft("")
+    box.current?.focus()
+  }
+
+  const messages = chat.data ?? []
+
+  return (
+    <section className="flex h-full min-w-0 flex-col bg-zinc-950">
+      <header className="flex items-center gap-2 border-b border-zinc-900 px-4 py-3">
+        <Bot className="h-4 w-4 text-yard-400" />
+        <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
+        {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
+        <div className="ml-auto flex gap-1">
+          {busy.data && (
+            <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
+              <Square className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="ghost"
+            title="New conversation"
+            onClick={() => {
+              if (confirm("Start a new orchestrator conversation? Projects and tasks are kept.")) void control.reset()
+            }}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </header>
+
+      <div className="scroll-thin flex-1 space-y-3 overflow-y-auto px-4 py-4">
+        {messages.length === 0 && !chat.isLoading && (
+          <div className="space-y-3 pt-6 text-center">
+            <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
+            <div className="space-y-2">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  onClick={() => submit(s)}
+                  className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((m) => (
+          <ChatLine key={m.id} m={m} />
+        ))}
+        {stream.data && (
+          <div className="rounded-xl bg-zinc-900/60 px-3 py-2 text-sm text-zinc-200">
+            <Markdown>{stream.data}</Markdown>
+          </div>
+        )}
+        {busy.data && !stream.data && (
+          <div className="flex gap-1 px-1 py-2">
+            {[0, 1, 2].map((i) => (
+              <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" style={{ animationDelay: `${i * 120}ms` }} />
+            ))}
+          </div>
+        )}
+        <div ref={bottom} />
+      </div>
+
+      <form
+        className="border-t border-zinc-900 p-3"
+        onSubmit={(e) => {
+          e.preventDefault()
+          submit()
+        }}
+      >
+        <div className="flex items-end gap-2 rounded-xl border border-zinc-800 bg-zinc-900 p-2 focus-within:border-yard-500/50">
+          <textarea
+            ref={box}
+            rows={1}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+            placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
+            className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+            style={{ height: Math.min(160, 36 + (draft.split("\n").length - 1) * 20) }}
+          />
+          <Button type="submit" variant="primary" size="sm" className="h-8 w-8 !p-0" disabled={!draft.trim()}>
+            <Send className="h-4 w-4" />
+          </Button>
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function ChatLine({ m }: { m: ChatMessage }) {
+  if (m.role === "user") {
+    return (
+      <div className="flex justify-end">
+        <div className={cx("max-w-[85%] rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
+          {m.content}
+        </div>
+      </div>
+    )
+  }
+  if (m.role === "tool") {
+    const input = (m.meta?.input ?? {}) as Record<string, unknown>
+    const detail = (input.title ?? input.name ?? input.task ?? input.project ?? "") as string
+    return (
+      <div className="flex items-center gap-1.5 pl-1 text-xs text-zinc-500">
+        <Wrench className="h-3 w-3" />
+        <span className="font-mono">{m.content}</span>
+        {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
+      </div>
+    )
+  }
+  if (m.role === "notice") {
+    const taskId = m.meta?.taskId as string | undefined
+    const body = (
+      <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400">
+        <Markdown>{m.content}</Markdown>
+      </div>
+    )
+    return taskId ? (
+      <Link href={`/tasks/${taskId}`} className="block hover:opacity-90">
+        {body}
+      </Link>
+    ) : (
+      body
+    )
+  }
+  if (m.role === "error") {
+    return (
+      <div className="flex gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <div className="min-w-0 whitespace-pre-wrap">{m.content}</div>
+      </div>
+    )
+  }
+  return (
+    <div className="text-sm text-zinc-200">
+      <Markdown>{m.content}</Markdown>
+    </div>
+  )
+}
