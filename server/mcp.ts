@@ -6,7 +6,9 @@ import type { Store } from "./store.js"
 import type { TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
-import { TASK_STATUSES, type Project, type Task } from "../shared/types.js"
+import type { Scheduler } from "./scheduler.js"
+import { describeCron } from "../shared/cron.js"
+import { TASK_STATUSES, type Project, type Schedule, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 
 export interface McpDeps {
@@ -15,6 +17,7 @@ export interface McpDeps {
   hub: Hub
   artifacts: Artifacts
   publicUrl: () => string
+  scheduler: Scheduler
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
@@ -38,7 +41,7 @@ const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars
 
 /** The tools the orchestrator's Claude uses to run Box Yard. */
 export function buildMcpServer(deps: McpDeps): McpServer {
-  const { store, tasks, hub, artifacts } = deps
+  const { store, tasks, hub, artifacts, scheduler } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
 
   const project = (ref: string): Project => {
@@ -138,6 +141,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     safe(async (a: { project: string }) => {
       const p = project(a.project)
+      for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
       for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
       store.deleteProject(p.id)
       hub.broadcast({ type: "project.deleted", projectId: p.id })
@@ -294,6 +298,123 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           .map((x) => ({ id: x.id, title: x.title, url: absolute(x.url), size: x.size, task: x.taskId })),
       ),
     ),
+  )
+
+  const when = (ts: number | null, tz: string) =>
+    ts === null ? null : new Date(ts).toLocaleString("en-US", { timeZone: tz, dateStyle: "medium", timeStyle: "short" })
+  const scheduleView = (s: Schedule) => ({
+    id: s.id,
+    name: s.name,
+    project: store.getProject(s.projectId)?.name ?? s.projectId,
+    cron: s.cron,
+    meaning: describeCron(s.cron),
+    timezone: s.timezone,
+    enabled: s.enabled,
+    nextRun: when(s.nextRunAt, s.timezone),
+    lastRun: when(s.lastRunAt, s.timezone),
+    lastTask: s.lastTaskId ?? undefined,
+    lastSkipped: s.lastSkipReason ?? undefined,
+    runs: s.runCount,
+    catchUp: s.catchUp,
+    allowOverlap: s.allowOverlap,
+    prompt: s.prompt,
+  })
+
+  server.registerTool(
+    "list_schedules",
+    { description: "List schedules (recurring jobs), optionally for one project.", inputSchema: { project: z.string().optional() } },
+    safe(async (a: { project?: string }) => ok(scheduler.list(a.project ? project(a.project).id : undefined).map(scheduleView))),
+  )
+
+  server.registerTool(
+    "create_schedule",
+    {
+      description:
+        "Create a recurring job. Every time the cron fires, a new task starts in the project with this prompt (plus a note on the previous run), and Cody can watch it live like any task. " +
+        "cron is 5 fields (minute hour day-of-month month day-of-week) or @hourly/@daily/@weekly/@monthly. Write the prompt so it works on its own every run.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        name: z.string().min(1).max(120),
+        cron: z.string().describe('e.g. "0 9 * * 1-5" for weekdays at 9:00'),
+        prompt: z.string().min(1),
+        timezone: z.string().optional().describe("IANA zone like America/New_York. Defaults to the server's zone."),
+        catch_up: z.enum(["once", "skip"]).optional().describe("If runs were missed while Box Yard was down: run once to catch up (default) or skip."),
+        allow_overlap: z.boolean().optional().describe("Start a run even if the previous one is still going. Default false."),
+        enabled: z.boolean().optional(),
+      },
+    },
+    safe(
+      async (a: { project: string; name: string; cron: string; prompt: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
+        ok(
+          scheduleView(
+            await scheduler.create({
+              projectId: project(a.project).id,
+              name: a.name,
+              cron: a.cron,
+              prompt: a.prompt,
+              timezone: a.timezone,
+              catchUp: a.catch_up,
+              allowOverlap: a.allow_overlap,
+              enabled: a.enabled,
+            }),
+          ),
+        ),
+    ),
+  )
+
+  server.registerTool(
+    "update_schedule",
+    {
+      description: "Change a schedule: rename, new cron/time zone/prompt, or pause (enabled: false) and resume it.",
+      inputSchema: {
+        schedule: z.string().describe("Schedule id or name"),
+        name: z.string().optional(),
+        cron: z.string().optional(),
+        prompt: z.string().optional(),
+        timezone: z.string().optional(),
+        catch_up: z.enum(["once", "skip"]).optional(),
+        allow_overlap: z.boolean().optional(),
+        enabled: z.boolean().optional(),
+      },
+    },
+    safe(
+      async (a: { schedule: string; name?: string; cron?: string; prompt?: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
+        ok(
+          scheduleView(
+            await scheduler.update(a.schedule, {
+              name: a.name,
+              cron: a.cron,
+              prompt: a.prompt,
+              timezone: a.timezone,
+              catchUp: a.catch_up,
+              allowOverlap: a.allow_overlap,
+              enabled: a.enabled,
+            }),
+          ),
+        ),
+    ),
+  )
+
+  server.registerTool(
+    "delete_schedule",
+    { description: "Delete a schedule. Tasks from past runs stay.", inputSchema: { schedule: z.string().describe("Schedule id or name") } },
+    safe(async (a: { schedule: string }) => {
+      const s = scheduler.require(a.schedule)
+      await scheduler.remove(s.id)
+      return ok(`Deleted schedule ${s.name}.`)
+    }),
+  )
+
+  server.registerTool(
+    "run_schedule_now",
+    { description: "Start a run of a schedule right now (doesn't change its next planned run).", inputSchema: { schedule: z.string() } },
+    safe(async (a: { schedule: string }) => ok(brief(scheduler.runNow(a.schedule)))),
+  )
+
+  server.registerTool(
+    "list_schedule_runs",
+    { description: "Past runs (tasks) of a schedule, newest first.", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
+    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(a.schedule, a.limit ?? 10).map(brief))),
   )
 
   server.registerTool(

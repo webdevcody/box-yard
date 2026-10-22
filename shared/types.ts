@@ -62,6 +62,37 @@ export interface Task {
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
   lastArchivedAt: number | null
+  /** Set when a schedule started this task. */
+  scheduleId: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** What to do when runs were missed (the server was down or its box was paused). */
+export type CatchUp = "once" | "skip"
+
+export interface Schedule {
+  id: string
+  projectId: string
+  name: string
+  /** 5-field cron expression or a macro like @daily. */
+  cron: string
+  /** IANA time zone the cron is read in, e.g. America/New_York. */
+  timezone: string
+  /** What the agent is asked to do on every run. */
+  prompt: string
+  enabled: boolean
+  catchUp: CatchUp
+  /** Start a run even when the previous run is still going. */
+  allowOverlap: boolean
+  nextRunAt: number | null
+  lastRunAt: number | null
+  lastTaskId: string | null
+  /** Why the last due run did not start a task, if it didn't. */
+  lastSkipReason: string | null
+  runCount: number
+  /** QStash schedule id when QStash triggers this schedule. */
+  qstashId: string | null
   createdAt: number
   updatedAt: number
 }
@@ -119,6 +150,8 @@ export interface Health {
   problems: string[]
   pool: { maxBoxes: number; slotsPerBox: number }
   orchestratorBusy: boolean
+  /** How schedules are triggered: the server's own timer, or QStash plus the timer. */
+  scheduler: "local" | "qstash"
 }
 
 /** Server-sent events pushed to the UI. */
@@ -133,3 +166,5 @@ export type UiEvent =
   | { type: "chat.busy"; busy: boolean }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
+  | { type: "schedule"; schedule: Schedule }
+  | { type: "schedule.deleted"; scheduleId: string }

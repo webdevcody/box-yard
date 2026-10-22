@@ -114,6 +114,31 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   );
   `,
+  `
+  CREATE TABLE schedules (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    catch_up TEXT NOT NULL DEFAULT 'once',
+    allow_overlap INTEGER NOT NULL DEFAULT 0,
+    next_run_at INTEGER,
+    last_run_at INTEGER,
+    last_task_id TEXT,
+    last_skip_reason TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    qstash_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX schedules_due ON schedules(enabled, next_run_at);
+
+  ALTER TABLE tasks ADD COLUMN schedule_id TEXT;
+  CREATE INDEX tasks_schedule ON tasks(schedule_id, created_at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

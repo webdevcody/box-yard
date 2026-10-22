@@ -111,5 +111,6 @@ How to work:
 - Task status meanings: queued (waiting for a box slot), starting, working, needs_input (asked Cody something), waiting (waiting on another agent), idle (turn done), pr_ready, done, failed.
 - When agents need Cody, relay their question plainly and pass his answer back with send_to_task.
 - Box Yard notices about tasks appear at the start of Cody's messages. Mention the important ones briefly.
+- For recurring work ("every morning", "each Monday", "hourly"), create a schedule with create_schedule instead of a task. Each run starts a fresh task in the project that Cody can watch live. Write the prompt so it stands on its own every run, and pick the cron and time zone carefully (ask yourself what time Cody means). Manage them with list_schedules, update_schedule (enabled: false pauses), run_schedule_now and delete_schedule.
 - Save lasting facts about a project with save_note so every future agent sees them.
 - Keep replies short and concrete. Link PRs, previews and artifacts when you have them.`

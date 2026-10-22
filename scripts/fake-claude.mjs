@@ -163,6 +163,14 @@ async function orchestrator(mcp, prompt) {
     const r = await useTool(mcp, "create_task", { project: m[1].trim(), title: m[2].trim(), prompt: (m[3] ?? m[2]).trim() })
     lines.push(r.startsWith("{") ? `Started task **${m[2].trim()}** in ${m[1].trim()}.` : `Couldn't start that task: ${r}`)
   }
+  const scheduleRe = /^schedule\s+([\w .-]+?)\s+"([^"]+)":\s*(.+?)(?:\s+--\s+(.+))?$/gim
+  while ((m = scheduleRe.exec(text))) {
+    const r = await useTool(mcp, "create_schedule", { project: m[1].trim(), cron: m[2], name: m[3].trim(), prompt: (m[4] ?? m[3]).trim() })
+    lines.push(r.startsWith("{") ? `Scheduled **${m[3].trim()}** in ${m[1].trim()} (\`${m[2]}\`).` : `Couldn't create that schedule: ${r}`)
+  }
+  if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
+    lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
+  }
   if (!lines.length || /status|what.*(up|going)/i.test(text)) {
     const r = await useTool(mcp, "list_tasks", {})
     let tasks = []
@@ -172,7 +180,7 @@ async function orchestrator(mcp, prompt) {
     lines.push(
       tasks.length ? `Here's the yard:\n${tasks.map((t) => `- **${t.title}** (${t.project}): ${t.status}`).join("\n")}` : "No tasks yet.",
       "",
-      "_This is the mock Claude. Try `create project demo`, then `task demo: Write a haiku -- write a haiku about boxes [artifact]`._",
+      "_This is the mock Claude. Try `create project demo`, then `task demo: Write a haiku -- write a haiku about boxes [artifact]`, or `schedule demo \"*/5 * * * *\": Haiku drop -- write a haiku [artifact]`._",
     )
   }
   await say(lines.join("\n"))

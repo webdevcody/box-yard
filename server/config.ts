@@ -82,12 +82,27 @@ export const config = {
   archiveWorkspaces: (env.BOXYARD_ARCHIVE ?? "1") !== "0",
   archiveMaxMb: int("BOXYARD_ARCHIVE_MAX_MB", 60),
 
+  /** Time zone new schedules use unless one is given. */
+  defaultTimezone: env.BOXYARD_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+  /** How often the in-process scheduler looks for due schedules. */
+  schedulerTickMs: int("BOXYARD_SCHEDULER_TICK_MS", 15_000),
+  /** Optional: Upstash QStash also triggers schedules (needs BOXYARD_PUBLIC_URL). */
+  qstashUrl: env.QSTASH_URL ?? "https://qstash.upstash.io",
+  qstashToken: env.QSTASH_TOKEN ?? "",
+  qstashCurrentSigningKey: env.QSTASH_CURRENT_SIGNING_KEY ?? "",
+  qstashNextSigningKey: env.QSTASH_NEXT_SIGNING_KEY ?? "",
+
   /** When running inside a box: its id, so it can snapshot itself. */
   selfBoxId: env.BOXYARD_SELF_BOX_ID ?? "",
   selfSnapshotHours: int("BOXYARD_SELF_SNAPSHOT_HOURS", 6),
 }
 
 export type Config = typeof config
+
+/** QStash triggers schedules only when it can reach us and we can check its signature. */
+export function qstashEnabled(c: Config = config) {
+  return Boolean(!c.mock && c.qstashToken && c.qstashCurrentSigningKey && c.publicUrl)
+}
 
 export function redisEnabled(c: Config = config) {
   return Boolean(c.redisUrl && c.redisToken)
@@ -102,6 +117,9 @@ export function configProblems(c: Config = config): string[] {
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {
     problems.push("BOX_PROVIDER is upstash but UPSTASH_BOX_API_KEY is missing.")
+  }
+  if (c.qstashToken && !qstashEnabled(c)) {
+    problems.push("QSTASH_TOKEN is set but schedules still use the local timer: QStash also needs BOXYARD_PUBLIC_URL and QSTASH_CURRENT_SIGNING_KEY.")
   }
   if (!c.githubToken) {
     problems.push("GITHUB_TOKEN is missing, so agents can't push branches or open pull requests.")

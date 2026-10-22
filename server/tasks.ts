@@ -168,7 +168,14 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ public API
 
-  createTask(input: { id?: string; projectId: string; title: string; prompt: string; env?: Record<string, string> }): Task {
+  createTask(input: {
+    id?: string
+    projectId: string
+    title: string
+    prompt: string
+    env?: Record<string, string>
+    scheduleId?: string | null
+  }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
     if (!input.title.trim()) throw new BadRequestError("title is required")

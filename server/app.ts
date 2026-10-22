@@ -4,7 +4,7 @@ import path from "node:path"
 import { randomBytes } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
-import { configProblems, redisEnabled, type Config } from "./config.js"
+import { configProblems, qstashEnabled, redisEnabled, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
@@ -18,6 +18,9 @@ import { LocalProvider } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
 import type { BoxProvider } from "./providers/types.js"
 import { startSelfSnapshots } from "./backup.js"
+import { Scheduler } from "./scheduler.js"
+import { QStash, verifyQStashSignature } from "./qstash.js"
+import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
 import type { Health } from "../shared/types.js"
 
 const idSchema = z
@@ -54,6 +57,26 @@ const schemas = {
   message: z.object({ content: z.string().trim().min(1).max(50_000) }),
   chat: z.object({ id: idSchema, content: z.string().trim().min(1).max(50_000) }),
   login: z.object({ password: z.string() }),
+  schedule: z.object({
+    id: idSchema,
+    projectId: z.string().min(1),
+    name: z.string().trim().min(1).max(120),
+    cron: z.string().trim().min(1).max(200),
+    timezone: z.string().max(100).optional(),
+    prompt: z.string().trim().min(1).max(50_000),
+    enabled: z.boolean().optional(),
+    catchUp: z.enum(["once", "skip"]).optional(),
+    allowOverlap: z.boolean().optional(),
+  }),
+  schedulePatch: z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+    cron: z.string().trim().min(1).max(200).optional(),
+    timezone: z.string().max(100).optional(),
+    prompt: z.string().trim().min(1).max(50_000).optional(),
+    enabled: z.boolean().optional(),
+    catchUp: z.enum(["once", "skip"]).optional(),
+    allowOverlap: z.boolean().optional(),
+  }),
 }
 
 function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
@@ -76,12 +99,16 @@ export interface BoxYard {
   hub: Hub
   tasks: TaskManager
   orchestrator: Orchestrator
+  scheduler: Scheduler
   start(): Promise<void>
   stop(): void
 }
 
 /** Wire up the database, task manager, orchestrator and HTTP routes. */
-export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?: string } = {}): BoxYard {
+export function createBoxYard(
+  c: Config,
+  opts: { provider?: BoxProvider; webDir?: string; qstash?: QStash | null; now?: () => number } = {},
+): BoxYard {
   const db = openDb(c.dataDir)
   const store = new Store(db)
   const hub = new Hub()
@@ -89,6 +116,8 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const provider = opts.provider ?? makeProvider(c)
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts })
+  const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
+  const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken })
   const auth = new Auth(c.password, store)
@@ -104,10 +133,25 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
   const app = express()
   app.disable("x-powered-by")
   app.set("trust proxy", true)
-  app.use(express.json({ limit: "10mb" }))
+  app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the orchestrator's Claude (its own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler }, mcpToken))
+
+  // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
+  app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
+    const id = String(req.params.id)
+    const raw = (req as Request & { rawBody?: string }).rawBody ?? (typeof req.body === "string" ? req.body : "")
+    const problem = verifyQStashSignature({
+      signature: req.header("upstash-signature"),
+      body: raw,
+      url: scheduler.qstashUrl(id),
+      keys: [c.qstashCurrentSigningKey, c.qstashNextSigningKey],
+    })
+    if (problem) return void res.status(401).json({ error: `QStash signature rejected: ${problem}` })
+    // 200 even when there is nothing to do, so QStash doesn't retry.
+    res.json({ result: scheduler.fireFromQStash(id) })
+  })
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true })
@@ -148,6 +192,7 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
       problems,
       pool: { maxBoxes: c.maxBoxes, slotsPerBox: c.slotsPerBox },
       orchestratorBusy: orchestrator.busy,
+      scheduler: scheduler.mode,
     }
     res.json(body)
   })
@@ -172,6 +217,7 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
   })
   api.delete("/projects/:id", async (req, res) => {
     const id = req.params.id!
+    for (const s of store.listSchedules({ projectId: id })) await scheduler.remove(s.id)
     for (const t of store.listTasks({ projectId: id })) await tasks.deleteTask(t.id)
     store.deleteProject(id)
     hub.broadcast({ type: "project.deleted", projectId: id })
@@ -225,6 +271,43 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
     res.json({ ok: true })
   })
 
+  // ---- schedules
+  api.get("/schedules", (req, res) => {
+    const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined
+    res.json(scheduler.list(projectId))
+  })
+  api.get("/schedules/preview", (req, res) => {
+    // Validate a cron + time zone and show the next runs, for the create form.
+    const cron = String(req.query.cron ?? "")
+    const timezone = String(req.query.timezone || c.defaultTimezone)
+    try {
+      if (!isValidTimeZone(timezone)) throw new Error(`Unknown time zone "${timezone}"`)
+      parseCron(cron)
+      res.json({ ok: true, description: describeCron(cron), next: nextRuns(cron, Date.now(), timezone, 5), timezone })
+    } catch (err) {
+      res.json({ ok: false, error: (err as Error).message, next: [], timezone })
+    }
+  })
+  api.post("/schedules", async (req, res) => {
+    res.status(201).json(await scheduler.create(parse(schemas.schedule, req.body)))
+  })
+  api.get("/schedules/:id/runs", (req, res) => {
+    res.json(scheduler.runs(req.params.id!))
+  })
+  api.patch("/schedules/:id", async (req, res) => {
+    res.json(await scheduler.update(req.params.id!, parse(schemas.schedulePatch, req.body)))
+  })
+  api.post("/schedules/:id/run", (req, res) => {
+    res.status(201).json(scheduler.runNow(req.params.id!))
+  })
+  api.delete("/schedules/:id", async (req, res) => {
+    await scheduler.remove(req.params.id!)
+    res.json({ ok: true })
+  })
+  api.get("/settings", (_req, res) => {
+    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode })
+  })
+
   // ---- orchestrator chat
   api.get("/chat", (_req, res) => {
     res.json(store.listChat(500))
@@ -272,7 +355,7 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
   const webDir = opts.webDir ?? path.resolve(process.cwd(), "dist/web")
   if (fs.existsSync(path.join(webDir, "index.html"))) {
     app.use(express.static(webDir, { index: false, maxAge: "1h" }))
-    app.get(/^\/(?!api\/|mcp|artifacts\/).*/, (_req, res) => res.sendFile(path.join(webDir, "index.html")))
+    app.get(/^\/(?!api\/|mcp|artifacts\/|qstash\/).*/, (_req, res) => res.sendFile(path.join(webDir, "index.html")))
   } else {
     app.get("/", (_req, res) =>
       res.type("text").send("Box Yard API is running. Build the web app with `npm run build`, or use `npm run dev` (http://localhost:5173)."),
@@ -300,11 +383,14 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
     hub,
     tasks,
     orchestrator,
+    scheduler,
     async start() {
       await tasks.start()
+      scheduler.start()
       stopSnapshots = startSelfSnapshots(c, db)
     },
     stop() {
+      scheduler.stop()
       tasks.stop()
       orchestrator.cancel()
       stopSnapshots?.()

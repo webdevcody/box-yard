@@ -7,6 +7,8 @@ import type {
   PreviewLink,
   Project,
   ProjectNote,
+  CatchUp,
+  Schedule,
   Task,
   TaskMessage,
   TaskMessageRole,
@@ -60,6 +62,59 @@ export interface TaskRow {
   created_at: number
   updated_at: number
   last_active_at: number
+  schedule_id: string | null
+}
+
+interface ScheduleRow {
+  id: string
+  project_id: string
+  name: string
+  cron: string
+  timezone: string
+  prompt: string
+  enabled: number
+  catch_up: CatchUp
+  allow_overlap: number
+  next_run_at: number | null
+  last_run_at: number | null
+  last_task_id: string | null
+  last_skip_reason: string | null
+  run_count: number
+  qstash_id: string | null
+  created_at: number
+  updated_at: number
+}
+
+export type SchedulePatch = Partial<{
+  name: string
+  cron: string
+  timezone: string
+  prompt: string
+  enabled: boolean
+  catchUp: CatchUp
+  allowOverlap: boolean
+  nextRunAt: number | null
+  lastRunAt: number | null
+  lastTaskId: string | null
+  lastSkipReason: string | null
+  runCount: number
+  qstashId: string | null
+}>
+
+const SCHEDULE_COLUMNS: Record<keyof SchedulePatch, string> = {
+  name: "name",
+  cron: "cron",
+  timezone: "timezone",
+  prompt: "prompt",
+  enabled: "enabled",
+  catchUp: "catch_up",
+  allowOverlap: "allow_overlap",
+  nextRunAt: "next_run_at",
+  lastRunAt: "last_run_at",
+  lastTaskId: "last_task_id",
+  lastSkipReason: "last_skip_reason",
+  runCount: "run_count",
+  qstashId: "qstash_id",
 }
 
 interface ProjectRow {
@@ -274,6 +329,7 @@ export class Store {
       turnCount: row.turn_count,
       pendingCount: pending.n,
       lastArchivedAt: row.last_archived_at,
+      scheduleId: row.schedule_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -318,13 +374,14 @@ export class Store {
     prompt: string
     env?: Record<string, string>
     branch?: string | null
+    scheduleId?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -334,6 +391,7 @@ export class Store {
         randomUUID(),
         input.branch ?? null,
         JSON.stringify(input.env ?? {}),
+        input.scheduleId ?? null,
         now,
         now,
         now,
@@ -575,6 +633,124 @@ export class Store {
 
   removeBox(id: string) {
     this.db.prepare("DELETE FROM boxes WHERE id = ?").run(id)
+  }
+
+  // ---------- schedules ----------
+
+  private scheduleFromRow(r: ScheduleRow): Schedule {
+    return {
+      id: r.id,
+      projectId: r.project_id,
+      name: r.name,
+      cron: r.cron,
+      timezone: r.timezone,
+      prompt: r.prompt,
+      enabled: Boolean(r.enabled),
+      catchUp: r.catch_up,
+      allowOverlap: Boolean(r.allow_overlap),
+      nextRunAt: r.next_run_at,
+      lastRunAt: r.last_run_at,
+      lastTaskId: r.last_task_id,
+      lastSkipReason: r.last_skip_reason,
+      runCount: r.run_count,
+      qstashId: r.qstash_id,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    }
+  }
+
+  listSchedules(filter: { projectId?: string } = {}): Schedule[] {
+    const rows = filter.projectId
+      ? this.db.prepare("SELECT * FROM schedules WHERE project_id = ? ORDER BY created_at ASC").all(filter.projectId)
+      : this.db.prepare("SELECT * FROM schedules ORDER BY created_at ASC").all()
+    return (rows as ScheduleRow[]).map((r) => this.scheduleFromRow(r))
+  }
+
+  getSchedule(id: string): Schedule | null {
+    const row = this.db.prepare("SELECT * FROM schedules WHERE id = ?").get(id) as ScheduleRow | undefined
+    return row ? this.scheduleFromRow(row) : null
+  }
+
+  findSchedule(idOrName: string): Schedule | null {
+    const row = this.db
+      .prepare("SELECT * FROM schedules WHERE id = ? OR name = ? COLLATE NOCASE ORDER BY created_at ASC LIMIT 1")
+      .get(idOrName, idOrName) as ScheduleRow | undefined
+    return row ? this.scheduleFromRow(row) : null
+  }
+
+  /** Enabled schedules whose next run is at or before `now`. */
+  dueSchedules(now: number): Schedule[] {
+    const rows = this.db
+      .prepare("SELECT * FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
+      .all(now) as ScheduleRow[]
+    return rows.map((r) => this.scheduleFromRow(r))
+  }
+
+  createSchedule(input: {
+    id?: string
+    projectId: string
+    name: string
+    cron: string
+    timezone: string
+    prompt: string
+    enabled?: boolean
+    catchUp?: CatchUp
+    allowOverlap?: boolean
+    nextRunAt: number | null
+  }): Schedule {
+    const now = Date.now()
+    const id = input.id ?? newId("sch")
+    this.db
+      .prepare(
+        `INSERT INTO schedules (id, project_id, name, cron, timezone, prompt, enabled, catch_up, allow_overlap, next_run_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.projectId,
+        input.name.trim(),
+        input.cron.trim(),
+        input.timezone,
+        input.prompt,
+        input.enabled === false ? 0 : 1,
+        input.catchUp ?? "once",
+        input.allowOverlap ? 1 : 0,
+        input.nextRunAt,
+        now,
+        now,
+      )
+    return this.getSchedule(id)!
+  }
+
+  updateSchedule(id: string, patch: SchedulePatch): Schedule {
+    const sets: string[] = []
+    const args: unknown[] = []
+    for (const [key, value] of Object.entries(patch) as [keyof SchedulePatch, unknown][]) {
+      if (value === undefined) continue
+      sets.push(`${SCHEDULE_COLUMNS[key]} = ?`)
+      args.push(typeof value === "boolean" ? (value ? 1 : 0) : value)
+    }
+    sets.push("updated_at = ?")
+    args.push(Date.now(), id)
+    const res = this.db.prepare(`UPDATE schedules SET ${sets.join(", ")} WHERE id = ?`).run(...args)
+    if (res.changes === 0) throw new NotFoundError(`Schedule ${id} not found`)
+    return this.getSchedule(id)!
+  }
+
+  /**
+   * Move a schedule's next run from `expected` to `next`, only if nobody else
+   * did first. This is what makes a run fire once even when the local timer
+   * and a QStash delivery race each other.
+   */
+  claimRun(id: string, expected: number | null, next: number | null): boolean {
+    const res = this.db
+      .prepare("UPDATE schedules SET next_run_at = ?, updated_at = ? WHERE id = ? AND next_run_at IS ?")
+      .run(next, Date.now(), id, expected)
+    return res.changes === 1
+  }
+
+  deleteSchedule(id: string) {
+    this.db.prepare("DELETE FROM schedules WHERE id = ?").run(id)
   }
 
   // ---------- kv ----------
