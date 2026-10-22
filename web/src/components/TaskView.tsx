@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
@@ -53,6 +53,7 @@ export function TaskView({ id }: { id: string }) {
   const [draft, setDraft] = useState("")
   const [port, setPort] = useState("")
   const [showTools, setShowTools] = useState(false)
+  const panel = useRef<HTMLDivElement>(null)
   const task = tasks.data?.find((t) => t.id === id)
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
@@ -71,7 +72,7 @@ export function TaskView({ id }: { id: string }) {
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div ref={panel} className="relative flex h-full flex-col">
       <div className="mb-4">
         <Link href={project ? `/projects/${project.id}` : "/"} className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300">
           <ArrowLeft className="h-3.5 w-3.5" /> {project?.name ?? "Back"}
@@ -196,6 +197,7 @@ export function TaskView({ id }: { id: string }) {
         value={draft}
         onChange={setDraft}
         onSubmit={submit}
+        panelRef={panel}
         placeholder={
           task.status === "needs_input"
             ? "Answer the agent…"
