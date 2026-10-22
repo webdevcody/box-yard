@@ -98,6 +98,9 @@ export const toast = {
     push({ kind: "task", ...t }, duration),
 }
 
+/** What is on screen now (for tests; components use useToasts). */
+export const currentToasts = () => toasts
+
 export function useToasts() {
   return useSyncExternalStore(
     (cb) => {
