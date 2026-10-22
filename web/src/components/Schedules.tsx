@@ -14,6 +14,7 @@ import {
   useTasks,
   useUpdateSchedule,
 } from "../lib/queries"
+import { useScrollToHash } from "../lib/hash"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
 import { Button, Empty, Field, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
@@ -36,6 +37,7 @@ export function SchedulesView() {
   const settings = useSettings()
   const [creating, setCreating] = useState(false)
   const list = schedules.data ?? []
+  useScrollToHash(Boolean(schedules.data))
   const orchestratorList = list.filter((s) => s.target === "orchestrator")
   const groups = (projects.data ?? [])
     .map((project) => ({ project, schedules: list.filter((s) => s.target === "project" && s.projectId === project.id) }))

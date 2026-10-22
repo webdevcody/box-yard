@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Link } from "wouter"
 import { Boxes, ExternalLink, Globe, Settings } from "lucide-react"
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
+import { useScrollToHash } from "../lib/hash"
 import { Empty, StatusBadge, TimeAgo, cx } from "./ui"
 import { SettingsDialog } from "./SettingsDialog"
 import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
@@ -13,20 +14,6 @@ const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string }> = {
   ready: { label: "Running", chip: "bg-emerald-500/10 text-emerald-300" },
   lost: { label: "Error", chip: "bg-red-500/10 text-red-300" },
   deleting: { label: "Deleting", chip: "bg-zinc-800 text-zinc-300" },
-}
-
-/** Scroll to the box named in the URL hash (set by the sidebar bars). */
-function useScrollToHash(ready: boolean) {
-  useEffect(() => {
-    if (!ready) return
-    const go = () => {
-      const id = decodeURIComponent(window.location.hash.slice(1))
-      if (id) document.getElementById(`box-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" })
-    }
-    go()
-    window.addEventListener("hashchange", go)
-    return () => window.removeEventListener("hashchange", go)
-  }, [ready])
 }
 
 function Stat({ label, value, max }: { label: string; value: number; max: number }) {
@@ -48,7 +35,7 @@ export function BoxesView() {
   const tasks = useTasks()
   const projects = useProjects()
   const health = useHealth()
-  useScrollToHash(Boolean(boxes.data))
+  useScrollToHash(Boolean(boxes.data), (id) => `box-${id}`)
   const [editing, setEditing] = useState(false)
 
   const pool = health.data?.pool
