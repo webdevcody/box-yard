@@ -1,9 +1,10 @@
 import { useRef, useState } from "react"
 import { Link } from "wouter"
-import { AlertTriangle, Bot, RotateCcw, Send, Square, Wrench } from "lucide-react"
+import { AlertTriangle, Bot, RotateCcw, Square, Wrench } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useSendChat } from "../lib/queries"
 import { Button, Markdown, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
+import { Composer } from "./Composer"
 import type { ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -90,34 +91,13 @@ export function ChatPanel() {
         )}
       </StickyScroll>
 
-      <form
-        className="border-t border-zinc-900 p-3"
-        onSubmit={(e) => {
-          e.preventDefault()
-          submit()
-        }}
-      >
-        <div className="flex items-end gap-2 rounded-xl border border-zinc-800 bg-zinc-900 p-2 focus-within:border-yard-500/50">
-          <textarea
-            ref={box}
-            rows={1}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                submit()
-              }
-            }}
-            placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
-            className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
-            style={{ height: Math.min(160, 36 + (draft.split("\n").length - 1) * 20) }}
-          />
-          <Button type="submit" variant="primary" size="sm" className="h-8 w-8 !p-0" disabled={!draft.trim()}>
-            <Send className="h-4 w-4" />
-          </Button>
-        </div>
-      </form>
+      <Composer
+        value={draft}
+        onChange={setDraft}
+        onSubmit={() => submit()}
+        placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
+        textareaRef={box}
+      />
     </section>
   )
 }

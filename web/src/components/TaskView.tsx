@@ -13,7 +13,6 @@ import {
   Globe,
   MessageCircleQuestion,
   RefreshCcw,
-  Send,
   Trash2,
   Users,
   Wrench,
@@ -33,8 +32,9 @@ import {
 } from "../lib/queries"
 import { api } from "../lib/api"
 import { toast } from "../lib/toast"
-import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
+import { Composer } from "./Composer"
 import type { TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
@@ -190,39 +190,19 @@ export function TaskView({ id }: { id: string }) {
         )}
       </StickyScroll>
 
-      <form
+      <Composer
         className="mt-3"
-        onSubmit={(e) => {
-          e.preventDefault()
-          submit()
-        }}
-      >
-        <div className="flex items-end gap-2">
-          <textarea
-            rows={2}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault()
-                submit()
-              }
-            }}
-            placeholder={
-              task.status === "needs_input"
-                ? "Answer the agent…"
-                : running
-                  ? "Message is delivered when the current turn ends…"
-                  : "Send feedback or a follow-up (resumes the same session)…"
-            }
-            className={cx(inputClass, "resize-none")}
-          />
-          <Button type="submit" variant="primary" disabled={!draft.trim()}>
-            <Send className="h-4 w-4" />
-          </Button>
-        </div>
-        <div className="mt-1 text-right text-[11px] text-zinc-600">⌘/Ctrl + Enter to send</div>
-      </form>
+        value={draft}
+        onChange={setDraft}
+        onSubmit={submit}
+        placeholder={
+          task.status === "needs_input"
+            ? "Answer the agent…"
+            : running
+              ? "Message is delivered when the current turn ends…"
+              : "Send feedback or a follow-up (resumes the same session)…"
+        }
+      />
     </div>
   )
 }
