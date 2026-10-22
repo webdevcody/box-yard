@@ -75,7 +75,7 @@ export function SchedulesView() {
             <ScheduleGroup title="Orchestrator" icon={<Bot className="h-4 w-4" />} schedules={orchestratorList} />
           )}
           {groups.map((g) => (
-            <ScheduleGroup key={g.project.id} title={g.project.name} href={`/projects/${g.project.id}`} schedules={g.schedules} />
+            <ScheduleGroup key={g.project.id} title={g.project.name} href={`/projects/${g.project.id}?tab=schedules`} schedules={g.schedules} />
           ))}
         </div>
       )}
@@ -106,30 +106,26 @@ function ScheduleGroup({ title, href, icon, schedules }: { title: string; href?:
   )
 }
 
-/** The schedules section on a project page. */
+/** The Schedules tab on a project page. */
 export function ProjectSchedules({ projectId }: { projectId: string }) {
   const schedules = useSchedules()
   const [creating, setCreating] = useState(false)
   const list = (schedules.data ?? []).filter((s) => s.target === "project" && s.projectId === projectId)
   return (
-    <section>
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-300">
-          <AlarmClock className="h-4 w-4" /> Schedules
-        </h2>
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-zinc-500">Each run starts a fresh task in this project. Watch it live like any task.</p>
         {!creating && (
-          <Button size="sm" variant="ghost" onClick={() => setCreating(true)}>
-            <Plus className="h-3.5 w-3.5" /> New schedule
+          <Button variant="primary" onClick={() => setCreating(true)}>
+            <Plus className="h-4 w-4" /> New schedule
           </Button>
         )}
       </div>
-      {creating && (
-        <div className="mb-3">
-          <ScheduleForm projectId={projectId} onDone={() => setCreating(false)} />
-        </div>
-      )}
-      {list.length === 0 && !creating ? (
-        <p className="text-sm text-zinc-500">Run a task on a timer: nightly reports, weekly dependency bumps, hourly checks.</p>
+      {creating && <ScheduleForm projectId={projectId} onDone={() => setCreating(false)} />}
+      {schedules.isLoading ? null : list.length === 0 && !creating ? (
+        <Empty icon={<AlarmClock className="h-8 w-8" />} title="No schedules yet">
+          Run a task on a timer: nightly reports, weekly dependency bumps, hourly checks.
+        </Empty>
       ) : (
         <div className="space-y-3">
           {list.map((s) => (
