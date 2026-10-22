@@ -13,6 +13,7 @@ import {
 } from "../lib/queries"
 import { Button, Empty, Field, inputClass, parseEnv, TimeAgo } from "./ui"
 import { TaskCard } from "./TaskCard"
+import { ProjectSchedules } from "./Schedules"
 import type { Project, TaskStatus } from "../../../shared/types"
 
 const ORDER: TaskStatus[] = ["needs_input", "failed", "working", "starting", "waiting", "queued", "pr_ready", "idle", "done"]
@@ -75,6 +76,8 @@ export function ProjectView({ id }: { id: string }) {
           </div>
         )}
       </section>
+
+      <ProjectSchedules projectId={id} />
 
       <div className="grid gap-8 lg:grid-cols-2">
         <Notes project={project} />

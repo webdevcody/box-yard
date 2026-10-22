@@ -36,7 +36,7 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
 }
 
 /** Ids the server accepts from the client, so optimistic rows keep their id. */
-export function clientId(prefix: "prj" | "task" | "chat") {
+export function clientId(prefix: "prj" | "task" | "chat" | "sch") {
   const bytes = crypto.getRandomValues(new Uint8Array(8))
   return `${prefix}_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12)}`
 }

@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
-import { Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus } from "lucide-react"
-import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
+import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus } from "lucide-react"
+import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
 import type { Connection } from "../lib/stream"
@@ -12,6 +12,8 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
   const tasks = useTasks()
   const boxes = useBoxes()
   const health = useHealth()
+  const schedules = useSchedules()
+  const activeSchedules = schedules.data?.filter((s) => s.enabled).length ?? 0
   const [creating, setCreating] = useState(false)
 
   const inboxCount = tasks.data?.filter((t) => t.status === "needs_input" || t.status === "pr_ready" || t.status === "failed").length ?? 0
@@ -64,6 +66,10 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
               {inboxCount}
             </span>
           )}
+        </Link>
+        <Link href="/schedules" className={navItem("/schedules", location === "/schedules")}>
+          <AlarmClock className="h-4 w-4" /> Schedules
+          {activeSchedules > 0 && <span className="ml-auto text-xs text-zinc-500">{activeSchedules}</span>}
         </Link>
       </nav>
 

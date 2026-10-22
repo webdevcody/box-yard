@@ -90,6 +90,14 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 
 **Previews and artifacts.** An agent starts a dev server on its own port range (`$PORT` to `$PORT+9`) and calls `report_preview`. Box Yard then asks the box for a public URL (`getPublicURL`). For files, `publish_artifact` copies the file to the server, and Box Yard hosts it at `/artifacts/...`.
 
+**Schedules.** A schedule is a cron job inside a project: a name, a 5-field cron expression (or `@hourly`, `@daily`, `@weekly`, `@monthly`), a time zone and a prompt. Each time it fires, Box Yard starts an ordinary task in that project, so you watch the run live like any other task. The Schedules page shows a live tail of a run that is going, plus each schedule's run history. The prompt for each run also says how the previous run ended, so runs can build on each other. Create, pause, run now and delete schedules from the Schedules page, a project page, or the orchestrator chat (`create_schedule`, `list_schedules`, `update_schedule`, `run_schedule_now`, `delete_schedule`).
+
+- The server's own timer checks for due schedules every 15 seconds (`BOXYARD_SCHEDULER_TICK_MS`).
+- If the server was down when runs were due, it starts one catch-up run when it comes back, and tells the agent how many runs it missed. Set a schedule's missed-runs option to "skip" to drop them instead.
+- A new run is skipped while the previous run is still going, unless the schedule allows overlap. The reason shows on the schedule card.
+- Optional: with `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY` (and `QSTASH_NEXT_SIGNING_KEY`) plus `BOXYARD_PUBLIC_URL`, each schedule is also created in Upstash QStash, which POSTs to `/qstash/schedules/<id>`. That request wakes a paused orchestrator box, so runs happen on time. Box Yard checks the QStash signature, and the local timer and QStash can't both start the same run.
+- New schedules use `BOXYARD_TIMEZONE`, or the server's time zone if that isn't set.
+
 **Event bus.** The worker runner appends every event to `events.jsonl` in the box. If Upstash Redis is configured, it also adds the event to a Redis stream. Events carry sequence numbers, so the server can read either source without duplicates. If Redis misses something, the server falls back to the file.
 
 ### Where the SQLite data lives when the orchestrator runs in a box
@@ -107,7 +115,7 @@ npm run typecheck
 npm run worker-snapshot   # bake Claude Code into a snapshot -> WORKER_SNAPSHOT_ID for fast box starts
 ```
 
-The mock Claude (`scripts/fake-claude.mjs`) speaks the same headless protocol and calls the real MCP tools. In the orchestrator chat, try `create project demo`, then `task demo: Haiku -- write a haiku [artifact]`. Worker prompts react to `[ask]`, `[fail]`, `[slow]`, `[preview]`, `[artifact]`, `[note]` and `[agent:<taskId>]`.
+The mock Claude (`scripts/fake-claude.mjs`) speaks the same headless protocol and calls the real MCP tools. In the orchestrator chat, try `create project demo`, then `task demo: Haiku -- write a haiku [artifact]`, or `schedule demo "*/5 * * * *": Haiku drop -- write a haiku [artifact]`. Worker prompts react to `[ask]`, `[fail]`, `[slow]`, `[preview]`, `[artifact]`, `[note]` and `[agent:<taskId>]`.
 
 | Path | What's there |
 | --- | --- |
@@ -122,4 +130,5 @@ This version was built without live keys, so the following has run only against 
 
 - **Box API behavior.** Upstash Box calls follow the `@upstash/box` 0.7.10 type definitions: `exec`, `files`, `getPublicURL`, `snapshot`, `keepAlive` and `setInitCommand`. Their real behavior hasn't been confirmed.
 - **Background processes and pausing.** It's unconfirmed whether a background process survives a dropped exec connection. While a turn runs, Box Yard holds an exec stream open so the box doesn't pause.
+- **QStash.** The schedule calls (`POST /v2/schedules/<url>` with `Upstash-Cron` and `Upstash-Schedule-Id`) and the signature check follow QStash's docs. They have only run against a fake.
 - **Claude CLI.** The `claude` flags were checked against the real CLI, but no real model turn ran.

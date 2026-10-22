@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { Link, useLocation } from "wouter"
 import {
+  AlarmClock,
   ArrowLeft,
   Bot,
   Box,
@@ -24,6 +25,7 @@ import {
   useDeleteTask,
   useProjects,
   useRetryTask,
+  useSchedules,
   useSendTaskMessage,
   useStopTask,
   useTaskMessages,
@@ -37,6 +39,7 @@ import type { TaskMessage } from "../../../shared/types"
 export function TaskView({ id }: { id: string }) {
   const tasks = useTasks()
   const projects = useProjects()
+  const schedules = useSchedules()
   const messages = useTaskMessages(id)
   const artifacts = useArtifacts()
   const send = useSendTaskMessage(id)
@@ -51,6 +54,7 @@ export function TaskView({ id }: { id: string }) {
   const bottom = useRef<HTMLDivElement>(null)
   const task = tasks.data?.find((t) => t.id === id)
   const project = projects.data?.find((p) => p.id === task?.projectId)
+  const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" })
@@ -80,6 +84,11 @@ export function TaskView({ id }: { id: string }) {
           <StatusBadge status={task.status} />
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-zinc-500">
+          {task.scheduleId && (
+            <Link href="/schedules" className="inline-flex items-center gap-1 text-yard-400 hover:underline">
+              <AlarmClock className="h-3.5 w-3.5" /> {schedule ? `Schedule: ${schedule.name}` : "From a deleted schedule"}
+            </Link>
+          )}
           {task.branch && (
             <span className="inline-flex items-center gap-1 font-mono">
               <GitBranch className="h-3.5 w-3.5" /> {task.branch}

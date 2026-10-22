@@ -1,5 +1,5 @@
 import { Link } from "wouter"
-import { ExternalLink, GitPullRequest, Globe, MessageCircleQuestion } from "lucide-react"
+import { AlarmClock, ExternalLink, GitPullRequest, Globe, MessageCircleQuestion } from "lucide-react"
 import type { Task } from "../../../shared/types"
 import { StatusBadge, TimeAgo, cx } from "./ui"
 
@@ -43,6 +43,11 @@ export function TaskCard({ task, projectName }: { task: Task; projectName?: stri
             <ExternalLink className="h-3 w-3" />
           </a>
         ))}
+        {task.scheduleId && (
+          <span className="inline-flex items-center gap-1" title="Started by a schedule">
+            <AlarmClock className="h-3.5 w-3.5" /> scheduled
+          </span>
+        )}
         {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
         <span className="ml-auto">
           <TimeAgo ts={task.updatedAt} />

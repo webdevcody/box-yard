@@ -7,6 +7,8 @@ import type {
   ChatMessage,
   Health,
   Project,
+  Schedule,
+  CatchUp,
   Task,
   TaskMessage,
   TaskStatus,
@@ -23,6 +25,8 @@ export const keys = {
   chatBusy: ["chat-busy"] as const,
   artifacts: ["artifacts"] as const,
   boxes: ["boxes"] as const,
+  schedules: ["schedules"] as const,
+  settings: ["settings"] as const,
 }
 
 // ------------------------------------------------------------------ cache helpers
@@ -57,6 +61,13 @@ export const useTaskMessages = (id: string) =>
   useQuery({ queryKey: keys.taskMessages(id), queryFn: () => api<TaskMessage[]>(`/api/tasks/${id}/messages`) })
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
 export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
+export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
+export const useSettings = () =>
+  useQuery({
+    queryKey: keys.settings,
+    queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash" }>("/api/settings"),
+    staleTime: Infinity,
+  })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
 
 export const useChatStream = () =>
@@ -202,6 +213,7 @@ export function useCreateTask() {
           turnCount: 0,
           pendingCount: 0,
           lastArchivedAt: null,
+          scheduleId: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -276,6 +288,92 @@ export function useDeleteTask() {
       ctx?.undo()
       fail("Couldn't delete the task")(err)
     },
+  })
+}
+
+export interface ScheduleInput {
+  id: string
+  projectId: string
+  name: string
+  cron: string
+  timezone: string
+  prompt: string
+  catchUp: CatchUp
+  allowOverlap: boolean
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: ScheduleInput) => api<Schedule>("/api/schedules", { body: input }),
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: keys.schedules })
+      const undo = snapshot<Schedule[]>(qc, keys.schedules)
+      const now = Date.now()
+      qc.setQueryData<Schedule[]>(keys.schedules, (list) =>
+        upsert(list, {
+          ...input,
+          enabled: true,
+          nextRunAt: null,
+          lastRunAt: null,
+          lastTaskId: null,
+          lastSkipReason: null,
+          runCount: 0,
+          qstashId: null,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      )
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't create the schedule")(err)
+    },
+    onSuccess: (schedule) => qc.setQueryData<Schedule[]>(keys.schedules, (list) => upsert(list, schedule)),
+  })
+}
+
+export function useUpdateSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...patch }: { id: string } & Partial<Omit<ScheduleInput, "id" | "projectId">> & { enabled?: boolean }) =>
+      api<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: patch }),
+    onMutate: async ({ id, ...patch }) => {
+      const undo = snapshot<Schedule[]>(qc, keys.schedules)
+      qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.map((s) => (s.id === id ? { ...s, ...patch } : s)))
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't update the schedule")(err)
+    },
+    onSuccess: (schedule) => qc.setQueryData<Schedule[]>(keys.schedules, (list) => upsert(list, schedule)),
+  })
+}
+
+export function useDeleteSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api(`/api/schedules/${id}`, { method: "DELETE" }),
+    onMutate: async (id) => {
+      const undo = snapshot<Schedule[]>(qc, keys.schedules)
+      qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.id !== id))
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't delete the schedule")(err)
+    },
+  })
+}
+
+export function useRunSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api<Task>(`/api/schedules/${id}/run`, { method: "POST" }),
+    onError: fail("Couldn't start a run"),
+    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
   })
 }
 
