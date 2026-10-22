@@ -23,12 +23,15 @@ import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
   EFFORTS,
+  SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
+  WORKER_SIZES,
   agentCapacity,
   type AgentEffort,
   type AutoCompact,
   type Settings,
   type SettingSource,
+  type WorkerSize,
 } from "../../../shared/types"
 
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
@@ -430,19 +433,69 @@ function LimitsPanel({
   fid: (k: string) => string
 }) {
   const health = useHealth()
-  const int = (k: "maxBoxes" | "slotsPerBox" | "maxAgents") => (e: React.ChangeEvent<HTMLInputElement>) => set(k, Math.trunc(Number(e.target.value)))
+  const int =
+    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays") =>
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
   const upstash = health.data?.provider === "upstash"
+  const sizeDefault = SIZE_DEFAULTS[s.workerSize]
   return (
     <Panel section="limits">
+      <Row
+        id={fid("ws")}
+        label="Worker size"
+        help="Upstash Box size for newly created boxes. Existing boxes keep the size they were created with."
+        hint={hint("workerSize")}
+      >
+        <Select id={fid("ws")} className="w-full" value={s.workerSize} onChange={(e) => set("workerSize", e.target.value as WorkerSize)}>
+          {WORKER_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {size} ({SIZE_DEFAULTS[size].slotsPerBox} slots, {SIZE_DEFAULTS[size].maxResidentPerBox} resident tasks by default)
+            </option>
+          ))}
+        </Select>
+      </Row>
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
       </Row>
-      <Row id={fid("spb")} label="Agents per box" help="Claude turns that may run at the same time inside one box." hint={hint("slotsPerBox")}>
+      <Row
+        id={fid("spb")}
+        label="Agents per box"
+        help={`Claude turns that may run at the same time inside one box. Default for ${s.workerSize}: ${sizeDefault.slotsPerBox}.`}
+        hint={hint("slotsPerBox")}
+      >
         <input id={fid("spb")} type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
       </Row>
       <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
+      </Row>
+      <Row
+        id={fid("mr")}
+        label="Resident tasks per box"
+        help={`Task folders kept on one box before older archived workspaces are parked. Default for ${s.workerSize}: ${sizeDefault.maxResidentPerBox}.`}
+        hint={hint("maxResidentPerBox")}
+      >
+        <input id={fid("mr")} type="number" min={1} max={200} className={inputClass} value={s.maxResidentPerBox} onChange={int("maxResidentPerBox")} />
+      </Row>
+      <Row id={fid("bid")} label="Idle box deletion" help="Delete an idle worker box after this many minutes, but only when every resident workspace has a fresh archive. 0 keeps boxes." hint={hint("boxIdleDeleteMinutes")}>
+        <input id={fid("bid")} type="number" min={0} max={43_200} className={inputClass} value={s.boxIdleDeleteMinutes} onChange={int("boxIdleDeleteMinutes")} />
+      </Row>
+      <Row
+        id={fid("wrd")}
+        label="Workspace retention"
+        help="After this many idle days, archived resting task folders are removed from boxes and restored from the archive on the next message. 0 keeps folders."
+        hint={hint("workspaceRetentionDays")}
+      >
+        <input id={fid("wrd")} type="number" min={0} max={3650} className={inputClass} value={s.workspaceRetentionDays} onChange={int("workspaceRetentionDays")} />
+      </Row>
+      <Row
+        id={fid("ard")}
+        label="Archive retention"
+        help="After this many days, orphan archives and long-done task archives are pruned. Archives for resumable parked tasks are kept. 0 keeps archives."
+        hint={hint("archiveRetentionDays")}
+      >
+        <input id={fid("ard")} type="number" min={0} max={3650} className={inputClass} value={s.archiveRetentionDays} onChange={int("archiveRetentionDays")} />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
