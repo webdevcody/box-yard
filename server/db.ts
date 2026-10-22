@@ -195,6 +195,22 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN compact_prev_status TEXT;
   ALTER TABLE tasks ADD COLUMN effort TEXT;
   `,
+  `
+  -- Task finished / needs-you notifications for toasts and the sidebar's Recent list.
+  CREATE TABLE notifications (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    created_at INTEGER NOT NULL,
+    read_at INTEGER
+  );
+  CREATE INDEX notifications_recent ON notifications(created_at);
+  CREATE INDEX notifications_task ON notifications(task_id);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

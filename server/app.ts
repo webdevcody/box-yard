@@ -34,6 +34,9 @@ const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var
 const attachmentIds = z.array(z.string()).max(20).optional()
 
 const schemas = {
+  notificationsRead: z
+    .object({ ids: z.array(z.string().max(64)).max(500).optional(), taskId: z.string().max(64).optional(), all: z.boolean().optional() })
+    .refine((b) => b.all || b.taskId || b.ids?.length, "Pass ids, taskId or all"),
   project: z.object({
     id: idSchema,
     name: z.string().trim().min(1).max(80),
@@ -129,6 +132,7 @@ export function createBoxYard(
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   tasks.onNotice = () => orchestrator.nudge()
+  store.onNotification = (notification) => hub.broadcast({ type: "notification", notification })
   const auth = new Auth(c.password, store)
   const publicUrl = () => c.publicUrl
 
@@ -405,6 +409,19 @@ export function createBoxYard(
   })
 
   // ---- artifacts and boxes
+  // ---- notifications (task finished / needs you)
+  api.get("/notifications", (req, res) => {
+    const limit = Number.parseInt(String(req.query.limit ?? "50"), 10)
+    res.json(store.listNotifications(Number.isFinite(limit) ? limit : 50))
+  })
+  api.post("/notifications/read", (req, res) => {
+    const body = parse(schemas.notificationsRead, req.body ?? {})
+    const readAt = Date.now()
+    const ids = store.markNotificationsRead(body, readAt)
+    if (ids.length) hub.broadcast({ type: "notifications.read", ids, readAt })
+    res.json({ ids, readAt })
+  })
+
   api.get("/artifacts", (req, res) => {
     const q = req.query as Record<string, string | undefined>
     res.json(store.listArtifacts({ projectId: q.projectId, taskId: q.taskId }))
