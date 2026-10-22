@@ -1,0 +1,80 @@
+<!-- 04 · Story — one change with a strong why. Numbered sections read top to bottom:
+     problem → change → how it looks → how it works → risk → the details → notes. -->
+
+<One sentence that names the problem and the fix together: "X made Y happen; now Z."> 
+
+**Contents:** [1. The problem](#user-content-1-the-problem) · [2. What changed](#user-content-2-what-changed) · [3. How it looks](#user-content-3-how-it-looks) · [4. How it works](#user-content-4-how-it-works) · [5. Risk](#user-content-5-risk) · [6. Technical overview](#user-content-6-technical-overview) · [7. Notes](#user-content-7-notes)
+
+## 1. The problem <a id="1-the-problem"></a>
+
+<Two to four sentences, in the user's words where possible: what they saw, when, why it mattered. No code yet.>
+
+> <Optional: the user's own sentence, quoted.>
+
+## 2. What changed <a id="2-what-changed"></a>
+
+- **<Hook>.** <The new behaviour, the key or command in backticks.>
+- **<Hook>.** <…>
+- **Unchanged.** <What the user liked and still has.>
+
+## 3. How it looks <a id="3-how-it-looks"></a>
+
+| <Caption: what this shows> |
+|---|
+| ![<alt>](<artifact-or-url>/<after>.png) |
+
+<!-- A before shot too, if the problem was visible: make it a two-column table. -->
+
+## 4. How it works <a id="4-how-it-works"></a>
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant T as web app
+  participant D as server
+  participant C as worker runner
+  U->>T: key or command
+  T->>D: request
+  D->>C: spawn / signal / hook
+  C-->>D: hook event
+  Note over D: the new step — what this PR adds
+  D-->>T: status change
+  T-->>U: what the user sees
+```
+
+## 5. Risk <a id="5-risk"></a>
+
+<!-- Only when the change ADDS A SURFACE — the server execs a program, opens a socket, route or
+     HTTP request, reads a new config source, writes a file it did not before. One bullet per way
+     in: who or what reaches it, what holds it, what does not. The 🔒 row below then rates the
+     residue. A PR that adds no surface deletes this subsection. -->
+### 🎯 Attack surface <a id="attack-surface"></a>
+
+- **<Way in>.** <Who or what reaches it. Held by: <mitigation>. Not held: <what remains>.>
+- **<Way in>.** <…>
+
+**Verdict:** <🟢 Low risk · 🟡 Merge with care · 🔴 Do not merge as-is — pick one, then one clause saying why. The author's own read; the PR REVIEWER SKILL checks it against the diff.>
+
+| | Level | Why |
+|---|---|---|
+| 🔒 **Security & production** | <Low / Medium / High> | <who can reach the new code and what it reaches — a new `HTTP request`, a hook route, a shell call, a token, a file the server writes — or "no new surface: <why>"> |
+| ⚡ **Performance** | <Low / Medium / High> | <the hot path touched — the web app draw, the event-loop drain, the worker log path, the scheduler/maintenance tick — or "off every hot path: <why>"> |
+| 🧩 **Fit with the codebase** | <Low / Medium / High> | <the existing pattern it follows, or the departure and why> |
+
+**Rollback:** <one line — `git revert <merge>`, plus what the revert does not undo: a schema/config change, a migrated SQLite store, a pushed branch.>
+
+## 6. Technical overview <a id="6-technical-overview"></a>
+
+- **Mechanism.** <Three or four sentences: the type or flag, who owns the state, what triggers it.>
+- **Files.** `server/<file>.ts or web/src/<file>.tsx` — <clause>; `server/<file>.ts or web/src/<file>.tsx` — <clause>.
+- **Why not <the obvious alternative>.** <One or two sentences.>
+- **Gate.** <`npm test` and `npm run typecheck` green; or what did not run and why.>
+
+## 7. Notes <a id="7-notes"></a>
+
+- <Merge state, conflicts, upgrade note.>
+- Closes #<N>.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+<optional session link; delete this line when none is provided>
