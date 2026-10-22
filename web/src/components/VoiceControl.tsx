@@ -32,6 +32,8 @@ export function VoiceControl() {
       {s.enabled && status.locked && (
         <button
           type="button"
+          data-voice-unlock
+          // Normally the window-level gesture listener in lib/speech.ts has already unlocked by now.
           onClick={() => {
             unlockVoice()
             speakNow("Voice on.")

@@ -425,10 +425,13 @@ export function unlockVoice() {
 }
 
 if (browser) {
-  const onGesture = () => {
+  // Any click or key press unlocks speech. This runs before the "Click to enable voice" chip's own
+  // handler (which unmounts once unlocked), so the chip's "Voice on." is said from here.
+  const onGesture = (e: Event) => {
     if (activated && !blocked) return
-    if (getVoiceSettings().enabled) unlockVoice()
-    else activated = true
+    if (!getVoiceSettings().enabled) activated = true
+    else if ((e.target as Element | null)?.closest?.("[data-voice-unlock]")) speakNow("Voice on.")
+    else unlockVoice()
     refreshStatus()
   }
   window.addEventListener("pointerdown", onGesture, true)

@@ -29,6 +29,9 @@ function Slider({ id, label, value, min, max, step, disabled, onChange, format }
 }) {
   return (
     <div className={cx("flex items-center gap-3", disabled && "opacity-50")}>
+      <label htmlFor={id} className="w-12 shrink-0 text-xs text-zinc-400">
+        {label}
+      </label>
       <input
         id={id}
         type="range"
@@ -38,10 +41,9 @@ function Slider({ id, label, value, min, max, step, disabled, onChange, format }
         step={step}
         value={value}
         disabled={disabled}
-        aria-label={label}
         onChange={(e) => onChange(Number(e.target.value))}
       />
-      <span className="w-12 shrink-0 text-right text-xs text-zinc-400 tabular-nums">{format(value)}</span>
+      <span className="w-10 shrink-0 text-right text-xs text-zinc-400 tabular-nums">{format(value)}</span>
     </div>
   )
 }
