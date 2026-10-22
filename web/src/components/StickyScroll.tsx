@@ -22,6 +22,7 @@ export function StickyScroll({
   const scroller = useRef<HTMLDivElement>(null)
   const content = useRef<HTMLDivElement>(null)
   const stuck = useRef(true)
+  const lastTop = useRef(0)
   const lastCount = useRef(count)
   const [away, setAway] = useState(false)
   const [unread, setUnread] = useState(0)
@@ -35,9 +36,14 @@ export function StickyScroll({
     const el = scroller.current
     if (!el) return
     const near = el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX
-    stuck.current = near
-    setAway(!near)
-    if (near) setUnread(0)
+    const up = el.scrollTop < lastTop.current
+    lastTop.current = el.scrollTop
+    // Only scrolling up unpins. The viewport shrinking (a growing composer) can leave a late scroll
+    // event off the bottom; the resize observer below pulls the list back down.
+    if (near) stuck.current = true
+    else if (up) stuck.current = false
+    setAway(!stuck.current)
+    if (stuck.current) setUnread(0)
   }, [])
 
   // Opening or switching to another list starts at the bottom.
