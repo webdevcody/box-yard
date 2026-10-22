@@ -82,7 +82,11 @@ export class Orchestrator {
     if (!this.c.orchestratorAutoWake || this.wakeTimer) return
     this.wakeTimer = setTimeout(() => {
       this.wakeTimer = null
-      if (!this.store.hasUnseenNotices()) return
+      // Updates from an agent that's still mid-turn (say, it published a file)
+      // wait for its end-of-turn notice, which nudges again; then they go together.
+      const busy = new Set(["queued", "starting", "working"])
+      const ready = this.store.unseenNoticeTasks().some((id) => !id || !busy.has(this.store.getTask(id)?.status ?? "idle"))
+      if (!ready) return
       this.wakeWanted = true
       void this.drain()
     }, WAKE_DEBOUNCE_MS)

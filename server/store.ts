@@ -536,6 +536,14 @@ export class Store {
     })()
   }
 
+  /** Task ids of notices the orchestrator hasn't seen (null for notices not about a task). */
+  unseenNoticeTasks(): (string | null)[] {
+    const rows = this.db
+      .prepare("SELECT json_extract(meta_json, '$.taskId') AS task_id FROM chat_messages WHERE seen_by_orchestrator = 0")
+      .all() as { task_id: string | null }[]
+    return rows.map((r) => r.task_id)
+  }
+
   hasUnseenNotices(): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM chat_messages WHERE seen_by_orchestrator = 0 LIMIT 1").get())
   }
