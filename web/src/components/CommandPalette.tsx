@@ -4,7 +4,7 @@ import { AlarmClock, Box, CornerDownLeft, FileText, FolderGit2, History, LayoutG
 import { useArtifacts, useBoxes, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { buildItems, pushRecent, recentKeyFor, searchPalette, parseQuery, type PaletteCommand, type PaletteGroup, type PaletteItem } from "../lib/palette"
 import { StatusBadge, TimeAgo, cx } from "./ui"
-import { SettingsDialog } from "./SettingsDialog"
+import { useOpenSettings } from "./SettingsDialog"
 import { NewProjectDialog } from "./NewProjectDialog"
 
 // ------------------------------------------------------------------ open state
@@ -59,6 +59,7 @@ export function CommandPalette() {
   const isOpen = usePaletteOpen()
   const [location] = useLocation()
   const [dialog, setDialog] = useState<PaletteCommand | null>(null)
+  const openSettings = useOpenSettings()
 
   useEffect(() => {
     const key = recentKeyFor(location)
@@ -82,8 +83,7 @@ export function CommandPalette() {
 
   return (
     <>
-      {isOpen && <Palette onClose={() => setOpen(false)} onCommand={setDialog} />}
-      {dialog === "settings" && <SettingsDialog onClose={() => setDialog(null)} />}
+      {isOpen && <Palette onClose={() => setOpen(false)} onCommand={(c) => (c === "settings" ? openSettings() : setDialog(c))} />}
       {dialog === "new-project" && <NewProjectDialog onClose={() => setDialog(null)} />}
     </>
   )
