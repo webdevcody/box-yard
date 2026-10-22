@@ -161,17 +161,15 @@ export function firstSentence(text: string): string {
 export function spokenSummary(reply: string): string | null {
   const raw = reply.trim()
   if (!raw || raw === NO_UPDATE) return null
-  // The first block that still has words once markdown, code and links are gone (skips a lone heading or code block).
-  const blocks = raw.replace(/```[\s\S]*?(```|$)/g, "\n\n").split(/\n\s*\n/)
-  for (const block of blocks) {
-    const lines = block.split("\n")
-    // A heading line on its own is a title, not a sentence: keep going within the block.
-    const body = lines.filter((l) => !/^\s{0,3}#{1,6}\s/.test(l) && !/^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l))
-    const text = cleanForSpeech(body.join("\n"))
+  // The first line that still has words once markdown, code and links are gone. Headings and table
+  // rules are skipped, and a line break ends a sentence, so a list isn't run together
+  // ("Here's the yard:" is said, not every item after it).
+  for (const src of raw.replace(/```[\s\S]*?(```|$)/g, "\n").split("\n")) {
+    if (/^\s{0,3}#{1,6}\s/.test(src) || /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(src)) continue
+    const text = cleanForSpeech(src)
     if (!/[\p{L}\p{N}]/u.test(text)) continue
     const line = capWords(firstSentence(text))
-    if (line === NO_UPDATE) return null
-    return line
+    return line === NO_UPDATE ? null : line
   }
   return null
 }

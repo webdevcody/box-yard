@@ -74,6 +74,8 @@ describe("spokenSummary", () => {
     expect(spokenSummary("## Status\n\nTwo tasks finished. Details below.")).toBe("Two tasks finished.")
     expect(spokenSummary("```\nlog\n```\n\nBuild passed.")).toBe("Build passed.")
     expect(spokenSummary("🎉\n\nAll green.")).toBe("All green.")
+    expect(spokenSummary("Here's the yard:\n- **Haiku** (demo): done\n- **Limerick** (demo): done")).toBe("Here's the yard")
+    expect(spokenSummary("- Merged #30\n- Started docs")).toBe("Merged number 30")
   })
 
   it("never speaks (no update) or empty replies", () => {
