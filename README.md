@@ -53,13 +53,28 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 ./yard deploy-vps root@1.2.3.4 # run it on your server with Docker (HTTPS if BOXYARD_DOMAIN is set)
 ```
 
-**`deploy-box`** creates or updates a box named `box-yard-orchestrator`, uploads the app, installs Claude Code, builds, and prints a public URL and password. The box is keep-alive, and an init command restarts the server whenever the box resumes. Run it again to ship changes. Your data is kept. `npm run deploy:box -- --logs` tails the server log.
+**`deploy-box`** creates or updates a box named `box-yard-orchestrator`, uploads the app, installs Claude Code, builds, and prints a public URL and password. Run it again to ship changes. Your data and password are kept. `npm run deploy:box -- --logs` tails the server log, and `-- --restart` restarts the server without redeploying.
+
+- On a paid Upstash plan the box is keep-alive. On the free plan keep-alive isn't allowed, so it falls back to a normal box: while agents are running or queued, the server holds its own box awake, and when the yard is idle it lets go. Opening the URL wakes a paused box, and the init command restarts the server, which picks running agents back up.
+- Talk to a deployed yard from the terminal with `YARD_URL=<url> YARD_PASSWORD=<password> npx tsx scripts/yardctl.ts say "..."` (also `status`, `wait`, `task <id>`, `chat`, `reset`).
 
 **`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume.
 
 ## How it works
 
-**Orchestrator.** Each chat message runs `claude -p` with `--resume <session>`, so the conversation keeps its context across messages and restarts. The orchestrator gets Box Yard's MCP tools (`create_project`, `create_task`, `send_to_task`, `list_inbox`, `get_preview_url`, `create_artifact`, `save_note`, `pool_status`, and more) at `/mcp`. Task updates such as questions, PRs, finished work and failures appear in the chat as notices. The orchestrator also reads them at the start of its next turn.
+**Orchestrator.** Each chat message runs `claude -p` with `--resume <session>`, so the conversation keeps its context across messages and restarts. The orchestrator gets Box Yard's MCP tools (`create_project`, `create_task`, `send_to_task`, `wait_for_tasks`, `list_tasks`, `list_inbox`, `get_preview_url`, `create_artifact`, `save_note`, `pool_status`, and more) at `/mcp`. Every turn starts with a snapshot of the agents that are busy right now, so it never works from stale memory.
+
+**Routing.** For each request the orchestrator decides where the work goes:
+
+| Request | What happens |
+| --- | --- |
+| Follow-up on work an agent did ("close those issues", "fix that PR") | `send_to_task` to that agent. Its Claude session resumes with full context, restored from the archive if it was parked. |
+| Follow-up while that agent is mid-turn | Same call. The message is queued and goes out as soon as the turn ends, in the same session. |
+| New, independent work in a known project | `create_task`: a fresh session on the project's box. `related_tasks` passes along earlier outcomes. |
+| A repo with no project yet | `create_project`, then `create_task`. One project per repo. |
+| Several repos or independent pieces | One task each, all started at once. |
+
+`list_tasks` takes a `query`, so even a fresh orchestrator session finds the agent that did related work. For quick work it calls `wait_for_tasks` and answers in the same reply. For long work it ends its turn. When an agent finishes, fails, asks something or opens a PR, a notice lands in the chat and the orchestrator wakes up on its own to tell you, and to start the next step of what you asked for (`BOXYARD_ORCHESTRATOR_AUTOWAKE=0` turns this off). Notices from an agent that's still mid-turn wait for its end-of-turn notice, so you get one report.
 
 **Tasks and turns.** A task's agent runs one headless turn per incoming message (`claude -p --session-id` the first time, then `--resume`). Messages that arrive while it's busy wait in a queue and go out together in the next turn. Each task's Claude config lives in its own folder (`CLAUDE_CONFIG_DIR`), so the session moves with the task.
 
@@ -77,7 +92,14 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 | `done` | The agent or you marked it finished. |
 | `failed` | Something broke. Retry with a click. |
 
-**Box pool.** The free plan allows about 5 boxes, so Box Yard runs a pool. `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` (default 2) sets how many agents run at once in one box. The defaults allow 10 agents at a time, and further work waits in a queue. Tasks stay on the box they started on. If that box is busy and the task's archive is current, the task can move to a free box. Idle boxes pause on their own.
+**Box pool.** The free plan allows about 5 boxes, so Box Yard runs a pool. `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` (default 2) sets how many agents run at once in one box. The defaults allow 10 agents at a time, and further work waits in a queue. Placement keeps a project together:
+
+1. A task goes to a box that already hosts its project (each box keeps a bare mirror of the project's repo, so later clones come from local disk).
+2. Otherwise an empty box.
+3. Otherwise, while the pool has room, a new box is made for that project and reserved for it.
+4. Once the pool is full, projects share boxes, picking the least loaded one.
+
+A project whose box has all its slots busy gets a second box while there's room. Tasks stay on the box they started on. If that box is busy and the task's archive is current, the task can move to a free box.
 
 **Nothing gets lost.**
 - Every transcript line, question, PR, preview, note and artifact is stored in SQLite.
@@ -88,7 +110,9 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 
 **Agents talk to each other.** Agents can call `list_agents` and `message_agent` (optionally waiting for a reply), `save_note` and `read_notes` for project memory that every future agent sees, and `ask_user` to ask you. Messages go through the orchestrator, because boxes can't reach each other directly. Agent-to-agent messages are rate limited to stop loops.
 
-**Previews and artifacts.** An agent starts a dev server on its own port range (`$PORT` to `$PORT+9`) and calls `report_preview`. Box Yard then asks the box for a public URL (`getPublicURL`). For files, `publish_artifact` copies the file to the server, and Box Yard hosts it at `/artifacts/...`.
+**Previews and artifacts.** An agent starts a dev server on its own port range (`$PORT` to `$PORT+9`) and calls `report_preview`. Box Yard then asks the box for a public URL (`getPublicURL`). For files, `publish_artifact` copies the file to the server, and Box Yard hosts it at `/artifacts/...`. The agent gets the final URL back right away, so it can pass the link on.
+
+**Pull requests.** When a turn ends on a task with a PR, Box Yard asks GitHub for its state. A merged PR marks the task done. A closed one means there's nothing left to review.
 
 **Schedules.** A schedule is a cron job inside a project: a name, a 5-field cron expression (or `@hourly`, `@daily`, `@weekly`, `@monthly`), a time zone and a prompt. Each time it fires, Box Yard starts an ordinary task in that project, so you watch the run live like any other task. The Schedules page shows a live tail of a run that is going, plus each schedule's run history. The prompt for each run also says how the previous run ended, so runs can build on each other. Create, pause, run now and delete schedules from the Schedules page, a project page, or the orchestrator chat (`create_schedule`, `list_schedules`, `update_schedule`, `run_schedule_now`, `delete_schedule`).
 
@@ -124,11 +148,22 @@ The mock Claude (`scripts/fake-claude.mjs`) speaks the same headless protocol an
 | `web/` | The React app |
 | `scripts/` | Deploy scripts and the fake Claude |
 
-## Untested against real services
+## Verified against real services
 
-This version was built without live keys, so the following has run only against the fake Claude and local boxes. Check it first with real accounts:
+Checked on 2026-10-22 with a real Upstash Box account (free plan), a Claude Code OAuth token and a GitHub token, with the orchestrator deployed in its own box:
 
-- **Box API behavior.** Upstash Box calls follow the `@upstash/box` 0.7.10 type definitions: `exec`, `files`, `getPublicURL`, `snapshot`, `keepAlive` and `setInitCommand`. Their real behavior hasn't been confirmed.
-- **Background processes and pausing.** It's unconfirmed whether a background process survives a dropped exec connection. While a turn runs, Box Yard holds an exec stream open so the box doesn't pause.
-- **QStash.** The schedule calls (`POST /v2/schedules/<url>` with `Upstash-Cron` and `Upstash-Schedule-Id`) and the signature check follow QStash's docs. They have only run against a fake.
-- **Claude CLI.** The `claude` flags were checked against the real CLI, but no real model turn ran.
+- **Box API** (`npx tsx scripts/smoke-box.ts`): create (about 5 s, Claude Code and `gh` preinstalled), exec, file write/read, env vars, a real `claude -p` turn in a box, cloning a private repo, public URLs. `scripts/boxes.ts` lists, deletes and runs commands in boxes.
+- **Pausing.** Over 20 minutes, no box paused, idle or not, and a background process kept running the whole time. So agent turns survive a dropped exec connection. Keep-alive needs a paid plan.
+- **Cancelling an exec stream does not stop its process in the box.** Holds are written to end on their own.
+- **End-to-end scenarios through the deployed orchestrator:**
+  - Issues opened on several repos in parallel, one project and one box each.
+  - "Close those issues" resumed the agents that opened them.
+  - A follow-up sent mid-turn was queued into the same session.
+  - New work in a known project got a fresh agent on the project's box.
+  - A new repo got its own box. With the pool full, it shared a box.
+  - An agent's question was relayed and the answer passed back.
+  - A draft PR was opened and then closed, and its branch deleted.
+  - Artifacts were published with working links.
+  - The server was restarted mid-turn and the agent was picked back up.
+  - With the orchestrator session reset, a follow-up still found the right agent.
+- **Not yet checked live:** QStash schedules (only run against a fake), Upstash Redis as the event bus (the file log was used), and archive restore onto a different box after a box is lost (covered by the local tests).
