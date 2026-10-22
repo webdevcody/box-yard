@@ -13,6 +13,7 @@ import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
 import { SchedulesView } from "./components/Schedules"
 import { CommandPalette } from "./components/CommandPalette"
+import { SettingsHost } from "./components/SettingsDialog"
 import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
@@ -102,6 +103,7 @@ export function App() {
         </button>
       )}
       <CommandPalette />
+      <SettingsHost />
       <Toasts />
     </div>
   )
