@@ -39,11 +39,14 @@ export function inFilter(task: Task, filter: TaskFilter): boolean {
   return !statuses || (statuses as readonly TaskStatus[]).includes(task.status)
 }
 
-/** Case-insensitive match of every word against the title and the summary (or the prompt, which cards show until there is a summary). */
-export function matchesQuery(task: Task, query: string): boolean {
+/**
+ * Case-insensitive match of every word against the title and the summary (or the prompt, which cards show until there is a summary),
+ * plus any `extra` text such as the project name.
+ */
+export function matchesQuery(task: Task, query: string, extra = ""): boolean {
   const words = query.toLowerCase().split(/\s+/).filter(Boolean)
   if (!words.length) return true
-  const text = `${task.title}\n${task.summary ?? task.prompt}`.toLowerCase()
+  const text = `${task.title}\n${task.summary ?? task.prompt}\n${extra}`.toLowerCase()
   return words.every((w) => text.includes(w))
 }
 

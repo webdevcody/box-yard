@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Boxes, Inbox as InboxIcon, Lock } from "lucide-react"
+import { Inbox as InboxIcon, Lock } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useHealth, useMarkDoneFromInbox, useProjects, useTasks, keys } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
@@ -43,32 +43,6 @@ function Grouped({ tasks, groups, onMarkDone }: { tasks: Task[]; groups: typeof 
           </section>
         )
       })}
-    </div>
-  )
-}
-
-export function HomeView() {
-  const tasks = useTasks()
-  const health = useHealth()
-  if (tasks.isLoading) return null
-  const list = tasks.data ?? []
-  const working = list.filter((t) => t.status === "working" || t.status === "starting").length
-  return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">The yard</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          {working} agent{working === 1 ? "" : "s"} working · {list.length} task{list.length === 1 ? "" : "s"} ·{" "}
-          {health.data ? `${health.data.provider} boxes, ${health.data.bus === "redis" ? "Redis bus" : "file bus"}` : ""}
-        </p>
-      </header>
-      {list.length === 0 ? (
-        <Empty icon={<Boxes className="h-8 w-8" />} title="Nothing in the yard yet">
-          Tell the orchestrator what you want built, researched or written. It creates projects and starts agents in boxes for you.
-        </Empty>
-      ) : (
-        <Grouped tasks={list} groups={GROUPS} />
-      )}
     </div>
   )
 }
