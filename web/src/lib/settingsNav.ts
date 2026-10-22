@@ -27,8 +27,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "How many worker boxes and agents may run at once.",
-    fields: ["maxBoxes", "slotsPerBox", "maxAgents"],
+    description: "Worker box size, capacity, and cleanup retention.",
+    fields: ["workerSize", "maxBoxes", "slotsPerBox", "maxAgents", "maxResidentPerBox", "boxIdleDeleteMinutes", "workspaceRetentionDays", "archiveRetentionDays"],
   },
   {
     key: "notifications",
@@ -69,9 +69,14 @@ export function stepSection(current: SettingsSection, delta: number): SettingsSe
 export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   orchestratorModel: "ORCHESTRATOR_MODEL",
   agentModel: "WORKER_MODEL",
+  workerSize: "WORKER_SIZE",
   maxBoxes: "BOX_POOL_MAX",
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
+  maxResidentPerBox: "BOX_MAX_RESIDENT",
+  boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
+  workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
+  archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
 }
 
 /** Settings whose draft value differs from the one in effect. */
@@ -85,7 +90,16 @@ export function changedSections(keys: (keyof Settings)[]): Set<SettingsSection> 
   return new Set(SETTINGS_SECTIONS.filter((s) => s.fields.some((f) => keys.includes(f))).map((s) => s.key))
 }
 
-const POOL_KEYS = ["maxBoxes", "slotsPerBox", "maxAgents"] as const
+const POOL_KEYS = [
+  "workerSize",
+  "maxBoxes",
+  "slotsPerBox",
+  "maxAgents",
+  "maxResidentPerBox",
+  "boxIdleDeleteMinutes",
+  "workspaceRetentionDays",
+  "archiveRetentionDays",
+] as const
 
 /** What Save sends. Pool limits go only when edited, so an untouched form doesn't pin them over env changes. */
 export function savePatch(draft: Settings, current: Settings | null | undefined): Partial<Settings> {
