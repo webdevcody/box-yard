@@ -43,6 +43,9 @@ export interface TaskManagerDeps {
   artifacts: Artifacts
 }
 
+/** kv key for the box a project's work goes to first. */
+const projectBoxKey = (projectId: string) => `project_box:${projectId}`
+
 const slugify = (s: string) =>
   s
     .toLowerCase()
@@ -73,6 +76,10 @@ export class TaskManager {
   private pollFailures = new Map<string, number>()
   private stopRequested = new Set<string>()
   private creatingBoxes = 0
+  /** Boxes being created, per project they're for. */
+  private creatingFor = new Map<string, number>()
+  /** Tasks that found no box this scheduling pass and want a new one. */
+  private wantsBox = new Set<string>()
   private lastBoxError: { at: number; message: string } | null = null
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
@@ -284,6 +291,7 @@ export class TaskManager {
         slots: this.c.slotsPerBox,
         runningTurns: residents.filter((r) => r.current_turn_id).length,
         residentTasks: residents.map((r) => r.id),
+        projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
         createdAt: b.created_at,
         lastUsedAt: b.last_used_at,
       }
@@ -332,7 +340,7 @@ export class TaskManager {
       .filter((r) => r.status !== "starting" && r.status !== "working")
       .sort((a, b) => a.last_active_at - b.last_active_at)
 
-    let unplaced = 0
+    this.wantsBox.clear()
     for (const row of waiting) {
       const boxId = await this.place(row)
       if (!boxId) {
@@ -340,7 +348,6 @@ export class TaskManager {
           this.store.updateTask(row.id, { status: "queued" })
           this.emitTask(row.id)
         }
-        if (!row.box_id || this.store.getBox(row.box_id)?.status !== "ready") unplaced++
         continue
       }
       const turnId = randomUUID()
@@ -351,13 +358,14 @@ export class TaskManager {
       void this.launch(row.id, boxId, turnId)
     }
 
-    // Grow the pool when work is waiting and there is room.
-    const boxes = this.store.listBoxes()
-    const freeSoon = this.creatingBoxes * this.c.slotsPerBox
-    const recentlyFailed = this.lastBoxError && Date.now() - this.lastBoxError.at < BOX_RETRY_MS
-    if (unplaced > freeSoon && boxes.length + this.creatingBoxes < this.c.maxBoxes && !recentlyFailed) {
-      const want = Math.min(Math.ceil((unplaced - freeSoon) / this.c.slotsPerBox), this.c.maxBoxes - boxes.length - this.creatingBoxes)
-      for (let i = 0; i < want; i++) void this.createBox()
+    // Grow the pool: one new box per project per `slotsPerBox` tasks waiting for one.
+    const perProject = new Map<string, number>()
+    for (const row of waiting) {
+      if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
+    }
+    for (const [projectId, n] of perProject) {
+      const need = Math.ceil(n / this.c.slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
+      for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
   }
 
@@ -386,20 +394,51 @@ export class TaskManager {
     return boxId ? this.assign(row.id, boxId) : null
   }
 
+  /**
+   * Pick a box for a task. A project keeps its work together, so the order is:
+   * 1. a box that already hosts this project (warm repo mirror, shared files),
+   * 2. an empty box,
+   * 3. nothing yet, when the pool has room: a new box is made for the project,
+   * 4. a free slot on a box another project uses (the pool is full).
+   * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
+   */
   private pickBox(taskId: string, exclude?: string): string | null {
+    const row = this.store.getTaskRow(taskId)
+    const projectId = row?.project_id
+    const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
     const candidates = this.store
       .listBoxes()
       .filter((b) => b.status === "ready" && b.id !== exclude)
       .map((b) => {
-        const residents = this.store.listTaskRows({ boxId: b.id })
-        return { id: b.id, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length }
+        const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
+        const mine = residents.some((r) => r.project_id === projectId) || b.id === preferred
+        const others = residents.some((r) => r.project_id !== projectId)
+        // 0 = this project's box, 1 = empty box, 2 = another project's box
+        const rank = mine ? 0 : !residents.length ? 1 : others ? 2 : 1
+        return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length }
       })
       .filter((b) => b.running < this.c.slotsPerBox)
-      .sort((a, b) => a.running - b.running || a.residents - b.residents)
+      .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     for (const b of candidates) {
-      if (b.residents < this.c.maxResidentPerBox || this.evictOne(b.id, taskId)) return b.id
+      if (b.rank === 2 && this.poolHasRoom()) {
+        // Rather than crowd another project's box, make one for this project.
+        this.wantsBox.add(taskId)
+        return null
+      }
+      if (b.residents < this.c.maxResidentPerBox || this.evictOne(b.id, taskId)) {
+        this.wantsBox.delete(taskId)
+        return b.id
+      }
     }
+    if (this.poolHasRoom()) this.wantsBox.add(taskId)
     return null
+  }
+
+  /** Room to create another box (and box creation isn't failing right now). */
+  private poolHasRoom() {
+    const recentlyFailed = this.lastBoxError && Date.now() - this.lastBoxError.at < BOX_RETRY_MS
+    // listBoxes() includes the placeholders of boxes being created.
+    return !recentlyFailed && this.store.listBoxes().length < this.c.maxBoxes
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */
@@ -413,6 +452,8 @@ export class TaskManager {
     let port = PORT_BASE
     while (used.has(port)) port += 10
     this.store.updateTask(taskId, { boxId, portBase: port })
+    const projectId = this.store.getTaskRow(taskId)?.project_id
+    if (projectId) this.store.setKv(projectBoxKey(projectId), boxId)
     return boxId
   }
 
@@ -437,17 +478,22 @@ export class TaskManager {
     return true
   }
 
-  private async createBox() {
+  private async createBox(projectId?: string) {
     this.creatingBoxes++
+    if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
     this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now() })
     this.emitBoxes()
+    const project = projectId ? this.store.getProject(projectId) : null
     try {
-      const id = await this.provider.create({ labels: ["boxyard", this.installLabel()] })
+      const labels = ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
+      const id = await this.provider.create({ labels })
       this.store.removeBox(placeholder)
       this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now() })
+      // The new box belongs to the project that asked for it, so its tasks land there.
+      if (projectId && this.store.getProject(projectId)) this.store.setKv(projectBoxKey(projectId), id)
       this.lastBoxError = null
-      console.log(`[box-yard] created box ${id}`)
+      console.log(`[box-yard] created box ${id}${project ? ` for project ${project.name}` : ""}`)
     } catch (err) {
       this.store.removeBox(placeholder)
       const message = `Couldn't create a worker box: ${errorMessage(err)}`
@@ -457,6 +503,11 @@ export class TaskManager {
       setTimeout(() => this.schedule(), BOX_RETRY_MS).unref()
     } finally {
       this.creatingBoxes--
+      if (projectId) {
+        const left = (this.creatingFor.get(projectId) ?? 1) - 1
+        if (left > 0) this.creatingFor.set(projectId, left)
+        else this.creatingFor.delete(projectId)
+      }
       this.emitBoxes()
       this.schedule()
     }
@@ -613,9 +664,16 @@ export class TaskManager {
     if (project.repo) {
       const helper = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
       const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.c.githubToken
+      const url = cloneUrl(project.repo)
+      // One bare mirror per repo per box: later tasks of the project clone from
+      // local disk. --dissociate copies the objects, so a task folder stays
+      // self-contained when it's archived or moved to another box.
+      const mirror = `${root}/.boxyard/repos/${slugify(project.repo.replace(/^https?:\/\/[^/]+\//, ""))}.git`
+      const git = `GITHUB_TOKEN=${q(token)} GIT_TERMINAL_PROMPT=0 git -c credential.helper=${q(helper)}`
       steps.push(
+        `( [ -d ${q(mirror)} ] && ${git} -C ${q(mirror)} fetch -q --prune origin || (rm -rf ${q(mirror)} && mkdir -p ${q(root + "/.boxyard/repos")} && ${git} clone -q --mirror ${q(url)} ${q(mirror)}) ) >/dev/null 2>&1; true`,
         `cd ${q(dir)}`,
-        `GITHUB_TOKEN=${q(token)} GIT_TERMINAL_PROMPT=0 git -c credential.helper=${q(helper)} clone ${q(cloneUrl(project.repo))} work`,
+        `${git} clone --reference-if-able ${q(mirror)} --dissociate ${q(url)} work`,
         `cd work`,
         `(git checkout ${q(project.baseBranch)} 2>/dev/null || true)`,
         `git config credential.helper ${q(helper)}`,

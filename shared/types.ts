@@ -137,6 +137,8 @@ export interface BoxInfo {
   slots: number
   runningTurns: number
   residentTasks: string[]
+  /** Names of the projects whose tasks live on this box. */
+  projects: string[]
   createdAt: number
   lastUsedAt: number
 }

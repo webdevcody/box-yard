@@ -114,7 +114,7 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
             return (
               <div
                 key={i}
-                title={box ? `${box.id}: ${box.runningTurns}/${box.slots} running, ${box.residentTasks.length} tasks` : "free"}
+                title={box ? `${box.id}: ${box.runningTurns}/${box.slots} running, ${box.residentTasks.length} tasks${box.projects.length ? ` (${box.projects.join(", ")})` : ""}` : "free"}
                 className={cx(
                   "h-2 flex-1 rounded-sm",
                   !box && "bg-zinc-800",
