@@ -3,6 +3,26 @@ import { AlarmClock, ExternalLink, GitPullRequest, Globe, MessageCircleQuestion 
 import type { Task } from "../../../shared/types"
 import { StatusBadge, TimeAgo, cx } from "./ui"
 
+/** Flattens markdown to plain text for card previews; drops the task's own PR URL (shown in the footer) and shortens other URLs. */
+export function plainPreview(text: string, prUrl?: string | null): string {
+  let t = text
+  if (prUrl) t = t.split(prUrl).join("")
+  return t
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/https?:\/\/([^\s/)]+)(\/[^\s)]*)?/g, (_, host: string, path?: string) => {
+      const short = host.replace(/^www\./, "") + (path && path !== "/" ? path : "")
+      return short.length > 40 ? short.slice(0, 39) + "…" : short
+    })
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*>\s?/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/(\*\*|__|\*|`)/g, "")
+    .replace(/\s*:\s*(?=[.,;]|$)/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 export function TaskCard({ task, projectName }: { task: Task; projectName?: string }) {
   return (
     <Link
@@ -13,11 +33,13 @@ export function TaskCard({ task, projectName }: { task: Task; projectName?: stri
       )}
     >
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           {projectName && <div className="mb-0.5 truncate text-xs text-zinc-500">{projectName}</div>}
-          <div className="truncate font-medium text-zinc-100">{task.title}</div>
+          <div className="line-clamp-2 break-words font-medium text-zinc-100">{task.title}</div>
         </div>
-        <StatusBadge status={task.status} />
+        <span className="mt-0.5 shrink-0">
+          <StatusBadge status={task.status} />
+        </span>
       </div>
 
       {task.status === "needs_input" && task.question ? (
@@ -28,7 +50,7 @@ export function TaskCard({ task, projectName }: { task: Task; projectName?: stri
       ) : task.status === "failed" && task.error ? (
         <p className="mt-2 line-clamp-2 text-sm text-red-300/80">{task.error}</p>
       ) : (
-        <p className="mt-2 line-clamp-2 text-sm text-zinc-400">{task.summary ?? task.prompt}</p>
+        <p className="mt-2 line-clamp-2 text-sm text-zinc-400">{plainPreview(task.summary ?? task.prompt, task.prUrl)}</p>
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
