@@ -211,6 +211,12 @@ const MIGRATIONS: string[] = [
   CREATE INDEX notifications_recent ON notifications(created_at);
   CREATE INDEX notifications_task ON notifications(task_id);
   `,
+  `
+  -- Live pull request state, polled from GitHub: open, draft, merged or closed (NULL until first checked).
+  ALTER TABLE tasks ADD COLUMN pr_state TEXT;
+  ALTER TABLE tasks ADD COLUMN pr_merged_at INTEGER;
+  ALTER TABLE tasks ADD COLUMN pr_merged_by TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
