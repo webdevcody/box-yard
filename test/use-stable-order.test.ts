@@ -106,8 +106,24 @@ describe("useStableOrder", () => {
     hovered.mockReturnValue(false)
     act(() => {
       list.dispatchEvent(new Event("pointerleave"))
-      vi.advanceTimersByTime(IDLE_MS)
+      vi.advanceTimersByTime(IDLE_MS - 100)
     })
+    expect(shown()).toEqual(["a", "b", "c"])
+    act(() => vi.advanceTimersByTime(100))
     expect(shown()).toEqual(["c", "a", "b"])
+  })
+
+  it("moves cards on its own at most once per IDLE_MS", () => {
+    vi.useFakeTimers()
+    render(start)
+    render([{ id: "a", score: 3 }, { id: "b", score: 2 }, { id: "c", score: 9 }])
+    act(() => vi.advanceTimersByTime(IDLE_MS))
+    expect(shown()).toEqual(["c", "a", "b"])
+    // A change right after the re-sort waits for the next window.
+    render([{ id: "a", score: 3 }, { id: "b", score: 20 }, { id: "c", score: 9 }])
+    act(() => vi.advanceTimersByTime(IDLE_MS / 2))
+    expect(shown()).toEqual(["c", "a", "b"])
+    act(() => vi.advanceTimersByTime(IDLE_MS / 2))
+    expect(shown()).toEqual(["b", "c", "a"])
   })
 })

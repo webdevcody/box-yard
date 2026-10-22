@@ -4,13 +4,14 @@
 // - on mount (navigating to the page, switching tabs) and whenever `resetKey` changes (sort, filter, search);
 // - when the user clicks the Re-sort pill (`resort`);
 // - while the browser tab is hidden, so you come back to a fresh order;
-// - on its own, after IDLE_MS, only when the pointer isn't over the list, nothing in it has focus,
-//   and its scroller is at the top. Scrolled down, hovering or keyboarding through cards, nothing moves.
+// - on its own only when the list is left alone: the pointer isn't over it, nothing in it has focus, its scroller
+//   is at the top, and it has been IDLE_MS since the last re-sort and since the user last touched the list.
+//   So cards move at most every IDLE_MS, and never while you hover, tab through or scroll the cards.
 // Cards that move slide to their new spot (FLIP), unless the user prefers reduced motion.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { freshOrder, hasPending, stableView, type StableOptions, type StableView } from "./stableOrder"
 
-export const IDLE_MS = 3000
+export const IDLE_MS = 20_000
 const KEY_ATTR = "data-stable-key"
 
 export interface StableOrder<T> extends StableView<T> {
@@ -24,6 +25,7 @@ export function useStableOrder<T, K>(items: readonly T[], opts: StableOptions<T,
   const [state, setState] = useState(() => ({ frozen: freshOrder(items, opts), resetKey: opts.resetKey }))
   const [el, setEl] = useState<HTMLElement | null>(null)
   const flip = useRef<Map<string, DOMRect> | null>(null)
+  const quietSince = useRef(Date.now())
   const latest = useRef({ items, opts })
   latest.current = { items, opts }
 
@@ -78,6 +80,9 @@ export function useStableOrder<T, K>(items: readonly T[], opts: StableOptions<T,
   })
 
   const pending = hasPending(view)
+  useEffect(() => {
+    quietSince.current = Date.now()
+  }, [state.frozen])
 
   // Re-sort while the tab is hidden: nobody is looking, and coming back shows a fresh order.
   useEffect(() => {
@@ -95,18 +100,22 @@ export function useStableOrder<T, K>(items: readonly T[], opts: StableOptions<T,
     const idle = () => !el.matches(":hover") && !el.matches(":focus-within") && scroller.scrollTop < 4 && !document.hidden
     const schedule = () => {
       clearTimeout(timer)
-      timer = setTimeout(() => idle() && apply(true), IDLE_MS)
+      timer = setTimeout(() => idle() && apply(true), Math.max(0, quietSince.current + IDLE_MS - Date.now()))
+    }
+    const touched = () => {
+      quietSince.current = Date.now()
+      schedule()
     }
     schedule()
     const target = scroller === document.scrollingElement ? window : scroller
-    el.addEventListener("pointerleave", schedule)
-    el.addEventListener("focusout", schedule)
-    target.addEventListener("scroll", schedule, { passive: true })
+    el.addEventListener("pointerleave", touched)
+    el.addEventListener("focusout", touched)
+    target.addEventListener("scroll", touched, { passive: true })
     return () => {
       clearTimeout(timer)
-      el.removeEventListener("pointerleave", schedule)
-      el.removeEventListener("focusout", schedule)
-      target.removeEventListener("scroll", schedule)
+      el.removeEventListener("pointerleave", touched)
+      el.removeEventListener("focusout", touched)
+      target.removeEventListener("scroll", touched)
     }
   }, [pending, el, apply])
 
