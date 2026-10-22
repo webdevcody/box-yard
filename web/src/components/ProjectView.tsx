@@ -23,10 +23,8 @@ import {
   parseSort,
   type TaskFilter,
 } from "../lib/projectTasks"
-import { useStableOrder } from "../lib/useStableOrder"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
-import { TaskCard } from "./TaskCard"
-import { ResortPill } from "./ResortPill"
+import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
@@ -207,8 +205,7 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
 
   const counts = filterCounts(tasks, query)
   // Sorted once, then held still: live updates change cards in place; the pill re-sorts.
-  const stable = useStableOrder(tasks, {
-    key: (t) => t.id,
+  const stable = useStableTasks(tasks, {
     compare: compareTasks(sort),
     include: (t) => isVisible(t, { filter, query }),
     resetKey: `${filter}|${sort}|${query}`,
@@ -217,7 +214,8 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
   const filterLabel = TASK_FILTERS.find((f) => f.key === filter)!.label
 
   return (
-    <div className="space-y-4">
+    // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
+    <div className="space-y-4 pb-6">
       {showNew && <NewTaskForm projectId={projectId} onDone={onCloseNew} />}
 
       {tasks.length === 0 ? (
@@ -275,16 +273,7 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
               )}
             </Empty>
           ) : (
-            <div ref={stable.listRef} className="scroll-mt-14">
-              <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} className="top-14" />
-              <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-                {shown.map(({ item: t, stale }) => (
-                  <div key={t.id} data-stable-key={t.id}>
-                    <TaskCard task={t} stale={stale} />
-                  </div>
-                ))}
-              </div>
-            </div>
+            <TaskGrid stable={stable} pillClassName="top-14" />
           )}
 
           {filter === "open" && counts.done > 0 && shown.length > 0 && (

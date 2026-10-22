@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "wouter"
 import { Activity, Boxes, CheckCircle2, ChevronRight, History, Inbox as InboxIcon, Layers, Search } from "lucide-react"
 import { useHealth, useProjects, useTasks } from "../lib/queries"
@@ -15,10 +15,8 @@ import {
   yardCounts,
   type YardTab,
 } from "../lib/yardTasks"
-import { useStableOrder, type StableOrder } from "../lib/useStableOrder"
 import { Empty, STATUS, Select, TimeAgo, cx } from "./ui"
-import { TaskCard } from "./TaskCard"
-import { ResortPill } from "./ResortPill"
+import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, isTyping, useUrlQuery, withParam } from "./TaskFilters"
 import type { Task } from "../../../shared/types"
 
@@ -40,41 +38,6 @@ function useNow(ms = 60_000) {
   return now
 }
 
-/** Cards only re-render when their task changes; react-query keeps unchanged task objects identical. */
-const MemoTaskCard = memo(TaskCard)
-
-/** Cards rendered up front; more on request, so a tab with hundreds of tasks opens fast. */
-const PAGE = 60
-
-/** The cards of a tab, held still by useStableOrder (live updates change them in place; the pill re-sorts). */
-function TaskGrid({ stable, names }: { stable: StableOrder<Task>; names: Map<string, string> }) {
-  const [limit, setLimit] = useState(PAGE)
-  const rest = stable.entries.length - limit
-  return (
-    <>
-      <div ref={stable.listRef}>
-        <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} />
-        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-          {stable.entries.slice(0, limit).map(({ item: t, stale }) => (
-            // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
-            <div key={t.id} data-stable-key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
-              <MemoTaskCard task={t} projectName={names.get(t.projectId)} stale={stale} />
-            </div>
-          ))}
-        </div>
-      </div>
-      {rest > 0 && (
-        <button
-          onClick={() => setLimit((n) => n + PAGE * 2)}
-          className="w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
-        >
-          Show {Math.min(rest, PAGE * 2)} more of {rest}
-        </button>
-      )}
-    </>
-  )
-}
-
 export function YardView() {
   const tasks = useTasks()
   const projects = useProjects()
@@ -87,16 +50,16 @@ export function YardView() {
   const sort = parseSort(params.get("sort"))
   const older = params.get("older") === "1"
   const names = useMemo(() => new Map((projects.data ?? []).map((p) => [p.id, p.name])), [projects.data])
+  const projectNameOf = (id: string) => names.get(id)
   const projectId = names.has(params.get("project") ?? "") ? params.get("project") : null
 
   const all = tasks.data
   const scoped = useMemo(() => (all ?? []).filter((t) => !projectId || t.projectId === projectId), [all, projectId])
   const counts = useMemo(() => yardCounts(scoped, now), [scoped, now])
   // Sorted once per tab, filter and search, then held still while agents update.
-  const stable = useStableOrder(scoped, {
-    key: (t) => t.id,
+  const stable = useStableTasks(scoped, {
     compare: yardCompare({ tab, sort }),
-    include: (t) => inYardView(t, { tab, now, older, query, projectName: (id) => names.get(id) }),
+    include: (t) => inYardView(t, { tab, now, older, query, projectName: projectNameOf }),
     resetKey: `${tab}|${projectId}|${older}|${tab === "all" ? `${sort}|${query}` : ""}`,
   })
   const shown = stable.entries
@@ -129,7 +92,8 @@ export function YardView() {
   const projectName = projectId ? names.get(projectId) : undefined
 
   return (
-    <div className="space-y-5">
+    // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
+    <div className="space-y-5 pb-6">
       <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">The yard</h1>
@@ -193,7 +157,7 @@ export function YardView() {
             <>
               {strip.length > 0 && <RecentStrip tasks={strip} names={names} href={tabHref(params, "recent")} />}
               {shown.length ? (
-                <TaskGrid key={tab} stable={stable} names={names} />
+                <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
               ) : (
                 <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
                   No agents are working right now. Ask the orchestrator for something new
@@ -213,7 +177,7 @@ export function YardView() {
 
           {tab === "needs_you" &&
             (shown.length ? (
-              <TaskGrid key={tab} stable={stable} names={names} />
+              <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
             ) : (
               <Empty icon={<InboxIcon className="h-8 w-8" />} title="Nothing needs you">
                 No questions, pull requests or failures waiting.
@@ -224,7 +188,7 @@ export function YardView() {
             <>
               <p className="text-xs text-zinc-500">{older ? "Every finished task, newest first." : "Finished in the last 24 hours, newest first."}</p>
               {shown.length ? (
-                <TaskGrid key={tab} stable={stable} names={names} />
+                <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
               ) : (
                 <Empty icon={<History className="h-8 w-8" />} title="Nothing finished in the last 24 hours" />
               )}
@@ -246,7 +210,7 @@ export function YardView() {
                 <SortSelect sort={sort} />
               </div>
               {shown.length ? (
-                <TaskGrid key={tab} stable={stable} names={names} />
+                <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
               ) : (
                 <Empty icon={<Search className="h-8 w-8" />} title={`No tasks match "${query.trim()}"`}>
                   <button className="text-yard-400 hover:text-yard-300" onClick={() => onQuery("")}>
