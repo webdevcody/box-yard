@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Request, Response } from "express"
 import { z } from "zod"
+import { capReply, preview } from "./replies.js"
 import type { Store } from "./store.js"
 import type { TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
@@ -195,13 +196,27 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   server.registerTool(
     "get_task",
     {
-      description: "Get one task with its latest transcript lines.",
-      inputSchema: { task: z.string(), last_messages: z.number().int().min(0).max(200).optional() },
+      description:
+        "Get one task with its latest transcript lines. `lastReply` is the agent's latest reply in full (up to 20k chars); older transcript lines are short previews. If a reply ends with a [truncated: N more chars …] marker, call again with full_reply=true and the offset from the marker — never ask the agent to repeat itself.",
+      inputSchema: {
+        task: z.string(),
+        last_messages: z.number().int().min(0).max(200).optional(),
+        full_reply: z.boolean().optional().describe("Return only the agent's latest reply, starting at `offset`, up to 20k chars"),
+        offset: z.number().int().min(0).optional().describe("Char offset into the latest reply (with full_reply)"),
+      },
     },
-    safe(async (a: { task: string; last_messages?: number }) => {
+    safe(async (a: { task: string; last_messages?: number; full_reply?: boolean; offset?: number }) => {
       const t = task(a.task)
-      const messages = store.listTaskMessages(t.id, a.last_messages ?? 20).map((m) => `[${m.role}] ${m.content.slice(0, 1200)}`)
-      return ok({ ...brief(t), prompt: t.prompt, summary: t.summary, branch: t.branch, messages })
+      const all = store.listTaskMessages(t.id, Math.max(a.last_messages ?? 20, 50))
+      const lastAssistant = [...all].reverse().find((m) => m.role === "assistant")
+      const reply = t.summary && (!lastAssistant || t.summary.length > lastAssistant.content.length) ? t.summary : (lastAssistant?.content ?? null)
+      if (a.full_reply) return ok({ ...brief(t), totalChars: reply?.length ?? 0, offset: a.offset ?? 0, lastReply: reply === null ? null : capReply(reply, a.offset ?? 0) })
+      const messages = all.slice(-(a.last_messages ?? 20)).map((m) => {
+        // The latest reply is returned once, in full, as lastReply.
+        if (m === lastAssistant && reply === m.content) return "[assistant] (latest reply: see lastReply)"
+        return `[${m.role}] ${preview(m.content, 600, "call get_task with full_reply for the latest reply")}`
+      })
+      return ok({ ...brief(t), prompt: t.prompt, branch: t.branch, lastReply: reply === null ? null : capReply(reply), messages })
     }),
   )
 
