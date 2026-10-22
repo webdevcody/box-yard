@@ -14,9 +14,9 @@ import {
   yardTasks,
   type YardTab,
 } from "../lib/yardTasks"
-import { Empty, STATUS, TimeAgo, cx } from "./ui"
+import { Empty, STATUS, Select, TimeAgo, cx } from "./ui"
 import { TaskCard } from "./TaskCard"
-import { SearchBox, SortSelect, TabBar, isTyping, selectClass, useUrlQuery, withParam } from "./TaskFilters"
+import { SearchBox, SortSelect, TabBar, isTyping, useUrlQuery, withParam } from "./TaskFilters"
 import type { Task } from "../../../shared/types"
 
 const TAB_ICONS: Record<YardTab, typeof Activity> = { active: Activity, needs_you: InboxIcon, recent: History, all: Layers }
@@ -128,8 +128,8 @@ export function YardView() {
           </p>
         </div>
         {list.length > 0 && (
-          <select
-            className={cx(selectClass, "w-44 sm:w-56", projectId && "border-yard-500/40 text-zinc-100")}
+          <Select
+            className={cx("w-44 shrink-0 text-zinc-300 sm:w-56", projectId && "border-yard-500/40 text-zinc-100")}
             value={projectId ?? ""}
             onChange={(e) => setParam("project", e.target.value || null)}
             aria-label="Filter by project"
@@ -143,7 +143,7 @@ export function YardView() {
                   {p.name} ({perProject.get(p.id) ?? 0})
                 </option>
               ))}
-          </select>
+          </Select>
         )}
       </header>
 

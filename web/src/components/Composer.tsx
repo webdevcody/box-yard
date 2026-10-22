@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
 import { createPortal } from "react-dom"
-import { AlertTriangle, FileText, Loader2, Paperclip, Send, X } from "lucide-react"
+import { AlertTriangle, FileText, Loader2, Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
+import { composerMaxHeight } from "../lib/composer"
 import { useSettings } from "../lib/queries"
 import { Button, cx } from "./ui"
 import { formatSize, isImage } from "./Attachments"
@@ -45,6 +46,9 @@ export function Composer({
 }) {
   const [files, setFiles] = useState<Pending[]>([])
   const [dragging, setDragging] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const input = useRef<HTMLTextAreaElement | null>(null)
   const picker = useRef<HTMLInputElement>(null)
   const maxMb = useSettings().data?.maxUploadMb ?? 20
   const filesRef = useRef(files)
@@ -87,6 +91,60 @@ export function Composer({
   const uploading = files.some((f) => f.status === "uploading")
   const ready = files.flatMap((f) => (f.attachment ? [f.attachment] : []))
   const canSend = !uploading && Boolean(value.trim() || ready.length)
+
+  const setTextarea = useCallback(
+    (el: HTMLTextAreaElement | null) => {
+      input.current = el
+      if (typeof textareaRef === "function") textareaRef(el)
+      else if (textareaRef) (textareaRef as { current: HTMLTextAreaElement | null }).current = el
+    },
+    [textareaRef],
+  )
+
+  // Grow the box with its text up to a cap, then scroll inside it. Runs on every value change
+  // (typing, paste, draft restore, clearing after send), when attachments change and on resize.
+  const resize = useCallback(() => {
+    const el = input.current
+    const row = el?.parentElement
+    if (!el || !row) return
+    const max = composerMaxHeight(window.innerHeight, expanded)
+    // Hold the row's height while measuring so the panel (and the message list scroll) doesn't move.
+    row.style.minHeight = `${row.offsetHeight}px`
+    el.style.height = "auto"
+    const full = el.scrollHeight
+    el.style.height = `${Math.min(full, max)}px`
+    row.style.minHeight = ""
+    const over = full > max
+    el.style.overflowY = over ? "auto" : "hidden"
+    setOverflowing(over)
+    // Typing or pasting at the end of a capped box: keep the caret in view.
+    if (over && document.activeElement === el && el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight
+  }, [expanded])
+
+  useLayoutEffect(resize, [resize, value, files.length])
+
+  useEffect(() => {
+    const el = input.current
+    if (!el) return
+    // Width changes (window or panel resize) rewrap the text, so re-measure.
+    let width = el.offsetWidth
+    const ro = new ResizeObserver(() => {
+      if (el.offsetWidth === width) return
+      width = el.offsetWidth
+      resize()
+    })
+    ro.observe(el)
+    window.addEventListener("resize", resize)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener("resize", resize)
+    }
+  }, [resize])
+
+  // An emptied box (after sending) goes back to its normal size.
+  useEffect(() => {
+    if (!value) setExpanded(false)
+  }, [value])
 
   const submit = () => {
     if (!canSend) return
@@ -226,7 +284,7 @@ export function Composer({
             <Paperclip className="h-4 w-4" />
           </Button>
           <textarea
-            ref={textareaRef}
+            ref={setTextarea}
             rows={1}
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -238,12 +296,30 @@ export function Composer({
               }
             }}
             placeholder={placeholder}
-            className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
-            style={{ height: Math.min(160, 36 + (value.split("\n").length - 1) * 20) }}
+            className="scroll-thin min-h-[2.25rem] flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
           />
-          <Button type="submit" variant="primary" size="sm" className="h-8 w-8 !p-0" disabled={!canSend}>
-            <Send className="h-4 w-4" />
-          </Button>
+          <div className="flex flex-col items-center gap-1">
+            {(overflowing || expanded) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 w-8 !p-0"
+                title={expanded ? "Shrink editor" : "Expand editor"}
+                aria-label={expanded ? "Shrink editor" : "Expand editor"}
+                aria-pressed={expanded}
+                onClick={() => {
+                  setExpanded((on) => !on)
+                  input.current?.focus()
+                }}
+              >
+                {expanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+              </Button>
+            )}
+            <Button type="submit" variant="primary" size="sm" className="h-8 w-8 !p-0" disabled={!canSend}>
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </form>
