@@ -161,7 +161,8 @@ function ChatLine({ m }: { m: ChatMessage }) {
     const taskId = m.meta?.taskId as string | undefined
     const body = (
       <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400">
-        <Markdown>{m.content}</Markdown>
+        {/* The whole notice already links to its task; links inside it would nest. */}
+        <Markdown linkify={!taskId}>{m.content}</Markdown>
       </div>
     )
     return taskId ? (

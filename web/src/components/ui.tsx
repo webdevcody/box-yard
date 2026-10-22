@@ -1,8 +1,11 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { useLocation } from "wouter"
 import { Loader2 } from "lucide-react"
-import type { TaskStatus } from "../../../shared/types"
+import { useArtifacts, useBoxes, useProjects, useSchedules, useTasks } from "../lib/queries"
+import { buildEntityIndex, linkTarget, refForHref, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
+import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -57,16 +60,56 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
   )
 }
 
-export function Markdown({ children }: { children: string }) {
+export function Markdown({ children, linkify = true }: { children: string; linkify?: boolean }) {
+  const index = useEntityIndex()
   return (
-    <div className="prose-chat break-words">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{ a: (props) => <a {...props} target="_blank" rel="noreferrer" /> }}
-      >
+    <EntityIndexContext.Provider value={index}>
+      <div className="prose-chat break-words">
+        <ReactMarkdown remarkPlugins={linkify ? [remarkGfm, [remarkEntityLinks, index]] : [remarkGfm]} components={{ a: MarkdownLink }}>
+          {children}
+        </ReactMarkdown>
+      </div>
+    </EntityIndexContext.Provider>
+  )
+}
+
+const EntityIndexContext = createContext<EntityIndex | null>(null)
+
+let lastIndex: { inputs: unknown[]; index: EntityIndex } | null = null
+
+/** Every task, project, schedule, artifact and box in the client cache, indexed for linking. Shared by all messages. */
+function useEntityIndex(): EntityIndex {
+  const inputs = [useTasks().data, useProjects().data, useSchedules().data, useArtifacts().data, useBoxes().data]
+  if (!lastIndex || inputs.some((v, i) => v !== lastIndex!.inputs[i])) {
+    const [tasks, projects, schedules, artifacts, boxes] = inputs as [Task[], Project[], Schedule[], Artifact[], BoxInfo[]]
+    lastIndex = { inputs, index: buildEntityIndex({ tasks, projects, schedules, artifacts, boxes }, (s) => STATUS[s].label) }
+  }
+  return lastIndex.index
+}
+
+/** In-app links navigate without a reload (Cmd/Ctrl-click still opens a tab); files and other sites open in a new tab. */
+function MarkdownLink({ href = "", title, children, node: _node, ...rest }: ComponentProps<"a"> & { node?: unknown }) {
+  const [, navigate] = useLocation()
+  const index = useContext(EntityIndexContext)
+  const target = linkTarget(href, window.location.origin)
+  const hint = title ?? (index && target.kind !== "external" ? refForHref(target.href, index)?.hint : undefined)
+  if (target.kind !== "app")
+    return (
+      <a {...rest} href={target.href} title={hint} target="_blank" rel="noreferrer">
         {children}
-      </ReactMarkdown>
-    </div>
+      </a>
+    )
+  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+    e.preventDefault()
+    navigate(target.href)
+    // pushState doesn't fire hashchange; pages that scroll to #id listen for it.
+    if (target.href.includes("#")) window.dispatchEvent(new HashChangeEvent("hashchange"))
+  }
+  return (
+    <a {...rest} href={target.href} title={hint} onClick={onClick}>
+      {children}
+    </a>
   )
 }
 
