@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "limits" | "notifications" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "limits" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -36,6 +36,12 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     description: "How this browser tells you a task finished or needs you. Saved in this browser only.",
     fields: [],
   },
+  {
+    key: "voice",
+    label: "Voice",
+    description: "Hear short spoken updates when work finishes, using this browser's text-to-speech. Saved in this browser only.",
+    fields: [],
+  },
   { key: "about", label: "About", description: "What this Box Yard is running on.", fields: [] },
 ]
 
@@ -43,7 +49,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { boxes: "limits", agent: "agents", workers: "agents" }
+const ALIASES: Record<string, SettingsSection> = { boxes: "limits", agent: "agents", workers: "agents", speech: "voice", tts: "voice" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

@@ -12,6 +12,7 @@ import { Composer } from "./Composer"
 import { AttachmentList } from "./Attachments"
 import { ContextMeter } from "./ContextMeter"
 import { useOpenSettings } from "./SettingsDialog"
+import { VoiceControl } from "./VoiceControl"
 import type { Attachment, ChatMessage } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 
@@ -75,7 +76,8 @@ export const ChatPanel = memo(function ChatPanel() {
         <Bot className="h-4 w-4 text-yard-400" />
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
         {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
-        <div className="ml-auto flex gap-1">
+        <div className="ml-auto flex items-center gap-1">
+          <VoiceControl />
           <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
             <SettingsIcon className="h-3.5 w-3.5" />
           </Button>

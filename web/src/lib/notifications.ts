@@ -6,6 +6,7 @@ import { navigate } from "wouter/use-browser-location"
 import { api } from "./api"
 import { keys } from "./queries"
 import { toast, type ToastTone } from "./toast"
+import { voiceNotification } from "./speech"
 import type { AppNotification, NotifyStatus } from "../../../shared/types"
 
 /** Notifications that land within this window of each other share one toast. */
@@ -138,6 +139,7 @@ export function receiveNotification(qc: QueryClient, n: AppNotification) {
     void markRead(qc, { ids: [n.id] })
     return
   }
+  voiceNotification(n)
   burst.push(n)
   flushTimer ??= setTimeout(() => flush(qc), BATCH_MS)
 }

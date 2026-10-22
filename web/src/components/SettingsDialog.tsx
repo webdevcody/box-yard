@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -15,6 +15,7 @@ import {
 } from "../lib/settingsNav"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
+import { VoicePanel } from "./VoiceSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { Button, Select, cx, inputClass } from "./ui"
@@ -33,7 +34,7 @@ import {
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, notifications: Bell, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -76,7 +77,7 @@ function SourceHint({ source, env, changed }: { source?: SettingSource; env?: st
 }
 
 /** One setting: label and help text on the left, the control and where its value comes from on the right. */
-function Row({ id, label, help, hint, children }: { id?: string; label: string; help: ReactNode; hint?: ReactNode; children: ReactNode }) {
+export function Row({ id, label, help, hint, children }: { id?: string; label: string; help: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return (
     <div className="grid gap-x-8 gap-y-2 border-t border-zinc-900 py-4 first:border-t-0 first:pt-0 sm:grid-cols-[minmax(0,1fr)_17rem]">
       <div>
@@ -93,7 +94,7 @@ function Row({ id, label, help, hint, children }: { id?: string; label: string; 
   )
 }
 
-function Panel({ section, children }: { section: SettingsSection; children: ReactNode }) {
+export function Panel({ section, children }: { section: SettingsSection; children: ReactNode }) {
   const info = SETTINGS_SECTIONS.find((s) => s.key === section)!
   return (
     <div>
@@ -328,6 +329,8 @@ export function SettingsDialog({
           <AboutPanel />
         ) : section === "notifications" ? (
           <NotificationsPanel fid={fid} />
+        ) : section === "voice" ? (
+          <VoicePanel fid={fid} />
         ) : !s ? (
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : section === "orchestrator" ? (
