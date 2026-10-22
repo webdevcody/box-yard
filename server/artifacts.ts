@@ -45,7 +45,7 @@ export class Artifacts {
     fs.mkdirSync(dir, { recursive: true })
   }
 
-  save(input: { title: string; filename: string; data: Buffer; projectId: string | null; taskId: string | null }): Artifact {
+  save(input: { id?: string; title: string; filename: string; data: Buffer; projectId: string | null; taskId: string | null }): Artifact {
     if (input.data.length > MAX_ARTIFACT_BYTES) throw new Error("Artifact is larger than 25 MB")
     const filename = safeFilename(input.filename)
     const folder = path.join(this.dir, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
@@ -53,6 +53,7 @@ export class Artifacts {
     const file = path.join(folder, filename)
     fs.writeFileSync(file, input.data)
     return this.store.addArtifact({
+      id: input.id,
       projectId: input.projectId,
       taskId: input.taskId,
       title: input.title.trim() || filename,

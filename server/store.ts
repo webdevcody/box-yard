@@ -557,8 +557,9 @@ export class Store {
 
   // ---------- artifacts ----------
 
-  addArtifact(input: Omit<Artifact, "id" | "createdAt" | "url"> & { path: string }): Artifact {
-    const id = newId("art")
+  addArtifact(input: Omit<Artifact, "id" | "createdAt" | "url"> & { path: string; id?: string }): Artifact {
+    // Workers pick the id themselves so they can hand out the URL right away.
+    const id = input.id && /^art_[a-f0-9]{12}$/.test(input.id) && !this.getArtifact(input.id) ? input.id : newId("art")
     const createdAt = Date.now()
     this.db
       .prepare(

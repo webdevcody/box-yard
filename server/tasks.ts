@@ -649,6 +649,7 @@ export class TaskManager {
       port: row.port_base ?? PORT_BASE,
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
+      publicUrl: this.c.publicUrl || null,
       redis: this.redis ? { url: this.c.redisUrl, token: this.c.redisToken, key: redisEventsKey(row.id) } : null,
     }
   }
@@ -855,6 +856,7 @@ export class TaskManager {
         try {
           const data = await this.provider.readFile(row.box_id, String(ev.path))
           const artifact = this.artifacts.save({
+            id: typeof ev.id === "string" ? ev.id : undefined,
             title: String(ev.title ?? path.basename(String(ev.path))),
             filename: path.basename(String(ev.path)),
             data,
@@ -863,6 +865,7 @@ export class TaskManager {
           })
           this.hub.broadcast({ type: "artifact", artifact })
           say("event", `Published artifact: ${artifact.title}`, { kind: "artifact", url: artifact.url, artifactId: artifact.id })
+          this.notice(`📎 **${row.title}** published ${artifact.title}: ${this.absoluteUrl(artifact.url)}`, { taskId })
         } catch (err) {
           say("event", `Couldn't fetch artifact ${ev.path}: ${errorMessage(err)}`)
         }
@@ -914,11 +917,17 @@ export class TaskManager {
 
     const cost = typeof ev.costUsd === "number" ? ` · $${ev.costUsd.toFixed(3)}` : ""
     this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`)
+    // What the agent said at the end of the turn, for the orchestrator.
+    const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
+    const gist = said.length > 600 ? `${said.slice(0, 600)}…` : said
+    const more = this.store.hasInputs(row.id) ? " (more messages are queued for it)" : ""
     if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
-    else if (status === "done") this.notice(`✅ **${row.title}** is done: ${(flags.done ?? "").slice(0, 300)}`, { taskId: row.id })
+    else if (status === "done") this.notice(`✅ **${row.title}** is done: ${gist}`, { taskId: row.id })
     else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${(error ?? "").slice(0, 300)}`, { taskId: row.id })
     else if (status === "pr_ready" && row.status !== "pr_ready" && !flags.sawPr) {
       this.notice(`🔀 **${row.title}** has a PR ready: ${row.pr_url}`, { taskId: row.id })
+    } else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
+      this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
 
     this.emitTask(row.id)
@@ -1165,6 +1174,10 @@ export class TaskManager {
     const previews = [...task.previews.filter((p) => p.port !== link.port), link].sort((a, b) => a.port - b.port)
     this.store.updateTask(taskId, { previews })
     this.emitTask(taskId)
+  }
+
+  private absoluteUrl(url: string) {
+    return url.startsWith("/") && this.c.publicUrl ? `${this.c.publicUrl.replace(/\/$/, "")}${url}` : url
   }
 
   private addEvent(taskId: string, content: string) {

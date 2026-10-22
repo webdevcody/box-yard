@@ -474,8 +474,12 @@ async function callTool(name, args = {}) {
       }
       if (!stat.isFile()) return text(`${p} is not a file`, true)
       if (stat.size > 25 * 1024 * 1024) return text("File is over 25 MB; compress or split it.", true)
-      await emit({ t: "artifact", path: p, title: args.title ? String(args.title) : path.basename(p), size: stat.size })
-      return text(`Published ${path.basename(p)}. Box Yard will host it.`)
+      // Same rules as the server's safeFilename, so the URL we hand out is the real one.
+      const filename = path.basename(p).replace(/[^\w.\- ]+/g, "_").trim().slice(0, 120) || "file"
+      const id = `art_${randomUUID().replace(/-/g, "").slice(0, 12)}`
+      const url = `${task.publicUrl ? task.publicUrl.replace(/\/$/, "") : ""}/artifacts/${id}/${encodeURIComponent(filename)}`
+      await emit({ t: "artifact", id, path: p, title: args.title ? String(args.title) : path.basename(p), size: stat.size })
+      return text(`Published ${filename}. Box Yard will host it at ${url} (live within a few seconds). Share that link.`)
     }
     case "mark_done": {
       await emit({ t: "done", summary: String(args.summary ?? "").trim() || "Done." })
