@@ -64,6 +64,15 @@ export interface Task {
   lastArchivedAt: number | null
   /** Set when a schedule started this task. */
   scheduleId: string | null
+  /** Tokens in the Claude session's context after its last turn; null until the first turn ends. */
+  contextTokens: number | null
+  contextWindow: number | null
+  /** A compaction is queued for after the current turn. */
+  compactPending: boolean
+  /** A compaction turn is running right now. */
+  compacting: boolean
+  /** Effort the orchestrator picked for this agent (used only in "let the orchestrator decide" mode). */
+  effort: Effort | null
   createdAt: number
   updatedAt: number
 }
@@ -166,7 +175,74 @@ export type UiEvent =
   | { type: "chat.message"; message: ChatMessage }
   | { type: "chat.delta"; text: string }
   | { type: "chat.busy"; busy: boolean }
+  | { type: "orchestrator.state"; state: OrchestratorState }
+  | { type: "settings"; info: SettingsInfo }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "schedule"; schedule: Schedule }
   | { type: "schedule.deleted"; scheduleId: string }
+
+// ---------------------------------------------------------------- effort, usage, settings
+
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const
+export type Effort = (typeof EFFORTS)[number]
+/** Box agent effort setting: a fixed level, or the orchestrator picks per task/message. */
+export type AgentEffort = Effort | "orchestrator"
+
+export const DEFAULT_MODEL = "claude-opus-5-5"
+export const DEFAULT_EFFORT: Effort = "high"
+/** The CLI accepts an auto-compact window between these many tokens. */
+export const AUTOCOMPACT_MIN_TOKENS = 100_000
+export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
+
+export interface AutoCompact {
+  enabled: boolean
+  unit: "percent" | "tokens"
+  /** Percent of the context window (10-95) or a token count. */
+  value: number
+}
+
+export interface Settings {
+  orchestratorModel: string
+  orchestratorEffort: Effort
+  /** Compacts between turns once usage passes the threshold; writes a log file first. */
+  orchestratorAutoCompact: AutoCompact
+  agentModel: string
+  agentEffort: AgentEffort
+  /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
+  agentAutoCompact: AutoCompact
+}
+
+export type SettingSource = "ui" | "env" | "default"
+
+export interface SettingsInfo {
+  /** The values in effect from the next turn on. */
+  settings: Settings
+  /** Where each value comes from: saved in the UI, an env var, or the built-in default. */
+  sources: Record<keyof Settings, SettingSource>
+  defaults: Settings
+}
+
+export interface ContextUsage {
+  tokens: number | null
+  window: number | null
+  updatedAt: number | null
+}
+
+export interface CompactionInfo {
+  at: number
+  trigger: "button" | "auto"
+  tokensBefore: number | null
+  tokensAfter: number | null
+  file: string
+}
+
+export interface OrchestratorState {
+  busy: boolean
+  usage: ContextUsage
+  compacting: boolean
+  compactQueued: boolean
+  lastCompaction: CompactionInfo | null
+  compactionsDir: string
+  error: string | null
+}
