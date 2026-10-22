@@ -4,7 +4,8 @@ import { Boxes, ChevronRight, ExternalLink, Globe, Settings } from "lucide-react
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
-import { Empty, StatusBadge, cx, timeAgo } from "./ui"
+import { Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
+import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
 
@@ -128,7 +129,8 @@ function TaskRow({ task, projectName, muted }: { task: Task; projectName: string
         </div>
         <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
       </div>
-      <StatusBadge status={task.status} />
+      <PrChip task={task} variant="link" className="hidden text-xs sm:inline-flex" />
+      <StatusBadge status={badgeStatus(task)} />
       <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600 transition group-hover:translate-x-0.5 group-hover:text-zinc-300" />
     </Link>
   )

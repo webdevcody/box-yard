@@ -95,6 +95,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     status: t.status,
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
+    prState: t.prUrl ? (t.prState ?? undefined) : undefined,
     previews: t.previews.length ? t.previews.map((p) => p.url) : undefined,
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,

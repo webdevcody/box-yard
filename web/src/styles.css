@@ -9,6 +9,9 @@
   --color-yard-400: #fbbf24;
   --color-yard-500: #f59e0b;
   --color-yard-600: #d97706;
+  /* GitHub's merged-PR purple, and a lighter shade that reads on dark backgrounds. */
+  --color-merged: #8957e5;
+  --color-merged-fg: #b392f0;
 }
 
 html,
