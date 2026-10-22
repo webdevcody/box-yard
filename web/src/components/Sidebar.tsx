@@ -7,7 +7,7 @@ import { NewProjectDialog } from "./NewProjectDialog"
 import type { Connection } from "../lib/stream"
 
 export function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
-  const [location] = useLocation()
+  const [location, navigate] = useLocation()
   const projects = useProjects()
   const tasks = useTasks()
   const boxes = useBoxes()
@@ -99,7 +99,14 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
         })}
       </div>
 
-      <div className="border-t border-zinc-900 p-3">
+      <div
+        role="link"
+        tabIndex={0}
+        title="Open the Boxes page"
+        onClick={() => { navigate("/boxes"); onNavigate?.() }}
+        onKeyDown={(e) => { if (e.key === "Enter") { navigate("/boxes"); onNavigate?.() } }}
+        className={cx("cursor-pointer border-t border-zinc-900 p-3 transition hover:bg-zinc-900/60", location === "/boxes" && "bg-zinc-900/60")}
+      >
         <div className="mb-1.5 flex items-center justify-between text-xs text-zinc-500">
           <span>
             {boxes.data?.length ?? 0}/{pool?.maxBoxes ?? "?"} boxes · {health.data?.provider ?? "…"}
@@ -114,6 +121,7 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
             return (
               <div
                 key={i}
+                onClick={box ? (e) => { e.stopPropagation(); navigate("/boxes"); window.location.hash = box.id; onNavigate?.() } : undefined}
                 title={box ? `${box.id}: ${box.runningTurns}/${box.slots} running, ${box.residentTasks.length} tasks${box.projects.length ? ` (${box.projects.join(", ")})` : ""}` : "free"}
                 className={cx(
                   "h-2 flex-1 rounded-sm",

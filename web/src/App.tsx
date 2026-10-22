@@ -10,6 +10,7 @@ import { Sidebar } from "./components/Sidebar"
 import { ChatPanel } from "./components/ChatPanel"
 import { ProjectView } from "./components/ProjectView"
 import { TaskView } from "./components/TaskView"
+import { BoxesView } from "./components/BoxesView"
 import { SchedulesView } from "./components/Schedules"
 import { HealthBanner, HomeView, InboxView, Login } from "./components/Views"
 import { cx } from "./components/ui"
@@ -63,6 +64,7 @@ export function App() {
             <Switch>
               <Route path="/" component={HomeView} />
               <Route path="/inbox" component={InboxView} />
+              <Route path="/boxes" component={BoxesView} />
               <Route path="/schedules" component={SchedulesView} />
               <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
               <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>
