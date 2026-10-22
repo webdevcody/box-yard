@@ -3,6 +3,7 @@ import { notifyManager, useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
+import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import type { AppNotification, Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
@@ -111,6 +112,10 @@ export function useServerEvents(enabled: boolean): Connection {
         case "chat.message":
           qc.setQueryData<ChatMessage[]>(keys.chat, (list) => (list ? upsert(list, ev.message) : list))
           if (ev.message.role === "assistant" || ev.message.role === "tool") qc.setQueryData(keys.chatStream, "")
+          voiceChatMessage(ev.message)
+          break
+        case "chat.turn":
+          voiceChatTurn(ev)
           break
         case "chat.delta":
           qc.setQueryData<string>(keys.chatStream, (prev) => (prev ?? "") + ev.text)
@@ -118,6 +123,7 @@ export function useServerEvents(enabled: boolean): Connection {
         case "chat.busy":
           qc.setQueryData(keys.chatBusy, ev.busy)
           if (!ev.busy) qc.setQueryData(keys.chatStream, "")
+          voiceChatBusy(ev.busy)
           break
         case "orchestrator.state":
           qc.setQueryData(keys.orchestrator, ev.state)
