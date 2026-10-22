@@ -97,6 +97,15 @@ export interface Schedule {
   updatedAt: number
 }
 
+/** A file Cody attached to a message. `path` is the file on the server's disk (chat messages only). */
+export interface Attachment {
+  id: string
+  name: string
+  size: number
+  mime: string
+  path?: string
+}
+
 export type TaskMessageRole = "user" | "assistant" | "tool" | "event" | "agent"
 
 export interface TaskMessage {

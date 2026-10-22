@@ -7,6 +7,7 @@ import type { Store } from "./store.js"
 import type { TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
+import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { describeCron } from "../shared/cron.js"
 import { TASK_STATUSES, type Project, type Schedule, type Task } from "../shared/types.js"
@@ -19,6 +20,7 @@ export interface McpDeps {
   artifacts: Artifacts
   publicUrl: () => string
   scheduler: Scheduler
+  uploads: Uploads
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
@@ -38,11 +40,17 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
   }
 }
 
+const attachmentsSchema = z
+  .array(z.string())
+  .optional()
+  .describe(
+    "Files Cody attached in this chat, as the ids (up_…) or paths shown in his message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
+  )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /** The tools the orchestrator's Claude uses to run Box Yard. */
 export function buildMcpServer(deps: McpDeps): McpServer {
-  const { store, tasks, hub, artifacts, scheduler } = deps
+  const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
 
   const project = (ref: string): Project => {
@@ -233,7 +241,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description:
         "Start a NEW agent (a fresh Claude Code session) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
-        "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt.",
+        "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt. If Cody attached files (a screenshot of a bug, a spec) that the agent needs, pass them in attachments.",
       inputSchema: {
         project: z.string().describe("Project id or name"),
         title: z.string().min(1).max(120),
@@ -243,9 +251,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           .array(z.string())
           .optional()
           .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)"),
+        attachments: attachmentsSchema,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[] }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[] }) => {
       let prompt = a.prompt
       if (a.related_tasks?.length) {
         const context = a.related_tasks.map((ref) => {
@@ -256,7 +265,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         })
         prompt = `${prompt}\n\n## Related earlier work\n${context.join("\n")}`
       }
-      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env })
+      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env, attachments: uploads.resolveAll(a.attachments) })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
   )
@@ -266,13 +275,13 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends.",
-      inputSchema: { task: z.string(), message: z.string().min(1) },
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
+      inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema },
     },
-    safe(async (a: { task: string; message: string }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[] }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, "orchestrator")
+      const t = tasks.sendInput(before.id, a.message, "orchestrator", uploads.resolveAll(a.attachments))
       return ok({ ...brief(t), delivery: how })
     }),
   )

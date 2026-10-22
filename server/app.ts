@@ -9,6 +9,7 @@ import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
+import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { mcpHandler } from "./mcp.js"
@@ -28,6 +29,8 @@ const idSchema = z
   .regex(/^[a-z]+_[A-Za-z0-9-]{6,40}$/)
   .optional()
 const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var names must be like MY_VAR"), z.string())
+
+const attachmentIds = z.array(z.string()).max(20).optional()
 
 const schemas = {
   project: z.object({
@@ -54,8 +57,8 @@ const schemas = {
     prompt: z.string().trim().min(1).max(50_000),
     env: envSchema.optional(),
   }),
-  message: z.object({ content: z.string().trim().min(1).max(50_000) }),
-  chat: z.object({ id: idSchema, content: z.string().trim().min(1).max(50_000) }),
+  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
@@ -115,7 +118,8 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const provider = opts.provider ?? makeProvider(c)
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts })
+  const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
@@ -137,7 +141,7 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the orchestrator's Claude (its own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -251,7 +255,9 @@ export function createBoxYard(
     res.json(store.listTaskMessages(req.params.id!, 1000))
   })
   api.post("/tasks/:id/messages", (req, res) => {
-    res.json(tasks.sendInput(req.params.id!, parse(schemas.message, req.body).content, "cody"))
+    const body = parse(schemas.message, req.body)
+    const files = withAttachments(body.content, body.attachments)
+    res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
   })
   api.post("/tasks/:id/stop", async (req, res) => {
     res.json(await tasks.stopTask(req.params.id!))
@@ -306,8 +312,42 @@ export function createBoxYard(
     res.json({ ok: true })
   })
   api.get("/settings", (_req, res) => {
-    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode })
+    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb })
   })
+
+  // ---- file attachments. One file per request, sent as the raw body: POST /api/uploads?name=shot.png
+  api.post(
+    "/uploads",
+    (req, res, next) => {
+      const length = Number(req.header("content-length") ?? 0)
+      if (length > uploads.maxBytes) return next(tooLarge(String(req.query.name || "file"), uploads.maxBytes))
+      next()
+    },
+    express.raw({ type: () => true, limit: uploads.maxBytes }),
+    (req, res) => {
+      const name = String(req.query.name || "").trim()
+      if (!name) throw new BadRequestError("name is required, e.g. /api/uploads?name=screenshot.png")
+      const data = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)
+      const { path: _path, ...file } = uploads.save(name, data)
+      res.status(201).json(file)
+    },
+  )
+  api.get("/uploads/:id/:name", (req, res) => {
+    const file = uploads.get(String(req.params.id))
+    if (!file) return void res.status(404).json({ error: "Not found" })
+    // Served as a download or image, never as a page, so an uploaded .html can't act as Box Yard.
+    res.setHeader("Content-Type", file.mime)
+    res.setHeader("X-Content-Type-Options", "nosniff")
+    res.setHeader("Content-Security-Policy", "sandbox")
+    res.sendFile(file.path)
+  })
+
+  /** Look up the uploads a message refers to; a message needs text or at least one file. */
+  const withAttachments = (content: string, ids: string[] | undefined) => {
+    const files = uploads.resolveAll(ids)
+    if (!content.trim() && !files.length) throw new BadRequestError("content: message is empty")
+    return files
+  }
 
   // ---- orchestrator chat
   api.get("/chat", (_req, res) => {
@@ -315,7 +355,8 @@ export function createBoxYard(
   })
   api.post("/chat", (req, res) => {
     const body = parse(schemas.chat, req.body)
-    res.status(201).json(orchestrator.send(body.content, body.id))
+    const files = withAttachments(body.content, body.attachments)
+    res.status(201).json(orchestrator.send(body.content, body.id, files))
   })
   api.post("/chat/stop", (_req, res) => {
     orchestrator.cancel()

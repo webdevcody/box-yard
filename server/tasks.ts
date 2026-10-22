@@ -19,7 +19,8 @@ import {
   workerSystemPrompt,
   type DirectoryEntry,
 } from "./prompts.js"
-import type { BoxInfo, PreviewLink, Task, TaskStatus } from "../shared/types.js"
+import type { Uploads, StoredUpload } from "./uploads.js"
+import type { Attachment, BoxInfo, PreviewLink, Task, TaskStatus } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 
@@ -42,7 +43,11 @@ export interface TaskManagerDeps {
   hub: Hub
   redis: Redis | null
   artifacts: Artifacts
+  uploads: Uploads
 }
+
+/** What clients see of an upload: no server paths. */
+const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
 
 /** kv key for the box a project's work goes to first. */
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
@@ -68,6 +73,7 @@ export class TaskManager {
   private readonly hub: Hub
   private readonly redis: Redis | null
   private readonly artifacts: Artifacts
+  private readonly uploads: Uploads
   private readonly reader: EventReader
 
   private timers: NodeJS.Timeout[] = []
@@ -98,6 +104,7 @@ export class TaskManager {
     this.hub = deps.hub
     this.redis = deps.redis
     this.artifacts = deps.artifacts
+    this.uploads = deps.uploads
     this.reader = new EventReader(deps.provider, deps.redis)
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
   }
@@ -187,6 +194,7 @@ export class TaskManager {
     prompt: string
     env?: Record<string, string>
     scheduleId?: string | null
+    attachments?: StoredUpload[]
   }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
@@ -196,19 +204,27 @@ export class TaskManager {
       ...input,
       branch: project.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
     })
-    this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt" })
+    const files = input.attachments ?? []
+    this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
+    if (files.length) this.store.queueInput(task.id, "orchestrator", "These files go with the task:", files.map((f) => f.id))
     this.emitTask(task.id)
     this.publishDirectory()
     this.schedule()
     return this.store.getTask(task.id)!
   }
 
-  sendInput(taskId: string, content: string, source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody"): Task {
+  sendInput(
+    taskId: string,
+    content: string,
+    source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody",
+    attachments: StoredUpload[] = [],
+  ): Task {
     const row = this.requireRow(taskId)
-    if (!content.trim()) throw new BadRequestError("message is empty")
-    this.store.queueInput(row.id, source, content.trim())
+    if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
+    // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
+    this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
     if (source === "cody" || source === "orchestrator") {
-      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { source })
+      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { source, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
@@ -546,7 +562,8 @@ export class TaskManager {
       if (check.stdout.includes("missing")) await this.prepareWorkspace(row, boxId, dir)
       row = this.requireRow(taskId)
 
-      const inputs = this.store.peekInputs(taskId)
+      const queued = this.store.peekInputs(taskId)
+      const inputs = await this.deliverAttachments(boxId, dir, queued)
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
@@ -582,7 +599,7 @@ export class TaskManager {
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
 
-      this.store.deleteInputs(inputs.map((i) => i.id))
+      this.store.deleteInputs(queued.map((i) => i.id))
       const flags = this.store.turnFlags(row)
       this.store.updateTask(taskId, {
         status: "working",
@@ -618,6 +635,36 @@ export class TaskManager {
       this.emitTask(taskId)
       this.schedule()
     }
+  }
+
+  /**
+   * Copy the files attached to queued inputs into `<task folder>/attachments/` in
+   * the box and name their paths in the input text. Binary-safe (Buffers).
+   */
+  async deliverAttachments<T extends { content: string; attachments: string[] }>(boxId: string, dir: string, inputs: T[]): Promise<T[]> {
+    if (!inputs.some((i) => i.attachments.length)) return inputs
+    const folder = `${dir}/attachments`
+    await this.provider.exec(boxId, `mkdir -p ${q(folder)}`)
+    const used = new Set<string>()
+    const out: T[] = []
+    for (const input of inputs) {
+      const lines: string[] = []
+      for (const id of input.attachments) {
+        const file = this.uploads.get(id)
+        if (!file) {
+          lines.push(`- (a file was attached but is no longer on the server: ${id})`)
+          continue
+        }
+        let name = file.name
+        if (used.has(name)) name = `${id}-${name}`
+        used.add(name)
+        await this.provider.writeFile(boxId, `${folder}/${name}`, fs.readFileSync(file.path))
+        lines.push(`- ${folder}/${name} (${file.mime}, ${file.size} bytes)`)
+      }
+      const note = lines.length ? `\n\nAttached files (open images and other files with the Read tool):\n${lines.join("\n")}` : ""
+      out.push({ ...input, content: input.content + note })
+    }
+    return out
   }
 
   private runnerCache: string | null = null

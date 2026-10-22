@@ -431,17 +431,18 @@ export class Store {
 
   // pending inputs: messages for a task that wait for its next turn
 
-  queueInput(taskId: string, source: string, content: string) {
+  queueInput(taskId: string, source: string, content: string, attachments: string[] = []) {
     this.db
-      .prepare("INSERT INTO task_inputs (id, task_id, source, content, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(newId("in"), taskId, source, content, Date.now())
+      .prepare("INSERT INTO task_inputs (id, task_id, source, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(newId("in"), taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, Date.now())
   }
 
   /** Queued inputs, oldest first. Delete them with deleteInputs once a turn has started. */
-  peekInputs(taskId: string): { id: string; source: string; content: string }[] {
-    return this.db
-      .prepare("SELECT id, source, content FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
-      .all(taskId) as { id: string; source: string; content: string }[]
+  peekInputs(taskId: string): { id: string; source: string; content: string; attachments: string[] }[] {
+    const rows = this.db
+      .prepare("SELECT id, source, content, attachments FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(taskId) as { id: string; source: string; content: string; attachments: string | null }[]
+    return rows.map((r) => ({ ...r, attachments: r.attachments ? (JSON.parse(r.attachments) as string[]) : [] }))
   }
 
   deleteInputs(ids: string[]) {

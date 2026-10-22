@@ -5,7 +5,8 @@ import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useSe
 import { Button, Markdown, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
-import type { ChatMessage } from "../../../shared/types"
+import { AttachmentList } from "./Attachments"
+import type { Attachment, ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
   "What's everyone working on?",
@@ -22,10 +23,10 @@ export function ChatPanel() {
   const [draft, setDraft] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
 
-  const submit = (text = draft) => {
+  const submit = (text = draft, attachments: Attachment[] = []) => {
     const content = text.trim()
-    if (!content) return
-    send.mutate({ id: newClientId("chat"), content })
+    if (!content && !attachments.length) return
+    send.mutate({ id: newClientId("chat"), content, attachments })
     setDraft("")
     box.current?.focus()
   }
@@ -94,7 +95,7 @@ export function ChatPanel() {
       <Composer
         value={draft}
         onChange={setDraft}
-        onSubmit={() => submit()}
+        onSubmit={(files) => submit(draft, files)}
         placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
         textareaRef={box}
       />
@@ -108,6 +109,7 @@ function ChatLine({ m }: { m: ChatMessage }) {
       <div className="flex justify-end">
         <div className={cx("max-w-[85%] rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
           {m.content}
+          <AttachmentList files={m.meta?.attachments} />
         </div>
       </div>
     )
