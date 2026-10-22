@@ -38,7 +38,9 @@ async function setup() {
     const r = (await client.callTool({ name: "get_task", arguments: { task: t.id, ...args } })) as { content: { text: string }[] }
     return JSON.parse(r.content[0]!.text)
   }
-  return { yard, t, get }
+  const call = async (name: string, args: Record<string, unknown>) =>
+    JSON.parse(((await client.callTool({ name, arguments: args })) as { content: { text: string }[] }).content[0]!.text)
+  return { yard, t, get, call }
 }
 
 describe("get_task", () => {
@@ -75,5 +77,26 @@ describe("event dedupe", () => {
     await yard.tasks.applyEvents(t.id, [ev], { seq: 0, offset: 0, rid: null })
     await Promise.all([yard.tasks.applyEvents(t.id, [{ ...ev, seq: 2 }], { seq: 0, offset: 0, rid: null }), yard.tasks.applyEvents(t.id, [{ ...ev, seq: 2 }], { seq: 0, offset: 0, rid: null })])
     expect(yard.store.listTaskMessages(t.id).filter((m) => m.role === "assistant")).toHaveLength(2)
+  })
+})
+
+describe("wait_for_tasks", () => {
+  it("returns the full reply once, even when summary equals it", async () => {
+    const { yard, t, call } = await setup()
+    const reply = "w".repeat(8000)
+    yard.store.addTaskMessage(t.id, "assistant", reply)
+    yard.store.updateTask(t.id, { status: "idle", summary: reply })
+    const out = await call("wait_for_tasks", { tasks: [t.id], timeout_seconds: 5 })
+    expect(out.tasks[0].lastReply).toBe(reply)
+    expect(out.tasks[0].summary).toBeUndefined()
+    expect(JSON.stringify(out).split("w".repeat(100)).length).toBe(81)
+  })
+
+  it("marks a reply over the cap instead of cutting it silently", async () => {
+    const { yard, t, call } = await setup()
+    yard.store.addTaskMessage(t.id, "assistant", "z".repeat(REPLY_CAP + 7))
+    yard.store.updateTask(t.id, { status: "idle" })
+    const out = await call("wait_for_tasks", { tasks: [t.id], timeout_seconds: 5 })
+    expect(out.tasks[0].lastReply).toContain("[truncated: 7 more chars")
   })
 })
