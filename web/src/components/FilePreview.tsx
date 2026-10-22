@@ -419,7 +419,7 @@ function TextPreview({ item, kind, raw }: { item: PreviewItem; kind: "markdown" 
   const { text } = file
   if (!raw && kind === "markdown")
     return (
-      <div className="scroll-thin min-h-0 flex-1 overflow-auto px-6 py-5 text-sm text-zinc-200">
+      <div className="prose-doc scroll-thin min-h-0 flex-1 overflow-auto px-6 py-5 text-sm text-zinc-200">
         <Markdown>{text}</Markdown>
       </div>
     )

@@ -74,6 +74,19 @@ body {
 .prose-chat h3 {
   @apply mt-3 mb-1 font-semibold text-zinc-100;
 }
+/* Markdown files in the preview modal: documents, so headings get real sizes */
+.prose-doc h1 {
+  @apply mt-1 mb-3 border-b border-zinc-800 pb-2 text-2xl;
+}
+.prose-doc h2 {
+  @apply mt-5 mb-2 text-xl;
+}
+.prose-doc h3 {
+  @apply mt-4 mb-1.5 text-base;
+}
+.prose-doc blockquote {
+  @apply my-2 border-l-2 border-zinc-700 pl-3 text-zinc-400;
+}
 .prose-chat table {
   @apply my-2 text-sm;
 }
