@@ -2,7 +2,9 @@ import { useRef, useState } from "react"
 import { Link } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, RotateCcw, Settings as SettingsIcon, Square, Wrench } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useSendChat } from "../lib/queries"
-import { Button, Markdown, cx } from "./ui"
+import { AppLink, Button, Markdown, cx } from "./ui"
+import { useEntityIndex } from "../lib/entities"
+import { toolMentions } from "../lib/linkify"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { AttachmentList } from "./Attachments"
@@ -122,6 +124,39 @@ export function ChatPanel() {
   )
 }
 
+/** A tool call, with the tasks, schedules or projects it's about linked by title. */
+function ToolLine({ m }: { m: ChatMessage }) {
+  const index = useEntityIndex()
+  const input = (m.meta?.input ?? {}) as Record<string, unknown>
+  const resultId = typeof m.meta?.resultId === "string" ? m.meta.resultId : null
+  const mentions = toolMentions(m.content, input, resultId, index)
+  const detail = mentions.length ? null : ((input.title ?? input.name ?? input.task ?? input.project ?? "") as string)
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 pl-1 text-xs text-zinc-500">
+      <Wrench className="h-3 w-3 shrink-0" />
+      <span className="font-mono">{m.content}</span>
+      {mentions.length > 0 && (
+        <span className="truncate text-zinc-600">
+          ·{" "}
+          {mentions.map((t, i) => (
+            <span key={i}>
+              {i > 0 && ", "}
+              {t.ref ? (
+                <AppLink href={t.ref.href} className="text-zinc-400 hover:text-zinc-200 hover:underline">
+                  {t.text.slice(0, 60)}
+                </AppLink>
+              ) : (
+                t.text.slice(0, 60)
+              )}
+            </span>
+          ))}
+        </span>
+      )}
+      {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
+    </div>
+  )
+}
+
 function ChatLine({ m }: { m: ChatMessage }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by an orchestrator schedule, not typed by Cody.
@@ -146,17 +181,7 @@ function ChatLine({ m }: { m: ChatMessage }) {
       </div>
     )
   }
-  if (m.role === "tool") {
-    const input = (m.meta?.input ?? {}) as Record<string, unknown>
-    const detail = (input.title ?? input.name ?? input.task ?? input.project ?? "") as string
-    return (
-      <div className="flex items-center gap-1.5 pl-1 text-xs text-zinc-500">
-        <Wrench className="h-3 w-3" />
-        <span className="font-mono">{m.content}</span>
-        {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
-      </div>
-    )
-  }
+  if (m.role === "tool") return <ToolLine m={m} />
   if (m.role === "notice") {
     const taskId = m.meta?.taskId as string | undefined
     const body = (
