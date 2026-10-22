@@ -9,7 +9,7 @@ import { cx } from "./ui"
 export function ResortPill({ newCount, changedCount, onResort, className = "top-3" }: { newCount: number; changedCount: number; onResort: () => void; className?: string }) {
   const label = pendingLabel(newCount, changedCount)
   return (
-    <div aria-live="polite" className={cx("pointer-events-none sticky z-20 flex h-0 justify-center", className)}>
+    <div aria-live="polite" className={cx("pointer-events-none sticky z-20 flex h-0 items-start justify-center", className)}>
       {label && (
         <button
           type="button"
