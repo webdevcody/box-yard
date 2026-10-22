@@ -1,0 +1,339 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
+import type { Request, Response } from "express"
+import { z } from "zod"
+import type { Store } from "./store.js"
+import type { TaskManager } from "./tasks.js"
+import type { Hub } from "./hub.js"
+import type { Artifacts } from "./artifacts.js"
+import { TASK_STATUSES, type Project, type Task } from "../shared/types.js"
+import { errorMessage } from "./util/retry.js"
+
+export interface McpDeps {
+  store: Store
+  tasks: TaskManager
+  hub: Hub
+  artifacts: Artifacts
+  publicUrl: () => string
+}
+
+type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
+const ok = (value: unknown): ToolResult => ({
+  content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
+})
+const fail = (message: string): ToolResult => ({ content: [{ type: "text", text: message }], isError: true })
+
+/** Wrap a handler so thrown errors become tool errors the model can read. */
+function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
+  return async (args: A): Promise<ToolResult> => {
+    try {
+      return await fn(args)
+    } catch (err) {
+      return fail(errorMessage(err))
+    }
+  }
+}
+
+const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
+
+/** The tools the orchestrator's Claude uses to run Box Yard. */
+export function buildMcpServer(deps: McpDeps): McpServer {
+  const { store, tasks, hub, artifacts } = deps
+  const server = new McpServer({ name: "boxyard", version: "0.1.0" })
+
+  const project = (ref: string): Project => {
+    const p = store.findProject(ref)
+    if (!p) throw new Error(`No project "${ref}". Use list_projects.`)
+    return p
+  }
+  const task = (ref: string): Task => {
+    const t = store.getTask(ref) ?? store.listTasks().find((x) => x.title.toLowerCase() === ref.toLowerCase())
+    if (!t) throw new Error(`No task "${ref}". Use list_tasks.`)
+    return t
+  }
+  const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
+  const brief = (t: Task) => ({
+    id: t.id,
+    title: t.title,
+    project: store.getProject(t.projectId)?.name ?? t.projectId,
+    status: t.status,
+    question: t.question ?? undefined,
+    pr: t.prUrl ?? undefined,
+    previews: t.previews.length ? t.previews.map((p) => p.url) : undefined,
+    error: t.error ?? undefined,
+    queuedMessages: t.pendingCount || undefined,
+    box: t.boxId ?? undefined,
+  })
+  const projectView = (p: Project) => ({
+    id: p.id,
+    name: p.name,
+    description: p.description,
+    repo: p.repo,
+    baseBranch: p.baseBranch,
+    envKeys: p.envKeys,
+    notes: p.notes.map((n) => `(${n.author}) ${n.content}`),
+    tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
+  })
+
+  server.registerTool(
+    "list_projects",
+    { description: "List all projects with their repo, env var names, notes and tasks." },
+    safe(async () => ok(store.listProjects().map(projectView))),
+  )
+
+  server.registerTool(
+    "create_project",
+    {
+      description:
+        "Create a project. repo is optional (owner/name or git URL); leave it out for non-coding work. env vars are given to every task in the project.",
+      inputSchema: {
+        name: z.string().min(1),
+        description: z.string().optional(),
+        repo: z.string().optional(),
+        base_branch: z.string().optional(),
+        env: envSchema,
+      },
+    },
+    safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> }) => {
+      if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
+      const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env })
+      hub.broadcast({ type: "project", project: p })
+      return ok(projectView(p))
+    }),
+  )
+
+  server.registerTool(
+    "update_project",
+    {
+      description: "Change a project's name, description, repo, base branch or env vars.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        name: z.string().optional(),
+        description: z.string().optional(),
+        repo: z.string().nullable().optional(),
+        base_branch: z.string().optional(),
+        env: envSchema,
+        remove_env: z.array(z.string()).optional(),
+      },
+    },
+    safe(async (a: { project: string; name?: string; description?: string; repo?: string | null; base_branch?: string; env?: Record<string, string>; remove_env?: string[] }) => {
+      const p = store.updateProject(project(a.project).id, {
+        name: a.name,
+        description: a.description,
+        repo: a.repo,
+        baseBranch: a.base_branch,
+        env: a.env,
+        removeEnv: a.remove_env,
+      })
+      hub.broadcast({ type: "project", project: p })
+      return ok(projectView(p))
+    }),
+  )
+
+  server.registerTool(
+    "delete_project",
+    {
+      description: "Delete a project and all its tasks. Only do this when Cody explicitly asks.",
+      inputSchema: { project: z.string() },
+    },
+    safe(async (a: { project: string }) => {
+      const p = project(a.project)
+      for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
+      store.deleteProject(p.id)
+      hub.broadcast({ type: "project.deleted", projectId: p.id })
+      return ok(`Deleted project ${p.name}.`)
+    }),
+  )
+
+  server.registerTool(
+    "list_tasks",
+    {
+      description: "List tasks, optionally for one project and/or with given statuses.",
+      inputSchema: {
+        project: z.string().optional(),
+        status: z.array(z.enum(TASK_STATUSES)).optional(),
+      },
+    },
+    safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][] }) =>
+      ok(store.listTasks({ projectId: a.project ? project(a.project).id : undefined, status: a.status }).map(brief)),
+    ),
+  )
+
+  server.registerTool(
+    "get_task",
+    {
+      description: "Get one task with its latest transcript lines.",
+      inputSchema: { task: z.string(), last_messages: z.number().int().min(0).max(200).optional() },
+    },
+    safe(async (a: { task: string; last_messages?: number }) => {
+      const t = task(a.task)
+      const messages = store.listTaskMessages(t.id, a.last_messages ?? 20).map((m) => `[${m.role}] ${m.content.slice(0, 1200)}`)
+      return ok({ ...brief(t), prompt: t.prompt, summary: t.summary, branch: t.branch, messages })
+    }),
+  )
+
+  server.registerTool(
+    "create_task",
+    {
+      description:
+        "Start a new agent on a task in a project. It gets its own folder in a worker box (repo cloned if the project has one) and runs Claude Code headless. Write a self-contained prompt.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        title: z.string().min(1).max(120),
+        prompt: z.string().min(1),
+        env: envSchema,
+      },
+    },
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string> }) => {
+      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt: a.prompt, env: a.env })
+      return ok(brief(t))
+    }),
+  )
+
+  server.registerTool(
+    "send_to_task",
+    {
+      description:
+        "Send a message to a task's agent (an answer, feedback, or a follow-up). It resumes the same Claude session; if the agent is busy, the message waits for its next turn.",
+      inputSchema: { task: z.string(), message: z.string().min(1) },
+    },
+    safe(async (a: { task: string; message: string }) => ok(brief(tasks.sendInput(task(a.task).id, a.message, "orchestrator")))),
+  )
+
+  server.registerTool(
+    "stop_task",
+    { description: "Stop the agent's current turn. The task keeps its workspace.", inputSchema: { task: z.string() } },
+    safe(async (a: { task: string }) => ok(brief(await tasks.stopTask(task(a.task).id)))),
+  )
+
+  server.registerTool(
+    "close_task",
+    {
+      description: "Mark a task done and free its box space (its workspace is archived).",
+      inputSchema: { task: z.string() },
+    },
+    safe(async (a: { task: string }) => ok(brief(await tasks.closeTask(task(a.task).id)))),
+  )
+
+  server.registerTool(
+    "retry_task",
+    { description: "Retry a failed task.", inputSchema: { task: z.string() } },
+    safe(async (a: { task: string }) => ok(brief(tasks.retryTask(task(a.task).id)))),
+  )
+
+  server.registerTool(
+    "get_preview_url",
+    {
+      description: "Get a public URL for a port in a task's box (a dev server the agent started).",
+      inputSchema: { task: z.string(), port: z.number().int().min(1).max(65535) },
+    },
+    safe(async (a: { task: string; port: number }) => ok(await tasks.previewUrl(task(a.task).id, a.port))),
+  )
+
+  server.registerTool(
+    "list_inbox",
+    { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures." },
+    safe(async () =>
+      ok(store.listTasks({ status: ["needs_input", "pr_ready", "failed"] }).map(brief)),
+    ),
+  )
+
+  server.registerTool(
+    "save_note",
+    {
+      description: "Save a lasting fact to a project's shared notes. Every agent in the project sees them.",
+      inputSchema: { project: z.string(), content: z.string().min(1) },
+    },
+    safe(async (a: { project: string; content: string }) => {
+      const p = project(a.project)
+      store.addNote(p.id, "orchestrator", a.content)
+      tasks.publishNotes(p.id)
+      hub.broadcast({ type: "project", project: store.getProject(p.id)! })
+      return ok("Saved.")
+    }),
+  )
+
+  server.registerTool(
+    "create_artifact",
+    {
+      description:
+        "Host a file for Cody (markdown, HTML page, CSV, JSON, SVG...). Returns its URL. Use base64 encoding for binary content.",
+      inputSchema: {
+        title: z.string().min(1),
+        filename: z.string().min(1),
+        content: z.string(),
+        encoding: z.enum(["utf8", "base64"]).optional(),
+        project: z.string().optional(),
+        task: z.string().optional(),
+      },
+    },
+    safe(async (a: { title: string; filename: string; content: string; encoding?: "utf8" | "base64"; project?: string; task?: string }) => {
+      const t = a.task ? task(a.task) : null
+      const artifact = artifacts.save({
+        title: a.title,
+        filename: a.filename,
+        data: Buffer.from(a.content, a.encoding === "base64" ? "base64" : "utf8"),
+        projectId: a.project ? project(a.project).id : (t?.projectId ?? null),
+        taskId: t?.id ?? null,
+      })
+      hub.broadcast({ type: "artifact", artifact })
+      return ok({ ...artifact, url: absolute(artifact.url) })
+    }),
+  )
+
+  server.registerTool(
+    "list_artifacts",
+    {
+      description: "List hosted artifacts, optionally for a project or task.",
+      inputSchema: { project: z.string().optional(), task: z.string().optional() },
+    },
+    safe(async (a: { project?: string; task?: string }) =>
+      ok(
+        store
+          .listArtifacts({ projectId: a.project ? project(a.project).id : undefined, taskId: a.task ? task(a.task).id : undefined })
+          .map((x) => ({ id: x.id, title: x.title, url: absolute(x.url), size: x.size, task: x.taskId })),
+      ),
+    ),
+  )
+
+  server.registerTool(
+    "pool_status",
+    { description: "Show worker boxes, their busy slots, and how many tasks are queued." },
+    safe(async () =>
+      ok({
+        boxes: tasks.boxes(),
+        queued: store.listTasks({ status: ["queued"] }).map((t) => `${t.id} ${t.title}`),
+      }),
+    ),
+  )
+
+  return server
+}
+
+/** Stateless Streamable HTTP endpoint: a fresh server per request. */
+export function mcpHandler(deps: McpDeps, token: string) {
+  return async (req: Request, res: Response) => {
+    if (req.headers.authorization !== `Bearer ${token}`) {
+      res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized" }, id: null })
+      return
+    }
+    if (req.method !== "POST") {
+      res.status(405).set("Allow", "POST").end()
+      return
+    }
+    const server = buildMcpServer(deps)
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    res.on("close", () => {
+      void transport.close()
+      void server.close()
+    })
+    try {
+      await server.connect(transport)
+      await transport.handleRequest(req, res, req.body)
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: errorMessage(err) }, id: null })
+      }
+    }
+  }
+}
