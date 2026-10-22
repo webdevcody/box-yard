@@ -189,7 +189,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
       className="sm:max-h-[70vh]"
       bodyClassName="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex items-center gap-2.5 border-b border-zinc-900 px-4">
+      <div className="flex min-h-14 items-center gap-2.5 border-b border-zinc-900 px-4">
         {actionsOnly ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
         <input
           ref={input}
@@ -204,7 +204,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search tasks, projects, schedules, files… (> for actions)"
-          className="min-w-0 flex-1 bg-transparent py-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+          className="min-w-0 flex-1 bg-transparent py-3.5 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:text-sm"
         />
         <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500">esc</kbd>
       </div>
@@ -232,7 +232,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500 max-sm:hidden">
         <span>
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd> move
@@ -297,7 +297,7 @@ function Option({
       onMouseMove={() => !selected && onHover()}
       onClick={(e) => onChoose(e.metaKey || e.ctrlKey)}
       onAuxClick={(e) => e.button === 1 && onChoose(true)}
-      className={cx("flex cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm", selected ? "bg-zinc-800/80 text-zinc-50" : "text-zinc-300")}
+      className={cx("flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2 text-sm", selected ? "bg-zinc-800/80 text-zinc-50" : "text-zinc-300")}
     >
       <Icon className={cx("h-4 w-4 shrink-0", selected ? "text-yard-400" : "text-zinc-500")} />
       <div className="min-w-0 flex-1">

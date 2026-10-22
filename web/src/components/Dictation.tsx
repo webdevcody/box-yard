@@ -24,7 +24,7 @@ export function MicButton({ machine }: { machine: DictationMachine }) {
       type="button"
       variant="ghost"
       size="sm"
-      className={cx("h-8 w-8 touch-none !p-0 select-none", on && "bg-red-500/15 !text-red-400 hover:bg-red-500/25")}
+      className={cx("h-11 w-11 touch-none !p-0 select-none sm:h-8 sm:w-8", on && "bg-red-500/15 !text-red-400 hover:bg-red-500/25")}
       title={label}
       aria-label={label}
       aria-pressed={on}
@@ -58,7 +58,7 @@ export function DictationStatus({ machine }: { machine: DictationMachine }) {
       <div role="alert" className="flex items-start gap-2 px-2 pb-2 text-xs text-amber-300">
         <Mic className="mt-0.5 h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 flex-1">{ERROR_TEXT[state.error]}</span>
-        <button type="button" className="rounded p-0.5 text-zinc-500 hover:text-zinc-200" aria-label="Dismiss" onClick={() => machine.clearError()}>
+        <button type="button" className="-my-3 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:text-zinc-200 sm:-my-1 sm:h-6 sm:w-6" aria-label="Dismiss" onClick={() => machine.clearError()}>
           <X className="h-3.5 w-3.5" />
         </button>
       </div>

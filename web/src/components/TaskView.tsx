@@ -39,7 +39,7 @@ export function TaskView({ id }: { id: string }) {
   const submit = (content: string, attachments: Attachment[]) => send.mutate({ content, attachments })
 
   return (
-    <div ref={panel} className="relative flex h-full flex-col">
+    <div ref={panel} className="relative flex h-full min-w-0 flex-col">
       <TaskHeader task={task} project={project} schedule={schedule} files={files} showTools={showTools} onShowTools={setShowTools} />
 
       {task.status === "needs_input" && task.question && (
@@ -58,7 +58,7 @@ export function TaskView({ id }: { id: string }) {
       <TaskThread id={id} showTools={showTools} working={running ? (task.status === "starting" ? "Preparing the box…" : "Agent is working…") : null} />
 
       <Composer
-        className="mt-3"
+        className="sticky bottom-0 z-10 mt-3 border-t border-zinc-900 bg-zinc-950/95 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur"
         onSubmit={submit}
         panelRef={panel}
         placeholder={
@@ -128,7 +128,7 @@ const Line = memo(function Line({ m }: { m: TaskMessage }) {
       )
     case "assistant":
       return (
-        <div className="flex gap-2">
+        <div className="flex min-w-0 gap-2">
           <Bot className="mt-1 h-4 w-4 shrink-0 text-zinc-500" />
           <div className="min-w-0 text-sm text-zinc-200">
             <Markdown>{m.content}</Markdown>
@@ -137,7 +137,7 @@ const Line = memo(function Line({ m }: { m: TaskMessage }) {
       )
     case "tool":
       return (
-        <div className={cx("truncate pl-6 font-mono text-[11px]", m.meta?.error ? "text-red-400/80" : "text-zinc-600")}>
+        <div className={cx("overflow-x-auto pl-6 font-mono text-[11px] whitespace-nowrap", m.meta?.error ? "text-red-400/80" : "text-zinc-600")}>
           {m.meta?.error ? "✗ " : "› "}
           {m.content}
         </div>

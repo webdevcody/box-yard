@@ -64,7 +64,7 @@ export function SchedulesView() {
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-wrap items-start gap-4">
+      <header className="flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-start">
         <div className="min-w-0 flex-1">
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight text-zinc-50">
             <AlarmClock className="h-6 w-6 text-yard-400" /> Schedules
@@ -79,7 +79,7 @@ export function SchedulesView() {
             )}
           </p>
         </div>
-        <Button variant="primary" onClick={() => setCreating(true)}>
+        <Button variant="primary" onClick={() => setCreating(true)} className="w-full sm:w-auto">
           <Plus className="h-4 w-4" /> New schedule
         </Button>
       </header>
@@ -137,7 +137,7 @@ export function ProjectSchedules({ projectId }: { projectId: string }) {
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm text-zinc-500">Each run starts a fresh task in this project. Watch it live like any task.</p>
-        <Button variant="primary" onClick={() => setCreating(true)}>
+        <Button variant="primary" onClick={() => setCreating(true)} className="w-full sm:w-auto">
           <Plus className="h-4 w-4" /> New schedule
         </Button>
       </div>
@@ -173,9 +173,9 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
 
   return (
     <div id={s.id} className={cx("rounded-xl border bg-zinc-900/40 p-4", live || chatLive ? "border-sky-500/40" : "border-zinc-800/80")}>
-      <div className="flex flex-wrap items-start gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="truncate font-medium text-zinc-100">{s.name}</span>
             {!s.enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 uppercase">Paused</span>}
             {chatLive && (
@@ -201,7 +201,7 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
             {s.runCount > 0 && <span>{s.runCount} {s.runCount === 1 ? "run" : "runs"}</span>}
           </div>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center justify-end gap-1 sm:justify-start">
           <Button size="sm" variant="subtle" onClick={() => run.mutate(s.id)} title="Start a run now">
             <Zap className="h-3.5 w-3.5" /> Run now
           </Button>
@@ -227,7 +227,7 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
 
       {live && <LiveTail task={live} />}
 
-      <button onClick={() => setOpen((v) => !v)} className="mt-3 flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300">
+      <button onClick={() => setOpen((v) => !v)} className="mt-3 flex min-h-11 items-center gap-1 rounded-lg text-left text-xs text-zinc-500 hover:text-zinc-300 sm:min-h-0">
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
         {open ? "Hide" : "Show"} prompt and runs
         {latest && !open && (
@@ -261,7 +261,7 @@ function ChatRunList({ runs }: { runs: ScheduleRun[] }) {
   return (
     <ul className="divide-y divide-zinc-900 rounded-lg border border-zinc-800/80">
       {runs.slice(0, 15).map((r) => (
-        <li key={r.id} className="flex items-center gap-3 px-3 py-2 text-sm">
+        <li key={r.id} className="flex min-h-11 flex-wrap items-center gap-3 px-3 py-2 text-sm">
           <span className="min-w-0 flex-1 truncate text-zinc-200">
             {new Date(r.dueAt).toLocaleString()}
             {r.reason !== "scheduled" && <span className="ml-2 text-xs text-zinc-500">({r.reason})</span>}
@@ -270,7 +270,7 @@ function ChatRunList({ runs }: { runs: ScheduleRun[] }) {
           <span className={cx("rounded px-1.5 py-0.5 text-[11px] font-medium", tone[r.status])}>{r.status}</span>
           {r.chatMessageId ? (
             <button
-              className="text-xs text-sky-400 hover:text-sky-300"
+              className="inline-flex min-h-11 items-center text-xs text-sky-400 hover:text-sky-300 sm:min-h-0"
               onClick={() => revealChatMessage(r.chatMessageId!)}
             >
               View in chat
@@ -314,7 +314,7 @@ function RunList({ runs }: { runs: Task[] }) {
     <ul className="divide-y divide-zinc-900 rounded-lg border border-zinc-800/80">
       {runs.slice(0, 15).map((t) => (
         <li key={t.id}>
-          <Link href={`/tasks/${t.id}`} className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
+          <Link href={`/tasks/${t.id}`} className="flex min-h-11 items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
             <span className="min-w-0 flex-1 truncate text-zinc-200">{t.summary ?? t.title}</span>
             <StatusBadge status={badgeStatus(t)} />
             <span className="w-16 shrink-0 text-right text-xs text-zinc-500">
@@ -391,13 +391,13 @@ function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: 
     >
       {!projectId && (
         <Field label="Target">
-          <div className="flex gap-2">
+          <div className="grid gap-2 sm:flex">
             {(["project", "orchestrator"] as const).map((t) => (
               <button
                 type="button"
                 key={t}
                 onClick={() => setTarget(t)}
-                className={cx("rounded-md px-3 py-1 text-xs", target === t ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
+                className={cx("min-h-11 rounded-md px-3 py-2 text-xs sm:min-h-0 sm:py-1", target === t ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
               >
                 {t === "project" ? "Project (starts a task)" : "Orchestrator (message in chat)"}
               </button>
@@ -429,7 +429,7 @@ function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: 
               type="button"
               key={p.cron}
               onClick={() => setCron(p.cron)}
-              className={cx("rounded-md px-2 py-0.5 text-xs", cron === p.cron ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
+              className={cx("min-h-11 rounded-md px-2 py-1 text-xs sm:min-h-0 sm:py-0.5", cron === p.cron ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
             >
               {p.label}
             </button>
@@ -466,15 +466,15 @@ function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: 
         <textarea className={inputClass} rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Look at issues opened since the last run, label them, and post a summary as an artifact." />
       </Field>
 
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-zinc-400">
-        <label className="flex items-center gap-2">
+      <div className="flex flex-col gap-3 text-xs text-zinc-400 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-5 sm:gap-y-2">
+        <label className="flex flex-wrap items-center gap-2">
           Missed runs
           <Select size="sm" value={catchUp} onChange={(e) => setCatchUp(e.target.value as CatchUp)}>
             <option value="once">catch up once</option>
             <option value="skip">skip</option>
           </Select>
         </label>
-        <label className="flex items-center gap-2">
+        <label className="flex min-h-11 items-center gap-2 sm:min-h-0">
           <input type="checkbox" checked={allowOverlap} onChange={(e) => setAllowOverlap(e.target.checked)} />
           Start even if the last run is still going
         </label>

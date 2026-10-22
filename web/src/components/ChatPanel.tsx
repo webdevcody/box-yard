@@ -72,7 +72,7 @@ export const ChatPanel = memo(function ChatPanel() {
 
   return (
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
-      <header className="flex items-center gap-2 border-b border-zinc-900 px-4 py-3">
+      <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 px-4 pt-[env(safe-area-inset-top)] xl:min-h-0 xl:py-3 xl:pt-3">
         <Bot className="h-4 w-4 text-yard-400" />
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
         {busy.data && <span className="text-xs text-sky-400">thinking…</span>}

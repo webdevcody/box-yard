@@ -119,7 +119,7 @@ export function HealthBanner() {
           <div key={p}>⚠ {p}</div>
         ))}
       </div>
-      <button className="text-amber-400/70 hover:text-amber-200" onClick={() => setHidden(true)}>
+      <button className="-my-3 grid min-h-11 place-items-center rounded-lg px-2 text-amber-400/70 hover:text-amber-200 sm:-my-1 sm:min-h-0" onClick={() => setHidden(true)}>
         dismiss
       </button>
     </div>
@@ -132,7 +132,7 @@ export function Login() {
   const [error, setError] = useState("")
   const [busy, setBusy] = useState(false)
   return (
-    <div className="grid h-full place-items-center p-4">
+    <div className="grid min-h-[100dvh] place-items-center p-4">
       <form
         className="w-full max-w-sm space-y-4 rounded-2xl border border-zinc-800 bg-zinc-950 p-6"
         onSubmit={async (e) => {
