@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type Ref } from "react"
+import { useEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
+import { createPortal } from "react-dom"
 import { AlertTriangle, FileText, Loader2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
 import { useSettings } from "../lib/queries"
@@ -31,6 +32,7 @@ export function Composer({
   placeholder,
   className = "border-t border-zinc-900 p-3",
   textareaRef,
+  panelRef,
 }: {
   value: string
   onChange: (value: string) => void
@@ -38,6 +40,8 @@ export function Composer({
   placeholder: string
   className?: string
   textareaRef?: Ref<HTMLTextAreaElement>
+  /** The panel that accepts dropped files, message list included. It must be `relative`. */
+  panelRef: RefObject<HTMLElement | null>
 }) {
   const [files, setFiles] = useState<Pending[]>([])
   const [dragging, setDragging] = useState(false)
@@ -97,11 +101,54 @@ export function Composer({
     e.preventDefault()
     add(pasted)
   }
-  const onDrop = (e: DragEvent) => {
-    e.preventDefault()
-    setDragging(false)
-    add(Array.from(e.dataTransfer.files))
-  }
+
+  // Drop files anywhere on the panel. Window-level handlers stop a missed drop from opening the file in the tab.
+  const addRef = useRef(add)
+  addRef.current = add
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return
+    const hasFiles = (e: globalThis.DragEvent) => Boolean(e.dataTransfer?.types?.includes("Files"))
+    let depth = 0
+    const enter = (e: globalThis.DragEvent) => {
+      if (!hasFiles(e)) return
+      depth++
+      setDragging(true)
+    }
+    const leave = (e: globalThis.DragEvent) => {
+      if (!hasFiles(e)) return
+      depth = Math.max(0, depth - 1)
+      if (!depth) setDragging(false)
+    }
+    const over = (e: globalThis.DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    const drop = (e: globalThis.DragEvent) => {
+      depth = 0
+      setDragging(false)
+      const dropped = Array.from(e.dataTransfer?.files ?? [])
+      if (!dropped.length) return
+      e.preventDefault()
+      addRef.current(dropped)
+    }
+    const stray = (e: globalThis.DragEvent) => {
+      if (hasFiles(e)) e.preventDefault()
+    }
+    panel.addEventListener("dragenter", enter)
+    panel.addEventListener("dragleave", leave)
+    panel.addEventListener("dragover", over)
+    panel.addEventListener("drop", drop)
+    window.addEventListener("dragover", stray)
+    window.addEventListener("drop", stray)
+    return () => {
+      panel.removeEventListener("dragenter", enter)
+      panel.removeEventListener("dragleave", leave)
+      panel.removeEventListener("dragover", over)
+      panel.removeEventListener("drop", drop)
+      window.removeEventListener("dragover", stray)
+      window.removeEventListener("drop", stray)
+    }
+  }, [panelRef])
 
   return (
     <form
@@ -110,22 +157,19 @@ export function Composer({
         e.preventDefault()
         submit()
       }}
-      onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return
-        e.preventDefault()
-        setDragging(true)
-      }}
-      onDragLeave={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false)
-      }}
-      onDrop={onDrop}
     >
-      <div
-        className={cx(
-          "rounded-xl border bg-zinc-900 p-2 focus-within:border-yard-500/50",
-          dragging ? "border-yard-500 ring-1 ring-yard-500/40" : "border-zinc-800",
+      {dragging &&
+        panelRef.current &&
+        createPortal(
+          <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-zinc-950/85">
+            <div className="rounded-2xl border-2 border-dashed border-yard-500 px-8 py-6 text-center text-sm font-medium text-yard-400">
+              <Paperclip className="mx-auto mb-2 h-6 w-6" />
+              Drop files to attach
+            </div>
+          </div>,
+          panelRef.current,
         )}
-      >
+      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-2 focus-within:border-yard-500/50">
         {files.length > 0 && (
           <div className="flex flex-wrap gap-2 px-1 pb-2">
             {files.map((f) => (
