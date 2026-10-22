@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import { Inbox as InboxIcon, Lock } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useHealth, useMarkDoneFromInbox, useProjects, useTasks, keys } from "../lib/queries"
@@ -20,9 +20,12 @@ const GROUPS: { title: string; statuses: TaskStatus[] }[] = [
   { title: "Done", statuses: ["done"] },
 ]
 
+const INBOX_GROUPS = GROUPS.filter((g) => ["Needs you", "Ready for review", "Failed"].includes(g.title))
+
 function useProjectNames() {
   const projects = useProjects()
-  return (id: string) => projects.data?.find((p) => p.id === id)?.name
+  const names = useMemo(() => new Map(projects.data?.map((p) => [p.id, p.name])), [projects.data])
+  return (id: string) => names.get(id)
 }
 
 /**
@@ -62,7 +65,7 @@ function Grouped({
               <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
                 {list.map(({ item: t, stale }) => (
                   <div key={t.id} data-stable-key={t.id}>
-                    <TaskCard task={t} projectName={name(t.projectId)} stale={stale} onMarkDone={onMarkDone && !stale ? () => onMarkDone(t) : undefined} />
+                    <TaskCard task={t} projectName={name(t.projectId)} stale={stale} onMarkDone={stale ? undefined : onMarkDone} />
                   </div>
                 ))}
               </div>
@@ -97,7 +100,7 @@ export function InboxView() {
           // the inbox (an answered question goes back to working) stays in place, dimmed, until a re-sort.
           tasks={all.filter((t) => t.status !== "done" && !closing.has(t.id))}
           include={(t) => inInbox(t, closing)}
-          groups={GROUPS.filter((g) => ["Needs you", "Ready for review", "Failed"].includes(g.title))}
+          groups={INBOX_GROUPS}
           onMarkDone={markDone}
         />
       )}
