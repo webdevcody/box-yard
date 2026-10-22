@@ -4,6 +4,7 @@ import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import type { AppNotification, BoxInfo, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
+import { NEXT_STEPS_META_KEY } from "../shared/nextSteps.js"
 import { fakeRedis, freePort, testConfig, waitFor } from "./helpers.js"
 
 // End-to-end: the real server, task manager, worker runner and MCP servers,
@@ -85,6 +86,10 @@ describe("box yard end to end", () => {
 
     // The workspace gets archived so the task can move boxes later.
     await waitFor(async () => (await getTask(r, t.id)).lastArchivedAt, "archive")
+    const messages = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
+    const reply = [...messages].reverse().find((m) => m.role === "assistant")
+    expect(reply?.content).not.toContain("boxyard-next-steps")
+    expect(reply?.meta?.[NEXT_STEPS_META_KEY]).toEqual(["Review the mock result", "Run a broader check", "Ask for a PR-ready summary"])
   })
 
   it("asks Cody a question, then resumes the same session with the answer", async () => {
@@ -228,6 +233,9 @@ describe("box yard end to end", () => {
     const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
     expect(chat.filter((m) => m.role === "tool").map((m) => m.content)).toEqual(expect.arrayContaining(["create_project", "create_task"]))
     expect(chat.some((m) => m.role === "assistant" && m.content.includes("Started task"))).toBe(true)
+    const reply = [...chat].reverse().find((m) => m.role === "assistant")
+    expect(reply?.content).not.toContain("boxyard-next-steps")
+    expect(reply?.meta?.[NEXT_STEPS_META_KEY]).toEqual(["Check the latest yard status", "Start a related task", "Summarize open decisions"])
     // Second message resumed the same orchestrator session.
     expect(r.yard.store.getKv("orchestrator_session_started")).toBe("1")
   })

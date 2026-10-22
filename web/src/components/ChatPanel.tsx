@@ -1,7 +1,7 @@
-import { memo, useCallback, useEffect, useRef } from "react"
-import { Link } from "wouter"
+import { memo, useCallback, useEffect, useMemo, useRef } from "react"
+import { Link, useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, RotateCcw, Settings as SettingsIcon, Square, Wrench } from "lucide-react"
-import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useSendChat } from "../lib/queries"
+import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { AppLink, Button, Markdown, cx, warmMarkdown } from "./ui"
@@ -13,6 +13,9 @@ import { AttachmentList } from "./Attachments"
 import { ContextMeter } from "./ContextMeter"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
+import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
+import { SelectionToTask } from "./SelectionToTask"
+import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, ChatMessage } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 
@@ -32,6 +35,9 @@ export const ChatPanel = memo(function ChatPanel() {
   const orch = useOrchestratorState()
   const compact = useCompactOrchestrator()
   const openSettings = useOpenSettings()
+  const projects = useProjects()
+  const tasks = useTasks()
+  const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
 
@@ -47,6 +53,14 @@ export const ChatPanel = memo(function ChatPanel() {
 
   const messages = chat.data ?? NO_MESSAGES
   const tail = useTail(messages, "chat")
+  const currentProject = useMemo(() => {
+    const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
+    if (projectId) return projects.data?.find((p) => p.id === projectId) ?? null
+    const taskId = location.match(/^\/tasks\/([^/?#]+)/)?.[1]
+    const task = taskId ? tasks.data?.find((t) => t.id === taskId) : null
+    return task ? (projects.data?.find((p) => p.id === task.projectId) ?? null) : null
+  }, [location, projects.data, tasks.data])
+  const selectionSource: SelectionTaskSource = { kind: "orchestrator", project: projectContext(currentProject) }
 
   // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
@@ -109,26 +123,28 @@ export const ChatPanel = memo(function ChatPanel() {
         onCompact={() => compact.mutate()}
       />
 
-      <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className="px-4 py-4" contentClassName="space-y-3">
-        {messages.length === 0 && !chat.isLoading && (
-          <div className="space-y-3 pt-6 text-center">
-            <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
-            <div className="space-y-2">
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  onClick={() => submit(s)}
-                  className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
-                >
-                  {s}
-                </button>
-              ))}
+      <SelectionToTask source={selectionSource} onPrompt={submit}>
+        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className="px-4 py-4" contentClassName="space-y-3">
+          {messages.length === 0 && !chat.isLoading && (
+            <div className="space-y-3 pt-6 text-center">
+              <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
+              <div className="space-y-2">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => submit(s)}
+                    className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        <ChatLines messages={tail.visible} />
-        <StreamingReply busy={Boolean(busy.data)} />
-      </StickyScroll>
+          )}
+          <ChatLines messages={tail.visible} onFollowUp={submit} />
+          <StreamingReply busy={Boolean(busy.data)} />
+        </StickyScroll>
+      </SelectionToTask>
 
       <Composer
         onSubmit={submit}
@@ -140,8 +156,8 @@ export const ChatPanel = memo(function ChatPanel() {
   )
 })
 
-const ChatLines = memo(function ChatLines({ messages }: { messages: ChatMessage[] }) {
-  return messages.map((m) => <ChatLine key={m.id} m={m} />)
+const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {
+  return messages.map((m) => <ChatLine key={m.id} m={m} onFollowUp={onFollowUp} />)
 })
 
 /** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */
@@ -196,7 +212,7 @@ const ToolLine = memo(function ToolLine({ m }: { m: ChatMessage }) {
   )
 })
 
-const ChatLine = memo(function ChatLine({ m }: { m: ChatMessage }) {
+const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by an orchestrator schedule, not typed by Cody.
     return (
@@ -248,6 +264,7 @@ const ChatLine = memo(function ChatLine({ m }: { m: ChatMessage }) {
   return (
     <div className="text-sm text-zinc-200">
       <Markdown>{m.content}</Markdown>
+      <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
     </div>
   )
 })
