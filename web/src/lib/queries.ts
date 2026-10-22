@@ -1,3 +1,4 @@
+import { useCallback } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api, clientId } from "./api"
 import { toast } from "./toast"
@@ -69,6 +70,11 @@ export const useHealth = () =>
   useQuery({ queryKey: keys.health, queryFn: () => api<Health>("/api/health"), refetchInterval: 30_000 })
 export const useProjects = () => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects") })
 export const useTasks = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks") })
+/** One task from the shared list. Re-renders only when that task changes, not on every task update. */
+export function useTask(id: string) {
+  const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
+}
 export const useTaskMessages = (id: string) =>
   useQuery({ queryKey: keys.taskMessages(id), queryFn: () => api<TaskMessage[]>(`/api/tasks/${id}/messages`) })
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
@@ -303,11 +309,14 @@ export const useRetryTask = () => useTaskAction("retry", () => ({ status: "queue
 
 /** Inbox card "Mark done": the same close as the task view's, sent after a short undo window. */
 export function useMarkDoneFromInbox() {
-  const close = useCloseTask()
-  return (task: Task) => {
-    if (!deferClose(task.id, () => close.mutateAsync(task.id))) return
-    toast.info("Marked done", task.title, { action: { label: "Undo", onClick: () => undoClose(task.id) }, duration: UNDO_MS })
-  }
+  const { mutateAsync } = useCloseTask()
+  return useCallback(
+    (task: Task) => {
+      if (!deferClose(task.id, () => mutateAsync(task.id))) return
+      toast.info("Marked done", task.title, { action: { label: "Undo", onClick: () => undoClose(task.id) }, duration: UNDO_MS })
+    },
+    [mutateAsync],
+  )
 }
 
 export function useDeleteTask() {
