@@ -327,7 +327,10 @@ export class TaskManager {
     if (row.current_turn_id && row.box_id) await this.killTurn(row).catch(() => {})
     this.holds.get(row.id)?.abort()
     if (row.box_id) await this.removeTaskDir(row.box_id, row.id).catch(() => {})
-    if (row.archive_path) fs.rmSync(row.archive_path, { force: true })
+    if (row.archive_path) {
+      fs.rmSync(row.archive_path, { force: true })
+      this.store.noteTaskArchiveUnavailable(row.id, row.archive_path, "archive deleted with task")
+    }
     if (this.redis) await this.redis.cmd("DEL", redisEventsKey(row.id)).catch(() => {})
     this.store.deleteTask(row.id)
     this.hub.broadcast({ type: "task.deleted", taskId: row.id })
@@ -1136,10 +1139,44 @@ export class TaskManager {
         row.id,
         `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after)} tokens` : " (new usage shows after the next turn)"}.`,
       )
+    const archiveAvailable = Boolean(row.archive_path && fs.existsSync(row.archive_path))
+    const record = this.store.addTaskCompaction({
+      taskId: row.id,
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
+      at: Date.now(),
+      statusBefore: prev,
+      statusAfter: status,
+      tokensBefore: before,
+      tokensAfter: after ?? null,
+      summary: this.taskCompactionSummary(row),
+      archivePath: row.archive_path,
+      archiveAvailable,
+      archiveNote: archiveAvailable ? null : row.archive_path ? "archive path was not present when compaction finished" : "no workspace archive recorded yet",
+    })
     this.emitTask(row.id)
     this.publishDirectory()
-    void this.archive(row.id).finally(() => this.schedule())
+    void this.archive(row.id)
+      .then(() => {
+        const fresh = this.store.getTaskRow(row.id)
+        if (!fresh?.archive_path) return
+        const available = fs.existsSync(fresh.archive_path)
+        this.store.updateTaskCompactionArchive(record.id, fresh.archive_path, available, available ? null : "archive path was not present after compaction archive")
+      })
+      .finally(() => this.schedule())
     this.schedule()
+  }
+
+  private taskCompactionSummary(row: TaskRow): string {
+    const task = this.store.getTask(row.id)
+    const messages = this.store.listTaskMessages(row.id, 60)
+    const latest = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "event" || m.role === "agent")
+    const pieces = [
+      task?.summary ? `Outcome: ${task.summary}` : "",
+      latest ? `Latest context: [${latest.role}] ${latest.content}` : "",
+      row.branch ? `Branch: ${row.branch}` : "",
+      row.pr_url ? `PR: ${row.pr_url}` : "",
+    ].filter(Boolean)
+    return preview(pieces.join("\n"), 1200, "open the task transcript for more")
   }
 
   private deliverAgentMessage(from: TaskRow, to: string, message: string, expectReply: boolean) {

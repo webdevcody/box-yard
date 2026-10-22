@@ -104,6 +104,26 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     lastActive: ago(t.updatedAt),
     summary: t.summary ? preview(t.summary, 300, "call get_task or wait_for_tasks for the full reply") : undefined,
   })
+  const compactionView = (c: ReturnType<Store["listOrchestratorCompactions"]>[number], full = false) => ({
+    id: c.id,
+    at: new Date(c.at).toISOString(),
+    trigger: c.trigger,
+    tokensBefore: c.tokensBefore,
+    tokensAfter: c.tokensAfter,
+    markdownFile: c.file,
+    jsonFile: c.jsonFile,
+    tasks: c.tasks.map((t) => ({
+      id: t.taskId,
+      title: t.title,
+      status: t.status,
+      project: t.projectName,
+      branch: t.branch ?? undefined,
+      pr: t.prUrl ?? undefined,
+      sessionId: t.sessionId,
+      summary: full ? t.summary : preview(t.summary, 500, "call read_compaction for full linked-task context"),
+    })),
+    ...(full ? { markdown: c.markdown ?? "" } : {}),
+  })
   /**
    * The agent's latest reply, to be sent once and in full (capped). `summary` is only
    * added when it says something different (e.g. the text passed to mark_done).
@@ -227,6 +247,52 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         list = list.filter((t) => score(t) > 0).sort((x, y) => score(y) - score(x))
       }
       return ok(list.map(brief))
+    }),
+  )
+
+  server.registerTool(
+    "list_compactions",
+    {
+      description:
+        "List orchestrator compaction records, newest first. Use this to recover prior context after the orchestrator was compacted; pass task to filter to compactions that mentioned or snapshotted that task.",
+      inputSchema: {
+        task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    safe(async (a: { task?: string; limit?: number }) => {
+      const taskId = a.task ? task(a.task).id : undefined
+      return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
+    }),
+  )
+
+  server.registerTool(
+    "read_compaction",
+    {
+      description: "Read one orchestrator compaction's markdown summary and linked task snapshots.",
+      inputSchema: { compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z") },
+    },
+    safe(async (a: { compaction: string }) => {
+      const c = store.getOrchestratorCompaction(a.compaction, true)
+      if (!c) throw new Error(`No compaction "${a.compaction}". Use list_compactions.`)
+      return ok(compactionView(c, true))
+    }),
+  )
+
+  server.registerTool(
+    "find_compactions_by_task",
+    {
+      description:
+        "Find orchestrator compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
+      inputSchema: { task: z.string(), limit: z.number().int().min(1).max(100).optional() },
+    },
+    safe(async (a: { task: string; limit?: number }) => {
+      const t = task(a.task)
+      return ok({
+        task: brief(t),
+        orchestratorCompactions: store.listOrchestratorCompactions({ taskId: t.id, limit: a.limit ?? 20 }).map((c) => compactionView(c)),
+        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit: a.limit ?? 20 }),
+      })
     }),
   )
 

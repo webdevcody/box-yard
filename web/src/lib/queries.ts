@@ -10,6 +10,7 @@ import type {
   BoxInfo,
   ChatMessage,
   Health,
+  OrchestratorCompactionRecord,
   OrchestratorState,
   Settings,
   SettingsInfo,
@@ -19,6 +20,7 @@ import type {
   ScheduleTarget,
   CatchUp,
   Task,
+  TaskCompactionRecord,
   TaskMessage,
   TaskStatus,
 } from "../../../shared/types"
@@ -36,6 +38,9 @@ export const keys = {
   boxes: ["boxes"] as const,
   schedules: ["schedules"] as const,
   scheduleRuns: ["schedule-runs"] as const,
+  compactions: ["compactions"] as const,
+  compaction: (id: string) => ["compaction", id] as const,
+  taskCompactions: (id: string) => ["task-compactions", id] as const,
   settings: ["settings"] as const,
   orchestrator: ["orchestrator"] as const,
   agentSettings: ["agent-settings"] as const,
@@ -81,6 +86,11 @@ export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<
 export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
 export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
 export const useScheduleRuns = () => useQuery({ queryKey: keys.scheduleRuns, queryFn: () => api<ScheduleRun[]>("/api/schedule-runs") })
+export const useCompactions = () => useQuery({ queryKey: keys.compactions, queryFn: () => api<OrchestratorCompactionRecord[]>("/api/compactions") })
+export const useCompaction = (id: string | null) =>
+  useQuery({ queryKey: id ? keys.compaction(id) : ["compaction", "none"], queryFn: () => api<OrchestratorCompactionRecord>(`/api/compactions/${id}`), enabled: Boolean(id) })
+export const useTaskCompactions = (taskId: string) =>
+  useQuery({ queryKey: keys.taskCompactions(taskId), queryFn: () => api<TaskCompactionRecord[]>(`/api/task-compactions?taskId=${encodeURIComponent(taskId)}`) })
 export const useSettings = () =>
   useQuery({
     queryKey: keys.settings,
