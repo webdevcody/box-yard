@@ -50,11 +50,20 @@ export function matchesQuery(task: Task, query: string, extra = ""): boolean {
   return words.every((w) => text.includes(w))
 }
 
+/** The comparator behind each sort, for lists that sort themselves (useStableOrder). */
+export function compareTasks(sort: TaskSort): (a: Task, b: Task) => number {
+  if (sort === "newest") return (a, b) => b.createdAt - a.createdAt
+  if (sort === "recent") return (a, b) => b.updatedAt - a.updatedAt
+  return (a, b) => ATTENTION.indexOf(a.status) - ATTENTION.indexOf(b.status) || b.updatedAt - a.updatedAt
+}
+
 export function sortTasks(tasks: Task[], sort: TaskSort): Task[] {
-  const list = [...tasks]
-  if (sort === "newest") return list.sort((a, b) => b.createdAt - a.createdAt)
-  if (sort === "recent") return list.sort((a, b) => b.updatedAt - a.updatedAt)
-  return list.sort((a, b) => ATTENTION.indexOf(a.status) - ATTENTION.indexOf(b.status) || b.updatedAt - a.updatedAt)
+  return [...tasks].sort(compareTasks(sort))
+}
+
+/** Whether a task shows under the filter and search. */
+export function isVisible(task: Task, opts: { filter: TaskFilter; query: string }): boolean {
+  return inFilter(task, opts.filter) && matchesQuery(task, opts.query)
 }
 
 /** How many of `tasks` match the query in each filter, for the chip counts. */
@@ -65,7 +74,7 @@ export function filterCounts(tasks: Task[], query: string): Record<TaskFilter, n
 
 export function visibleTasks(tasks: Task[], opts: { filter: TaskFilter; query: string; sort: TaskSort }): Task[] {
   return sortTasks(
-    tasks.filter((t) => inFilter(t, opts.filter) && matchesQuery(t, opts.query)),
+    tasks.filter((t) => isVisible(t, opts)),
     opts.sort,
   )
 }
