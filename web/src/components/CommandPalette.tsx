@@ -6,6 +6,7 @@ import { buildItems, pushRecent, recentKeyFor, searchPalette, parseQuery, type P
 import { StatusBadge, TimeAgo, cx } from "./ui"
 import { useOpenSettings } from "./SettingsDialog"
 import { NewProjectDialog } from "./NewProjectDialog"
+import { Modal } from "./Modal"
 
 // ------------------------------------------------------------------ open state
 
@@ -124,12 +125,8 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
   const current = flat[Math.min(active, flat.length - 1)]
   const optionId = (i: number) => `${id}-opt-${i}`
 
-  // Give focus back to whatever had it when the palette closes.
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null
-    input.current?.focus()
-    return () => previous?.focus?.()
-  }, [])
+  // The Modal gives focus back to whatever had it when the palette closes.
+  useEffect(() => input.current?.focus(), [])
 
   useEffect(() => setActive(0), [query])
 
@@ -180,76 +177,75 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
   let index = 0
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-[12vh] backdrop-blur-sm" onMouseDown={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Command palette"
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={onKeyDown}
-        className="flex max-h-[70vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl"
-      >
-        <div className="flex items-center gap-2.5 border-b border-zinc-900 px-4">
-          {actionsOnly ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
-          <input
-            ref={input}
-            role="combobox"
-            aria-expanded={flat.length > 0}
-            aria-controls={`${id}-list`}
-            aria-activedescendant={current ? optionId(flat.indexOf(current)) : undefined}
-            aria-autocomplete="list"
-            aria-label="Search Box Yard"
-            autoComplete="off"
-            spellCheck={false}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search tasks, projects, schedules, files… (> for actions)"
-            className="min-w-0 flex-1 bg-transparent py-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
-          />
-          <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500">esc</kbd>
-        </div>
-
-        <div ref={list} id={`${id}-list`} role="listbox" aria-label="Results" className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2">
-          {flat.length === 0 && <div className="px-3 py-8 text-center text-sm text-zinc-500">{tasks.isLoading ? "Loading…" : "No matches"}</div>}
-          {groups.map((g) => (
-            <Group key={`${g.kind}:${g.label}`} group={g} id={`${id}-${g.kind}`}>
-              {g.items.map((item) => {
-                const i = index++
-                return (
-                  <Option
-                    key={item.key}
-                    id={optionId(i)}
-                    index={i}
-                    item={item}
-                    query={q}
-                    selected={item === current}
-                    onHover={() => setActive(i)}
-                    onChoose={(newTab) => choose(item, newTab)}
-                  />
-                )
-              })}
-            </Group>
-          ))}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
-          <span>
-            <Kbd>↑</Kbd>
-            <Kbd>↓</Kbd> move
-          </span>
-          <span>
-            <Kbd>↵</Kbd> open
-          </span>
-          <span>
-            <Kbd>{MOD_KEY.trim()}</Kbd>
-            <Kbd>↵</Kbd> new tab
-          </span>
-          <span className="ml-auto">
-            <Kbd>&gt;</Kbd> actions
-          </span>
-        </div>
+    <Modal
+      size="lg"
+      placement="top"
+      label="Command palette"
+      onClose={onClose}
+      onKeyDown={onKeyDown}
+      className="sm:max-h-[70vh]"
+      bodyClassName="flex min-h-0 flex-1 flex-col"
+    >
+      <div className="flex items-center gap-2.5 border-b border-zinc-900 px-4">
+        {actionsOnly ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
+        <input
+          ref={input}
+          role="combobox"
+          aria-expanded={flat.length > 0}
+          aria-controls={`${id}-list`}
+          aria-activedescendant={current ? optionId(flat.indexOf(current)) : undefined}
+          aria-autocomplete="list"
+          aria-label="Search Box Yard"
+          autoComplete="off"
+          spellCheck={false}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search tasks, projects, schedules, files… (> for actions)"
+          className="min-w-0 flex-1 bg-transparent py-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+        />
+        <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500">esc</kbd>
       </div>
-    </div>
+
+      <div ref={list} id={`${id}-list`} role="listbox" aria-label="Results" className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2">
+        {flat.length === 0 && <div className="px-3 py-8 text-center text-sm text-zinc-500">{tasks.isLoading ? "Loading…" : "No matches"}</div>}
+        {groups.map((g) => (
+          <Group key={`${g.kind}:${g.label}`} group={g} id={`${id}-${g.kind}`}>
+            {g.items.map((item) => {
+              const i = index++
+              return (
+                <Option
+                  key={item.key}
+                  id={optionId(i)}
+                  index={i}
+                  item={item}
+                  query={q}
+                  selected={item === current}
+                  onHover={() => setActive(i)}
+                  onChoose={(newTab) => choose(item, newTab)}
+                />
+              )
+            })}
+          </Group>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
+        <span>
+          <Kbd>↑</Kbd>
+          <Kbd>↓</Kbd> move
+        </span>
+        <span>
+          <Kbd>↵</Kbd> open
+        </span>
+        <span>
+          <Kbd>{MOD_KEY.trim()}</Kbd>
+          <Kbd>↵</Kbd> new tab
+        </span>
+        <span className="ml-auto">
+          <Kbd>&gt;</Kbd> actions
+        </span>
+      </div>
+    </Modal>
   )
 }
 
