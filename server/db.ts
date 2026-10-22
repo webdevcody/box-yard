@@ -139,6 +139,10 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN schedule_id TEXT;
   CREATE INDEX tasks_schedule ON tasks(schedule_id, created_at);
   `,
+  // Files attached to a queued input, as a JSON array of upload ids.
+  `
+  ALTER TABLE task_inputs ADD COLUMN attachments TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

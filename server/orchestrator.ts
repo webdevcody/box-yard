@@ -6,7 +6,8 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import type { ChatMessage } from "../shared/types.js"
+import { uploadsDir } from "./uploads.js"
+import type { Attachment, ChatMessage } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -17,6 +18,13 @@ const MAX_AUTO_TURNS = 8
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
+
+/** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
+function attachmentNote(files: unknown): string {
+  if (!Array.isArray(files) || !files.length) return ""
+  const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
+  return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
+}
 
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
@@ -63,8 +71,8 @@ export class Orchestrator {
   }
 
   /** Save Cody's message and make sure a turn will pick it up. */
-  send(content: string, id?: string): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), null, id)
+  send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
+    const msg = this.store.addChat("user", content.trim(), attachments.length ? { attachments } : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     this.autoTurns = 0
@@ -148,7 +156,8 @@ export class Orchestrator {
     return this.store
       .listChat(200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content)
+      .map((m) => m.content + attachmentNote(m.meta?.attachments))
+      .filter((text) => text.trim())
   }
 
   /** A turn with only task updates in it: report them and keep Cody's work moving. */
@@ -224,9 +233,10 @@ export class Orchestrator {
         "--mcp-config",
         this.mcpConfigPath,
         "--tools",
-        "WebSearch,WebFetch",
+        "WebSearch,WebFetch,Read",
         "--allowedTools",
-        "mcp__boxyard,WebSearch,WebFetch",
+        // Read only works inside the uploads folder (`//` = absolute path), so attached files and images can be opened.
+        `mcp__boxyard,WebSearch,WebFetch,Read(/${uploadsDir(this.c.dataDir)}/**)`,
         "--permission-mode",
         "dontAsk",
         "--append-system-prompt",
