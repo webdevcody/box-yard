@@ -33,7 +33,7 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
     )
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-zinc-900 bg-zinc-950">
+    <aside className="flex h-full w-full shrink-0 flex-col border-r border-zinc-900 bg-zinc-950">
       <div className="flex items-center gap-2 px-4 pt-4 pb-3">
         <div className="grid h-7 w-7 place-items-center rounded-md bg-yard-500 text-zinc-950">
           <Boxes className="h-4 w-4" />

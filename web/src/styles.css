@@ -63,3 +63,12 @@ body {
 .prose-chat td {
   @apply border border-zinc-800 px-2 py-1;
 }
+
+/* While dragging a panel border: no text selection, and keep the resize cursor everywhere */
+body.resizing {
+  user-select: none;
+  cursor: col-resize;
+}
+body.resizing iframe {
+  pointer-events: none;
+}
