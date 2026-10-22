@@ -6,6 +6,7 @@ import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib
 import { inInbox, usePendingCloses } from "../lib/inbox"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
+import { RecentActivity } from "./RecentActivity"
 import { MOD_KEY, openPalette } from "./CommandPalette"
 import type { Connection } from "../lib/stream"
 
@@ -117,6 +118,8 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
           )
         })}
       </div>
+
+      <RecentActivity onNavigate={onNavigate} />
 
       <div
         role="link"

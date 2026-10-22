@@ -3,6 +3,7 @@ import { api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import type {
+  AppNotification,
   Artifact,
   Attachment,
   BoxInfo,
@@ -37,6 +38,7 @@ export const keys = {
   settings: ["settings"] as const,
   orchestrator: ["orchestrator"] as const,
   agentSettings: ["agent-settings"] as const,
+  notifications: ["notifications"] as const,
 }
 
 // ------------------------------------------------------------------ cache helpers
@@ -83,6 +85,9 @@ export const useOrchestratorState = () =>
   useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
 export const useAgentSettings = () =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
+/** Newest first; kept live by the event stream (see lib/notifications.ts). */
+export const useNotifications = () =>
+  useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
 
 export const useChatStream = () =>

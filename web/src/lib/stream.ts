@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
-import type { Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
+import { applyRead, receiveNotification } from "./notifications"
+import type { AppNotification, Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -52,6 +53,7 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "task.deleted":
           qc.setQueryData<Task[]>(keys.tasks, (list) => list?.filter((t) => t.id !== ev.taskId))
+          qc.setQueryData<AppNotification[]>(keys.notifications, (list) => list?.filter((n) => n.taskId !== ev.taskId))
           break
         case "task.message":
           qc.setQueryData<TaskMessage[]>(keys.taskMessages(ev.message.taskId), (list) => {
@@ -103,6 +105,12 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "schedule.run":
           qc.setQueryData<ScheduleRun[]>(keys.scheduleRuns, (list) => (list ? upsert(list, ev.run, true) : list))
+          break
+        case "notification":
+          receiveNotification(qc, ev.notification)
+          break
+        case "notifications.read":
+          qc.setQueryData<AppNotification[]>(keys.notifications, (list) => applyRead(list, ev.ids, ev.readAt))
           break
         case "schedule.deleted":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.id !== ev.scheduleId))

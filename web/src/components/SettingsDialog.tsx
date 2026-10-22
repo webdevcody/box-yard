@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { X } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings } from "../lib/queries"
+import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { Button, Field, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
@@ -25,6 +26,34 @@ function Source({ source }: { source: SettingSource }) {
     <span className={cx("ml-1.5 rounded px-1 py-px text-[10px] font-normal tracking-normal normal-case", source === "ui" ? "bg-yard-500/15 text-yard-300" : "bg-zinc-800 text-zinc-500")}>
       {SOURCE_LABEL[source]}
     </span>
+  )
+}
+
+/** Saved in this browser only: whether a background tab pops a system notification when a task finishes. */
+function BrowserNotificationsToggle() {
+  const [on, setOn] = useState(browserNotificationsOn)
+  const [denied, setDenied] = useState(false)
+  if (!browserNotificationsSupported()) return null
+  return (
+    <section className="space-y-1.5 border-t border-zinc-900 pt-4">
+      <h3 className="text-sm font-semibold text-zinc-200">This browser</h3>
+      <label className="flex items-center gap-2 text-sm text-zinc-200">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={async (e) => {
+            const want = e.target.checked
+            const now = await setBrowserNotifications(want)
+            setOn(now)
+            setDenied(want && !now)
+          }}
+        />
+        Browser notifications when a task finishes and this tab is in the background
+      </label>
+      <p className="pl-6 text-xs text-zinc-500">
+        {denied ? "The browser blocked notifications for this site. Allow them in the site settings, then try again." : "Saved in this browser only. In-app toasts show either way."}
+      </p>
+    </section>
   )
 }
 
@@ -191,6 +220,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </p>
               )}
             </section>
+            <BrowserNotificationsToggle />
             <datalist id="boxyard-models">
               {MODELS.map((m) => (
                 <option key={m} value={m} />
