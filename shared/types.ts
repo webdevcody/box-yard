@@ -57,6 +57,8 @@ export interface Task {
   previews: PreviewLink[]
   question: string | null
   summary: string | null
+  /** Until there is a summary: the latest assistant text or tool call as one line (shared/activity.ts), for cards. */
+  activity?: string | null
   error: string | null
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
