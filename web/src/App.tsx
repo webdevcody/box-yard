@@ -16,6 +16,7 @@ import { Toasts } from "./components/Toasts"
 import { NotificationEffects } from "./components/NotificationEffects"
 import { SettingsHost } from "./components/SettingsDialog"
 import { ConfirmHost } from "./components/ConfirmDialog"
+import { FilePreviewHost } from "./components/FilePreview"
 import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
@@ -100,6 +101,7 @@ export function App() {
       <CommandPalette />
       <SettingsHost />
       <ConfirmHost />
+      <FilePreviewHost />
       <NotificationEffects />
     </div>
   )

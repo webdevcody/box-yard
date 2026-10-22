@@ -25,6 +25,7 @@ import {
 } from "../lib/projectTasks"
 import { Modal } from "./Modal"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
+import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
@@ -367,15 +368,15 @@ function Files({ files }: { files: Artifact[] }) {
       </Empty>
     )
   return (
-    <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80">
+    <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80" {...PREVIEW_GROUP}>
       {[...files]
         .sort((a, b) => b.createdAt - a.createdAt)
         .map((a) => (
           <li key={a.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
             <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
-            <a href={a.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
+            <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
               {a.title}
-            </a>
+            </ArtifactLink>
             <span className="ml-auto shrink-0 text-xs text-zinc-500">
               {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
             </span>

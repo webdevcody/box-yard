@@ -8,6 +8,11 @@ const MIME: Record<string, string> = {
   ".htm": "text/html; charset=utf-8",
   ".md": "text/markdown; charset=utf-8",
   ".txt": "text/plain; charset=utf-8",
+  ".log": "text/plain; charset=utf-8",
+  ".yaml": "text/yaml; charset=utf-8",
+  ".yml": "text/yaml; charset=utf-8",
+  ".ts": "text/plain; charset=utf-8",
+  ".py": "text/plain; charset=utf-8",
   ".csv": "text/csv; charset=utf-8",
   ".json": "application/json",
   ".js": "text/javascript",
@@ -18,10 +23,13 @@ const MIME: Record<string, string> = {
   ".jpeg": "image/jpeg",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".avif": "image/avif",
   ".pdf": "application/pdf",
   ".zip": "application/zip",
   ".mp4": "video/mp4",
+  ".webm": "video/webm",
   ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
 }
 
 export const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024

@@ -11,6 +11,8 @@ export const MODAL_SIZES = {
   md: "sm:max-w-lg",
   lg: "sm:max-w-2xl",
   xl: "sm:max-w-[54rem]",
+  /** File previews: images, HTML pages and PDFs. */
+  full: "sm:max-w-[90vw]",
 } as const
 
 export type ModalSize = keyof typeof MODAL_SIZES
