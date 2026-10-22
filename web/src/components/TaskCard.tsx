@@ -6,7 +6,7 @@ import { StatusBadge, TimeAgo, cx } from "./ui"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
- * space reserved), an optional chips row, then a one-line footer pinned to the bottom (the card fills its grid cell).
+ * space reserved), an optional chips row, then a one-line footer pinned to the bottom (the card grows to fill its flex-column grid cell).
  *
  * `onMarkDone` adds a "Mark done" check button (inbox cards). `stale` dims a card that no longer belongs in its
  * list (e.g. it finished under the Active filter) but stays put until the list is re-sorted (useStableOrder).
@@ -18,7 +18,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
       href={`/tasks/${task.id}`}
       title={stale ? "No longer matches this list. It leaves on the next re-sort." : undefined}
       className={cx(
-        "group flex h-full flex-col rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
+        "group flex flex-1 flex-col rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
         task.status === "needs_input" ? "border-amber-500/40" : task.status === "failed" ? "border-red-900/60" : "border-zinc-800/80 hover:border-zinc-700",
         stale && "border-dashed opacity-50 hover:opacity-80",
       )}
