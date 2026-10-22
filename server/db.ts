@@ -143,6 +143,50 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE task_inputs ADD COLUMN attachments TEXT;
   `,
+  `
+  -- Schedules can target the orchestrator chat instead of a project, so project_id becomes nullable.
+  CREATE TABLE schedules_new (
+    id TEXT PRIMARY KEY,
+    target TEXT NOT NULL DEFAULT 'project',
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    catch_up TEXT NOT NULL DEFAULT 'once',
+    allow_overlap INTEGER NOT NULL DEFAULT 0,
+    next_run_at INTEGER,
+    last_run_at INTEGER,
+    last_task_id TEXT,
+    last_skip_reason TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    qstash_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  INSERT INTO schedules_new (id, target, project_id, name, cron, timezone, prompt, enabled, catch_up, allow_overlap, next_run_at, last_run_at, last_task_id, last_skip_reason, run_count, qstash_id, created_at, updated_at)
+    SELECT id, 'project', project_id, name, cron, timezone, prompt, enabled, catch_up, allow_overlap, next_run_at, last_run_at, last_task_id, last_skip_reason, run_count, qstash_id, created_at, updated_at FROM schedules;
+  DROP TABLE schedules;
+  ALTER TABLE schedules_new RENAME TO schedules;
+  CREATE INDEX schedules_due ON schedules(enabled, next_run_at);
+
+  -- One row per orchestrator-schedule run: queued until the orchestrator is free, then running, then done or failed.
+  CREATE TABLE schedule_runs (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT 'scheduled',
+    prompt TEXT NOT NULL,
+    due_at INTEGER NOT NULL,
+    chat_message_id TEXT,
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    started_at INTEGER,
+    finished_at INTEGER
+  );
+  CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule_id, created_at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

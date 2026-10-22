@@ -9,6 +9,8 @@ import type {
   Health,
   Project,
   Schedule,
+  ScheduleRun,
+  ScheduleTarget,
   CatchUp,
   Task,
   TaskMessage,
@@ -27,6 +29,7 @@ export const keys = {
   artifacts: ["artifacts"] as const,
   boxes: ["boxes"] as const,
   schedules: ["schedules"] as const,
+  scheduleRuns: ["schedule-runs"] as const,
   settings: ["settings"] as const,
 }
 
@@ -63,6 +66,7 @@ export const useTaskMessages = (id: string) =>
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
 export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
 export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
+export const useScheduleRuns = () => useQuery({ queryKey: keys.scheduleRuns, queryFn: () => api<ScheduleRun[]>("/api/schedule-runs") })
 export const useSettings = () =>
   useQuery({
     queryKey: keys.settings,
@@ -295,7 +299,9 @@ export function useDeleteTask() {
 
 export interface ScheduleInput {
   id: string
-  projectId: string
+  target: ScheduleTarget
+  /** Null for orchestrator schedules. */
+  projectId: string | null
   name: string
   cron: string
   timezone: string
@@ -339,7 +345,7 @@ export function useCreateSchedule() {
 export function useUpdateSchedule() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, ...patch }: { id: string } & Partial<Omit<ScheduleInput, "id" | "projectId">> & { enabled?: boolean }) =>
+    mutationFn: ({ id, ...patch }: { id: string } & Partial<Omit<ScheduleInput, "id" | "projectId" | "target">> & { enabled?: boolean }) =>
       api<Schedule>(`/api/schedules/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, ...patch }) => {
       const undo = snapshot<Schedule[]>(qc, keys.schedules)
@@ -373,9 +379,12 @@ export function useDeleteSchedule() {
 export function useRunSchedule() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) => api<Task>(`/api/schedules/${id}/run`, { method: "POST" }),
+    mutationFn: (id: string) => api<Task | ScheduleRun>(`/api/schedules/${id}/run`, { method: "POST" }),
     onError: fail("Couldn't start a run"),
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (run) => {
+      if ("dueAt" in run) qc.setQueryData<ScheduleRun[]>(keys.scheduleRuns, (list) => upsert(list, run, true))
+      else qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, run))
+    },
   })
 }
 

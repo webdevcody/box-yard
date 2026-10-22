@@ -7,7 +7,7 @@ import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
 import { uploadsDir } from "./uploads.js"
-import type { Attachment, ChatMessage } from "../shared/types.js"
+import type { Attachment, ChatMessage, ScheduleRun } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -37,6 +37,8 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
+  private readonly runNotes = new Map<string, string>()
   private child: ChildProcess | null = null
   private readonly workdir: string
   private readonly mcpConfigPath: string
@@ -78,6 +80,21 @@ export class Orchestrator {
     this.autoTurns = 0
     void this.drain()
     return msg
+  }
+
+  /**
+   * Queue a scheduled prompt (a `queued` schedule_runs row). It is injected into
+   * the chat once no turn is running, so two orchestrator turns never overlap.
+   */
+  enqueueScheduled(runId: string, notes?: string) {
+    if (notes) this.runNotes.set(runId, notes)
+    void this.drain()
+  }
+
+  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered. */
+  resumeScheduled() {
+    for (const r of this.store.listScheduleRuns({ status: ["running"] })) this.finishScheduledRun(r.id, "Box Yard restarted before this run finished.")
+    if (this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
   }
 
   /**
@@ -134,11 +151,13 @@ export class Orchestrator {
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted) {
+      while (this.pending || this.wakeWanted || this.nextScheduledRun()) {
         if (this.pending) {
           this.pending = false
           this.wakeWanted = false
           await this.turn()
+        } else if (this.nextScheduledRun()) {
+          await this.scheduledTurn(this.nextScheduledRun()!)
         } else {
           this.wakeWanted = false
           await this.autoTurn()
@@ -148,6 +167,39 @@ export class Orchestrator {
       this.running = false
       this.hub.broadcast({ type: "chat.busy", busy: false })
     }
+  }
+
+  /** The oldest queued scheduled run, if any. */
+  private nextScheduledRun() {
+    const queued = this.store.listScheduleRuns({ status: ["queued"] })
+    return queued.length ? queued[queued.length - 1]! : null
+  }
+
+  private finishScheduledRun(id: string, error?: string) {
+    const run = this.store.updateScheduleRun(id, { status: error ? "failed" : "done", error: error ?? null, finishedAt: Date.now() })
+    this.runNotes.delete(id)
+    this.hub.broadcast({ type: "schedule.run", run })
+  }
+
+  /** Inject a scheduled prompt into the chat as a labeled message and handle it like a message from Cody. */
+  private async scheduledTurn(queued: ScheduleRun) {
+    const msg = this.store.addChat("user", queued.prompt, { scheduleId: queued.scheduleId, scheduleRunId: queued.id })
+    this.hub.broadcast({ type: "chat.message", message: msg })
+    const run = this.store.updateScheduleRun(queued.id, { status: "running", startedAt: Date.now(), chatMessageId: msg.id })
+    this.hub.broadcast({ type: "schedule.run", run })
+    // This message is answered by this turn, not by Cody's next one.
+    this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
+    const notices = this.store.takeUnseenNotices()
+    const notes = this.runNotes.get(queued.id)
+    const prompt = [
+      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      queued.prompt,
+      `(This is a scheduled message from Box Yard, not a new message from Cody. ${notes ?? ""} Handle it as if Cody had sent it: do the work, and reply with what he should see.)`,
+    ]
+      .filter(Boolean)
+      .join("\n\n")
+    const result = await this.runPrompt(prompt)
+    this.finishScheduledRun(queued.id, result.ok ? undefined : result.error.slice(0, 500))
   }
 
   /** Messages Cody sent since the orchestrator last replied. */
@@ -199,7 +251,7 @@ export class Orchestrator {
     return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
   }
 
-  private async runPrompt(body: string) {
+  private async runPrompt(body: string): Promise<{ ok: boolean; error: string }> {
     const prompt = `${this.yardNow()}\n\n${body}`
     const s = this.session()
     let result = await this.run(prompt, s.id, s.started)
@@ -218,6 +270,7 @@ export class Orchestrator {
       const msg = this.store.addChat("error", `The orchestrator hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "chat.message", message: msg })
     }
+    return result
   }
 
   private run(prompt: string, sessionId: string, resume: boolean): Promise<{ ok: boolean; error: string }> {

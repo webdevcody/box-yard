@@ -10,7 +10,7 @@ import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { describeCron } from "../shared/cron.js"
-import { TASK_STATUSES, type Project, type Schedule, type Task } from "../shared/types.js"
+import { TASK_STATUSES, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 
 export interface McpDeps {
@@ -417,7 +417,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   const scheduleView = (s: Schedule) => ({
     id: s.id,
     name: s.name,
-    project: store.getProject(s.projectId)?.name ?? s.projectId,
+    target: s.target,
+    project: s.projectId ? (store.getProject(s.projectId)?.name ?? s.projectId) : undefined,
     cron: s.cron,
     meaning: describeCron(s.cron),
     timezone: s.timezone,
@@ -432,20 +433,50 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     prompt: s.prompt,
   })
 
+  const runView = (r: ScheduleRun) => ({
+    id: r.id,
+    schedule: store.getSchedule(r.scheduleId)?.name ?? r.scheduleId,
+    status: r.status,
+    reason: r.reason,
+    dueAt: new Date(r.dueAt).toISOString(),
+    started: r.startedAt ? ago(r.startedAt) : undefined,
+    chatMessage: r.chatMessageId ?? undefined,
+    error: r.error ?? undefined,
+  })
+  const anyRunView = (r: Task | ScheduleRun) => ("scheduleId" in r && "dueAt" in r ? runView(r) : brief(r as Task))
+
   server.registerTool(
     "list_schedules",
-    { description: "List schedules (recurring jobs), optionally for one project.", inputSchema: { project: z.string().optional() } },
-    safe(async (a: { project?: string }) => ok(scheduler.list(a.project ? project(a.project).id : undefined).map(scheduleView))),
+    {
+      description:
+        "List schedules (recurring jobs). Each has a target: \"project\" (starts a task in a project) or \"orchestrator\" (injects a prompt into this chat). " +
+        "Filter by project, or by target; project: \"none\" and target: \"orchestrator\" both list only orchestrator schedules.",
+      inputSchema: { project: z.string().optional(), target: z.enum(["project", "orchestrator"]).optional() },
+    },
+    safe(async (a: { project?: string; target?: "project" | "orchestrator" }) => {
+      const orchestratorOnly = a.project?.toLowerCase() === "none" || a.target === "orchestrator"
+      const list = scheduler.list({
+        projectId: a.project && !orchestratorOnly ? project(a.project).id : undefined,
+        target: orchestratorOnly ? "orchestrator" : a.target,
+      })
+      return ok(list.map(scheduleView))
+    }),
   )
 
   server.registerTool(
     "create_schedule",
     {
       description:
-        "Create a recurring job. Every time the cron fires, a new task starts in the project with this prompt (plus a note on the previous run), and Cody can watch it live like any task. " +
+        "Create a recurring job of one of two kinds. " +
+        "PROJECT schedule (give `project`): every time the cron fires, a new task starts in that project with this prompt (plus a note on the previous run), on a box; Cody can watch it live like any task. Use it for repo-specific recurring work: nightly test runs, dependency bumps, issue triage in one repo. " +
+        "ORCHESTRATOR schedule (leave `project` out, or target: \"orchestrator\"): every time the cron fires, the prompt is injected into this chat as \"[Scheduled: <name>] <prompt>\" and you handle it like a message from Cody, using your tools. No box is used. Use it for cross-project, digest, reminder or routing work: \"every morning summarize open PRs and anything waiting on me across all repos\", \"remind me to...\". If you're busy, it waits until your turn ends. " +
         "cron is 5 fields (minute hour day-of-month month day-of-week) or @hourly/@daily/@weekly/@monthly. Write the prompt so it works on its own every run.",
       inputSchema: {
-        project: z.string().describe("Project id or name"),
+        project: z.string().optional().describe("Project id or name for a project schedule. Omit for an orchestrator schedule."),
+        target: z
+          .enum(["project", "orchestrator"])
+          .optional()
+          .describe('"project" or "orchestrator". Defaults to "project" when `project` is given, otherwise "orchestrator".'),
         name: z.string().min(1).max(120),
         cron: z.string().describe('e.g. "0 9 * * 1-5" for weekdays at 9:00'),
         prompt: z.string().min(1),
@@ -456,11 +487,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     safe(
-      async (a: { project: string; name: string; cron: string; prompt: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
+      async (a: { project?: string; target?: "project" | "orchestrator"; name: string; cron: string; prompt: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
         ok(
           scheduleView(
             await scheduler.create({
-              projectId: project(a.project).id,
+              target: a.target,
+              projectId: a.project ? project(a.project).id : undefined,
               name: a.name,
               cron: a.cron,
               prompt: a.prompt,
@@ -477,7 +509,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   server.registerTool(
     "update_schedule",
     {
-      description: "Change a schedule: rename, new cron/time zone/prompt, or pause (enabled: false) and resume it.",
+      description: "Change a schedule of either kind: rename, new cron/time zone/prompt, or pause (enabled: false) and resume it. A schedule's kind (project vs orchestrator) can't change; delete it and create a new one.",
       inputSchema: {
         schedule: z.string().describe("Schedule id or name"),
         name: z.string().optional(),
@@ -509,7 +541,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
 
   server.registerTool(
     "delete_schedule",
-    { description: "Delete a schedule. Tasks from past runs stay.", inputSchema: { schedule: z.string().describe("Schedule id or name") } },
+    { description: "Delete a schedule (either kind). Tasks from past project runs stay.", inputSchema: { schedule: z.string().describe("Schedule id or name") } },
     safe(async (a: { schedule: string }) => {
       const s = scheduler.require(a.schedule)
       await scheduler.remove(s.id)
@@ -519,14 +551,18 @@ export function buildMcpServer(deps: McpDeps): McpServer {
 
   server.registerTool(
     "run_schedule_now",
-    { description: "Start a run of a schedule right now (doesn't change its next planned run).", inputSchema: { schedule: z.string() } },
-    safe(async (a: { schedule: string }) => ok(brief(scheduler.runNow(a.schedule)))),
+    {
+      description:
+        "Start a run of a schedule right now (doesn't change its next planned run). A project schedule starts a task; an orchestrator schedule queues its prompt into this chat (delivered after your current turn ends, so don't wait on it).",
+      inputSchema: { schedule: z.string() },
+    },
+    safe(async (a: { schedule: string }) => ok(anyRunView(scheduler.runNow(a.schedule)))),
   )
 
   server.registerTool(
     "list_schedule_runs",
-    { description: "Past runs (tasks) of a schedule, newest first.", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
-    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(a.schedule, a.limit ?? 10).map(brief))),
+    { description: "Past runs of a schedule, newest first: tasks for a project schedule; for an orchestrator schedule, the injected chat messages with their status (queued, running, done, failed).", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
+    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(a.schedule, a.limit ?? 10).map(anyRunView))),
   )
 
   server.registerTool(
