@@ -1,11 +1,12 @@
-import { createContext, useContext, useEffect, useState, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
-import ReactMarkdown from "react-markdown"
+import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react"
+import ReactMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
+import { useQueryClient } from "@tanstack/react-query"
 import { Loader2 } from "lucide-react"
-import { useArtifacts, useBoxes, useProjects, useSchedules, useTasks } from "../lib/queries"
-import { buildEntityIndex, linkTarget, refForHref, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
-import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
+import { hintForHref, useEntityIndex } from "../lib/entities"
+import { followAppLink, linkTarget, remarkEntityLinks } from "../lib/linkify"
+import type { TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -62,52 +63,50 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
 
 export function Markdown({ children, linkify = true }: { children: string; linkify?: boolean }) {
   const index = useEntityIndex()
+  const plugins = useMemo<Options["remarkPlugins"]>(() => (linkify ? [remarkGfm, [remarkEntityLinks, index]] : [remarkGfm]), [linkify, index])
   return (
-    <EntityIndexContext.Provider value={index}>
-      <div className="prose-chat break-words">
-        <ReactMarkdown remarkPlugins={linkify ? [remarkGfm, [remarkEntityLinks, index]] : [remarkGfm]} components={{ a: MarkdownLink }}>
-          {children}
-        </ReactMarkdown>
-      </div>
-    </EntityIndexContext.Provider>
+    <div className="prose-chat break-words">
+      <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>
+        {children}
+      </ReactMarkdown>
+    </div>
   )
 }
 
-const EntityIndexContext = createContext<EntityIndex | null>(null)
-
-let lastIndex: { inputs: unknown[]; index: EntityIndex } | null = null
-
-/** Every task, project, schedule, artifact and box in the client cache, indexed for linking. Shared by all messages. */
-function useEntityIndex(): EntityIndex {
-  const inputs = [useTasks().data, useProjects().data, useSchedules().data, useArtifacts().data, useBoxes().data]
-  if (!lastIndex || inputs.some((v, i) => v !== lastIndex!.inputs[i])) {
-    const [tasks, projects, schedules, artifacts, boxes] = inputs as [Task[], Project[], Schedule[], Artifact[], BoxInfo[]]
-    lastIndex = { inputs, index: buildEntityIndex({ tasks, projects, schedules, artifacts, boxes }, (s) => STATUS[s].label) }
-  }
-  return lastIndex.index
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href = "", title, children }) => (
+    <AppLink href={href} title={title}>
+      {children}
+    </AppLink>
+  ),
 }
 
-/** In-app links navigate without a reload (Cmd/Ctrl-click still opens a tab); files and other sites open in a new tab. */
-function MarkdownLink({ href = "", title, children, node: _node, ...rest }: ComponentProps<"a"> & { node?: unknown }) {
+/**
+ * A link that knows the app: in-app paths navigate through the router (Cmd/Ctrl/middle-click still open a tab),
+ * files and other sites open in a new tab. Hovering an entity link shows its title and current status.
+ */
+export function AppLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
   const [, navigate] = useLocation()
-  const index = useContext(EntityIndexContext)
+  const qc = useQueryClient()
   const target = linkTarget(href, window.location.origin)
-  const hint = title ?? (index && target.kind !== "external" ? refForHref(target.href, index)?.hint : undefined)
+  const onMouseEnter = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (title || target.kind === "external") return
+    const hint = hintForHref(qc, target.href, (s) => STATUS[s].label)
+    if (hint) e.currentTarget.title = hint
+  }
   if (target.kind !== "app")
     return (
-      <a {...rest} href={target.href} title={hint} target="_blank" rel="noreferrer">
+      <a href={target.href} title={title} className={className} target="_blank" rel="noopener noreferrer" onMouseEnter={onMouseEnter}>
         {children}
       </a>
     )
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
-    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
-    e.preventDefault()
-    navigate(target.href)
+    if (!followAppLink(e, target.href, navigate)) return
     // pushState doesn't fire hashchange; pages that scroll to #id listen for it.
     if (target.href.includes("#")) window.dispatchEvent(new HashChangeEvent("hashchange"))
   }
   return (
-    <a {...rest} href={target.href} title={hint} onClick={onClick}>
+    <a href={target.href} title={title} className={className} onClick={onClick} onMouseEnter={onMouseEnter}>
       {children}
     </a>
   )

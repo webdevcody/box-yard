@@ -3,7 +3,8 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { buildEntityIndex, linkTarget, refForHref, remarkEntityLinks, splitText, type EntityIndex } from "../web/src/lib/linkify.js"
+import { buildEntityIndex, followAppLink, linkTarget, refForHref, remarkEntityLinks, splitText, toolMentions, type EntityIndex } from "../web/src/lib/linkify.js"
+import { createdId } from "../server/orchestrator.js"
 import type { Artifact, BoxInfo, Project, Schedule, Task } from "../shared/types.js"
 
 const project = { id: "prj_demo01", name: "box-yard", repo: "webdevcody/box-yard" } as Project
@@ -66,13 +67,12 @@ describe("remarkEntityLinks", () => {
   it("links ids in plain text", () => {
     const html = render("Started task_fb675b48a4e1 in prj_demo01.")
     expect(anchors(html)).toEqual(["/tasks/task_fb675b48a4e1", "/projects/prj_demo01"])
-    expect(html).toContain('title="Inbox: mark card as reviewed · WORKING · box-yard"')
     expect(html).toContain('data-entity="task"')
   })
 
   it("links ids inside inline code, keeping the code span", () => {
     const html = render("**Inbox: mark card as reviewed** (`task_fb675b48a4e1`)")
-    expect(html).toContain('<a href="/tasks/task_fb675b48a4e1" title="Inbox: mark card as reviewed · WORKING · box-yard" data-entity="task"><code>task_fb675b48a4e1</code></a>')
+    expect(html).toContain('<a href="/tasks/task_fb675b48a4e1" data-entity="task"><code>task_fb675b48a4e1</code></a>')
   })
 
   it("leaves code spans with more than an id alone", () => {
@@ -129,5 +129,74 @@ describe("links", () => {
     expect(refForHref("/boxes#local-1a2b3c4d", index)?.kind).toBe("box")
     expect(refForHref("/artifacts/art_96efb3c6cbea/arch.html", index)?.kind).toBe("artifact")
     expect(refForHref("/inbox", index)).toBeNull()
+  })
+})
+
+describe("followAppLink", () => {
+  const click = (over: Partial<Parameters<typeof followAppLink>[0]> = {}) => {
+    const e = { button: 0, metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, defaultPrevented: false, prevented: false, preventDefault() {
+      e.prevented = true
+    }, ...over }
+    return e
+  }
+  const run = (href: string, over = {}) => {
+    const to: string[] = []
+    const e = click(over)
+    const navigated = followAppLink(e, href, (h) => to.push(h), "http://yard.test")
+    return { navigated, to, prevented: e.prevented }
+  }
+
+  it("navigates in-app links through the router", () => {
+    expect(run("/tasks/task_25e0c6728cdf")).toEqual({ navigated: true, to: ["/tasks/task_25e0c6728cdf"], prevented: true })
+    expect(run("http://yard.test/schedules#sch_0123456789ab").to).toEqual(["/schedules#sch_0123456789ab"])
+  })
+
+  it("leaves modified and middle clicks to the browser (new tab)", () => {
+    for (const over of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }, { button: 1 }])
+      expect(run("/tasks/task_25e0c6728cdf", over)).toEqual({ navigated: false, to: [], prevented: false })
+  })
+
+  it("leaves external links and files to the browser", () => {
+    expect(run("https://github.com/webdevcody/box-yard/pull/18")).toEqual({ navigated: false, to: [], prevented: false })
+    expect(run("/artifacts/art_96efb3c6cbea/arch.html").navigated).toBe(false)
+  })
+})
+
+describe("toolMentions", () => {
+  const texts = (ms: ReturnType<typeof toolMentions>) => ms.map((m) => [m.text, m.ref?.href ?? null])
+
+  it("links task ids by title", () => {
+    expect(texts(toolMentions("send_to_task", { task: "task_fb675b48a4e1", message: "hi" }, null, index))).toEqual([
+      ["Inbox: mark card as reviewed", "/tasks/task_fb675b48a4e1"],
+    ])
+  })
+
+  it("links every task wait_for_tasks waits on, keeping unknown ones as text", () => {
+    expect(texts(toolMentions("wait_for_tasks", { tasks: ["task_fb675b48a4e1", "task_ffffffffffff"] }, null, index))).toEqual([
+      ["Inbox: mark card as reviewed", "/tasks/task_fb675b48a4e1"],
+      ["task_ffffffffffff", null],
+    ])
+  })
+
+  it("links what a create tool made, from the recorded result id or a unique name", () => {
+    expect(texts(toolMentions("create_task", { project: "box-yard", title: "Same title" }, "task_bbbbbbbbbbbb", index))).toEqual([["Same title", "/tasks/task_bbbbbbbbbbbb"]])
+    expect(texts(toolMentions("create_task", { project: "box-yard", title: "Same title" }, null, index))).toEqual([["Same title", null]])
+    expect(texts(toolMentions("create_project", { name: "box-yard" }, null, index))).toEqual([["box-yard", "/projects/prj_demo01"]])
+  })
+
+  it("links schedules and projects by id or name", () => {
+    expect(texts(toolMentions("run_schedule_now", { schedule: "Morning digest" }, null, index))).toEqual([["Morning digest", "/schedules#sch_0123456789ab"]])
+    expect(texts(toolMentions("save_note", { project: "prj_demo01", content: "x" }, null, index))).toEqual([["box-yard", "/projects/prj_demo01"]])
+    expect(texts(toolMentions("create_task", { project: "prj_demo01", title: "New" }, null, index))).toEqual([["New", null]])
+    expect(toolMentions("list_projects", {}, null, index)).toEqual([])
+  })
+})
+
+describe("createdId", () => {
+  it("finds the new id in a create tool result", () => {
+    expect(createdId("create_task", '{"id":"task_abcdef123456","title":"x","project":"box-yard"}')).toBe("task_abcdef123456")
+    expect(createdId("create_schedule", [{ type: "text", text: '{"projectId":"prj_demo01","id":"sch_abcdef123456"}' }])).toBe("sch_abcdef123456")
+    expect(createdId("create_project", "Error: exists")).toBeNull()
+    expect(createdId("send_to_task", "task_abcdef123456")).toBeNull()
   })
 })
