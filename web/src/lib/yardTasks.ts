@@ -1,5 +1,6 @@
 // Tab bucketing for the Yard view (every task across projects). Pure, so it is unit tested.
 import type { Task, TaskStatus } from "../../../shared/types"
+import { INBOX_STATUSES } from "./inbox"
 import { matchesQuery, sortTasks, type TaskSort } from "./projectTasks"
 
 export const YARD_TABS = [
@@ -17,7 +18,8 @@ export const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000
 
 /** Live work. `waiting` (on another agent) is mid-task, so it counts as active too. */
 export const ACTIVE_STATUSES: TaskStatus[] = ["working", "starting", "waiting", "queued"]
-export const NEEDS_YOU_STATUSES: TaskStatus[] = ["needs_input", "pr_ready", "failed"]
+/** Same as the Inbox: questions, pull requests and failures. */
+export const NEEDS_YOU_STATUSES = INBOX_STATUSES
 /** A turn ended and nothing is running. `updatedAt` is when that happened. */
 export const FINISHED_STATUSES: TaskStatus[] = ["done", "idle", "pr_ready", "failed"]
 
