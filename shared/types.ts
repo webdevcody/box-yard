@@ -220,6 +220,8 @@ export type UiEvent =
   | { type: "chat.message"; message: ChatMessage }
   | { type: "chat.delta"; text: string }
   | { type: "chat.busy"; busy: boolean }
+  /** An orchestrator turn ended. `replyId` is its final reply (text after its last tool call), if it said anything. */
+  | { type: "chat.turn"; startedAt: number; replyId: string | null }
   | { type: "orchestrator.state"; state: OrchestratorState }
   | { type: "settings"; info: SettingsInfo }
   | { type: "artifact"; artifact: Artifact }

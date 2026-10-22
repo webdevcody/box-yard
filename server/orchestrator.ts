@@ -510,6 +510,9 @@ export class Orchestrator {
       let settled = false
       let raw = ""
       let said = ""
+      // The turn's final reply: the last text, unless a tool call came after it.
+      let reply: ChatMessage | null = null
+      const startedAt = Date.now()
       let seenSession: string | null = null
       const created = new Map<string, ChatMessage>()
       const quiet = kind !== "turn"
@@ -548,9 +551,11 @@ export class Orchestrator {
           if (text && text !== NO_UPDATE) {
             const m = this.store.addChat("assistant", text)
             this.hub.broadcast({ type: "chat.message", message: m })
-          }
+            reply = m
+          } else if (text === NO_UPDATE) reply = null
           for (const b of msg.message.content) {
             if (b.type !== "tool_use") continue
+            reply = null
             const name = String(b.name).replace(/^mcp__boxyard__/, "")
             const m = this.store.addChat("tool", name, { input: b.input })
             if (CREATES[name] && typeof b.id === "string") created.set(b.id, m)
@@ -597,6 +602,8 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        // Lets the client speak a one-line summary of the reply (lib/speech.ts).
+        if (!quiet) this.hub.broadcast({ type: "chat.turn", startedAt, replyId: reply?.id ?? null })
         const base = { text: said, raw, sessionId: seenSession }
         if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
         if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })

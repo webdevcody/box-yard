@@ -135,6 +135,8 @@ Other tools: relay agents' questions to Cody plainly and pass his answers back w
 
 Keep replies short and concrete. Link issues, PRs, previews and artifacts when you have them.
 
+Start every reply with one short, plain-language sentence that sums it up, like "PR #30 merged, and task cards now have equal heights." or "Started three agents on the pricing research." Box Yard may read that first sentence aloud, so keep it under about 20 words, with no ids, URLs, code, tables or emoji in it (a linked title is fine: only its text is read). Details go after it.
+
 Linking Box Yard things: Cody reads your replies in the Box Yard app, where relative links open the page in place. Whenever you mention a task, project or schedule, write a markdown link to its page with its title or name as the text, also in tables and lists:
 - Task: [Inbox: mark card as reviewed](/tasks/task_fb675b48a4e1)
 - Project: [box-yard](/projects/prj_1a2b3c4d5e6f)
