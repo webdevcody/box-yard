@@ -4,6 +4,7 @@ import type {
   Artifact,
   ChatMessage,
   ChatRole,
+  Effort,
   PreviewLink,
   Project,
   ProjectNote,
@@ -66,6 +67,12 @@ export interface TaskRow {
   updated_at: number
   last_active_at: number
   schedule_id: string | null
+  context_tokens: number | null
+  context_window: number | null
+  compact_pending: number
+  compacting: number
+  compact_prev_status: TaskStatus | null
+  effort: Effort | null
 }
 
 interface ScheduleRunRow {
@@ -174,6 +181,12 @@ type TaskPatch = Partial<{
   archivePath: string | null
   lastArchivedAt: number | null
   lastActiveAt: number
+  contextTokens: number | null
+  contextWindow: number | null
+  compactPending: boolean
+  compacting: boolean
+  compactPrevStatus: TaskStatus | null
+  effort: Effort | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -196,6 +209,12 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   archivePath: "archive_path",
   lastArchivedAt: "last_archived_at",
   lastActiveAt: "last_active_at",
+  contextTokens: "context_tokens",
+  contextWindow: "context_window",
+  compactPending: "compact_pending",
+  compacting: "compacting",
+  compactPrevStatus: "compact_prev_status",
+  effort: "effort",
 }
 
 export class Store {
@@ -348,6 +367,11 @@ export class Store {
       pendingCount: pending.n,
       lastArchivedAt: row.last_archived_at,
       scheduleId: row.schedule_id ?? null,
+      contextTokens: row.context_tokens ?? null,
+      contextWindow: row.context_window ?? null,
+      compactPending: Boolean(row.compact_pending),
+      compacting: Boolean(row.compacting),
+      effort: row.effort ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -393,13 +417,14 @@ export class Store {
     env?: Record<string, string>
     branch?: string | null
     scheduleId?: string | null
+    effort?: Effort | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, effort, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -410,6 +435,7 @@ export class Store {
         input.branch ?? null,
         JSON.stringify(input.env ?? {}),
         input.scheduleId ?? null,
+        input.effort ?? null,
         now,
         now,
         now,
@@ -433,7 +459,7 @@ export class Store {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
       if (key === "previews" || key === "turnFlags") args.push(JSON.stringify(value))
-      else if (key === "sessionStarted") args.push(value ? 1 : 0)
+      else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
     }
     sets.push("updated_at = ?")

@@ -21,6 +21,7 @@ import {
 import {
   useArtifacts,
   useCloseTask,
+  useCompactTask,
   useDeleteTask,
   useProjects,
   useRetryTask,
@@ -35,6 +36,7 @@ import { toast } from "../lib/toast"
 import { Button, Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
+import { ContextMeter } from "./ContextMeter"
 import { AttachmentList } from "./Attachments"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 
@@ -48,6 +50,7 @@ export function TaskView({ id }: { id: string }) {
   const stop = useStopTask()
   const close = useCloseTask()
   const retry = useRetryTask()
+  const compact = useCompactTask()
   const del = useDeleteTask()
   const [, navigate] = useLocation()
   const [draft, setDraft] = useState("")
@@ -112,6 +115,15 @@ export function TaskView({ id }: { id: string }) {
           </span>
           <span>{task.turnCount} turns</span>
         </div>
+        <ContextMeter
+          className="mt-3"
+          tokens={task.contextTokens}
+          window={task.contextWindow}
+          compacting={task.compacting}
+          queued={task.compactPending}
+          canCompact={task.turnCount > 0 && task.status !== "failed"}
+          onCompact={() => compact.mutate(id)}
+        />
         <div className="mt-3 flex flex-wrap gap-2">
           {running && (
             <Button size="sm" variant="subtle" onClick={() => stop.mutate(id)}>

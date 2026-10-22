@@ -7,6 +7,9 @@ import type {
   BoxInfo,
   ChatMessage,
   Health,
+  OrchestratorState,
+  Settings,
+  SettingsInfo,
   Project,
   Schedule,
   ScheduleRun,
@@ -31,6 +34,8 @@ export const keys = {
   schedules: ["schedules"] as const,
   scheduleRuns: ["schedule-runs"] as const,
   settings: ["settings"] as const,
+  orchestrator: ["orchestrator"] as const,
+  agentSettings: ["agent-settings"] as const,
 }
 
 // ------------------------------------------------------------------ cache helpers
@@ -73,6 +78,10 @@ export const useSettings = () =>
     queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash"; maxUploadMb: number }>("/api/settings"),
     staleTime: Infinity,
   })
+export const useOrchestratorState = () =>
+  useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
+export const useAgentSettings = () =>
+  useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
 
 export const useChatStream = () =>
@@ -219,6 +228,11 @@ export function useCreateTask() {
           pendingCount: 0,
           lastArchivedAt: null,
           scheduleId: null,
+          contextTokens: null,
+          contextWindow: null,
+          compactPending: false,
+          compacting: false,
+          effort: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -434,3 +448,43 @@ export function useChatControl() {
 }
 
 export const newClientId = clientId
+
+export function useSaveSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (patch: Partial<Settings>) => api<SettingsInfo>("/api/agent-settings", { method: "PUT", body: patch }),
+    onSuccess: (info) => qc.setQueryData(keys.agentSettings, info),
+    onError: fail("Couldn't save the settings"),
+  })
+}
+
+export function useResetSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<SettingsInfo>("/api/agent-settings", { method: "DELETE" }),
+    onSuccess: (info) => qc.setQueryData(keys.agentSettings, info),
+    onError: fail("Couldn't reset the settings"),
+  })
+}
+
+export function useCompactTask() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (taskId: string) => api<Task>(`/api/tasks/${taskId}/compact`, { method: "POST", body: {} }),
+    onMutate: (taskId) => patchTask(qc, taskId, { compactPending: true }),
+    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => (list ? upsert(list, task) : list)),
+    onError: (err, taskId) => {
+      patchTask(qc, taskId, { compactPending: false })
+      toast.error("Couldn't compact", err.message)
+    },
+  })
+}
+
+export function useCompactOrchestrator() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<OrchestratorState>("/api/orchestrator/compact", { method: "POST", body: {} }),
+    onSuccess: (state) => qc.setQueryData(keys.orchestrator, state),
+    onError: fail("Couldn't compact"),
+  })
+}

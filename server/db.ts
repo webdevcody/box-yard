@@ -187,6 +187,14 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX schedule_runs_schedule ON schedule_runs(schedule_id, created_at);
   `,
+  `
+  ALTER TABLE tasks ADD COLUMN context_tokens INTEGER;
+  ALTER TABLE tasks ADD COLUMN context_window INTEGER;
+  ALTER TABLE tasks ADD COLUMN compact_pending INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN compacting INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN compact_prev_status TEXT;
+  ALTER TABLE tasks ADD COLUMN effort TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

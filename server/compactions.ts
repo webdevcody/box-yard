@@ -1,0 +1,132 @@
+import fs from "node:fs"
+import path from "node:path"
+import type { CompactionInfo } from "../shared/types.js"
+
+/** `2026-10-22T18-40-05Z`: ISO time without colons or millis, so names sort chronologically on every filesystem. */
+export function compactionStamp(at: number): string {
+  return new Date(at).toISOString().replace(/\.\d+Z$/, "Z").replace(/:/g, "-")
+}
+
+export function compactionsDir(dataDir: string) {
+  return path.join(dataDir, "orchestrator", "compactions")
+}
+
+/** What the orchestrator is asked to write before its context is compacted. */
+export const SUMMARY_PROMPT = `[Box Yard] Your context is about to be compacted. Before that, write a durable record of what matters, as plain markdown.
+It goes into a folder of files that is kept for months or years and may be read by other tools, so make it self-contained and don't rely on this conversation or on Claude-specific wording.
+Reply with the markdown only (no preamble, no tool calls), with exactly these sections, leaving a section's body as "- none" when it is empty:
+
+## Decisions and preferences
+Decisions Cody made, his preferences and his standing instructions.
+
+## Projects and repos
+Each project with its repo (owner/name) and what it is for.
+
+## Ongoing work
+Tasks and PRs, their state, and what is waiting on whom (with ids and links).
+
+## Open threads and next steps
+Anything unresolved, promised or planned.
+
+Only the most important things: no chit-chat, no transcript dumps, no step-by-step history.`
+
+export interface CompactionMeta {
+  at: number
+  sessionId: string
+  model: string
+  trigger: "button" | "auto"
+  tokensBefore: number | null
+}
+
+const frontmatter = (m: CompactionMeta, after: number | null | "pending") =>
+  [
+    "---",
+    `timestamp: ${new Date(m.at).toISOString().replace(/\.\d+Z$/, "Z")}`,
+    `session_id: ${m.sessionId}`,
+    `model: ${m.model}`,
+    `trigger: ${m.trigger}`,
+    `tokens_before: ${m.tokensBefore ?? "unknown"}`,
+    `tokens_after: ${after ?? "unknown"}`,
+    "---",
+    "",
+  ].join("\n")
+
+/** Strip a code fence or preamble the model may have wrapped around the markdown. */
+export function cleanSummary(text: string): string {
+  let t = text.trim()
+  const fenced = /^```(?:markdown|md)?\n([\s\S]*?)\n```$/.exec(t)
+  if (fenced) t = fenced[1]!.trim()
+  const first = t.indexOf("## ")
+  if (first > 0) t = t.slice(first)
+  return t
+}
+
+/** A summary is usable when it has at least the decisions section and some body. */
+export function summaryLooksValid(text: string): boolean {
+  return text.length >= 60 && /^## Decisions and preferences/m.test(text)
+}
+
+/** Write the log file (temp file + rename, so a crash never leaves half a file). Returns its path. */
+export function writeCompaction(dir: string, meta: CompactionMeta, summary: string): string {
+  fs.mkdirSync(dir, { recursive: true })
+  const stamp = compactionStamp(meta.at)
+  let file = path.join(dir, `${stamp}.md`)
+  for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${stamp}-${n}.md`)
+  const tmp = `${file}.tmp`
+  fs.writeFileSync(tmp, `${frontmatter(meta, "pending")}# Orchestrator compaction summary\n\n${summary.trim()}\n`)
+  fs.renameSync(tmp, file)
+  return file
+}
+
+/** Fill in tokens_after once the compaction has run. */
+export function finishCompaction(file: string, tokensAfter: number | null) {
+  const text = fs.readFileSync(file, "utf8")
+  const next = text.replace(/^tokens_after: .*$/m, `tokens_after: ${tokensAfter ?? "unknown"}`)
+  const tmp = `${file}.tmp`
+  fs.writeFileSync(tmp, next)
+  fs.renameSync(tmp, file)
+}
+
+/** Log files, oldest first (the names sort chronologically). */
+export function listCompactions(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort()
+  } catch {
+    return []
+  }
+}
+
+/** The last compaction, read back from its file's frontmatter. */
+export function lastCompaction(dir: string): CompactionInfo | null {
+  const name = listCompactions(dir).at(-1)
+  if (!name) return null
+  const file = path.join(dir, name)
+  try {
+    const head = fs.readFileSync(file, "utf8").slice(0, 600)
+    const get = (k: string) => new RegExp(`^${k}: (.*)$`, "m").exec(head)?.[1]?.trim()
+    const num = (v?: string) => (v && /^\d+$/.test(v) ? Number(v) : null)
+    return {
+      at: Date.parse(get("timestamp") ?? "") || 0,
+      trigger: get("trigger") === "auto" ? "auto" : "button",
+      tokensBefore: num(get("tokens_before")),
+      tokensAfter: num(get("tokens_after")),
+      file,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** The section of the orchestrator's system prompt that points at the log. */
+export function compactionsPrompt(dir: string): string {
+  const files = listCompactions(dir)
+  const recent = files.slice(-5).reverse()
+  return [
+    ``,
+    `Compaction history: whenever your context is compacted, Box Yard first saves a markdown summary of what mattered (Cody's decisions and preferences, projects and repos, ongoing work, open threads) as one file in ${dir}/`,
+    `File names are UTC timestamps, so they are in chronological order (oldest first). When you need history you no longer have in context (earlier decisions, who asked for what, how a project started), Read these files, newest first, with the Read tool and their full path. Don't read them otherwise.`,
+    files.length
+      ? `There ${files.length === 1 ? "is 1 file" : `are ${files.length} files`}. The newest: ${recent.map((f) => `${dir}/${f}`).join(", ")}.`
+      : `There are none yet.`,
+  ].join("\n")
+}

@@ -173,6 +173,11 @@ async function runTurn() {
   }
 
   const ok = stopping || (attempt.exitCode === 0 && !attempt.result?.is_error)
+  let usage = attempt.usage
+  if (turn.compact && ok && !stopping) {
+    // /compact prints no usage of its own; ask the session what it holds now.
+    usage = (await contextReport(sessionId, turn.model || task.model)) ?? null
+  }
   await emit({
     t: "turn_end",
     stopped: stopping,
@@ -183,10 +188,68 @@ async function runTurn() {
     durationMs: attempt.result?.duration_ms ?? null,
     numTurns: attempt.result?.num_turns ?? null,
     sessionId,
+    compact: Boolean(turn.compact),
+    usage,
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
   })
   // turn.pid stays behind on purpose: the orchestrator checks it with kill -0,
   // and a fast turn must not finish before the orchestrator sees it started.
+}
+
+function claudeEnv() {
+  const claudeConfigDir = path.join(taskDir, "claude")
+  const isolate = task.isolateConfig !== false
+  return {
+    ...process.env,
+    ...task.env,
+    ...(isolate ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
+    IS_SANDBOX: "1",
+    DISABLE_AUTOUPDATER: "1",
+    PORT: String(task.port ?? 4000),
+    BOXYARD_TASK_ID: task.taskId,
+    BOXYARD_TASK_DIR: taskDir,
+  }
+}
+
+/** Tokens in the context after one API call: its prompt side plus what it just wrote. */
+function contextTokensOf(u) {
+  if (!u) return null
+  const n = (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.output_tokens ?? 0)
+  return n > 0 ? n : null
+}
+
+function contextWindowOf(modelUsage) {
+  let best = null
+  for (const v of Object.values(modelUsage ?? {})) if (typeof v?.contextWindow === "number" && v.contextWindow > (best ?? 0)) best = v.contextWindow
+  return best
+}
+
+const AMOUNT = { "": 1, k: 1e3, m: 1e6 }
+function parseAmount(str) {
+  const m = /^([\d.]+)\s*([km]?)$/i.exec(str.trim())
+  return m ? Math.round(Number(m[1]) * AMOUNT[m[2].toLowerCase()]) : null
+}
+
+/** `claude -p "/context"` on the session: its "Tokens: 84k / 1m (8%)" line, or null if anything is off. */
+function contextReport(sessionId, model) {
+  return new Promise((resolve) => {
+    const args = [...(task.claudeArgs ?? []), "-p", "--resume", sessionId]
+    if (model) args.push("--model", model)
+    const child = spawn(task.claudeBin || "claude", [...args], { cwd: path.join(taskDir, "work"), env: claudeEnv(), stdio: ["pipe", "pipe", "ignore"] })
+    let out = ""
+    const timer = setTimeout(() => child.kill("SIGTERM"), 60_000)
+    child.stdout.on("data", (d) => (out += d))
+    child.on("error", () => resolve(null))
+    child.on("close", () => {
+      clearTimeout(timer)
+      const m = /Tokens:?\**\s*([\d.]+\s*[km]?)\s*\/\s*([\d.]+\s*[km]?)/i.exec(out)
+      const tokens = m && parseAmount(m[1])
+      const window = m && parseAmount(m[2])
+      resolve(tokens && window ? { tokens, window } : null)
+    })
+    child.stdin.on("error", () => {})
+    child.stdin.end("/context")
+  })
 }
 
 function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
@@ -206,7 +269,10 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
     ]
     if (resume) args.push("--resume", sessionId)
     else args.push("--session-id", sessionId)
-    if (task.model) args.push("--model", task.model)
+    const model = turn.model || task.model
+    if (model) args.push("--model", model)
+    if (turn.effort) args.push("--effort", turn.effort)
+    if (turn.autocompact) args.push("--autocompact", String(turn.autocompact))
 
     const workDir = path.join(taskDir, "work")
     const claudeConfigDir = path.join(taskDir, "claude")
@@ -218,21 +284,13 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
 
     const child = spawn(task.claudeBin || "claude", [...(task.claudeArgs ?? []), ...args], {
       cwd: workDir,
-      env: {
-        ...process.env,
-        ...task.env,
-        ...(isolate ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
-        IS_SANDBOX: "1",
-        DISABLE_AUTOUPDATER: "1",
-        PORT: String(task.port ?? 4000),
-        BOXYARD_TASK_ID: task.taskId,
-        BOXYARD_TASK_DIR: taskDir,
-      },
+      env: claudeEnv(),
       stdio: ["pipe", "pipe", "pipe"],
     })
 
     activeChild = child
     let result = null
+    let usage = null
     let stderr = ""
     let buf = ""
     let pending = Promise.resolve()
@@ -252,6 +310,11 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
           continue
         }
         if (msg.type === "result") result = msg
+        const tokens = msg.type === "assistant" && msg.message?.model !== "<synthetic>" ? contextTokensOf(msg.message?.usage) : null
+        if (tokens && tokens !== usage?.tokens) {
+          usage = { tokens, window: usage?.window ?? null }
+          queue(() => emit({ t: "usage", tokens, window: usage.window }))
+        }
         for (const ev of translate(msg)) queue(() => emit(ev))
       }
     })
@@ -270,9 +333,11 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
         } catch {}
         buf = ""
       }
-      pending.then(() =>
-        resolve({ exitCode: code ?? 1, result, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") }),
-      )
+      pending.then(() => {
+        const window = contextWindowOf(result?.modelUsage)
+        if (usage && window) usage.window = window
+        resolve({ exitCode: code ?? 1, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") })
+      })
     })
 
     child.stdin.on("error", () => {})

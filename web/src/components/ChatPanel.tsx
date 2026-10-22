@@ -1,11 +1,13 @@
 import { useRef, useState } from "react"
 import { Link } from "wouter"
-import { AlarmClock, AlertTriangle, Bot, RotateCcw, Square, Wrench } from "lucide-react"
-import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useSendChat } from "../lib/queries"
+import { AlarmClock, AlertTriangle, Bot, RotateCcw, Settings as SettingsIcon, Square, Wrench } from "lucide-react"
+import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useSendChat } from "../lib/queries"
 import { Button, Markdown, cx } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { AttachmentList } from "./Attachments"
+import { ContextMeter } from "./ContextMeter"
+import { SettingsDialog } from "./SettingsDialog"
 import type { Attachment, ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -20,6 +22,9 @@ export function ChatPanel() {
   const busy = useChatBusy()
   const send = useSendChat()
   const control = useChatControl()
+  const orch = useOrchestratorState()
+  const compact = useCompactOrchestrator()
+  const [showSettings, setShowSettings] = useState(false)
   const [draft, setDraft] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
@@ -41,6 +46,9 @@ export function ChatPanel() {
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
         {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex gap-1">
+          <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => setShowSettings(true)}>
+            <SettingsIcon className="h-3.5 w-3.5" />
+          </Button>
           {busy.data && (
             <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
               <Square className="h-3.5 w-3.5" />
@@ -58,6 +66,15 @@ export function ChatPanel() {
           </Button>
         </div>
       </header>
+      <ContextMeter
+        className="border-b border-zinc-900 px-4 py-2"
+        tokens={orch.data?.usage.tokens ?? null}
+        window={orch.data?.usage.window ?? null}
+        compacting={orch.data?.compacting ?? false}
+        queued={Boolean(orch.data?.compactQueued) || compact.isPending}
+        onCompact={() => compact.mutate()}
+      />
+      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
 
       <StickyScroll count={messages.length} className="px-4 py-4" contentClassName="space-y-3">
         {messages.length === 0 && !chat.isLoading && (
