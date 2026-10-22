@@ -16,7 +16,8 @@
     "test": "vitest run",
     "deploy:box": "tsx scripts/deploy-box.ts",
     "deploy:vps": "bash scripts/deploy-vps.sh",
-    "worker-snapshot": "tsx scripts/make-worker-snapshot.ts"
+    "worker-snapshot": "tsx scripts/make-worker-snapshot.ts",
+    "demo": "./yard demo"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

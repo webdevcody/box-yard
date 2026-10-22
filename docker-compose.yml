@@ -1,0 +1,31 @@
+# docker compose up -d            -> http://<host>:3000
+# docker compose --profile https up -d   -> https://$BOXYARD_DOMAIN (Caddy gets a certificate)
+services:
+  box-yard:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BOXYARD_DATA_DIR: /data
+    ports:
+      - "${BOXYARD_HTTP_PORT:-3000}:3000"
+    volumes:
+      - box-yard-data:/data
+
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [box-yard]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      BOXYARD_DOMAIN: ${BOXYARD_DOMAIN:-localhost}
+    command: caddy reverse-proxy --from ${BOXYARD_DOMAIN:-localhost} --to box-yard:3000
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  box-yard-data:
+  caddy-data:

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# One entry point for running and deploying Box Yard.
+#
+#   ./yard demo                  try it with no keys (a fake Claude answers)
+#   ./yard local                 run on this machine at http://localhost:3000
+#   ./yard dev                   hot-reloading dev servers (web on :5173)
+#   ./yard deploy-box            run it inside an Upstash Box (keeps going when your laptop sleeps)
+#   ./yard deploy-vps user@host  run it on your own server with Docker
+set -euo pipefail
+cd "$(dirname "$0")"
+
+need_node() {
+  command -v node >/dev/null || { echo "Install Node.js 20+ first: https://nodejs.org" >&2; exit 1; }
+  local major
+  major="$(node -p 'process.versions.node.split(".")[0]')"
+  [ "$major" -ge 20 ] || { echo "Node.js 20+ is required (you have $(node -v))." >&2; exit 1; }
+}
+install_deps() {
+  if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+    echo "▸ Installing dependencies…"
+    npm ci --no-audit --no-fund
+  fi
+}
+ensure_env() {
+  if [ ! -f .env ]; then
+    cp .env.example .env
+    echo "▸ Created .env from .env.example. Add your keys there (or use ./yard demo)."
+  fi
+}
+ensure_claude() {
+  if ! command -v claude >/dev/null; then
+    echo "▸ Installing the Claude Code CLI (npm i -g @anthropic-ai/claude-code)…"
+    npm install -g @anthropic-ai/claude-code --no-audit --no-fund
+  fi
+}
+
+cmd="${1:-local}"
+shift || true
+case "$cmd" in
+  demo)
+    need_node; install_deps
+    npm run build
+    echo "▸ Mock mode: a fake Claude drives the orchestrator and agents. Open http://localhost:${PORT:-3000}"
+    BOXYARD_MOCK=1 BOXYARD_DATA_DIR="${BOXYARD_DATA_DIR:-./data-demo}" exec node dist/server/server/index.js
+    ;;
+  local)
+    need_node; install_deps; ensure_env; ensure_claude
+    npm run build
+    exec node dist/server/server/index.js
+    ;;
+  dev)
+    need_node; install_deps; ensure_env
+    exec npm run dev
+    ;;
+  deploy-box)
+    need_node; install_deps; ensure_env
+    exec npx tsx scripts/deploy-box.ts "$@"
+    ;;
+  deploy-vps)
+    exec bash scripts/deploy-vps.sh "$@"
+    ;;
+  *)
+    sed -n '2,9p' "$0"
+    exit 1
+    ;;
+esac
