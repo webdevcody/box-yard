@@ -66,12 +66,13 @@ function packApp(): string {
   return out
 }
 
-function envFile(boxId: string, password: string) {
+function envFile(boxId: string, password: string, publicUrl: string) {
   const keep = [
     "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "UPSTASH_BOX_API_KEY", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "GITHUB_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL",
     "BOX_POOL_MAX", "BOX_SLOTS", "BOX_MAX_RESIDENT", "BOX_IDLE_DELETE_MINUTES", "ORCHESTRATOR_MODEL", "WORKER_MODEL",
-    "BOXYARD_SELF_SNAPSHOT_HOURS", "BOXYARD_ARCHIVE", "BOXYARD_ARCHIVE_MAX_MB",
+    "BOXYARD_SELF_SNAPSHOT_HOURS", "BOXYARD_ARCHIVE", "BOXYARD_ARCHIVE_MAX_MB", "BOXYARD_ORCHESTRATOR_AUTOWAKE",
+    "BOXYARD_TIMEZONE", "QSTASH_TOKEN", "QSTASH_CURRENT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY",
   ]
   const lines = keep.filter((k) => process.env[k]).map((k) => `${k}=${JSON.stringify(process.env[k])}`)
   lines.push(
@@ -80,7 +81,10 @@ function envFile(boxId: string, password: string) {
     `BOXYARD_DATA_DIR=${DATA}`,
     `BOXYARD_PASSWORD=${JSON.stringify(password)}`,
     `BOXYARD_SELF_BOX_ID=${boxId}`,
+    `BOXYARD_PUBLIC_URL=${process.env.BOXYARD_PUBLIC_URL || publicUrl}`,
   )
+  // Schedules should fire in Cody's time zone, not the box's (UTC).
+  if (!process.env.BOXYARD_TIMEZONE) lines.push(`BOXYARD_TIMEZONE=${Intl.DateTimeFormat().resolvedOptions().timeZone}`)
   return lines.join("\n") + "\n"
 }
 
@@ -108,9 +112,16 @@ async function main() {
     return
   }
 
-  const password = config.password || randomBytes(9).toString("base64url")
   const snapshot = flag("--from-snapshot")
   let box = snapshot === undefined ? await findBox() : null
+  // Keep the password a redeploy found on the box, unless .env sets one.
+  const existingPassword = box
+    ? await box.files
+        .read(`${APP}/.env`)
+        .then((env) => /^BOXYARD_PASSWORD=(.*)$/m.exec(env)?.[1]?.replace(/^"|"$/g, "") ?? "")
+        .catch(() => "")
+    : ""
+  const password = config.password || existingPassword || randomBytes(9).toString("base64url")
   const initCommand = `bash ${APP}/scripts/box-start.sh`
 
   if (!box) {
@@ -139,7 +150,8 @@ async function main() {
       `rm -rf box-yard.old; [ -d box-yard ] && mv box-yard box-yard.old; mv box-yard.new box-yard; rm -rf box-yard.old box-yard.tgz`,
     "unpack",
   )
-  await box.files.write({ path: `${APP}/.env`, content: envFile(box.id, password) })
+  const publicUrl = (await box.getPublicURL(3000)).url
+  await box.files.write({ path: `${APP}/.env`, content: envFile(box.id, password, publicUrl) })
 
   log("Installing dependencies, Claude Code and building (a few minutes the first time)…")
   await sh(
@@ -155,11 +167,10 @@ async function main() {
   await sh(box, initCommand, "start")
   await waitHealthy(box)
 
-  const url = await box.getPublicURL(3000)
   console.log(`
 \x1b[32m✓ Box Yard is live\x1b[0m
-  URL:       ${url.url}
-  Password:  ${password}${config.password ? " (from your .env)" : "  ← generated; add BOXYARD_PASSWORD to .env to keep it"}
+  URL:       ${publicUrl}
+  Password:  ${password}${config.password ? " (from your .env)" : existingPassword ? " (kept from the last deploy)" : "  ← generated; it's kept on redeploys"}
   Box:       ${box.id}
   Data:      ${DATA} on the box disk, plus automatic box snapshots
 
