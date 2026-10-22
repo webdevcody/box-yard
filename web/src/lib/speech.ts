@@ -151,7 +151,14 @@ export class SpeechQueue {
       done()
     }
     this.timers.clearTimeout(this.watchdog)
-    this.watchdog = this.timers.setTimeout(done, (chunk.length * 90) / Math.max(0.5, rate) + WATCHDOG_SLACK_MS)
+    this.watchdog = this.timers.setTimeout(() => {
+      if (token !== this.token) return
+      // Stuck: clear it out so the next utterance doesn't queue behind it.
+      try {
+        this.synth.cancel()
+      } catch {}
+      done()
+    }, (chunk.length * 90) / Math.max(0.5, rate) + WATCHDOG_SLACK_MS)
     this.keepAlive ??= this.timers.setInterval(() => {
       // Chrome pauses (and sometimes never resumes) speech in background tabs.
       if (this.synth.paused) this.synth.resume()

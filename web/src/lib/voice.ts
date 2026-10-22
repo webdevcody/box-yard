@@ -204,7 +204,7 @@ export function shortTitle(title: string): string {
 }
 
 const SINGLE: Record<VoiceEvent, (title: string, n: AppNotification) => string> = {
-  done: (t) => `Task ${t} finished.`,
+  done: (t) => (/^task\b/i.test(t) ? `${t} finished.` : `Task ${t} finished.`),
   pr_ready: (t) => `${t} has a PR ready.`,
   merged: (_t, n) => `PR ${mergedPrNumber(n)} merged.`,
   needs_input: (t) => `${t} needs your input.`,
