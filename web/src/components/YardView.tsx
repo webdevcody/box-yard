@@ -40,16 +40,31 @@ function useNow(ms = 60_000) {
 /** Cards only re-render when their task changes; react-query keeps unchanged task objects identical. */
 const MemoTaskCard = memo(TaskCard)
 
+/** Cards rendered up front; more on request, so a tab with hundreds of tasks opens fast. */
+const PAGE = 60
+
 function TaskGrid({ tasks, names }: { tasks: Task[]; names: Map<string, string> }) {
+  const [limit, setLimit] = useState(PAGE)
+  const rest = tasks.length - limit
   return (
-    <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-      {tasks.map((t) => (
-        // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
-        <div key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
-          <MemoTaskCard task={t} projectName={names.get(t.projectId)} />
-        </div>
-      ))}
-    </div>
+    <>
+      <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        {tasks.slice(0, limit).map((t) => (
+          // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
+          <div key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
+            <MemoTaskCard task={t} projectName={names.get(t.projectId)} />
+          </div>
+        ))}
+      </div>
+      {rest > 0 && (
+        <button
+          onClick={() => setLimit((n) => n + PAGE * 2)}
+          className="w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+        >
+          Show {Math.min(rest, PAGE * 2)} more of {rest}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -167,7 +182,7 @@ export function YardView() {
             <>
               {strip.length > 0 && <RecentStrip tasks={strip} names={names} href={tabHref(params, "recent")} />}
               {shown.length ? (
-                <TaskGrid tasks={shown} names={names} />
+                <TaskGrid key={tab} tasks={shown} names={names} />
               ) : (
                 <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
                   No agents are working right now. Ask the orchestrator for something new
@@ -187,7 +202,7 @@ export function YardView() {
 
           {tab === "needs_you" &&
             (shown.length ? (
-              <TaskGrid tasks={shown} names={names} />
+              <TaskGrid key={tab} tasks={shown} names={names} />
             ) : (
               <Empty icon={<InboxIcon className="h-8 w-8" />} title="Nothing needs you">
                 No questions, pull requests or failures waiting.
@@ -198,7 +213,7 @@ export function YardView() {
             <>
               <p className="text-xs text-zinc-500">{older ? "Every finished task, newest first." : "Finished in the last 24 hours, newest first."}</p>
               {shown.length ? (
-                <TaskGrid tasks={shown} names={names} />
+                <TaskGrid key={tab} tasks={shown} names={names} />
               ) : (
                 <Empty icon={<History className="h-8 w-8" />} title="Nothing finished in the last 24 hours" />
               )}
@@ -220,7 +235,7 @@ export function YardView() {
                 <SortSelect sort={sort} />
               </div>
               {shown.length ? (
-                <TaskGrid tasks={shown} names={names} />
+                <TaskGrid key={tab} tasks={shown} names={names} />
               ) : (
                 <Empty icon={<Search className="h-8 w-8" />} title={`No tasks match "${query.trim()}"`}>
                   <button className="text-yard-400 hover:text-yard-300" onClick={() => onQuery("")}>
