@@ -201,6 +201,31 @@ async function scroll(selector, frames = 150, step = 120) {
   }
 }
 
+/** Drag the orchestrator panel's edge to resize it. */
+async function resize(steps = 40) {
+  const handle = page.locator('[role="separator"]').nth(1)
+  const box = await handle.boundingBox()
+  const x = box.x + box.width / 2
+  const y = box.y + box.height / 2
+  await resetStats()
+  const before = await metric()
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  for (let i = 1; i <= steps; i++) await page.mouse.move(x - i * 3, y)
+  await page.mouse.up()
+  await sleep(300)
+  const after = await metric()
+  const s = await stats()
+  // Put it back.
+  await handle.dblclick()
+  return {
+    moves: steps,
+    mainThreadPerMoveMs: r1(diff(before, after).task / steps),
+    componentRendersPerMove: r1(s.rendered / steps),
+    topRendered: topNames(s.byName, 5),
+  }
+}
+
 async function pulse(kind, count) {
   await sleep(500)
   await resetStats()
@@ -242,6 +267,7 @@ out.loadTask = await load("/tasks/task_heavy-thread")
 out.typeTaskComposer = await typing(TASK_BOX, SENTENCE)
 out.typeChatOnTask = await typing(CHAT_BOX, SENTENCE)
 out.scrollTask = await scroll(TASK_SCROLLER)
+out.resizeOnTask = await resize()
 out.pulseTaskMessage = await pulse("task.message", 20)
 out.pulseTaskOnTask = await pulse("task", 20)
 
