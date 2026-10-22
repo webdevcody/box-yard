@@ -4,6 +4,7 @@
  *
  *   npm run deploy:box                       # create or update the box, print its URL
  *   npm run deploy:box -- --logs             # tail the server log
+ *   npm run deploy:box -- --restart          # restart the server without redeploying
  *   npm run deploy:box -- --from-snapshot ID # rebuild the box from a snapshot
  *   npm run deploy:box -- --destroy          # delete the orchestrator box (workers stay)
  *
@@ -108,6 +109,14 @@ async function main() {
     const box = (await findBox()) ?? die(`No box named ${NAME}.`)
     const run = await box.exec.stream(`tail -n 200 -f ${HOME}/box-yard.log`)
     for await (const chunk of run) if (chunk.type === "output") process.stdout.write(chunk.data)
+    return
+  }
+  if (args.includes("--restart")) {
+    const box = (await findBox()) ?? die(`No box named ${NAME}.`)
+    await box.resume().catch(() => {})
+    await sh(box, `bash ${APP}/scripts/box-start.sh`, "restart")
+    await waitHealthy(box)
+    log(`Restarted Box Yard on ${box.id}.`)
     return
   }
   if (args.includes("--destroy")) {
