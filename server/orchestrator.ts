@@ -13,6 +13,8 @@ const TURN_TIMEOUT_MS = 15 * 60_000
 const WAKE_DEBOUNCE_MS = 4000
 /** Automatic turns in a row (no message from Cody in between) before it stops waking itself. */
 const MAX_AUTO_TURNS = 8
+/** What the orchestrator says on an automatic turn when there's nothing to tell Cody; not shown. */
+const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
 
@@ -156,7 +158,7 @@ export class Orchestrator {
         `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
         `(Automatic wake-up: there is no new message from Cody. Tell him in a line or two what finished, failed or needs him, with links. ` +
           `If an update completes a step of work Cody already asked for and the next step is clear, start it. ` +
-          `Don't start unrelated work, and don't repeat things you already told him.)`,
+          `Don't start unrelated work, and don't repeat things you already told him. If there's nothing new for him, reply with exactly ${NO_UPDATE} and nothing else.)`,
       ].join("\n\n"),
     )
   }
@@ -275,7 +277,7 @@ export class Orchestrator {
             .map((b: any) => b.text)
             .join("")
             .trim()
-          if (text) {
+          if (text && text !== NO_UPDATE) {
             const m = this.store.addChat("assistant", text)
             this.hub.broadcast({ type: "chat.message", message: m })
           }

@@ -610,7 +610,7 @@ export class TaskManager {
       })
       if (!stopped) {
         this.addEvent(taskId, `Couldn't start the agent: ${message}`)
-        this.notice(`❌ **${current.title}** couldn't start: ${message}`)
+        this.notice(`❌ **${current.title}** couldn't start: ${message}`, { taskId })
         const health = await this.provider.health(boxId).catch(() => "unknown" as const)
         if (health === "gone" || health === "error") await this.loseBox(boxId, `Box ${boxId} is ${health}.`)
       }
@@ -834,7 +834,7 @@ export class TaskManager {
         const first = row.pr_url !== url
         this.store.updateTask(taskId, { prUrl: url, branch: String(ev.branch ?? row.branch ?? "") || row.branch, turnFlags: { ...flags, sawPr: true } })
         say("event", `${first ? "Opened" : "Updated"} pull request: ${url}`, { kind: "pr", url })
-        if (first) this.notice(`🔀 **${row.title}** opened a pull request: ${url}`)
+        if (first) this.notice(`🔀 **${row.title}** opened a pull request: ${url}`, { taskId })
         return this.emitTask(taskId)
       }
       case "preview": {
