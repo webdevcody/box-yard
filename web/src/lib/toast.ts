@@ -1,11 +1,21 @@
 import { useSyncExternalStore } from "react"
+import type { TaskStatus } from "../../../shared/types"
+
+export type ToastTone = "neutral" | "red" | "amber" | "green"
 
 export interface Toast {
   id: number
-  kind: "error" | "info"
+  kind: "error" | "info" | "task"
   title: string
   body?: string
   action?: { label: string; onClick: () => void }
+  /** Task toasts: where a click goes, the color, and the line under the title. */
+  href?: string
+  tone?: ToastTone
+  status?: TaskStatus
+  context?: string
+  /** Runs when the toast is clicked through to `href`. */
+  onOpen?: () => void
 }
 
 interface ToastOptions {
@@ -14,27 +24,82 @@ interface ToastOptions {
   duration?: number
 }
 
+/** At most this many toasts are on screen; the oldest goes first. */
+export const MAX_TOASTS = 3
+export const TASK_TOAST_MS = 6000
+
 let toasts: Toast[] = []
 let nextId = 1
 const listeners = new Set<() => void>()
 const emit = () => listeners.forEach((l) => l())
 
-function push(kind: Toast["kind"], title: string, body?: string, opts: ToastOptions = {}) {
+/** Auto-dismiss timers; paused while the pointer is over the stack. */
+const timers = new Map<number, { timer: ReturnType<typeof setTimeout> | null; remaining: number; startedAt: number }>()
+let paused = false
+
+function arm(id: number, ms: number) {
+  const t = { timer: null as ReturnType<typeof setTimeout> | null, remaining: ms, startedAt: Date.now() }
+  if (!paused) t.timer = setTimeout(() => dismiss(id), ms)
+  timers.set(id, t)
+}
+
+function push(toast: Omit<Toast, "id">, duration: number) {
   const id = nextId++
-  toasts = [...toasts.slice(-3), { id, kind, title, body, action: opts.action }]
+  const kept = toasts.slice(-(MAX_TOASTS - 1))
+  for (const old of toasts) if (!kept.includes(old)) clearTimer(old.id)
+  toasts = [...kept, { ...toast, id }]
+  arm(id, duration)
   emit()
-  setTimeout(() => dismiss(id), opts.duration ?? (kind === "error" ? 8000 : 4000))
+  return id
+}
+
+function clearTimer(id: number) {
+  const t = timers.get(id)
+  if (t?.timer) clearTimeout(t.timer)
+  timers.delete(id)
 }
 
 export function dismiss(id: number) {
+  clearTimer(id)
+  if (!toasts.some((t) => t.id === id)) return
   toasts = toasts.filter((t) => t.id !== id)
+  // The stack is gone, so the pointer can't be over it any more.
+  if (!toasts.length) paused = false
   emit()
 }
 
-export const toast = {
-  error: (title: string, body?: string, opts?: ToastOptions) => push("error", title, body, opts),
-  info: (title: string, body?: string, opts?: ToastOptions) => push("info", title, body, opts),
+/** Hold every toast on screen (pointer over the stack). */
+export function pauseToasts() {
+  if (paused) return
+  paused = true
+  const now = Date.now()
+  for (const t of timers.values()) {
+    if (t.timer) clearTimeout(t.timer)
+    t.timer = null
+    t.remaining = Math.max(0, t.remaining - (now - t.startedAt))
+  }
 }
+
+export function resumeToasts() {
+  if (!paused) return
+  paused = false
+  const now = Date.now()
+  for (const [id, t] of timers) {
+    t.startedAt = now
+    t.timer = setTimeout(() => dismiss(id), Math.max(t.remaining, 1000))
+  }
+}
+
+export const toast = {
+  error: (title: string, body?: string, opts: ToastOptions = {}) => push({ kind: "error", title, body, action: opts.action }, opts.duration ?? 8000),
+  info: (title: string, body?: string, opts: ToastOptions = {}) => push({ kind: "info", title, body, action: opts.action }, opts.duration ?? 4000),
+  /** A task finished or needs Cody: clickable, colored by status. */
+  task: (t: Pick<Toast, "title" | "body" | "href" | "tone" | "status" | "context" | "onOpen">, duration = TASK_TOAST_MS) =>
+    push({ kind: "task", ...t }, duration),
+}
+
+/** What is on screen now (for tests; components use useToasts). */
+export const currentToasts = () => toasts
 
 export function useToasts() {
   return useSyncExternalStore(

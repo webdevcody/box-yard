@@ -3,7 +3,7 @@ import fs from "node:fs"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
-import type { BoxInfo, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
+import type { AppNotification, BoxInfo, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
 import { fakeRedis, freePort, testConfig, waitFor } from "./helpers.js"
 
 // End-to-end: the real server, task manager, worker runner and MCP servers,
@@ -107,6 +107,28 @@ describe("box yard end to end", () => {
     expect(messages.some((m) => m.role === "user" && m.content === "blue")).toBe(true)
   })
 
+  it("records a notification each time a task lands on needs-you or done, with read state", async () => {
+    const r = await start()
+    const p = await project(r, "site")
+    const t = await task(r, p.id, "Button", "build a button [ask]")
+    await untilStatus(r, t.id, "needs_input")
+    let list = await call<AppNotification[]>(r, "GET", "/api/notifications")
+    expect(list).toMatchObject([{ taskId: t.id, status: "needs_input", title: "Button", projectName: "site", readAt: null }])
+    expect(list[0]!.summary).toMatch(/blue or green/)
+
+    const read = await call<{ ids: string[] }>(r, "POST", "/api/notifications/read", { taskId: t.id })
+    expect(read.ids).toEqual([list[0]!.id])
+    await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "blue" })
+    await untilStatus(r, t.id, "done")
+    list = await call<AppNotification[]>(r, "GET", "/api/notifications")
+    expect(list.map((n) => [n.status, n.readAt === null])).toEqual([["done", true], ["needs_input", false]])
+
+    // Cody closing it himself is not news.
+    await call(r, "POST", `/api/tasks/${t.id}/close`)
+    await waitFor(async () => (await getTask(r, t.id)).boxId === null, "workspace evicted") // let the close finish before teardown
+    expect(await call<AppNotification[]>(r, "GET", "/api/notifications")).toHaveLength(2)
+  })
+
   it("marks failures, keeps the error, and retries on request", async () => {
     const r = await start()
     const p = await project(r)
@@ -191,6 +213,8 @@ describe("box yard end to end", () => {
       return x.status === "idle" ? x : null
     }, "stopped")
     expect(stopped.error).toBeNull()
+    // Cody stopped it himself, so no notification.
+    expect(await call<AppNotification[]>(r, "GET", "/api/notifications")).toEqual([])
   })
 
   it("the orchestrator chat creates projects and tasks through MCP tools", async () => {

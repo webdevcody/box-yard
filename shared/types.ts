@@ -215,6 +215,38 @@ export type UiEvent =
   | { type: "schedule"; schedule: Schedule }
   | { type: "schedule.run"; run: ScheduleRun }
   | { type: "schedule.deleted"; scheduleId: string }
+  | { type: "notification"; notification: AppNotification }
+  | { type: "notifications.read"; ids: string[]; readAt: number }
+
+/** Task statuses that are worth telling Cody about when a task lands in them. */
+export const NOTIFY_STATUSES = ["done", "pr_ready", "needs_input", "failed", "idle"] as const
+export type NotifyStatus = (typeof NOTIFY_STATUSES)[number]
+
+/**
+ * Should a status change notify Cody? Only when work settles: a running (or queued) task lands on a
+ * finished or attention status. Idle counts only after a turn actually ran (working -> idle).
+ */
+export function shouldNotify(prev: TaskStatus, next: TaskStatus): next is NotifyStatus {
+  if (prev === next) return false
+  if (!(NOTIFY_STATUSES as readonly TaskStatus[]).includes(next)) return false
+  if (next === "idle") return prev === "working"
+  return prev === "queued" || prev === "starting" || prev === "working"
+}
+
+/** A task that finished or needs attention, as shown in toasts and the sidebar's Recent list. */
+export interface AppNotification {
+  id: string
+  taskId: string
+  projectId: string
+  /** Task title and project name as they were when it fired. */
+  title: string
+  projectName: string
+  status: NotifyStatus
+  /** One line: the question, the error or the agent's summary. */
+  summary: string | null
+  createdAt: number
+  readAt: number | null
+}
 
 // ---------------------------------------------------------------- effort, usage, settings
 

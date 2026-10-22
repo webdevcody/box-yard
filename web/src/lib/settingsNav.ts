@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "limits" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "limits" | "notifications" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -29,6 +29,12 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "Boxes & limits",
     description: "How many worker boxes and agents may run at once.",
     fields: ["maxBoxes", "slotsPerBox", "maxAgents"],
+  },
+  {
+    key: "notifications",
+    label: "Notifications",
+    description: "How this browser tells you a task finished or needs you. Saved in this browser only.",
+    fields: [],
   },
   { key: "about", label: "About", description: "What this Box Yard is running on.", fields: [] },
 ]

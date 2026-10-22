@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bot, Boxes, Check, ExternalLink, Info, Network, X, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, X, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -13,6 +13,7 @@ import {
   stepSection,
   type SettingsSection,
 } from "../lib/settingsNav"
+import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { Button, Select, cx, inputClass } from "./ui"
 import {
@@ -30,7 +31,7 @@ import {
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, notifications: Bell, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -299,6 +300,8 @@ export function SettingsDialog({
           >
             {section === "about" ? (
               <AboutPanel />
+            ) : section === "notifications" ? (
+              <NotificationsPanel fid={fid} />
             ) : !s ? (
               <p className="text-sm text-zinc-500">Loading…</p>
             ) : section === "orchestrator" ? (
@@ -448,6 +451,44 @@ function LimitsPanel({
           </p>
         )}
       </div>
+    </Panel>
+  )
+}
+
+function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
+  const [on, setOn] = useState(browserNotificationsOn)
+  const [denied, setDenied] = useState(false)
+  const supported = browserNotificationsSupported()
+  return (
+    <Panel section="notifications">
+      <Row
+        id={fid("bn")}
+        label="Browser notifications"
+        help="A system notification when a task finishes or needs you while this tab is in the background. In-app toasts and the sidebar's Recent list work either way."
+        hint={
+          denied ? (
+            <span className="text-xs text-amber-300">The browser blocked notifications for this site. Allow them in the site settings, then try again.</span>
+          ) : !supported ? (
+            <span className="text-xs text-zinc-500">This browser doesn't support notifications.</span>
+          ) : undefined
+        }
+      >
+        <label className="flex items-center gap-2 text-sm text-zinc-200">
+          <input
+            id={fid("bn")}
+            type="checkbox"
+            disabled={!supported}
+            checked={on}
+            onChange={async (e) => {
+              const want = e.target.checked
+              const now = await setBrowserNotifications(want)
+              setOn(now)
+              setDenied(want && !now)
+            }}
+          />
+          {on ? "On" : "Off"}
+        </label>
+      </Row>
     </Panel>
   )
 }

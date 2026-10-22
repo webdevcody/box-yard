@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
+import { shouldNotify } from "../shared/types.js"
 import type {
+  AppNotification,
   Artifact,
   ChatMessage,
   ChatRole,
@@ -217,8 +219,32 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   effort: "effort",
 }
 
+/** How many notifications to keep; older ones are pruned as new ones land. */
+const NOTIFICATIONS_KEPT = 200
+
+interface NotificationRow {
+  id: string
+  task_id: string
+  project_id: string
+  title: string
+  project_name: string
+  status: AppNotification["status"]
+  summary: string | null
+  created_at: number
+  read_at: number | null
+}
+
+const oneLine = (text: string | null | undefined, max = 200) => {
+  const t = (text ?? "").replace(/\s+/g, " ").trim()
+  if (!t) return null
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t
+}
+
 export class Store {
   constructor(readonly db: DB) {}
+
+  /** Called with every notification right after it is recorded (the app broadcasts it). */
+  onNotification: ((n: AppNotification) => void) | null = null
 
   // ---------- projects ----------
 
@@ -452,7 +478,15 @@ export class Store {
     return json<TurnFlags>(row.turn_flags_json, {})
   }
 
-  updateTask(id: string, patch: TaskPatch): Task {
+  /**
+   * `quiet` skips the notification for a status change Cody caused himself (stop, close).
+   * Compaction turns never notify: they hand back the status from before the compaction.
+   */
+  updateTask(id: string, patch: TaskPatch, opts: { quiet?: boolean } = {}): Task {
+    const before =
+      patch.status !== undefined && !opts.quiet
+        ? (this.db.prepare("SELECT status, compacting FROM tasks WHERE id = ?").get(id) as { status: TaskStatus; compacting: number } | undefined)
+        : undefined
     const sets: string[] = []
     const args: unknown[] = []
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
@@ -466,7 +500,9 @@ export class Store {
     args.push(Date.now(), id)
     const res = this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...args)
     if (res.changes === 0) throw new NotFoundError(`Task ${id} not found`)
-    return this.getTask(id)!
+    const task = this.getTask(id)!
+    if (before && !before.compacting && shouldNotify(before.status, task.status)) this.addNotification(task)
+    return task
   }
 
   deleteTask(id: string) {
@@ -897,6 +933,68 @@ export class Store {
   getKv(key: string): string | null {
     const row = this.db.prepare("SELECT value FROM kv WHERE key = ?").get(key) as { value: string } | undefined
     return row?.value ?? null
+  }
+
+  // ---------- notifications ----------
+
+  addNotification(task: Task): AppNotification | null {
+    if (!(["done", "pr_ready", "needs_input", "failed", "idle"] as TaskStatus[]).includes(task.status)) return null
+    const project = this.db.prepare("SELECT name FROM projects WHERE id = ?").get(task.projectId) as { name: string } | undefined
+    const text = task.status === "needs_input" ? task.question : task.status === "failed" ? task.error : task.summary
+    const n: AppNotification = {
+      id: newId("ntf"),
+      taskId: task.id,
+      projectId: task.projectId,
+      title: task.title,
+      projectName: project?.name ?? "",
+      status: task.status as AppNotification["status"],
+      summary: oneLine(text),
+      createdAt: Date.now(),
+      readAt: null,
+    }
+    this.db
+      .prepare(
+        "INSERT INTO notifications (id, task_id, project_id, title, project_name, status, summary, created_at, read_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+      )
+      .run(n.id, n.taskId, n.projectId, n.title, n.projectName, n.status, n.summary, n.createdAt)
+    this.db
+      .prepare("DELETE FROM notifications WHERE id NOT IN (SELECT id FROM notifications ORDER BY created_at DESC, rowid DESC LIMIT ?)")
+      .run(NOTIFICATIONS_KEPT)
+    this.onNotification?.(n)
+    return n
+  }
+
+  /** Newest first. */
+  listNotifications(limit = 50): AppNotification[] {
+    const rows = this.db
+      .prepare("SELECT * FROM notifications ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(Math.max(1, Math.min(limit, NOTIFICATIONS_KEPT))) as NotificationRow[]
+    return rows.map((r) => ({
+      id: r.id,
+      taskId: r.task_id,
+      projectId: r.project_id,
+      title: r.title,
+      projectName: r.project_name,
+      status: r.status,
+      summary: r.summary,
+      createdAt: r.created_at,
+      readAt: r.read_at,
+    }))
+  }
+
+  /** Mark notifications read: by id, every one for a task, or all. Returns the ids that changed. */
+  markNotificationsRead(by: { ids?: string[]; taskId?: string; all?: boolean }, at = Date.now()): string[] {
+    let rows: { id: string }[]
+    if (by.all) rows = this.db.prepare("SELECT id FROM notifications WHERE read_at IS NULL").all() as { id: string }[]
+    else if (by.taskId) rows = this.db.prepare("SELECT id FROM notifications WHERE read_at IS NULL AND task_id = ?").all(by.taskId) as { id: string }[]
+    else {
+      const stmt = this.db.prepare("SELECT id FROM notifications WHERE read_at IS NULL AND id = ?")
+      rows = (by.ids ?? []).flatMap((id) => (stmt.get(id) as { id: string } | undefined) ?? [])
+    }
+    const ids = rows.map((r) => r.id)
+    const upd = this.db.prepare("UPDATE notifications SET read_at = ? WHERE id = ?")
+    this.db.transaction(() => ids.forEach((id) => upd.run(at, id)))()
+    return ids
   }
 
   setKv(key: string, value: string | null) {

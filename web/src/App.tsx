@@ -5,7 +5,6 @@ import { Menu, MessageSquare, X } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { keys, useMe } from "./lib/queries"
 import { useServerEvents } from "./lib/stream"
-import { dismiss, useToasts } from "./lib/toast"
 import { Sidebar } from "./components/Sidebar"
 import { ChatPanel } from "./components/ChatPanel"
 import { ProjectView } from "./components/ProjectView"
@@ -13,6 +12,8 @@ import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
 import { SchedulesView } from "./components/Schedules"
 import { CommandPalette } from "./components/CommandPalette"
+import { Toasts } from "./components/Toasts"
+import { NotificationEffects } from "./components/NotificationEffects"
 import { SettingsHost } from "./components/SettingsDialog"
 import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
@@ -51,7 +52,7 @@ export function App() {
       </div>
       {navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
 
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="relative flex min-w-0 flex-1 flex-col">
         <HealthBanner />
         <div className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 lg:hidden">
           <button onClick={() => setNavOpen(true)} className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800">
@@ -77,6 +78,8 @@ export function App() {
             </Switch>
           </div>
         </div>
+        {/* Clear of the floating orchestrator button, which shows between lg and xl */}
+        <Toasts className={chatOpen ? undefined : "lg:bottom-20 xl:bottom-4"} />
       </main>
 
       {/* The global orchestrator chat: always visible on wide screens */}
@@ -104,45 +107,7 @@ export function App() {
       )}
       <CommandPalette />
       <SettingsHost />
-      <Toasts />
-    </div>
-  )
-}
-
-function Toasts() {
-  const toasts = useToasts()
-  return (
-    <div role="status" aria-live="polite" className="pointer-events-none fixed bottom-4 left-1/2 z-50 flex -translate-x-1/2 flex-col gap-2">
-      {toasts.map((t) => (
-        <div
-          key={t.id}
-          onClick={() => dismiss(t.id)}
-          className={cx(
-            "pointer-events-auto max-w-md cursor-pointer rounded-lg border px-4 py-2.5 text-sm shadow-xl",
-            t.kind === "error" ? "border-red-900 bg-red-950 text-red-100" : "border-zinc-800 bg-zinc-900 text-zinc-100",
-          )}
-        >
-          <div className="flex items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <div className="font-medium">{t.title}</div>
-              {t.body && <div className="mt-0.5 truncate text-xs opacity-80">{t.body}</div>}
-            </div>
-            {t.action && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  t.action!.onClick()
-                  dismiss(t.id)
-                }}
-                className="shrink-0 rounded-md px-2 py-1 text-xs font-semibold text-yard-400 hover:bg-zinc-800 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none"
-              >
-                {t.action.label}
-              </button>
-            )}
-          </div>
-        </div>
-      ))}
+      <NotificationEffects />
     </div>
   )
 }

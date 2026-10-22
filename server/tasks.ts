@@ -263,7 +263,7 @@ export class TaskManager {
       // The runner writes turn_end after it stops; that settles the status.
     } else if (row.status === "queued" || row.status === "starting") {
       this.store.clearInputs(row.id)
-      this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." })
+      this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
     this.addEvent(row.id, "Stopped by Cody.")
     this.emitTask(row.id)
@@ -275,7 +275,7 @@ export class TaskManager {
     const row = this.requireRow(taskId)
     if (row.current_turn_id) await this.stopTask(taskId)
     this.store.clearInputs(row.id)
-    this.store.updateTask(row.id, { status: "done", question: null })
+    this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
     this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
@@ -1074,7 +1074,7 @@ export class TaskManager {
       lastActiveAt: Date.now(),
       question: status === "needs_input" ? (flags.asked ?? null) : null,
       turnFlags: { interrupts: 0 },
-    })
+    }, { quiet: stopped })
     if (row.box_id) this.store.touchBox(row.box_id)
 
     const cost = typeof ev.costUsd === "number" ? ` · $${ev.costUsd.toFixed(3)}` : ""
