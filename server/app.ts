@@ -142,6 +142,7 @@ export function createBoxYard(c: Config, opts: { provider?: BoxProvider; webDir?
     const body: Health = {
       ok: problems.length === 0,
       provider: provider.name,
+      mock: c.mock || /fake-claude/.test(c.claudeBin),
       bus: tasks.busMode,
       claude: { available: Boolean(claudeVersion), version: claudeVersion ?? null },
       problems,

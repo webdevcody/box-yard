@@ -37,6 +37,11 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
           <Boxes className="h-4 w-4" />
         </div>
         <div className="font-semibold tracking-tight text-zinc-50">Box Yard</div>
+        {health.data?.mock && (
+          <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300" title="A fake claude is answering. Set real keys and drop BOXYARD_MOCK to go live.">
+            MOCK
+          </span>
+        )}
         <span
           title={connection === "live" ? "Live updates on" : "Reconnecting…"}
           className={cx("ml-auto h-2 w-2 rounded-full", connection === "live" ? "bg-emerald-500" : "animate-pulse bg-amber-500")}

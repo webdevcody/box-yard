@@ -1,5 +1,6 @@
 import path from "node:path"
 import fs from "node:fs"
+import { fileURLToPath } from "node:url"
 
 /** Load a .env file into process.env without overriding real env vars. */
 function loadDotEnv(file: string) {
@@ -29,6 +30,11 @@ function int(name: string, fallback: number) {
 
 const env = process.env
 
+/** Mock mode: a fake `claude` drives everything, so no keys are needed. */
+const mock = env.BOXYARD_MOCK === "1"
+const fakeClaude = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/fake-claude.mjs")
+const fakeClaudeSrc = path.resolve(process.cwd(), "scripts/fake-claude.mjs")
+
 export type ProviderName = "upstash" | "local"
 
 export const config = {
@@ -40,7 +46,7 @@ export const config = {
   /** Public URL of this server, used in links handed to agents. */
   publicUrl: env.BOXYARD_PUBLIC_URL ?? "",
 
-  provider: (env.BOX_PROVIDER ?? (env.UPSTASH_BOX_API_KEY ? "upstash" : "local")) as ProviderName,
+  provider: (env.BOX_PROVIDER ?? (env.UPSTASH_BOX_API_KEY && !mock ? "upstash" : "local")) as ProviderName,
   upstashBoxApiKey: env.UPSTASH_BOX_API_KEY ?? "",
   workerSnapshotId: env.WORKER_SNAPSHOT_ID ?? "",
   workerRuntime: env.WORKER_RUNTIME ?? "node",
@@ -64,11 +70,11 @@ export const config = {
   gitUserName: env.GIT_USER_NAME ?? "Box Yard Agent",
   gitUserEmail: env.GIT_USER_EMAIL ?? "box-yard@users.noreply.github.com",
 
+  mock,
   /** Claude binary used by the orchestrator (and by local workers). */
-  claudeBin: env.CLAUDE_BIN ?? "claude",
+  claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",
   workerModel: env.WORKER_MODEL ?? "",
-  workerMaxTurns: int("WORKER_MAX_TURNS", 200),
 
   /** Poll interval for worker events. */
   pollMs: int("BOXYARD_POLL_MS", 1500),
@@ -90,6 +96,7 @@ export function redisEnabled(c: Config = config) {
 /** Problems that stop Box Yard from doing real work, shown in the UI. */
 export function configProblems(c: Config = config): string[] {
   const problems: string[] = []
+  if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
   if (!c.claudeOauthToken && !c.anthropicApiKey) {
     problems.push("Set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`) or ANTHROPIC_API_KEY.")
   }
@@ -97,7 +104,7 @@ export function configProblems(c: Config = config): string[] {
     problems.push("BOX_PROVIDER is upstash but UPSTASH_BOX_API_KEY is missing.")
   }
   if (!c.githubToken) {
-    problems.push("GITHUB_TOKEN is missing, so agents can't clone private repos or open pull requests.")
+    problems.push("GITHUB_TOKEN is missing, so agents can't push branches or open pull requests.")
   }
   return problems
 }

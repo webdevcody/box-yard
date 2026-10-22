@@ -113,6 +113,7 @@ export interface BoxInfo {
 export interface Health {
   ok: boolean
   provider: string
+  mock: boolean
   bus: "redis" | "file"
   claude: { available: boolean; version: string | null }
   problems: string[]
