@@ -251,9 +251,9 @@ async function pulse(kind, count) {
 
 const out = { label, at: new Date().toISOString() }
 const SENTENCE = "the quick brown fox jumps over the lazy dog"
-const CHAT_BOX = "section textarea"
+const CHAT_BOX = "[data-testid=chat-panel] textarea"
 const TASK_BOX = "main textarea"
-const CHAT_SCROLLER = "section .overflow-y-auto"
+const CHAT_SCROLLER = "[data-testid=chat-panel] .overflow-y-auto"
 const TASK_SCROLLER = "main .overflow-y-auto .overflow-y-auto"
 
 out.loadHome = await load("/")
