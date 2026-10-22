@@ -3,7 +3,8 @@ import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import type { BoxInfo, Project, Task } from "../shared/types.js"
-import { freePort, testConfig, waitFor } from "./helpers.js"
+import { LocalProvider } from "../server/providers/local.js"
+import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Which box a task lands on: a project's tasks stay together, new projects get
 // their own box while the pool has room, and boxes are shared once it's full.
@@ -15,9 +16,9 @@ interface Running {
 }
 const running: Running[] = []
 
-async function start(overrides: Partial<Config> = {}): Promise<Running> {
+async function start(overrides: Partial<Config> = {}, provider?: LocalProvider): Promise<Running> {
   const port = await freePort()
-  const yard = createBoxYard(testConfig({ port, ...overrides }), { webDir: "/nonexistent" })
+  const yard = createBoxYard(testConfig({ port, ...overrides }), { webDir: "/nonexistent", provider })
   const server = await new Promise<Server>((resolve) => {
     const s = yard.app.listen(port, "127.0.0.1", () => resolve(s))
   })
@@ -79,6 +80,28 @@ describe("box placement", () => {
     const byId = new Map(list.map((x) => [x.id, x]))
     expect(byId.get(a1.boxId!)!.projects).toEqual(["alpha"])
     expect(byId.get(b1.boxId!)!.projects).toEqual(["beta"])
+  })
+
+  it("keeps a box made for one project for that project, even if another project's box is still being made", async () => {
+    // The first box asked for finishes last, so the second project's box is ready first.
+    class SlowFirst extends LocalProvider {
+      private n = 0
+      override async create() {
+        const delay = this.n++ === 0 ? 1500 : 0
+        await new Promise((r) => setTimeout(r, delay))
+        return super.create()
+      }
+    }
+    const r = await start({ maxBoxes: 3, slotsPerBox: 2 }, new SlowFirst(tmpDir("boxes-"), FAKE_CLAUDE))
+    const a = await project(r, "alpha")
+    const b = await project(r, "beta")
+    const ta = await task(r, a.id, "a1")
+    const tb = await task(r, b.id, "b1")
+    const [da, db] = await Promise.all([until(r, ta.id, "done"), until(r, tb.id, "done")])
+    expect(da.boxId).not.toBe(db.boxId)
+    const list = await boxes(r)
+    expect(list).toHaveLength(2)
+    expect(list.map((x) => x.projects.join()).sort()).toEqual(["alpha", "beta"])
   })
 
   it("shares boxes once the pool is full", async () => {

@@ -45,6 +45,8 @@ export interface TaskManagerDeps {
 
 /** kv key for the box a project's work goes to first. */
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
+/** kv key for the project a box was created for. */
+const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
 
 const slugify = (s: string) =>
   s
@@ -417,10 +419,12 @@ export class TaskManager {
       .filter((b) => b.status === "ready" && b.id !== exclude)
       .map((b) => {
         const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
-        const mine = residents.some((r) => r.project_id === projectId) || b.id === preferred
-        const others = residents.some((r) => r.project_id !== projectId)
-        // 0 = this project's box, 1 = empty box, 2 = another project's box
-        const rank = mine ? 0 : !residents.length ? 1 : others ? 2 : 1
+        // A box made for a project belongs to it, even before its first task lands.
+        const owner = this.store.getKv(boxOwnerKey(b.id))
+        const mine = residents.some((r) => r.project_id === projectId) || b.id === preferred || owner === projectId
+        const others = residents.some((r) => r.project_id !== projectId) || Boolean(owner && owner !== projectId)
+        // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
+        const rank = mine ? 0 : others ? 2 : 1
         return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length }
       })
       .filter((b) => b.running < this.c.slotsPerBox)
@@ -497,7 +501,10 @@ export class TaskManager {
       this.store.removeBox(placeholder)
       this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now() })
       // The new box belongs to the project that asked for it, so its tasks land there.
-      if (projectId && this.store.getProject(projectId)) this.store.setKv(projectBoxKey(projectId), id)
+      if (projectId && this.store.getProject(projectId)) {
+        this.store.setKv(projectBoxKey(projectId), id)
+        this.store.setKv(boxOwnerKey(id), projectId)
+      }
       this.lastBoxError = null
       console.log(`[box-yard] created box ${id}${project ? ` for project ${project.name}` : ""}`)
     } catch (err) {
@@ -1132,6 +1139,7 @@ export class TaskManager {
     const box = this.store.getBox(boxId)
     if (!box) return
     this.store.setBoxStatus(boxId, "lost")
+    this.store.setKv(boxOwnerKey(boxId), null)
     for (const row of this.store.listTaskRows({ boxId })) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       if (row.current_turn_id) this.interrupt(this.requireRow(row.id), reason)
