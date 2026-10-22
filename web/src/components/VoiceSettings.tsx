@@ -192,7 +192,8 @@ function DictationSection({ fid }: { fid: (k: string) => string }) {
       <p className="mt-1 mb-5 text-sm text-zinc-500">Talk instead of typing: a mic in the chat and task message boxes. Words go in at the cursor; nothing is sent until you say so.</p>
       {!supported ? (
         <p className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300" role="status">
-          This browser doesn't support speech recognition, so the mic is hidden. {OS_DICTATION_TIP}
+          This browser doesn't support speech recognition, so the mic is hidden. Use your OS dictation instead: it works in any text box (macOS: press
+          Fn twice; Windows: Win+H).
         </p>
       ) : (
         <>
