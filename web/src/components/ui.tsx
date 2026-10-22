@@ -1,4 +1,4 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type ReactNode } from "react"
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Loader2 } from "lucide-react"
@@ -30,7 +30,7 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
   )
 }
 
-type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+type ButtonProps = ComponentProps<"button"> & {
   variant?: "primary" | "ghost" | "danger" | "subtle"
   size?: "sm" | "md"
   loading?: boolean
