@@ -1,9 +1,10 @@
-import { useEffect } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "wouter"
-import { Boxes, ExternalLink, Globe } from "lucide-react"
+import { Boxes, ExternalLink, Globe, Settings } from "lucide-react"
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
 import { Empty, StatusBadge, TimeAgo, cx } from "./ui"
-import type { BoxInfo, Task } from "../../../shared/types"
+import { SettingsDialog } from "./SettingsDialog"
+import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -37,7 +38,7 @@ function Stat({ label, value, max }: { label: string; value: number; max: number
         {value}
         <span className="text-zinc-500"> / {max}</span>
       </div>
-      {over && <div className="mt-1 text-xs font-medium text-amber-300">Over limit</div>}
+      {over && <div className="mt-1 text-xs font-medium text-amber-300">Over limit: running work continues, nothing new is placed until usage drops.</div>}
     </div>
   )
 }
@@ -48,6 +49,7 @@ export function BoxesView() {
   const projects = useProjects()
   const health = useHealth()
   useScrollToHash(Boolean(boxes.data))
+  const [editing, setEditing] = useState(false)
 
   const pool = health.data?.pool
   const list = boxes.data ?? []
@@ -58,17 +60,23 @@ export function BoxesView() {
 
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
-        </p>
+      <header className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
+          <p className="mt-1 text-sm text-zinc-500">
+            Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
+          </p>
+        </div>
+        <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 text-sm text-sky-400 hover:underline">
+          <Settings className="h-3.5 w-3.5" /> Edit limits
+        </button>
       </header>
+      {editing && <SettingsDialog onClose={() => setEditing(false)} />}
 
       {pool && (
         <div className="grid gap-3 sm:grid-cols-2">
           <Stat label="Boxes" value={list.length} max={pool.maxBoxes} />
-          <Stat label="Agents running" value={running} max={pool.maxBoxes * pool.slotsPerBox} />
+          <Stat label="Agents running" value={running} max={agentCapacity(pool)} />
         </div>
       )}
 

@@ -1,11 +1,12 @@
 import { useState } from "react"
 import { X } from "lucide-react"
-import { useAgentSettings, useResetSettings, useSaveSettings } from "../lib/queries"
+import { useAgentSettings, useHealth, useResetSettings, useSaveSettings } from "../lib/queries"
 import { Button, Field, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
   EFFORTS,
+  UPSTASH_FREE_CONCURRENT_BOXES,
   type AgentEffort,
   type AutoCompact,
   type Settings,
@@ -14,6 +15,8 @@ import {
 
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
+
+const POOL_KEYS = ["maxBoxes", "slotsPerBox", "maxAgents"] as const
 
 const SOURCE_LABEL: Record<SettingSource, string> = { ui: "saved here", env: "from env var", default: "default" }
 
@@ -67,6 +70,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const info = useAgentSettings()
   const save = useSaveSettings()
   const reset = useResetSettings()
+  const health = useHealth()
   const [draft, setDraft] = useState<Settings | null>(null)
 
   const current = info.data
@@ -77,7 +81,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!s) return
-    save.mutate(s, { onSuccess: onClose })
+    // Pool limits are sent only when edited, so an untouched form doesn't pin them over env changes.
+    const patch: Partial<Settings> = { ...s }
+    for (const k of POOL_KEYS) if (current && s[k] === current.settings[k]) delete patch[k]
+    save.mutate(patch, { onSuccess: onClose })
   }
 
   return (
@@ -154,6 +161,35 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 value={s.agentAutoCompact}
                 onChange={(v) => set("agentAutoCompact", v)}
               />
+            </section>
+            <section className="space-y-3 border-t border-zinc-900 pt-4">
+              <h3 className="text-sm font-semibold text-zinc-200">Box limits</h3>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label="Max boxes">
+                  <input type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={(e) => set("maxBoxes", Math.trunc(Number(e.target.value)))} />
+                  {src("maxBoxes")}
+                </Field>
+                <Field label="Agents per box">
+                  <input type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={(e) => set("slotsPerBox", Math.trunc(Number(e.target.value)))} />
+                  {src("slotsPerBox")}
+                </Field>
+                <Field label="Max agents">
+                  <input type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={(e) => set("maxAgents", Math.trunc(Number(e.target.value)))} />
+                  {src("maxAgents")}
+                </Field>
+              </div>
+              <p className="text-xs text-zinc-500">
+                Max agents is a cap across all boxes (0 = boxes × agents per box). Changes apply right away. Lowering a limit never stops running boxes or agents: no new work is placed until usage drops.
+              </p>
+              {health.data?.provider === "upstash" && (
+                <p className="text-xs text-zinc-500">
+                  Free plan: up to {UPSTASH_FREE_CONCURRENT_BOXES} concurrent boxes (
+                  <a className="text-sky-400 hover:underline" href="https://upstash.com/pricing/box" target="_blank" rel="noreferrer">
+                    Upstash Box pricing
+                  </a>
+                  ).
+                </p>
+              )}
             </section>
             <datalist id="boxyard-models">
               {MODELS.map((m) => (

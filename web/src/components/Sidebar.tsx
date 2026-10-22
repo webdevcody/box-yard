@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
 import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus } from "lucide-react"
+import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
@@ -24,7 +25,8 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
 
   const pool = health.data?.pool
   const running = boxes.data?.reduce((n, b) => n + b.runningTurns, 0) ?? 0
-  const capacity = pool ? pool.maxBoxes * pool.slotsPerBox : 0
+  const capacity = pool ? agentCapacity(pool) : 0
+  const overLimit = Boolean(pool && ((boxes.data?.length ?? 0) > pool.maxBoxes || (capacity > 0 && running > capacity)))
 
   const navItem = (href: string, active: boolean) =>
     cx(
@@ -111,12 +113,12 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
           <span>
             {boxes.data?.length ?? 0}/{pool?.maxBoxes ?? "?"} boxes · {health.data?.provider ?? "…"}
           </span>
-          <span>
-            {running}/{capacity || "?"} agents
+          <span className={cx(overLimit && "text-amber-300")}>
+            {running}/{capacity || "?"} agents{overLimit && " · over limit"}
           </span>
         </div>
         <div className="flex gap-1">
-          {Array.from({ length: pool?.maxBoxes ?? 0 }, (_, i) => {
+          {Array.from({ length: Math.max(pool?.maxBoxes ?? 0, boxes.data?.length ?? 0) }, (_, i) => {
             const box = boxes.data?.[i]
             return (
               <div

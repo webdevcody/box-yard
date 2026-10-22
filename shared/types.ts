@@ -192,7 +192,7 @@ export interface Health {
   bus: "redis" | "file"
   claude: { available: boolean; version: string | null }
   problems: string[]
-  pool: { maxBoxes: number; slotsPerBox: number }
+  pool: { maxBoxes: number; slotsPerBox: number; maxAgents: number }
   orchestratorBusy: boolean
   /** How schedules are triggered: the server's own timer, or QStash plus the timer. */
   scheduler: "local" | "qstash"
@@ -245,7 +245,22 @@ export interface Settings {
   agentEffort: AgentEffort
   /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
   agentAutoCompact: AutoCompact
+  /** Most worker boxes alive at once. */
+  maxBoxes: number
+  /** Claude turns that may run at once inside one box. */
+  slotsPerBox: number
+  /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
+  maxAgents: number
 }
+
+/** Agents that can run at once under a set of limits. */
+export function agentCapacity(p: { maxBoxes: number; slotsPerBox: number; maxAgents: number }) {
+  const perBoxes = p.maxBoxes * p.slotsPerBox
+  return p.maxAgents > 0 ? Math.min(p.maxAgents, perBoxes) : perBoxes
+}
+
+/** Free-plan box limit, from https://upstash.com/pricing/box (checked 2026-10-22). */
+export const UPSTASH_FREE_CONCURRENT_BOXES = 10
 
 export type SettingSource = "ui" | "env" | "default"
 

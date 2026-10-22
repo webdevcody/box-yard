@@ -90,6 +90,7 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "settings":
           qc.setQueryData(keys.agentSettings, ev.info)
+          void qc.invalidateQueries({ queryKey: keys.health })
           break
         case "artifact":
           qc.setQueryData<Artifact[]>(keys.artifacts, (list) => (list ? upsert(list, ev.artifact, true) : list))

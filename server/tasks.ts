@@ -334,8 +334,26 @@ export class TaskManager {
     return link
   }
 
+  /** Pool limits in effect now. Read fresh on every use, so saved changes apply without a restart. */
+  limits() {
+    const { maxBoxes, slotsPerBox, maxAgents } = this.settings.get()
+    return { maxBoxes, slotsPerBox, maxAgents }
+  }
+
+  /** Agents (running turns) across all boxes. */
+  runningTotal() {
+    return this.store.listTaskRows().filter((r) => r.current_turn_id).length
+  }
+
   poolLimits() {
-    return { maxBoxes: this.c.maxBoxes, agentsPerBox: this.c.slotsPerBox, boxes: this.store.listBoxes().length }
+    const l = this.limits()
+    return {
+      maxBoxes: l.maxBoxes,
+      agentsPerBox: l.slotsPerBox,
+      maxAgents: l.maxAgents,
+      boxes: this.store.listBoxes().length,
+      agentsRunning: this.runningTotal(),
+    }
   }
 
   boxes(): BoxInfo[] {
@@ -345,7 +363,7 @@ export class TaskManager {
         id: b.id,
         provider: b.provider,
         status: b.status,
-        slots: this.c.slotsPerBox,
+        slots: this.limits().slotsPerBox,
         runningTurns: residents.filter((r) => r.current_turn_id).length,
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
@@ -399,7 +417,9 @@ export class TaskManager {
 
     this.wantsBox.clear()
     for (const row of waiting) {
-      const boxId = await this.place(row)
+      // Over the total agent cap: wait without growing the pool. Running work is never stopped.
+      const cap = this.limits().maxAgents
+      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(row)
       if (!boxId) {
         if (row.status !== "queued") {
           this.store.updateTask(row.id, { status: "queued" })
@@ -427,7 +447,7 @@ export class TaskManager {
       if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
     }
     for (const [projectId, n] of perProject) {
-      const need = Math.ceil(n / this.c.slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
+      const need = Math.ceil(n / this.limits().slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
       for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
   }
@@ -437,7 +457,7 @@ export class TaskManager {
     if (row.box_id) {
       const box = this.store.getBox(row.box_id)
       if (box?.status === "ready") {
-        if (this.runningOn(box.id) < this.c.slotsPerBox) return box.id
+        if (this.runningOn(box.id) < this.limits().slotsPerBox) return box.id
         // Its box is busy. Move to a free box if the archive is fresh enough.
         const fresh = row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path)
         if (!fresh) return null
@@ -482,7 +502,7 @@ export class TaskManager {
         const rank = mine ? 0 : others ? 2 : 1
         return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length }
       })
-      .filter((b) => b.running < this.c.slotsPerBox)
+      .filter((b) => b.running < this.limits().slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     for (const b of candidates) {
       if (b.rank === 2 && this.poolHasRoom()) {
@@ -503,7 +523,7 @@ export class TaskManager {
   private poolHasRoom() {
     const recentlyFailed = this.lastBoxError && Date.now() - this.lastBoxError.at < BOX_RETRY_MS
     // listBoxes() includes the placeholders of boxes being created.
-    return !recentlyFailed && this.store.listBoxes().length < this.c.maxBoxes
+    return !recentlyFailed && this.store.listBoxes().length < this.limits().maxBoxes
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */

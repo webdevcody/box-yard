@@ -23,6 +23,16 @@ export const DEFAULT_SETTINGS: Settings = {
   agentEffort: DEFAULT_EFFORT,
   // Off means the CLI's own default (compact near the model's window) applies.
   agentAutoCompact: { enabled: false, unit: "percent", value: 80 },
+  maxBoxes: 5,
+  slotsPerBox: 2,
+  maxAgents: 0,
+}
+
+/** Env vars that seed the pool limits; saved settings win over them. */
+const POOL_ENV: Record<"maxBoxes" | "slotsPerBox" | "maxAgents", string> = {
+  maxBoxes: "BOX_POOL_MAX",
+  slotsPerBox: "BOX_SLOTS",
+  maxAgents: "BOX_MAX_AGENTS",
 }
 
 const autoCompact = z
@@ -42,6 +52,9 @@ export const settingsPatch = z
     agentModel: model,
     agentEffort: z.enum([...EFFORTS, "orchestrator"]),
     agentAutoCompact: autoCompact,
+    maxBoxes: z.number().int().min(1).max(100),
+    slotsPerBox: z.number().int().min(1).max(20),
+    maxAgents: z.number().int().min(0).max(1000),
   })
   .partial()
   .strict()
@@ -54,7 +67,7 @@ export const settingsPatch = z
 export class SettingsStore {
   constructor(
     private readonly store: Store,
-    private readonly c: Pick<Config, "orchestratorModel" | "workerModel">,
+    private readonly c: Pick<Config, "orchestratorModel" | "workerModel" | "maxBoxes" | "slotsPerBox" | "maxAgents">,
   ) {}
 
   private saved(): Partial<Settings> {
@@ -73,10 +86,16 @@ export class SettingsStore {
     const env: Partial<Settings> = {}
     if (this.c.orchestratorModel) env.orchestratorModel = this.c.orchestratorModel
     if (this.c.workerModel) env.agentModel = this.c.workerModel
-    const settings = { ...DEFAULT_SETTINGS, ...env, ...saved } as Settings
+    // Config already holds the env var or the built-in default for the pool limits.
+    const pool = { maxBoxes: this.c.maxBoxes, slotsPerBox: this.c.slotsPerBox, maxAgents: this.c.maxAgents }
+    const defaults = { ...DEFAULT_SETTINGS, ...pool }
+    const settings = { ...defaults, ...env, ...saved } as Settings
     const sources = {} as Record<keyof Settings, SettingSource>
-    for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) sources[k] = k in saved ? "ui" : k in env ? "env" : "default"
-    return { settings, sources, defaults: DEFAULT_SETTINGS }
+    for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
+      const fromEnv = k in env || (k in POOL_ENV && process.env[POOL_ENV[k as keyof typeof POOL_ENV]] !== undefined)
+      sources[k] = k in saved ? "ui" : fromEnv ? "env" : "default"
+    }
+    return { settings, sources, defaults }
   }
 
   get(): Settings {
