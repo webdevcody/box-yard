@@ -6,6 +6,7 @@ import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
   ArrowLeft,
+  Bot,
   Box,
   Check,
   CheckCircle2,
@@ -114,6 +115,11 @@ export function TaskHeader({
         </span>
         {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
         <PrChip task={task} />
+        {(task.model || task.effort) && (
+          <span title={[task.routingRule, task.routingReason].filter(Boolean).join(" · ") || undefined}>
+            {[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}
+          </span>
+        )}
         {task.previews.map((p) => (
           <PreviewChip key={p.port} preview={p} />
         ))}
@@ -266,6 +272,13 @@ function TaskMenu({
                 {task.effort ? ` · ${task.effort} effort` : ""}
               </span>
             </Detail>
+            {(task.model || task.routingRule || task.routingReason) && (
+              <Detail icon={<Bot className="h-3.5 w-3.5" />} label="Route">
+                <span className="min-w-0 flex-1 truncate" title={[task.model, task.effort ? `${task.effort} effort` : "", task.routingRule, task.routingReason].filter(Boolean).join(" · ")}>
+                  {[task.model, task.routingRule ?? task.routingReason].filter(Boolean).join(" · ")}
+                </span>
+              </Detail>
+            )}
             {task.scheduleId && (
               <Detail icon={<AlarmClock className="h-3.5 w-3.5" />} label="Schedule">
                 <Link href="/schedules" className="truncate text-yard-400 hover:underline" onClick={() => setOpen(false)}>

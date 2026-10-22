@@ -8,6 +8,7 @@ const base: Settings = {
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
   agentModel: "claude-opus-5-5",
   agentEffort: "orchestrator",
+  agentRoutingConfig: "",
   agentAutoCompact: { enabled: false, unit: "tokens", value: 800_000 },
   maxBoxes: 5,
   slotsPerBox: 2,

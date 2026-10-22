@@ -79,7 +79,25 @@ export interface TaskRow {
   compact_pending: number
   compacting: number
   compact_prev_status: TaskStatus | null
+  model: string | null
   effort: Effort | null
+  routing_rule: string | null
+  routing_reason: string | null
+}
+
+export interface TaskTurnRow {
+  id: string
+  task_id: string
+  turn_index: number
+  model: string | null
+  effort: Effort | null
+  routing_rule: string | null
+  routing_reason: string | null
+  status: string
+  started_at: number
+  finished_at: number | null
+  cost_usd: number | null
+  error: string | null
 }
 
 interface ScheduleRunRow {
@@ -196,7 +214,10 @@ type TaskPatch = Partial<{
   compactPending: boolean
   compacting: boolean
   compactPrevStatus: TaskStatus | null
+  model: string | null
   effort: Effort | null
+  routingRule: string | null
+  routingReason: string | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -227,7 +248,10 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   compactPending: "compact_pending",
   compacting: "compacting",
   compactPrevStatus: "compact_prev_status",
+  model: "model",
   effort: "effort",
+  routingRule: "routing_rule",
+  routingReason: "routing_reason",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -412,7 +436,10 @@ export class Store {
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
+      model: row.model ?? null,
       effort: row.effort ?? null,
+      routingRule: row.routing_rule ?? null,
+      routingReason: row.routing_reason ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -478,14 +505,17 @@ export class Store {
     env?: Record<string, string>
     branch?: string | null
     scheduleId?: string | null
+    model?: string | null
     effort?: Effort | null
+    routingRule?: string | null
+    routingReason?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, effort, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -496,12 +526,49 @@ export class Store {
         input.branch ?? null,
         JSON.stringify(input.env ?? {}),
         input.scheduleId ?? null,
+        input.model ?? null,
         input.effort ?? null,
+        input.routingRule ?? null,
+        input.routingReason ?? null,
         now,
         now,
         now,
       )
     return this.getTask(id)!
+  }
+
+  startTaskTurn(input: {
+    id: string
+    taskId: string
+    turnIndex: number
+    model: string | null
+    effort: Effort | null
+    routingRule: string | null
+    routingReason: string | null
+    status?: string
+  }) {
+    this.db
+      .prepare(
+        `INSERT INTO task_turns (id, task_id, turn_index, model, effort, routing_rule, routing_reason, status, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           model = excluded.model,
+           effort = excluded.effort,
+           routing_rule = excluded.routing_rule,
+           routing_reason = excluded.routing_reason,
+           status = excluded.status`,
+      )
+      .run(input.id, input.taskId, input.turnIndex, input.model, input.effort, input.routingRule, input.routingReason, input.status ?? "started", Date.now())
+  }
+
+  finishTaskTurn(id: string, patch: { status: string; costUsd?: number | null; error?: string | null }) {
+    this.db
+      .prepare("UPDATE task_turns SET status = ?, finished_at = ?, cost_usd = ?, error = ? WHERE id = ?")
+      .run(patch.status, Date.now(), patch.costUsd ?? null, patch.error ?? null, id)
+  }
+
+  listTaskTurns(taskId: string): TaskTurnRow[] {
+    return this.db.prepare("SELECT * FROM task_turns WHERE task_id = ? ORDER BY started_at ASC").all(taskId) as TaskTurnRow[]
   }
 
   taskEnv(id: string): Record<string, string> {

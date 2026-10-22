@@ -21,6 +21,7 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
+import { routingInstructions } from "./routing.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -469,7 +470,7 @@ export class Orchestrator {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${ORCHESTRATOR_PROMPT}\n${compactionsPrompt(this.compactionsDir)}`,
+      `${ORCHESTRATOR_PROMPT}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
       ...session,
       ...model,
       "--effort",
