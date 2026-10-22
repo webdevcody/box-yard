@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type MouseEvent, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
 import ReactMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
