@@ -1,8 +1,8 @@
 import { useState } from "react"
 import { Boxes, Inbox as InboxIcon, Lock } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
-import { useHealth, useMarkReviewed, useProjects, useTasks, keys } from "../lib/queries"
-import { inInbox, usePendingReviews } from "../lib/review"
+import { useHealth, useMarkDoneFromInbox, useProjects, useTasks, keys } from "../lib/queries"
+import { inInbox, usePendingCloses } from "../lib/inbox"
 import { api } from "../lib/api"
 import { Button, Empty, inputClass } from "./ui"
 import { TaskCard } from "./TaskCard"
@@ -23,7 +23,7 @@ function useProjectNames() {
   return (id: string) => projects.data?.find((p) => p.id === id)?.name
 }
 
-function Grouped({ tasks, groups, onReviewed }: { tasks: Task[]; groups: typeof GROUPS; onReviewed?: (task: Task) => void }) {
+function Grouped({ tasks, groups, onMarkDone }: { tasks: Task[]; groups: typeof GROUPS; onMarkDone?: (task: Task) => void }) {
   const name = useProjectNames()
   return (
     <div className="space-y-8">
@@ -37,7 +37,7 @@ function Grouped({ tasks, groups, onReviewed }: { tasks: Task[]; groups: typeof 
             </h2>
             <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
               {list.map((t) => (
-                <TaskCard key={t.id} task={t} projectName={name(t.projectId)} onReviewed={onReviewed && (() => onReviewed(t))} />
+                <TaskCard key={t.id} task={t} projectName={name(t.projectId)} onMarkDone={onMarkDone && (() => onMarkDone(t))} />
               ))}
             </div>
           </section>
@@ -75,10 +75,10 @@ export function HomeView() {
 
 export function InboxView() {
   const tasks = useTasks()
-  const reviewed = usePendingReviews()
-  const markReviewed = useMarkReviewed()
+  const closing = usePendingCloses()
+  const markDone = useMarkDoneFromInbox()
   if (tasks.isLoading) return null
-  const list = (tasks.data ?? []).filter((t) => inInbox(t, reviewed))
+  const list = (tasks.data ?? []).filter((t) => inInbox(t, closing))
   return (
     <div className="space-y-6">
       <header>
@@ -93,7 +93,7 @@ export function InboxView() {
         <Grouped
           tasks={list}
           groups={GROUPS.filter((g) => ["Needs you", "Ready for review", "Failed"].includes(g.title))}
-          onReviewed={markReviewed}
+          onMarkDone={markDone}
         />
       )}
     </div>

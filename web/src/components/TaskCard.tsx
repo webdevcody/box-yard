@@ -23,8 +23,8 @@ export function plainPreview(text: string, prUrl?: string | null): string {
     .trim()
 }
 
-/** `onReviewed` adds a "Mark reviewed" check button (inbox cards). */
-export function TaskCard({ task, projectName, onReviewed }: { task: Task; projectName?: string; onReviewed?: () => void }) {
+/** `onMarkDone` adds a "Mark done" check button (inbox cards). */
+export function TaskCard({ task, projectName, onMarkDone }: { task: Task; projectName?: string; onMarkDone?: () => void }) {
   return (
     <Link
       href={`/tasks/${task.id}`}
@@ -75,16 +75,16 @@ export function TaskCard({ task, projectName, onReviewed }: { task: Task; projec
         <span className="ml-auto">
           <TimeAgo ts={task.updatedAt} />
         </span>
-        {onReviewed && (
+        {onMarkDone && (
           <button
             type="button"
-            title="Mark reviewed (marks the task done)"
-            aria-label={`Mark "${task.title}" reviewed`}
+            title="Mark done"
+            aria-label={`Mark "${task.title}" done`}
             onClick={(e) => {
               // The card is a link: don't open the task.
               e.preventDefault()
               e.stopPropagation()
-              onReviewed()
+              onMarkDone()
             }}
             className="-my-1 -mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-md border border-zinc-700 text-zinc-400 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100 hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none [@media(hover:none)]:opacity-100"
           >
