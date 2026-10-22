@@ -50,7 +50,8 @@ export function StickyScroll({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey])
 
-  // Content grew (new items, streaming text, expanding output): follow only if pinned to the bottom.
+  // Content grew (new items, streaming text, expanding output) or the viewport shrank (a growing
+  // composer below it): follow only if pinned to the bottom.
   useEffect(() => {
     const el = content.current
     if (!el) return
@@ -58,6 +59,7 @@ export function StickyScroll({
       if (stuck.current) toBottom()
     })
     ro.observe(el)
+    if (scroller.current) ro.observe(scroller.current)
     return () => ro.disconnect()
   }, [])
 
