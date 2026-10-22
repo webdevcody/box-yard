@@ -502,11 +502,11 @@ export class TaskManager {
 
       if (this.stopRequested.has(taskId)) throw new StoppedBeforeStart()
 
-      // setsid + nohup: the turn survives a dropped exec connection. The
-      // runner writes turn.pid itself.
+      // setsid (where it exists; macOS has none) + nohup: the turn survives a
+      // dropped exec connection. The runner writes turn.pid itself.
       const start = await this.provider.exec(
         boxId,
-        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && (setsid nohup ${q(this.provider.nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
+        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(this.provider.nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
 
@@ -913,7 +913,7 @@ export class TaskManager {
         .map((e) => `--exclude=${q(e)}`)
         .join(" ")
       const max = this.c.archiveMaxMb * 1024 * 1024
-      let res = await this.provider.exec(boxId, `cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId)} 2>/dev/null; stat -c %s ${tmp}`)
+      let res = await this.provider.exec(boxId, `cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId)} 2>/dev/null; wc -c < ${tmp}`)
       let size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
       let partial = false
       if (!Number.isFinite(size)) throw new Error(`tar failed: ${res.stderr.slice(-300)}`)
@@ -923,7 +923,7 @@ export class TaskManager {
         partial = true
         res = await this.provider.exec(
           boxId,
-          `cd ${q(root + "/" + taskId + "/work")} 2>/dev/null && [ -d .git ] && (git add -A && git -c user.name=box-yard -c user.email=box-yard@local commit -qm "box-yard: wip snapshot" --no-verify && git update-ref refs/boxyard/wip HEAD && git reset -q --soft HEAD~1) >/dev/null 2>&1; cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId + "/claude")} ${q(taskId + "/events.jsonl")} $( [ -d ${q(taskId + "/work/.git")} ] && echo ${q(taskId + "/work/.git")}) 2>/dev/null; stat -c %s ${tmp}`,
+          `cd ${q(root + "/" + taskId + "/work")} 2>/dev/null && [ -d .git ] && (git add -A && git -c user.name=box-yard -c user.email=box-yard@local commit -qm "box-yard: wip snapshot" --no-verify && git update-ref refs/boxyard/wip HEAD && git reset -q HEAD~1) >/dev/null 2>&1; cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId + "/claude")} ${q(taskId + "/events.jsonl")} $( [ -d ${q(taskId + "/work/.git")} ] && echo ${q(taskId + "/work/.git")}) 2>/dev/null; wc -c < ${tmp}`,
         )
         size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
         if (!Number.isFinite(size) || size > max) throw new Error(`workspace is too large to archive (${Math.round(size / 1e6)} MB)`)
