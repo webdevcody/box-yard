@@ -148,23 +148,23 @@ npm run typecheck
 npm run worker-snapshot   # bake Claude Code into a snapshot -> WORKER_SNAPSHOT_ID for fast box starts
 ```
 
-The mock Claude (`scripts/fake-claude.mjs`) speaks the same headless protocol and calls the real MCP tools. In the orchestrator chat, try `create project demo`, then `task demo: Haiku -- write a haiku [artifact]`, or `schedule demo "*/5 * * * *": Haiku drop -- write a haiku [artifact]`. Worker prompts react to `[ask]`, `[fail]`, `[slow]`, `[preview]`, `[artifact]`, `[note]` and `[agent:<taskId>]`.
+The mock Claude (`scripts/fake-claude.mjs`) speaks the same headless protocol and calls the real MCP tools. In the Coordinator chat, try `create project demo`, then `task demo: Haiku -- write a haiku [artifact]`, or `schedule demo "*/5 * * * *": Haiku drop -- write a haiku [artifact]`. Worker prompts react to `[ask]`, `[fail]`, `[slow]`, `[preview]`, `[artifact]`, `[note]` and `[agent:<taskId>]`.
 
 | Path | What's there |
 | --- | --- |
-| `server/` | API, SQLite store, task manager, orchestrator, MCP tools, box providers (`upstash`, `local`) |
+| `server/` | API, SQLite store, task manager, Coordinator/Captains, MCP tools, box providers (`upstash`, `local`) |
 | `runner/box-runner.mjs` | Copied into each worker box. Runs turns and serves the agent's MCP tools, with no dependencies. |
 | `web/` | The React app |
 | `scripts/` | Deploy scripts and the fake Claude |
 
 ## Verified against real services
 
-Checked on 2026-10-22 with a real Upstash Box account (free plan), a Claude Code OAuth token and a GitHub token, with the orchestrator deployed in its own box:
+Checked on 2026-10-22 with a real Upstash Box account (free plan), a Claude Code OAuth token and a GitHub token, with Box Yard deployed in its own box:
 
 - **Box API** (`npx tsx scripts/smoke-box.ts`): create (about 5 s, Claude Code and `gh` preinstalled), exec, file write/read, env vars, a real `claude -p` turn in a box, cloning a private repo, public URLs. `scripts/boxes.ts` lists, deletes and runs commands in boxes.
 - **Pausing.** Over 20 minutes, no box paused, idle or not, and a background process kept running the whole time. So agent turns survive a dropped exec connection. Keep-alive needs a paid plan.
 - **Cancelling an exec stream does not stop its process in the box.** Holds are written to end on their own.
-- **End-to-end scenarios through the deployed orchestrator:**
+- **End-to-end scenarios through the deployed Coordinator:**
   - Issues opened on several repos in parallel, one project and one box each.
   - "Close those issues" resumed the agents that opened them.
   - A follow-up sent mid-turn was queued into the same session.
@@ -174,5 +174,5 @@ Checked on 2026-10-22 with a real Upstash Box account (free plan), a Claude Code
   - A draft PR was opened and then closed, and its branch deleted.
   - Artifacts were published with working links.
   - The server was restarted mid-turn and the agent was picked back up.
-  - With the orchestrator session reset, a follow-up still found the right agent.
+  - With the Coordinator session reset, a follow-up still found the right agent.
 - **Not yet checked live:** QStash schedules (only run against a fake), Upstash Redis as the event bus (the file log was used), and archive restore onto a different box after a box is lost (covered by the local tests).

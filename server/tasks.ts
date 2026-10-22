@@ -1403,8 +1403,11 @@ export class TaskManager {
 
   /** A line for the owner of a task update; by default the Coordinator reads it on its next turn. */
   notice(content: string, meta: Record<string, unknown> | null = null) {
-    if (this.onNotice?.(content, meta)) return
+    const handled = Boolean(this.onNotice?.(content, meta))
     const msg = this.store.addChat("notice", content, meta)
+    // Keep the historical main-chat notice for existing installs, but do not
+    // make the Coordinator process every project task event once a Captain owns it.
+    if (handled) this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
     this.hub.broadcast({ type: "chat.message", message: msg })
   }
 

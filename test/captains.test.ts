@@ -58,7 +58,12 @@ describe("project Captains", () => {
     const messages = await call<CaptainMessage[]>(r, "GET", `/api/projects/${p.id}/captain/messages`)
     expect(messages.map((m) => m.role)).toContain("user")
     expect(messages.some((m) => m.role === "assistant" && /Started task/i.test(m.content))).toBe(true)
-    expect((await call<Task[]>(r, "GET", `/api/tasks?projectId=${p.id}`))).toHaveLength(1)
+    const tasks = await call<Task[]>(r, "GET", `/api/tasks?projectId=${p.id}`)
+    expect(tasks).toHaveLength(1)
+    await waitFor(async () => {
+      const t = await call<Task>(r, "GET", `/api/tasks/${tasks[0]!.id}`)
+      return !["queued", "starting", "working"].includes(t.status) ? t : null
+    }, "Captain-created task to settle")
   })
 
   it("exposes Coordinator MCP tools that hand work to a Captain", async () => {
