@@ -19,7 +19,9 @@ import {
   workerSystemPrompt,
   type DirectoryEntry,
 } from "./prompts.js"
-import type { BoxInfo, PreviewLink, Task, TaskStatus } from "../shared/types.js"
+import { DEFAULT_EFFORT, type BoxInfo, type Effort, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
+import { autocompactFlag, type SettingsStore } from "./settings.js"
+import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 
@@ -42,12 +44,21 @@ export interface TaskManagerDeps {
   hub: Hub
   redis: Redis | null
   artifacts: Artifacts
+  settings: SettingsStore
 }
 
 /** kv key for the box a project's work goes to first. */
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
+
+const usageFields = (u: unknown): { contextTokens?: number; contextWindow?: number } => {
+  const x = u as { tokens?: unknown; window?: unknown } | null | undefined
+  return {
+    ...(typeof x?.tokens === "number" ? { contextTokens: x.tokens } : {}),
+    ...(typeof x?.window === "number" ? { contextWindow: x.window } : {}),
+  }
+}
 
 const slugify = (s: string) =>
   s
@@ -69,6 +80,7 @@ export class TaskManager {
   private readonly redis: Redis | null
   private readonly artifacts: Artifacts
   private readonly reader: EventReader
+  private readonly settings: SettingsStore
 
   private timers: NodeJS.Timeout[] = []
   private scheduling = false
@@ -98,6 +110,7 @@ export class TaskManager {
     this.hub = deps.hub
     this.redis = deps.redis
     this.artifacts = deps.artifacts
+    this.settings = deps.settings
     this.reader = new EventReader(deps.provider, deps.redis)
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
   }
@@ -187,6 +200,7 @@ export class TaskManager {
     prompt: string
     env?: Record<string, string>
     scheduleId?: string | null
+    effort?: Effort | null
   }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
@@ -203,7 +217,7 @@ export class TaskManager {
     return this.store.getTask(task.id)!
   }
 
-  sendInput(taskId: string, content: string, source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody"): Task {
+  sendInput(taskId: string, content: string, source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody", effort?: Effort | null): Task {
     const row = this.requireRow(taskId)
     if (!content.trim()) throw new BadRequestError("message is empty")
     this.store.queueInput(row.id, source, content.trim())
@@ -212,6 +226,7 @@ export class TaskManager {
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
+    if (effort) patch.effort = effort
     if (row.status === "needs_input" && source !== "system" && !source.startsWith("agent:")) patch.question = null
     if (!row.current_turn_id && RESTING.includes(row.status)) {
       patch.status = "queued"
@@ -231,7 +246,7 @@ export class TaskManager {
       // The runner writes turn_end after it stops; that settles the status.
     } else if (row.status === "queued" || row.status === "starting") {
       this.store.clearInputs(row.id)
-      this.store.updateTask(row.id, { status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." })
+      this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." })
     }
     this.addEvent(row.id, "Stopped by Cody.")
     this.emitTask(row.id)
@@ -248,6 +263,22 @@ export class TaskManager {
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
+    return this.store.getTask(row.id)!
+  }
+
+  /**
+   * Compact a task's Claude session. Runs as its own turn (`/compact` on the
+   * resumed session), right away if the task is idle, or right after the
+   * current turn if it is busy. Queued messages wait until it is done.
+   */
+  compactTask(taskId: string): Task {
+    const row = this.requireRow(taskId)
+    if (!row.session_started) throw new BadRequestError("This agent hasn't started its session yet, so there is nothing to compact.")
+    if (row.compacting || row.compact_pending) return this.store.getTask(row.id)!
+    if (row.status === "failed") throw new BadRequestError("The agent's last turn failed. Retry it before compacting.")
+    this.store.updateTask(row.id, { compactPending: true })
+    this.emitTask(row.id)
+    this.schedule()
     return this.store.getTask(row.id)!
   }
 
@@ -345,7 +376,7 @@ export class TaskManager {
   private async schedulePass() {
     const waiting = this.store
       .listTaskRows()
-      .filter((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && this.store.hasInputs(r.id))))
+      .filter((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
       .filter((r) => r.status !== "starting" && r.status !== "working")
       .sort((a, b) => a.last_active_at - b.last_active_at)
 
@@ -361,7 +392,13 @@ export class TaskManager {
       }
       const turnId = randomUUID()
       // Reserve the slot before any await so parallel passes see it taken.
-      this.store.updateTask(row.id, { status: "starting", boxId, currentTurnId: turnId, error: null })
+      this.store.updateTask(row.id, {
+        status: "starting",
+        boxId,
+        currentTurnId: turnId,
+        error: null,
+        ...(row.compact_pending ? { compactPrevStatus: row.status } : {}),
+      })
       this.store.touchBox(boxId)
       this.emitTask(row.id)
       void this.launch(row.id, boxId, turnId)
@@ -546,11 +583,15 @@ export class TaskManager {
       if (check.stdout.includes("missing")) await this.prepareWorkspace(row, boxId, dir)
       row = this.requireRow(taskId)
 
-      const inputs = this.store.peekInputs(taskId)
+      const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
+      // A compaction is a turn of its own; queued messages wait for the next one.
+      const inputs = compact ? [] : this.store.peekInputs(taskId)
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
-      const prompt = firstTurn
+      const prompt = compact
+        ? "/compact"
+        : firstTurn
         ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followupPrompt(inputs)] : [] })
         : followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }])
 
@@ -565,6 +606,8 @@ export class TaskManager {
           prompt,
           sessionId: row.session_id,
           resume: !firstTurn,
+          compact,
+          ...this.agentSettings(row),
           systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
@@ -587,7 +630,7 @@ export class TaskManager {
       this.store.updateTask(taskId, {
         status: "working",
         sessionStarted: true,
-        turnCount: row.turn_count + 1,
+        ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
         turnFlags: { interrupts: flags.interrupts } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
@@ -604,12 +647,18 @@ export class TaskManager {
       if (!stopped) console.error(`[box-yard] launch ${taskId} on ${boxId} failed: ${message}`)
       const current = this.store.getTaskRow(taskId)
       if (!current) return
+      // A compaction that couldn't start isn't worth failing the task over.
+      const wasCompact = Boolean(current.compact_pending || current.compacting)
+      const prev = current.compact_prev_status
       this.store.updateTask(taskId, {
-        status: stopped ? "idle" : "failed",
+        status: wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : stopped ? "idle" : "failed",
         currentTurnId: null,
-        error: stopped ? null : `Couldn't start the agent: ${message}`,
+        compactPending: false,
+        compacting: false,
+        error: stopped || wasCompact ? null : `Couldn't start the agent: ${message}`,
       })
-      if (!stopped) {
+      if (wasCompact && !stopped) this.addEvent(taskId, `Couldn't compact: ${message}`)
+      if (!stopped && !wasCompact) {
         this.addEvent(taskId, `Couldn't start the agent: ${message}`)
         this.notice(`❌ **${current.title}** couldn't start: ${message}`, { taskId })
         const health = await this.provider.health(boxId).catch(() => "unknown" as const)
@@ -618,6 +667,13 @@ export class TaskManager {
       this.emitTask(taskId)
       this.schedule()
     }
+  }
+
+  /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
+  private agentSettings(row: TaskRow) {
+    const s = this.settings.get()
+    const effort: Effort = s.agentEffort === "orchestrator" ? (row.effort ?? DEFAULT_EFFORT) : s.agentEffort
+    return { model: s.agentModel, effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window) }
   }
 
   private runnerCache: string | null = null
@@ -646,7 +702,6 @@ export class TaskManager {
       // A local `claude` login lives in the default config dir, so only
       // isolate when we have a token to log in with.
       isolateConfig: !local || Boolean(this.c.claudeOauthToken || this.c.anthropicApiKey),
-      model: this.c.workerModel || undefined,
       port: row.port_base ?? PORT_BASE,
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
@@ -812,6 +867,11 @@ export class TaskManager {
       case "turn_start":
       case "log":
         return
+      case "usage": {
+        if (row.compacting || typeof ev.tokens !== "number") return
+        this.store.updateTask(taskId, { contextTokens: ev.tokens, ...(typeof ev.window === "number" ? { contextWindow: ev.window } : {}) })
+        return this.emitTask(taskId)
+      }
       case "assistant":
         return say("assistant", String(ev.text ?? ""))
       case "tool":
@@ -912,6 +972,7 @@ export class TaskManager {
   private finishTurn(row: TaskRow, ev: WorkerEvent, pr: "open" | "closed" | "merged" | null = null) {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
+    if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
     this.stopRequested.delete(row.id)
@@ -940,6 +1001,7 @@ export class TaskManager {
       error,
       currentTurnId: null,
       summary: flags.done ?? (result ? capReply(result) : row.summary),
+      ...usageFields(ev.usage),
       sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
       lastActiveAt: Date.now(),
       question: status === "needs_input" ? (flags.asked ?? null) : null,
@@ -960,6 +1022,40 @@ export class TaskManager {
       this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
 
+    this.emitTask(row.id)
+    this.publishDirectory()
+    void this.archive(row.id).finally(() => this.schedule())
+    this.schedule()
+  }
+
+  /** The end of a /compact turn: back to the status before it, with the new usage. Never fails the task. */
+  private finishCompact(row: TaskRow, ev: WorkerEvent) {
+    this.holds.get(row.id)?.abort()
+    this.holds.delete(row.id)
+    const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
+    this.stopRequested.delete(row.id)
+    const prev = row.compact_prev_status
+    const status: TaskStatus = prev && !["queued", "starting", "working"].includes(prev) ? prev : row.pr_url ? "pr_ready" : "idle"
+    const usage = usageFields(ev.usage)
+    this.store.updateTask(row.id, {
+      status,
+      currentTurnId: null,
+      compacting: false,
+      compactPending: false,
+      compactPrevStatus: null,
+      ...(ev.ok && !stopped ? { ...usage, ...(usage.contextTokens === undefined ? { contextTokens: null } : {}) } : {}),
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
+    })
+    if (row.box_id) this.store.touchBox(row.box_id)
+    const before = row.context_tokens
+    const after = usage.contextTokens
+    if (stopped) this.addEvent(row.id, "Compaction stopped.")
+    else if (!ev.ok) this.addEvent(row.id, `Compaction failed: ${String(ev.error ?? "claude exited with an error").slice(0, 400)}`)
+    else
+      this.addEvent(
+        row.id,
+        `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after)} tokens` : " (new usage shows after the next turn)"}.`,
+      )
     this.emitTask(row.id)
     this.publishDirectory()
     void this.archive(row.id).finally(() => this.schedule())
@@ -1160,6 +1256,15 @@ export class TaskManager {
     const flags = this.store.turnFlags(row)
     const interrupts = (flags.interrupts ?? 0) + 1
     this.holds.get(row.id)?.abort()
+    if (row.compacting) {
+      // Not worth retrying: the user can press Compact again.
+      const prev = row.compact_prev_status
+      this.store.updateTask(row.id, { status: prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle", currentTurnId: null, compacting: false, compactPending: false })
+      this.addEvent(row.id, `Compaction interrupted (${reason}).`)
+      this.emitTask(row.id)
+      this.schedule()
+      return
+    }
     if (interrupts > MAX_INTERRUPTS) {
       this.store.updateTask(row.id, { status: "failed", currentTurnId: null, error: `Interrupted: ${reason}`, turnFlags: { interrupts: 0 } })
       this.addEvent(row.id, `Turn interrupted (${reason}). Gave up after ${MAX_INTERRUPTS} retries.`)

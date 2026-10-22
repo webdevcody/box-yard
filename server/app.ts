@@ -115,7 +115,7 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const provider = opts.provider ?? makeProvider(c)
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, settings })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
