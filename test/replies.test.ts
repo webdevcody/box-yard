@@ -28,7 +28,7 @@ afterEach(() => yards.splice(0).forEach((y) => y.stop()))
 async function setup() {
   const yard = createBoxYard(testConfig(), { webDir: "/nonexistent" })
   yards.push(yard)
-  const server = buildMcpServer({ store: yard.store, tasks: yard.tasks, hub: yard.hub, artifacts: null as never, scheduler: yard.scheduler, publicUrl: () => "" } as never)
+  const server = buildMcpServer({ store: yard.store, tasks: yard.tasks, hub: yard.hub, artifacts: null as never, scheduler: yard.scheduler, settings: yard.settings, publicUrl: () => "" } as never)
   const [a, b] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: "t", version: "0" })
   await Promise.all([server.connect(a), client.connect(b)])

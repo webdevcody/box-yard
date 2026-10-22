@@ -101,6 +101,7 @@ export interface BoxYard {
   tasks: TaskManager
   orchestrator: Orchestrator
   scheduler: Scheduler
+  settings: SettingsStore
   start(): Promise<void>
   stop(): void
 }
@@ -410,6 +411,7 @@ export function createBoxYard(
     tasks,
     orchestrator,
     scheduler,
+    settings,
     async start() {
       await tasks.start()
       scheduler.start()

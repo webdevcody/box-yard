@@ -20,7 +20,8 @@ export interface McpDeps {
   artifacts: Artifacts
   publicUrl: () => string
   scheduler: Scheduler
-  settings: SettingsStore
+  /** Optional so tests can build the server without it; then effort is fixed. */
+  settings?: SettingsStore
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
@@ -60,7 +61,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   // The `effort` param only exists while Cody lets the orchestrator decide. The server is built per
   // request and the orchestrator's CLI lists tools at the start of every turn, so a settings change
   // shows up on its next turn. In fixed mode the param is absent (and an extra one would be ignored).
-  const decideEffort = deps.settings.get().agentEffort === "orchestrator"
+  const decideEffort = deps.settings?.get().agentEffort === "orchestrator"
   const effortParam: Record<string, typeof effortSchema> = decideEffort ? { effort: effortSchema } : {}
 
   const project = (ref: string): Project => {

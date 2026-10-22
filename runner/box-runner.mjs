@@ -333,11 +333,11 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
         } catch {}
         buf = ""
       }
-      pending.then(() =>
+      pending.then(() => {
         const window = contextWindowOf(result?.modelUsage)
         if (usage && window) usage.window = window
-        resolve({ exitCode: code ?? 1, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") }),
-      )
+        resolve({ exitCode: code ?? 1, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") })
+      })
     })
 
     child.stdin.on("error", () => {})

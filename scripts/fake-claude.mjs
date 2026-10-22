@@ -55,7 +55,6 @@ const WINDOW = Number(process.env.FAKE_CLAUDE_WINDOW || 200_000)
 const PER_TURN = Number(process.env.FAKE_CLAUDE_TOKENS_PER_TURN || 3000)
 const fmt = (n) => (n >= 1e6 ? `${n / 1e6}m` : n >= 1e3 ? `${Math.round(n / 100) / 10}k` : String(n))
 // Record how we were called, so tests can check flags (set FAKE_CLAUDE_LOG to a file).
-if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args }) + "\n")
 
 const session = resumeId ? JSON.parse(fs.readFileSync(sessionFile, "utf8")) : { id: sessionId, turns: [] }
 session.tokens ??= 0
@@ -246,6 +245,9 @@ process.stdin.on("end", async () => {
   out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
   let result = ""
   let mcp = null
+  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: prompt.slice(0, 120) }) + "\n")
+  // The prompt and the reply grow the context.
+  if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   try {
     mcp = loadMcp()
     await mcp?.init()
@@ -274,7 +276,6 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   session.turns.push({ prompt, result, at: Date.now() })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
