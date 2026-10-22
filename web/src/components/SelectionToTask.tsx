@@ -179,7 +179,8 @@ function usefulRect(range: Range): DOMRect | null {
 }
 
 function contains(root: HTMLElement, node: Node): boolean {
-  return root.contains(node.nodeType === Node.TEXT_NODE ? node.parentElement : node)
+  const target = node.nodeType === Node.TEXT_NODE ? node.parentNode : node
+  return target ? root.contains(target) : false
 }
 
 function clamp(n: number, min: number, max: number) {

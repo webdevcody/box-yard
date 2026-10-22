@@ -36,19 +36,19 @@ export function TaskView({ id }: { id: string }) {
   const task = tasks.data
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
-
-  if (tasks.isLoading) return null
-  if (!task) return <Empty title="Task not found">It may have been deleted.</Empty>
-
-  const running = task.status === "working" || task.status === "starting"
-  const files = (artifacts.data ?? []).filter((a) => a.taskId === id)
   const submit = useCallback((content: string, attachments: Attachment[]) => send.mutate({ content, attachments }), [send.mutate])
   const sendFollowUp = useCallback((content: string) => send.mutate({ content, attachments: [] }), [send.mutate])
   const startFromSelection = useCallback(
     (content: string) => sendChat.mutate({ id: newClientId("chat"), content, attachments: [] }),
     [sendChat.mutate],
   )
-  const selectionSource: SelectionTaskSource | null = project ? { kind: "task", project: projectContext(project)!, task: taskContext(task)! } : null
+  const selectionSource: SelectionTaskSource | null = project && task ? { kind: "task", project: projectContext(project)!, task: taskContext(task)! } : null
+
+  if (tasks.isLoading) return null
+  if (!task) return <Empty title="Task not found">It may have been deleted.</Empty>
+
+  const running = task.status === "working" || task.status === "starting"
+  const files = (artifacts.data ?? []).filter((a) => a.taskId === id)
 
   return (
     <div ref={panel} className="relative flex h-full flex-col">

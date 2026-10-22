@@ -60,7 +60,7 @@ export const ChatPanel = memo(function ChatPanel() {
     const task = taskId ? tasks.data?.find((t) => t.id === taskId) : null
     return task ? (projects.data?.find((p) => p.id === task.projectId) ?? null) : null
   }, [location, projects.data, tasks.data])
-  const selectionSource: SelectionTaskSource = { kind: "orchestrator", project: projectContext(currentProject) }
+  const selectionSource: SelectionTaskSource = useMemo(() => ({ kind: "orchestrator", project: projectContext(currentProject) }), [currentProject])
 
   // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
