@@ -24,7 +24,7 @@ import {
   visibleTasks,
   type TaskFilter,
 } from "../lib/projectTasks"
-import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
+import { Button, Empty, Field, STATUS, Select, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { TaskCard } from "./TaskCard"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
@@ -282,8 +282,8 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
                 </button>
               )}
             </div>
-            <select
-              className="w-32 shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-300 focus:border-yard-500/60 focus:outline-none sm:w-auto sm:px-3"
+            <Select
+              className="w-36 shrink-0 text-zinc-300 sm:w-auto"
               value={sort}
               onChange={(e) => setParam("sort", e.target.value === DEFAULT_SORT ? null : e.target.value)}
               aria-label="Sort tasks"
@@ -293,7 +293,7 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
                   {s.label}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
 
           <div className="scroll-thin -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Filter by status">
