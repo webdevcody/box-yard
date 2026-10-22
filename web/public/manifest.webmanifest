@@ -1,0 +1,18 @@
+{
+  "name": "Box Yard",
+  "short_name": "Box Yard",
+  "description": "Run and monitor a yard of coding agents from one mobile-friendly UI.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/icons/box-yard-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

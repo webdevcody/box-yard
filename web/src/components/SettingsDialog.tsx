@@ -113,7 +113,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
         <input id={id} type="checkbox" checked={value.enabled} onChange={(e) => onChange({ ...value, enabled: e.target.checked })} />
         Enabled
       </label>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="number"
           className={cx(inputClass, "min-w-0 flex-1 disabled:opacity-50")}
@@ -126,7 +126,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
           aria-label={`${label} threshold`}
         />
         <Select
-          className="w-36 shrink-0"
+          className="w-full shrink-0 sm:w-36"
           disabled={!value.enabled}
           value={value.unit}
           aria-label={`${label} unit`}
@@ -256,7 +256,7 @@ export function SettingsDialog({
           >
             Reset to defaults
           </Button>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="flex flex-col-reverse gap-2 sm:ml-auto sm:flex-row sm:items-center sm:gap-3">
             {dirty ? (
               <span className="text-xs text-amber-300" role="status">
                 {changed.length === 1 ? "1 unsaved change" : `${changed.length} unsaved changes`}
@@ -306,7 +306,7 @@ export function SettingsDialog({
               tabIndex={on ? 0 : -1}
               onClick={() => onSection(sec.key)}
               className={cx(
-                "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
+                "flex min-h-11 shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none sm:min-h-0",
                 on ? "bg-zinc-800/80 font-medium text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
               )}
             >
@@ -323,7 +323,7 @@ export function SettingsDialog({
         role="tabpanel"
         id={fid("panel")}
         aria-labelledby={fid(`tab-${section}`)}
-        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6"
+        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6"
       >
         {section === "about" ? (
           <AboutPanel />

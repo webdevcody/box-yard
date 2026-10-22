@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Box Yard">
+  <rect width="512" height="512" rx="112" fill="#09090b"/>
+  <rect x="82" y="164" width="348" height="244" rx="48" fill="#f59e0b"/>
+  <path d="M82 205c0-23 19-41 41-41h266c23 0 41 18 41 41v44H82v-44Z" fill="#b45309"/>
+  <path d="M154 164h204l-35-60c-9-16-26-25-44-25h-46c-18 0-35 9-44 25l-35 60Z" fill="#fbbf24"/>
+  <rect x="128" y="288" width="256" height="48" rx="24" fill="#09090b" opacity=".18"/>
+</svg>

@@ -34,7 +34,7 @@ let nextKey = 0
 export function Composer({
   onSubmit,
   placeholder,
-  className = "border-t border-zinc-900 p-3",
+  className = "sticky bottom-0 z-10 border-t border-zinc-900 bg-zinc-950/95 px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur",
   textareaRef,
   panelRef,
 }: {
@@ -111,7 +111,7 @@ export function Composer({
     const el = input.current
     const row = el?.parentElement
     if (!el || !row) return
-    const max = composerMaxHeight(window.innerHeight, expanded)
+    const max = composerMaxHeight(window.visualViewport?.height ?? window.innerHeight, expanded)
     // Hold the row's height while measuring so the panel (and the message list scroll) doesn't move.
     row.style.minHeight = `${row.offsetHeight}px`
     el.style.height = "auto"
@@ -140,9 +140,11 @@ export function Composer({
     })
     ro.observe(el)
     window.addEventListener("resize", resize)
+    window.visualViewport?.addEventListener("resize", resize)
     return () => {
       ro.disconnect()
       window.removeEventListener("resize", resize)
+      window.visualViewport?.removeEventListener("resize", resize)
     }
   }, [resize])
 
@@ -309,7 +311,7 @@ export function Composer({
               e.target.value = ""
             }}
           />
-          <Button type="button" variant="ghost" size="sm" className="h-8 w-8 !p-0" title="Attach files" onClick={() => picker.current?.click()}>
+          <Button type="button" variant="ghost" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" title="Attach files" onClick={() => picker.current?.click()}>
             <Paperclip className="h-4 w-4" />
           </Button>
           <MicButton machine={dictation} />
@@ -326,7 +328,7 @@ export function Composer({
               }
             }}
             placeholder={placeholder}
-            className="scroll-thin min-h-[2.25rem] flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+            className="scroll-thin min-h-11 flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-2.5 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:min-h-[2.25rem] sm:py-1.5 sm:text-sm"
           />
           <div className="flex flex-col items-center gap-1">
             {(overflowing || expanded) && (
@@ -334,7 +336,7 @@ export function Composer({
                 type="button"
                 variant="ghost"
                 size="sm"
-                className="h-8 w-8 !p-0"
+                className="h-11 w-11 !p-0 sm:h-8 sm:w-8"
                 title={expanded ? "Shrink editor" : "Expand editor"}
                 aria-label={expanded ? "Shrink editor" : "Expand editor"}
                 aria-pressed={expanded}
@@ -346,7 +348,7 @@ export function Composer({
                 {expanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </Button>
             )}
-            <Button type="submit" variant="primary" size="sm" className="h-8 w-8 !p-0" disabled={!canSend}>
+            <Button type="submit" variant="primary" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" disabled={!canSend}>
               <Send className="h-4 w-4" />
             </Button>
           </div>
