@@ -90,10 +90,13 @@ function envFile(boxId: string, password: string, publicUrl: string, keepAlive: 
   return lines.join("\n") + "\n"
 }
 
+/** Wait until the server we just started (not an old one) answers. */
 async function waitHealthy(box: Box) {
   for (let i = 0; i < 40; i++) {
-    const out = await box.exec.command(`bash -c "curl -fs http://localhost:3000/healthz || true"`)
-    if ((out.stdout || out.result).includes("ok")) return
+    const out = await box.exec.command(`bash -c "echo pid=\$(cat ${HOME}/box-yard.pid 2>/dev/null); curl -fs http://localhost:3000/healthz || true"`)
+    const text = out.stdout || out.result
+    const pid = /pid=(\d+)/.exec(text)?.[1]
+    if (pid && text.includes(`"pid":${pid}`)) return
     await new Promise((r) => setTimeout(r, 1500))
   }
   const tail = await box.exec.command(`tail -n 40 ${HOME}/box-yard.log`)

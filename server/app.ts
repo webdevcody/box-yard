@@ -155,7 +155,7 @@ export function createBoxYard(
   })
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true })
+    res.json({ ok: true, pid: process.pid })
   })
 
   // ---- auth

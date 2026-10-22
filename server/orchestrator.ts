@@ -40,13 +40,20 @@ export class Orchestrator {
     this.workdir = path.join(c.dataDir, "orchestrator")
     fs.mkdirSync(this.workdir, { recursive: true })
     this.mcpConfigPath = path.join(c.dataDir, "orchestrator-mcp.json")
-    fs.writeFileSync(
-      this.mcpConfigPath,
-      JSON.stringify({
-        mcpServers: { boxyard: { type: "http", url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } },
-      }),
-      { mode: 0o600 },
-    )
+    this.mcpConfig = JSON.stringify({
+      mcpServers: { boxyard: { type: "http", url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } },
+    })
+  }
+
+  private readonly mcpConfig: string
+
+  /**
+   * Written before every turn rather than once at startup: the token is per
+   * process, and another server process starting on the same data dir (say,
+   * one that then fails to bind the port) must not leave us a stale token.
+   */
+  private writeMcpConfig() {
+    fs.writeFileSync(this.mcpConfigPath, this.mcpConfig, { mode: 0o600 })
   }
 
   get busy() {
@@ -190,6 +197,7 @@ export class Orchestrator {
 
   private run(prompt: string, sessionId: string, resume: boolean): Promise<{ ok: boolean; error: string }> {
     return new Promise((resolve) => {
+      this.writeMcpConfig()
       const args = [
         "-p",
         "--output-format",
