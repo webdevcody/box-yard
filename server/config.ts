@@ -57,6 +57,8 @@ export const config = {
 
   /** Max worker boxes alive at once (the free plan allows about 5). */
   maxBoxes: int("BOX_POOL_MAX", 5),
+  /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
+  maxAgents: int("BOX_MAX_AGENTS", 0),
   /** Claude turns that may run at the same time inside one box. */
   slotsPerBox: int("BOX_SLOTS", 2),
   /** Task folders kept in one box before old, finished ones are evicted. */

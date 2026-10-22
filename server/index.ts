@@ -5,7 +5,7 @@ const yard = createBoxYard(config)
 
 const server = yard.app.listen(config.port, config.host, () => {
   console.log(`\n  Box Yard is running on http://localhost:${config.port}`)
-  console.log(`  boxes: ${config.provider} (max ${config.maxBoxes} boxes × ${config.slotsPerBox} agents) · data: ${config.dataDir}`)
+  console.log(`  boxes: ${config.provider} (default max ${config.maxBoxes} boxes × ${config.slotsPerBox} agents) · data: ${config.dataDir}`)
   for (const p of configProblems(config)) console.log(`  ! ${p}`)
   console.log("")
 })

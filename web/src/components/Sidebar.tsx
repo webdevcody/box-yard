@@ -1,13 +1,14 @@
 import { useState } from "react"
 import { Link, useLocation } from "wouter"
 import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus } from "lucide-react"
+import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
 import type { Connection } from "../lib/stream"
 
 export function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
-  const [location] = useLocation()
+  const [location, navigate] = useLocation()
   const projects = useProjects()
   const tasks = useTasks()
   const boxes = useBoxes()
@@ -24,7 +25,8 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
 
   const pool = health.data?.pool
   const running = boxes.data?.reduce((n, b) => n + b.runningTurns, 0) ?? 0
-  const capacity = pool ? pool.maxBoxes * pool.slotsPerBox : 0
+  const capacity = pool ? agentCapacity(pool) : 0
+  const overLimit = Boolean(pool && ((boxes.data?.length ?? 0) > pool.maxBoxes || (capacity > 0 && running > capacity)))
 
   const navItem = (href: string, active: boolean) =>
     cx(
@@ -99,21 +101,29 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
         })}
       </div>
 
-      <div className="border-t border-zinc-900 p-3">
+      <div
+        role="link"
+        tabIndex={0}
+        title="Open the Boxes page"
+        onClick={() => { navigate("/boxes"); onNavigate?.() }}
+        onKeyDown={(e) => { if (e.key === "Enter") { navigate("/boxes"); onNavigate?.() } }}
+        className={cx("cursor-pointer border-t border-zinc-900 p-3 transition hover:bg-zinc-900/60", location === "/boxes" && "bg-zinc-900/60")}
+      >
         <div className="mb-1.5 flex items-center justify-between text-xs text-zinc-500">
           <span>
             {boxes.data?.length ?? 0}/{pool?.maxBoxes ?? "?"} boxes · {health.data?.provider ?? "…"}
           </span>
-          <span>
-            {running}/{capacity || "?"} agents
+          <span className={cx(overLimit && "text-amber-300")}>
+            {running}/{capacity || "?"} agents{overLimit && " · over limit"}
           </span>
         </div>
         <div className="flex gap-1">
-          {Array.from({ length: pool?.maxBoxes ?? 0 }, (_, i) => {
+          {Array.from({ length: Math.max(pool?.maxBoxes ?? 0, boxes.data?.length ?? 0) }, (_, i) => {
             const box = boxes.data?.[i]
             return (
               <div
                 key={i}
+                onClick={box ? (e) => { e.stopPropagation(); navigate("/boxes"); window.location.hash = box.id; onNavigate?.() } : undefined}
                 title={box ? `${box.id}: ${box.runningTurns}/${box.slots} running, ${box.residentTasks.length} tasks${box.projects.length ? ` (${box.projects.join(", ")})` : ""}` : "free"}
                 className={cx(
                   "h-2 flex-1 rounded-sm",

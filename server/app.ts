@@ -199,7 +199,7 @@ export function createBoxYard(
       bus: tasks.busMode,
       claude: { available: Boolean(claudeVersion), version: claudeVersion ?? null },
       problems,
-      pool: { maxBoxes: c.maxBoxes, slotsPerBox: c.slotsPerBox },
+      pool: tasks.limits(),
       orchestratorBusy: orchestrator.busy,
       scheduler: scheduler.mode,
     }
@@ -375,17 +375,24 @@ export function createBoxYard(
   api.post("/orchestrator/compact", (_req, res) => {
     res.json(orchestrator.requestCompact("button"))
   })
+  /** New limits take effect now: waiting tasks may start, and boxes/health refresh. Nothing running is stopped. */
+  const applyPoolChange = () => {
+    hub.broadcast({ type: "boxes", boxes: tasks.boxes() })
+    tasks.schedule()
+  }
   api.get("/agent-settings", (_req, res) => {
     res.json(settings.info())
   })
   api.put("/agent-settings", (req, res) => {
     const info = settings.update(req.body)
     hub.broadcast({ type: "settings", info })
+    applyPoolChange()
     res.json(info)
   })
   api.delete("/agent-settings", (_req, res) => {
     const info = settings.reset()
     hub.broadcast({ type: "settings", info })
+    applyPoolChange()
     res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {

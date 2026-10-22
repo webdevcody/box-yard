@@ -92,7 +92,7 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 | `done` | The agent or you marked it finished. |
 | `failed` | Something broke. Retry with a click. |
 
-**Box pool.** The free plan allows about 5 boxes, so Box Yard runs a pool. `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` (default 2) sets how many agents run at once in one box. The defaults allow 10 agents at a time, and further work waits in a queue. Placement keeps a project together:
+**Box pool.** The free plan allows about 5 boxes, so Box Yard runs a pool. `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` (default 2) sets how many agents run at once in one box. The defaults allow 10 agents at a time, and further work waits in a queue. `BOX_MAX_AGENTS` optionally caps agents across all boxes. These are defaults: edit them live in Settings (or from the Boxes page). Lowering a limit never stops running work; it just holds back new work until usage drops. Placement keeps a project together:
 
 1. A task goes to a box that already hosts its project (each box keeps a bare mirror of the project's repo, so later clones come from local disk).
 2. Otherwise an empty box.
