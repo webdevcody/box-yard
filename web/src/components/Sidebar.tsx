@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { memo, useMemo, useState } from "react"
 import { Link, useLocation } from "wouter"
 import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
@@ -10,7 +10,7 @@ import { RecentActivity } from "./RecentActivity"
 import { MOD_KEY, openPalette } from "./CommandPalette"
 import type { Connection } from "../lib/stream"
 
-export function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
+export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
   const [location, navigate] = useLocation()
   const projects = useProjects()
   const tasks = useTasks()
@@ -21,11 +21,26 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
   const [creating, setCreating] = useState(false)
 
   const closing = usePendingCloses()
-  const inboxCount = tasks.data?.filter((t) => inInbox(t, closing)).length ?? 0
-  const needsYou = tasks.data?.filter((t) => t.status === "needs_input").length ?? 0
-  const active = (projectId: string) =>
-    tasks.data?.filter((t) => t.projectId === projectId && (t.status === "working" || t.status === "starting" || t.status === "queued")).length ?? 0
-  const attention = (projectId: string) => tasks.data?.some((t) => t.projectId === projectId && t.status === "needs_input")
+  // Badge counts in one pass over the tasks, recomputed only when they change.
+  const counts = useMemo(() => {
+    let inbox = 0
+    let needsYou = 0
+    const active = new Map<string, number>()
+    const attention = new Set<string>()
+    for (const t of tasks.data ?? []) {
+      if (inInbox(t, closing)) inbox++
+      if (t.status === "needs_input") {
+        needsYou++
+        attention.add(t.projectId)
+      }
+      if (t.status === "working" || t.status === "starting" || t.status === "queued") active.set(t.projectId, (active.get(t.projectId) ?? 0) + 1)
+    }
+    return { inbox, needsYou, active, attention }
+  }, [tasks.data, closing])
+  const inboxCount = counts.inbox
+  const needsYou = counts.needsYou
+  const active = (projectId: string) => counts.active.get(projectId) ?? 0
+  const attention = (projectId: string) => counts.attention.has(projectId)
 
   const pool = health.data?.pool
   const running = boxes.data?.reduce((n, b) => n + b.runningTurns, 0) ?? 0
@@ -159,4 +174,4 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
       {creating && <NewProjectDialog onClose={() => setCreating(false)} />}
     </aside>
   )
-}
+})

@@ -21,6 +21,7 @@ import { UpstashProvider } from "./providers/upstash.js"
 import type { BoxProvider } from "./providers/types.js"
 import { startSelfHold, startSelfSnapshots } from "./backup.js"
 import { Scheduler } from "./scheduler.js"
+import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
 import type { Health } from "../shared/types.js"
@@ -120,6 +121,7 @@ export function createBoxYard(
 ): BoxYard {
   const db = openDb(c.dataDir)
   const store = new Store(db)
+  if (c.mockHeavy && seedHeavy(db, store)) console.log("[box-yard] seeded the heavy mock dataset (BOXYARD_MOCK_HEAVY=1)")
   const hub = new Hub()
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
@@ -434,6 +436,7 @@ export function createBoxYard(
     res.json({ ok: true })
   })
 
+  if (c.mockHeavy) api.use(heavyDevRoutes(store, hub))
   app.use("/api", api)
 
   app.get("/artifacts/:id/:name", auth.middleware(), (req, res) => {

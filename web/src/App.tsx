@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { memo, useCallback, useEffect, useState } from "react"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
 import { Menu, MessageSquare, X } from "lucide-react"
@@ -29,6 +29,7 @@ export function App() {
   const [chatOpen, setChatOpen] = useState(false)
   const sidebarSize = useResizable({ key: "box-yard:sidebar-width", defaultWidth: 256, min: 200, max: 360, edge: "right" })
   const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
+  const closeNav = useCallback(() => setNavOpen(false), [])
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })
@@ -47,7 +48,7 @@ export function App() {
       <div className={cx("fixed inset-y-0 left-0 z-40 transition-transform w-64 lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
         style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
       >
-        <Sidebar connection={connection} onNavigate={() => setNavOpen(false)} />
+        <Sidebar connection={connection} onNavigate={closeNav} />
         <ResizeHandle {...sidebarSize.handle} className="lg:block" />
       </div>
       {navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
@@ -65,17 +66,7 @@ export function App() {
         </div>
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto h-full max-w-6xl px-6 py-6">
-            <Switch>
-              <Route path="/" component={YardView} />
-              <Route path="/inbox" component={InboxView} />
-              <Route path="/boxes" component={BoxesView} />
-              <Route path="/schedules" component={SchedulesView} />
-              <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
-              <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>
-              <Route>
-                <YardView />
-              </Route>
-            </Switch>
+            <Routes />
           </div>
         </div>
         {/* Clear of the floating orchestrator button, which shows between lg and xl */}
@@ -111,3 +102,21 @@ export function App() {
     </div>
   )
 }
+
+// The page content and the side panels are memoized: dragging a panel edge re-renders App on every
+// pointer move, and that shouldn't re-render the open view, the sidebar or the orchestrator thread.
+const Routes = memo(function Routes() {
+  return (
+    <Switch>
+      <Route path="/" component={YardView} />
+      <Route path="/inbox" component={InboxView} />
+      <Route path="/boxes" component={BoxesView} />
+      <Route path="/schedules" component={SchedulesView} />
+      <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
+      <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>
+      <Route>
+        <YardView />
+      </Route>
+    </Switch>
+  )
+})

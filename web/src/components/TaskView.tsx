@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { memo, useEffect, useMemo, useRef } from "react"
 import { Link } from "wouter"
 import { Bot, MessageCircleQuestion, Users } from "lucide-react"
 import {
@@ -6,10 +6,12 @@ import {
   useProjects,
   useSchedules,
   useSendTaskMessage,
+  useTask,
   useTaskMessages,
-  useTasks,
 } from "../lib/queries"
-import { Empty, Markdown, TimeAgo, cx } from "./ui"
+import { useEntityIndex } from "../lib/entities"
+import { useTail } from "../lib/tail"
+import { Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
@@ -17,16 +19,15 @@ import { AttachmentList } from "./Attachments"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
-  const tasks = useTasks()
+  // Only this task: other tasks' live updates don't re-render the view.
+  const tasks = useTask(id)
   const projects = useProjects()
   const schedules = useSchedules()
-  const messages = useTaskMessages(id)
   const artifacts = useArtifacts()
   const send = useSendTaskMessage(id)
-  const [draft, setDraft] = useState("")
   const [showTools, setShowTools] = useStoredFlag("boxyard:show-tool-calls")
   const panel = useRef<HTMLDivElement>(null)
-  const task = tasks.data?.find((t) => t.id === id)
+  const task = tasks.data
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
 
@@ -35,13 +36,7 @@ export function TaskView({ id }: { id: string }) {
 
   const running = task.status === "working" || task.status === "starting"
   const files = (artifacts.data ?? []).filter((a) => a.taskId === id)
-  const shown = (messages.data ?? []).filter((m) => showTools || m.role !== "tool")
-
-  const submit = (attachments: Attachment[]) => {
-    if (!draft.trim() && !attachments.length) return
-    send.mutate({ content: draft.trim(), attachments })
-    setDraft("")
-  }
+  const submit = (content: string, attachments: Attachment[]) => send.mutate({ content, attachments })
 
   return (
     <div ref={panel} className="relative flex h-full flex-col">
@@ -60,22 +55,10 @@ export function TaskView({ id }: { id: string }) {
         <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap text-red-200">{task.error}</div>
       )}
 
-      <StickyScroll count={shown.length} resetKey={id} className="rounded-xl border border-zinc-900 bg-zinc-950 p-4" contentClassName="space-y-2.5">
-        {messages.isLoading && <div className="text-sm text-zinc-500">Loading transcript…</div>}
-        {shown.map((m) => (
-          <Line key={m.id} m={m} />
-        ))}
-        {running && (
-          <div className="flex items-center gap-2 pt-1 text-xs text-sky-400">
-            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {task.status === "starting" ? "Preparing the box…" : "Agent is working…"}
-          </div>
-        )}
-      </StickyScroll>
+      <TaskThread id={id} showTools={showTools} working={running ? (task.status === "starting" ? "Preparing the box…" : "Agent is working…") : null} />
 
       <Composer
         className="mt-3"
-        value={draft}
-        onChange={setDraft}
         onSubmit={submit}
         panelRef={panel}
         placeholder={
@@ -90,7 +73,42 @@ export function TaskView({ id }: { id: string }) {
   )
 }
 
-function Line({ m }: { m: TaskMessage }) {
+/** The transcript. Its own component so header updates (status, context meter) don't re-render it. */
+const TaskThread = memo(function TaskThread({ id, showTools, working }: { id: string; showTools: boolean; working: string | null }) {
+  const messages = useTaskMessages(id)
+  const shown = useMemo(() => (messages.data ?? []).filter((m) => showTools || m.role !== "tool"), [messages.data, showTools])
+  const tail = useTail(shown, id)
+
+  // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
+  const hidden = tail.hidden
+  const index = useEntityIndex()
+  useEffect(() => {
+    if (hidden) warmMarkdown(shown.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
+  }, [shown, hidden, index])
+
+  return (
+    <StickyScroll
+      count={shown.length}
+      resetKey={id}
+      hidden={tail.hidden}
+      onLoadEarlier={tail.loadEarlier}
+      className="rounded-xl border border-zinc-900 bg-zinc-950 p-4"
+      contentClassName="space-y-2.5"
+    >
+      {messages.isLoading && <div className="text-sm text-zinc-500">Loading transcript…</div>}
+      {tail.visible.map((m) => (
+        <Line key={m.id} m={m} />
+      ))}
+      {working && (
+        <div className="flex items-center gap-2 pt-1 text-xs text-sky-400">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {working}
+        </div>
+      )}
+    </StickyScroll>
+  )
+})
+
+const Line = memo(function Line({ m }: { m: TaskMessage }) {
   const time = (
     <span className="ml-2 text-[10px] text-zinc-600">
       <TimeAgo ts={m.createdAt} />
@@ -154,4 +172,4 @@ function Line({ m }: { m: TaskMessage }) {
       )
     }
   }
-}
+})
