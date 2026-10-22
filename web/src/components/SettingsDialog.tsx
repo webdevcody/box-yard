@@ -1,7 +1,7 @@
 import { useState } from "react"
 import { X } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings } from "../lib/queries"
-import { Button, Field, cx, inputClass } from "./ui"
+import { Button, Field, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -48,8 +48,8 @@ function AutoCompactField({ label, hint, value, onChange }: { label: string; hin
           onChange={(e) => onChange({ ...value, value: Number(e.target.value) })}
           aria-label={`${label} threshold`}
         />
-        <select
-          className={cx(inputClass, "w-32")}
+        <Select
+          className="w-36"
           disabled={!value.enabled}
           value={value.unit}
           onChange={(e) => {
@@ -59,7 +59,7 @@ function AutoCompactField({ label, hint, value, onChange }: { label: string; hin
         >
           <option value="percent">% of window</option>
           <option value="tokens">tokens</option>
-        </select>
+        </Select>
       </div>
       <p className="pl-6 text-xs text-zinc-500">{hint}</p>
     </div>
@@ -115,13 +115,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   {src("orchestratorModel")}
                 </Field>
                 <Field label="Effort">
-                  <select className={inputClass} value={s.orchestratorEffort} onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}>
+                  <Select className="w-full" value={s.orchestratorEffort} onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}>
                     {EFFORTS.map((x) => (
                       <option key={x} value={x}>
                         {EFFORT_LABEL[x]}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                   {src("orchestratorEffort")}
                 </Field>
               </div>
@@ -141,14 +141,14 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   {src("agentModel")}
                 </Field>
                 <Field label="Effort">
-                  <select className={inputClass} value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
+                  <Select className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
                     <option value="orchestrator">Let the orchestrator decide</option>
                     {EFFORTS.map((x) => (
                       <option key={x} value={x}>
                         {EFFORT_LABEL[x]}
                       </option>
                     ))}
-                  </select>
+                  </Select>
                   {src("agentEffort")}
                 </Field>
               </div>

@@ -35,7 +35,7 @@ export function BoxesView() {
   const tasks = useTasks()
   const projects = useProjects()
   const health = useHealth()
-  useScrollToHash(Boolean(boxes.data), (id) => `box-${id}`)
+  useScrollToHash(Boolean(boxes.data), "box-")
   const [editing, setEditing] = useState(false)
 
   const pool = health.data?.pool

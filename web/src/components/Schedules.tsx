@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { Link } from "wouter"
+import { Link, useSearchParams } from "wouter"
 import { AlarmClock, Bot, ChevronDown, ChevronRight, Pause, Play, Plus, Trash2, Zap } from "lucide-react"
 import {
   newClientId,
@@ -16,7 +16,7 @@ import {
 } from "../lib/queries"
 import { useScrollToHash } from "../lib/hash"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
-import { Button, Empty, Field, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
 
 const PRESETS: { label: string; cron: string }[] = [
@@ -36,8 +36,21 @@ export function SchedulesView() {
   const projects = useProjects()
   const settings = useSettings()
   const [creating, setCreating] = useState(false)
+  const [params, setParams] = useSearchParams()
   const list = schedules.data ?? []
   useScrollToHash(Boolean(schedules.data))
+
+  // `?new=schedule` (from the command palette) opens the form once.
+  const wantsNew = params.get("new") === "schedule"
+  useEffect(() => {
+    if (!wantsNew) return
+    setCreating(true)
+    setParams((p) => {
+      const next = new URLSearchParams(p)
+      next.delete("new")
+      return next
+    }, { replace: true })
+  }, [wantsNew, setParams])
   const orchestratorList = list.filter((s) => s.target === "orchestrator")
   const groups = (projects.data ?? [])
     .map((project) => ({ project, schedules: list.filter((s) => s.target === "project" && s.projectId === project.id) }))
@@ -113,6 +126,7 @@ export function ProjectSchedules({ projectId }: { projectId: string }) {
   const schedules = useSchedules()
   const [creating, setCreating] = useState(false)
   const list = (schedules.data ?? []).filter((s) => s.target === "project" && s.projectId === projectId)
+  useScrollToHash(Boolean(schedules.data))
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -377,13 +391,13 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
         </Field>
         {!projectId && !orchestrator && (
           <Field label="Project">
-            <select className={inputClass} value={project} onChange={(e) => setProject(e.target.value)}>
+            <Select className="w-full" value={project} onChange={(e) => setProject(e.target.value)}>
               {projects.data?.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         )}
       </div>
@@ -435,10 +449,10 @@ function ScheduleForm({ projectId, onDone }: { projectId?: string; onDone: () =>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-zinc-400">
         <label className="flex items-center gap-2">
           Missed runs
-          <select className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs" value={catchUp} onChange={(e) => setCatchUp(e.target.value as CatchUp)}>
+          <Select size="sm" value={catchUp} onChange={(e) => setCatchUp(e.target.value as CatchUp)}>
             <option value="once">catch up once</option>
             <option value="skip">skip</option>
-          </select>
+          </Select>
         </label>
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={allowOverlap} onChange={(e) => setAllowOverlap(e.target.checked)} />

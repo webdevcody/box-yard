@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
@@ -12,6 +12,7 @@ import {
   GitPullRequest,
   Globe,
   MessageCircleQuestion,
+  Plug,
   RefreshCcw,
   Trash2,
   Users,
@@ -38,7 +39,7 @@ import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { ContextMeter } from "./ContextMeter"
 import { AttachmentList } from "./Attachments"
-import type { Attachment, TaskMessage } from "../../../shared/types"
+import type { Attachment, PreviewLink, TaskMessage } from "../../../shared/types"
 
 export function TaskView({ id }: { id: string }) {
   const tasks = useTasks()
@@ -54,7 +55,6 @@ export function TaskView({ id }: { id: string }) {
   const del = useDeleteTask()
   const [, navigate] = useLocation()
   const [draft, setDraft] = useState("")
-  const [port, setPort] = useState("")
   const [showTools, setShowTools] = useState(false)
   const panel = useRef<HTMLDivElement>(null)
   const task = tasks.data?.find((t) => t.id === id)
@@ -100,11 +100,6 @@ export function TaskView({ id }: { id: string }) {
               <GitPullRequest className="h-3.5 w-3.5" /> Pull request
             </a>
           )}
-          {task.previews.map((p) => (
-            <a key={p.port} href={p.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sky-400 hover:underline">
-              <Globe className="h-3.5 w-3.5" /> {p.label} <ExternalLink className="h-3 w-3" />
-            </a>
-          ))}
           {files.map((a) => (
             <a key={a.id} href={a.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-yard-400 hover:underline">
               <FileText className="h-3.5 w-3.5" /> {a.title}
@@ -140,26 +135,10 @@ export function TaskView({ id }: { id: string }) {
               <CheckCircle2 className="h-3.5 w-3.5" /> Mark done
             </Button>
           )}
-          <form
-            className="flex items-center gap-1"
-            onSubmit={async (e) => {
-              e.preventDefault()
-              const n = Number(port)
-              if (!n) return
-              try {
-                const link = await api<{ url: string }>(`/api/tasks/${id}/preview`, { body: { port: n } })
-                window.open(link.url, "_blank")
-                setPort("")
-              } catch (err) {
-                toast.error("Couldn't open a preview", (err as Error).message)
-              }
-            }}
-          >
-            <input value={port} onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))} placeholder="port" className="w-16 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs" />
-            <Button size="sm" variant="ghost" type="submit" disabled={!port}>
-              <Globe className="h-3.5 w-3.5" /> Preview
-            </Button>
-          </form>
+          {task.previews.map((p) => (
+            <PreviewChip key={p.port} preview={p} />
+          ))}
+          <OpenPort taskId={id} />
           <Button size="sm" variant="ghost" onClick={() => setShowTools((v) => !v)}>
             <Wrench className="h-3.5 w-3.5" /> {showTools ? "Hide" : "Show"} tool calls
           </Button>
@@ -286,4 +265,85 @@ function Line({ m }: { m: TaskMessage }) {
       )
     }
   }
+}
+
+/** A preview the agent registered (report_preview) or Cody opened: opens in a new tab. */
+function PreviewChip({ preview }: { preview: PreviewLink }) {
+  return (
+    <a
+      href={preview.url}
+      target="_blank"
+      rel="noreferrer"
+      title={preview.label}
+      className="inline-flex items-center gap-1.5 rounded-lg border border-sky-900/60 bg-sky-500/10 px-2.5 py-1 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20"
+    >
+      <Globe className="h-3.5 w-3.5" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-70" />
+    </a>
+  )
+}
+
+/** "Open a port…": a small popover to get a preview URL for any port in the box. */
+function OpenPort({ taskId }: { taskId: string }) {
+  const [open, setOpen] = useState(false)
+  const [port, setPort] = useState("")
+  const root = useRef<HTMLDivElement>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener("mousedown", onDown)
+    return () => document.removeEventListener("mousedown", onDown)
+  }, [open])
+
+  return (
+    <div
+      ref={root}
+      className="relative"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape" || !open) return
+        setOpen(false)
+        trigger.current?.focus()
+      }}
+    >
+      <Button ref={trigger} size="sm" variant="ghost" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen((v) => !v)}>
+        <Plug className="h-3.5 w-3.5" /> Open a port…
+      </Button>
+      {open && (
+        <form
+          role="dialog"
+          aria-label="Open a port"
+          className="absolute top-full left-0 z-20 mt-1 flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 shadow-xl"
+          onSubmit={async (e) => {
+            e.preventDefault()
+            const n = Number(port)
+            if (!n) return
+            try {
+              const link = await api<{ url: string }>(`/api/tasks/${taskId}/preview`, { body: { port: n } })
+              window.open(link.url, "_blank")
+              setPort("")
+              setOpen(false)
+            } catch (err) {
+              toast.error("Couldn't open a preview", (err as Error).message)
+            }
+          }}
+        >
+          <input
+            autoFocus
+            inputMode="numeric"
+            aria-label="Port"
+            value={port}
+            onChange={(e) => setPort(e.target.value.replace(/\D/g, ""))}
+            placeholder="port"
+            className="w-20 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs"
+          />
+          <Button size="sm" variant="subtle" type="submit" disabled={!port}>
+            <Globe className="h-3.5 w-3.5" /> Open
+          </Button>
+        </form>
+      )}
+    </div>
+  )
 }
