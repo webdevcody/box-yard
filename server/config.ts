@@ -97,6 +97,8 @@ export const config = {
   /** When running inside a box: its id, so it can snapshot itself. */
   selfBoxId: env.BOXYARD_SELF_BOX_ID ?? "",
   selfSnapshotHours: int("BOXYARD_SELF_SNAPSHOT_HOURS", 6),
+  /** Keep our own (non keep-alive) box awake while work is in flight. */
+  selfHold: env.BOXYARD_SELF_HOLD === "1",
 }
 
 export type Config = typeof config

@@ -33,3 +33,56 @@ export function startSelfSnapshots(c: Config, db: DB): (() => void) | null {
   timer.unref()
   return () => clearInterval(timer)
 }
+
+/**
+ * On a box without keep-alive (the free plan), the box pauses when idle. While
+ * Box Yard has work in flight (agents running or queued, the orchestrator
+ * mid-turn, schedules due soon with no QStash to wake us), hold an exec stream
+ * open on our own box so it stays up. When the work is done the stream closes
+ * and the box may pause; its public URL wakes it again, and the init command
+ * restarts the server, which reattaches to running agents.
+ */
+export function startSelfHold(c: Config, isBusy: () => boolean): (() => void) | null {
+  if (!c.selfBoxId || !c.upstashBoxApiKey || !c.selfHold) return null
+  let active: { cancel: () => Promise<void> } | null = null
+  let opening = false
+  let stopped = false
+  const open = async () => {
+    opening = true
+    try {
+      const box = await Box.get(c.selfBoxId, { apiKey: c.upstashBoxApiKey })
+      const run = await box.exec.stream(`bash -c "while true; do sleep 15; echo .; done"`)
+      active = run
+      console.log("[box-yard] work in flight: holding this box awake")
+      void (async () => {
+        try {
+          for await (const _chunk of run) if (stopped) break
+        } catch {}
+        if (active === run) active = null
+      })()
+    } catch (err) {
+      console.warn(`[box-yard] self hold failed: ${errorMessage(err)}`)
+    } finally {
+      opening = false
+    }
+  }
+  const tick = () => {
+    if (stopped) return
+    const busy = isBusy()
+    if (busy && !active && !opening) void open()
+    if (!busy && active) {
+      const run = active
+      active = null
+      console.log("[box-yard] idle: releasing the box so it can pause")
+      void run.cancel().catch(() => {})
+    }
+  }
+  const timer = setInterval(tick, 10_000)
+  timer.unref()
+  tick()
+  return () => {
+    stopped = true
+    clearInterval(timer)
+    void active?.cancel().catch(() => {})
+  }
+}

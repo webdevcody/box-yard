@@ -17,7 +17,7 @@ import { Redis } from "./redis.js"
 import { LocalProvider } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
 import type { BoxProvider } from "./providers/types.js"
-import { startSelfSnapshots } from "./backup.js"
+import { startSelfHold, startSelfSnapshots } from "./backup.js"
 import { Scheduler } from "./scheduler.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
@@ -377,6 +377,7 @@ export function createBoxYard(
   })
 
   let stopSnapshots: (() => void) | null = null
+  let stopHold: (() => void) | null = null
   return {
     app,
     db,
@@ -389,12 +390,23 @@ export function createBoxYard(
       await tasks.start()
       scheduler.start()
       stopSnapshots = startSelfSnapshots(c, db)
+      stopHold = startSelfHold(c, () => {
+        if (orchestrator.busy) return true
+        if (store.listTaskRows({ status: ["queued", "starting", "working"] }).length) return true
+        // Without QStash nothing wakes a paused box for a schedule, so stay up for ones due soon.
+        if (!qstash) {
+          const soon = Date.now() + 15 * 60_000
+          if (store.listSchedules({}).some((x) => x.enabled && x.nextRunAt !== null && x.nextRunAt <= soon)) return true
+        }
+        return false
+      })
     },
     stop() {
       scheduler.stop()
       tasks.stop()
       orchestrator.stop()
       stopSnapshots?.()
+      stopHold?.()
       hub.close()
       db.close()
     },

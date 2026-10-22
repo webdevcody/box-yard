@@ -66,7 +66,7 @@ function packApp(): string {
   return out
 }
 
-function envFile(boxId: string, password: string, publicUrl: string) {
+function envFile(boxId: string, password: string, publicUrl: string, keepAlive: boolean) {
   const keep = [
     "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "UPSTASH_BOX_API_KEY", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "GITHUB_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL",
@@ -82,6 +82,8 @@ function envFile(boxId: string, password: string, publicUrl: string) {
     `BOXYARD_PASSWORD=${JSON.stringify(password)}`,
     `BOXYARD_SELF_BOX_ID=${boxId}`,
     `BOXYARD_PUBLIC_URL=${process.env.BOXYARD_PUBLIC_URL || publicUrl}`,
+    // Without keep-alive the box would pause mid-work; the server holds it awake while busy.
+    `BOXYARD_SELF_HOLD=${keepAlive ? "0" : "1"}`,
   )
   // Schedules should fire in Cody's time zone, not the box's (UTC).
   if (!process.env.BOXYARD_TIMEZONE) lines.push(`BOXYARD_TIMEZONE=${Intl.DateTimeFormat().resolvedOptions().timeZone}`)
@@ -130,7 +132,15 @@ async function main() {
       box = await Box.fromSnapshot(snapshot, { apiKey, name: NAME, runtime: "node", size: "small", keepAlive: true, initCommand })
     } else {
       log(`Creating box ${NAME} (keep-alive, so agents keep running while you're away)…`)
-      box = await Box.create({ apiKey, name: NAME, runtime: "node", size: "small", keepAlive: true, labels: ["box-yard"] })
+      try {
+        box = await Box.create({ apiKey, name: NAME, runtime: "node", size: "small", keepAlive: true, labels: ["box-yard"] })
+      } catch (err) {
+        if (!/keep-alive|paid plan/i.test(String((err as Error).message))) throw err
+        // Free plan: a normal box. It stays awake while work is in flight and
+        // pauses when idle; opening its URL wakes it again.
+        log("Keep-alive needs a paid plan, so using a normal box that pauses when idle and wakes on its URL…")
+        box = await Box.create({ apiKey, name: NAME, runtime: "node", size: "small", labels: ["box-yard"] })
+      }
     }
   } else {
     log(`Updating existing box ${box.id}…`)
@@ -151,7 +161,7 @@ async function main() {
     "unpack",
   )
   const publicUrl = (await box.getPublicURL(3000)).url
-  await box.files.write({ path: `${APP}/.env`, content: envFile(box.id, password, publicUrl) })
+  await box.files.write({ path: `${APP}/.env`, content: envFile(box.id, password, publicUrl, box.keepAlive) })
 
   log("Installing dependencies, Claude Code and building (a few minutes the first time)…")
   await sh(
