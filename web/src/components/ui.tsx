@@ -102,6 +102,25 @@ export function Empty({ icon, title, children }: { icon?: ReactNode; title: stri
 export const inputClass =
   "w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-yard-500/60 focus:outline-none focus:ring-2 focus:ring-yard-500/20"
 
+const SELECT_SIZE = {
+  md: "rounded-lg py-2 pr-9 pl-3 text-sm",
+  sm: "select-sm rounded-md py-1 pr-7 pl-2 text-xs",
+}
+
+/** Native <select> with our own chevron, inset from the right edge, and room so long options never run under it. Pass width via className. */
+export function Select({ size = "md", className, ...props }: Omit<ComponentProps<"select">, "size"> & { size?: keyof typeof SELECT_SIZE }) {
+  return (
+    <select
+      {...props}
+      className={cx(
+        "select-chevron cursor-pointer border border-zinc-800 bg-zinc-900 text-zinc-100 hover:border-zinc-700 focus:border-yard-500/60 focus:ring-2 focus:ring-yard-500/20 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50",
+        SELECT_SIZE[size],
+        className,
+      )}
+    />
+  )
+}
+
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block space-y-1.5">
