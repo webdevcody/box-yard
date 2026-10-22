@@ -874,14 +874,35 @@ export class TaskManager {
       case "done":
         this.store.updateTask(taskId, { turnFlags: { ...flags, done: String(ev.summary ?? "Done.") } })
         return
-      case "turn_end":
-        return this.finishTurn(row, ev)
+      case "turn_end": {
+        // The agent may have merged or closed its PR during the turn; ask GitHub.
+        const pr = row.pr_url && row.current_turn_id ? await this.prState(row) : null
+        return this.finishTurn(this.store.getTaskRow(taskId) ?? row, ev, pr)
+      }
       default:
         return
     }
   }
 
-  private finishTurn(row: TaskRow, ev: WorkerEvent) {
+  /** open / closed / merged for the task's PR, or null if we can't tell. */
+  private async prState(row: TaskRow): Promise<"open" | "closed" | "merged" | null> {
+    const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(row.pr_url ?? "")
+    const token = this.store.projectEnv(row.project_id).GITHUB_TOKEN ?? this.c.githubToken
+    if (!m || !token || this.c.mock) return null
+    try {
+      const res = await fetch(`https://api.github.com/repos/${m[1]}/pulls/${m[2]}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "box-yard" },
+        signal: AbortSignal.timeout(10_000),
+      })
+      if (!res.ok) return null
+      const pr = (await res.json()) as { state?: string; merged?: boolean }
+      return pr.merged ? "merged" : pr.state === "closed" ? "closed" : "open"
+    } catch {
+      return null
+    }
+  }
+
+  private finishTurn(row: TaskRow, ev: WorkerEvent, pr: "open" | "closed" | "merged" | null = null) {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
     const flags = this.store.turnFlags(row)
@@ -890,16 +911,20 @@ export class TaskManager {
     this.holds.get(row.id)?.abort()
     this.holds.delete(row.id)
 
+    // A merged PR means the work landed; a closed one means there's no PR to review.
+    const openPr = Boolean(row.pr_url) && pr !== "closed" && pr !== "merged"
+    if (row.pr_url && (pr === "closed" || pr === "merged")) this.addEvent(row.id, `Pull request ${pr}: ${row.pr_url}`)
     let status: TaskStatus
     let error: string | null = null
-    if (stopped) status = row.pr_url ? "pr_ready" : "idle"
+    if (stopped) status = openPr ? "pr_ready" : "idle"
     else if (!ev.ok) {
       status = "failed"
       error = String(ev.error ?? "The agent exited with an error.")
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
-    else if (row.pr_url) status = "pr_ready"
+    else if (pr === "merged") status = "done"
+    else if (openPr) status = "pr_ready"
     else status = "idle"
 
     const result = typeof ev.result === "string" ? ev.result : null
@@ -924,9 +949,7 @@ export class TaskManager {
     if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
     else if (status === "done") this.notice(`✅ **${row.title}** is done: ${gist}`, { taskId: row.id })
     else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${(error ?? "").slice(0, 300)}`, { taskId: row.id })
-    else if (status === "pr_ready" && row.status !== "pr_ready" && !flags.sawPr) {
-      this.notice(`🔀 **${row.title}** has a PR ready: ${row.pr_url}`, { taskId: row.id })
-    } else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
+    else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
       this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
 
