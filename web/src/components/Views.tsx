@@ -59,9 +59,9 @@ function Grouped({
               <h2 className="mb-3 text-sm font-semibold text-zinc-300">
                 {g.title} <span className="text-zinc-600">{list.length}</span>
               </h2>
-              <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+              <div className="grid items-stretch gap-3 md:grid-cols-2 2xl:grid-cols-3">
                 {list.map(({ item: t, stale }) => (
-                  <div key={t.id} data-stable-key={t.id}>
+                  <div key={t.id} data-stable-key={t.id} className="flex flex-col">
                     <TaskCard task={t} projectName={name(t.projectId)} stale={stale} onMarkDone={onMarkDone && !stale ? () => onMarkDone(t) : undefined} />
                   </div>
                 ))}
