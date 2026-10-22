@@ -1,3 +1,4 @@
+import { memo } from "react"
 import { Link } from "wouter"
 import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
 import type { PreviewLink, Task } from "../../../shared/types"
@@ -11,8 +12,19 @@ import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
  *
  * `onMarkDone` adds a "Mark done" check button (inbox cards). `stale` dims a card that no longer belongs in its
  * list (e.g. it finished under the Active filter) but stays put until the list is re-sorted (useStableOrder).
+ * Memoized: react-query keeps unchanged task objects identical.
  */
-export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task; projectName?: string; onMarkDone?: () => void; stale?: boolean }) {
+export const TaskCard = memo(function TaskCard({
+  task,
+  projectName,
+  onMarkDone,
+  stale,
+}: {
+  task: Task
+  projectName?: string
+  onMarkDone?: (task: Task) => void
+  stale?: boolean
+}) {
   const summary = cardSummary(task)
   return (
     <Link
@@ -80,7 +92,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
               // The card is a link: don't open the task.
               e.preventDefault()
               e.stopPropagation()
-              onMarkDone()
+              onMarkDone(task)
             }}
             className="-my-1 -mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-md border border-zinc-700 text-zinc-400 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100 hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none [@media(hover:none)]:opacity-100"
           >
@@ -90,7 +102,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
       </div>
     </Link>
   )
-}
+})
 
 /** A compact one-line preview chip ("Preview :4030"); the agent's full label and the URL are in the tooltip. */
 function PreviewChip({ preview }: { preview: PreviewLink }) {

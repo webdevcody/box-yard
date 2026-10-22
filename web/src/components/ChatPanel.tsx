@@ -1,8 +1,10 @@
-import { useRef, useState } from "react"
+import { memo, useCallback, useEffect, useRef } from "react"
 import { Link } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, RotateCcw, Settings as SettingsIcon, Square, Wrench } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useSendChat } from "../lib/queries"
-import { AppLink, Button, Markdown, cx } from "./ui"
+import { REVEAL_CHAT_EVENT } from "../lib/reveal"
+import { useTail } from "../lib/tail"
+import { AppLink, Button, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { toolMentions } from "../lib/linkify"
 import { StickyScroll } from "./StickyScroll"
@@ -18,31 +20,56 @@ const SUGGESTIONS = [
   "Spin up 3 agents to research Upstash Box pricing, write a summary, and draft a tweet",
 ]
 
-export function ChatPanel() {
+const NO_MESSAGES: ChatMessage[] = []
+
+export const ChatPanel = memo(function ChatPanel() {
   const chat = useChat()
-  const stream = useChatStream()
   const busy = useChatBusy()
   const send = useSendChat()
   const control = useChatControl()
   const orch = useOrchestratorState()
   const compact = useCompactOrchestrator()
   const openSettings = useOpenSettings()
-  const [draft, setDraft] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
 
-  const submit = (text = draft, attachments: Attachment[] = []) => {
-    const content = text.trim()
-    if (!content && !attachments.length) return
-    send.mutate({ id: newClientId("chat"), content, attachments })
-    setDraft("")
-    box.current?.focus()
-  }
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const content = text.trim()
+      if (!content && !attachments.length) return
+      send.mutate({ id: newClientId("chat"), content, attachments })
+      box.current?.focus()
+    },
+    [send.mutate],
+  )
 
-  const messages = chat.data ?? []
+  const messages = chat.data ?? NO_MESSAGES
+  const tail = useTail(messages, "chat")
+
+  // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
+  const hidden = tail.hidden
+  const index = useEntityIndex()
+  useEffect(() => {
+    if (hidden) warmMarkdown(messages.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
+  }, [messages, hidden, index])
+
+  // Links to a chat message (e.g. a schedule run) may point above the rendered part of the thread.
+  const reveal = tail.reveal
+  useEffect(() => {
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail
+      if (!reveal(id)) return
+      // Two frames: let the list settle (and stop following the bottom) before scrolling to the message.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => document.getElementById(`chat-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" })),
+      )
+    }
+    window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
+    return () => window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
+  }, [reveal])
 
   return (
-    <section ref={panel} className="relative flex h-full min-w-0 flex-col bg-zinc-950">
+    <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header className="flex items-center gap-2 border-b border-zinc-900 px-4 py-3">
         <Bot className="h-4 w-4 text-yard-400" />
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
@@ -77,7 +104,7 @@ export function ChatPanel() {
         onCompact={() => compact.mutate()}
       />
 
-      <StickyScroll count={messages.length} className="px-4 py-4" contentClassName="space-y-3">
+      <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className="px-4 py-4" contentClassName="space-y-3">
         {messages.length === 0 && !chat.isLoading && (
           <div className="space-y-3 pt-6 text-center">
             <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
@@ -94,37 +121,45 @@ export function ChatPanel() {
             </div>
           </div>
         )}
-        {messages.map((m) => (
-          <ChatLine key={m.id} m={m} />
-        ))}
-        {stream.data && (
-          <div className="rounded-xl bg-zinc-900/60 px-3 py-2 text-sm text-zinc-200">
-            <Markdown>{stream.data}</Markdown>
-          </div>
-        )}
-        {busy.data && !stream.data && (
-          <div className="flex gap-1 px-1 py-2">
-            {[0, 1, 2].map((i) => (
-              <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" style={{ animationDelay: `${i * 120}ms` }} />
-            ))}
-          </div>
-        )}
+        <ChatLines messages={tail.visible} />
+        <StreamingReply busy={Boolean(busy.data)} />
       </StickyScroll>
 
       <Composer
-        value={draft}
-        onChange={setDraft}
-        onSubmit={(files) => submit(draft, files)}
+        onSubmit={submit}
         placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
         textareaRef={box}
         panelRef={panel}
       />
     </section>
   )
+})
+
+const ChatLines = memo(function ChatLines({ messages }: { messages: ChatMessage[] }) {
+  return messages.map((m) => <ChatLine key={m.id} m={m} />)
+})
+
+/** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */
+function StreamingReply({ busy }: { busy: boolean }) {
+  const stream = useChatStream()
+  if (stream.data)
+    return (
+      <div className="rounded-xl bg-zinc-900/60 px-3 py-2 text-sm text-zinc-200">
+        <Markdown live>{stream.data}</Markdown>
+      </div>
+    )
+  if (!busy) return null
+  return (
+    <div className="flex gap-1 px-1 py-2">
+      {[0, 1, 2].map((i) => (
+        <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" style={{ animationDelay: `${i * 120}ms` }} />
+      ))}
+    </div>
+  )
 }
 
 /** A tool call, with the tasks, schedules or projects it's about linked by title. */
-function ToolLine({ m }: { m: ChatMessage }) {
+const ToolLine = memo(function ToolLine({ m }: { m: ChatMessage }) {
   const index = useEntityIndex()
   const input = (m.meta?.input ?? {}) as Record<string, unknown>
   const resultId = typeof m.meta?.resultId === "string" ? m.meta.resultId : null
@@ -154,9 +189,9 @@ function ToolLine({ m }: { m: ChatMessage }) {
       {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
     </div>
   )
-}
+})
 
-function ChatLine({ m }: { m: ChatMessage }) {
+const ChatLine = memo(function ChatLine({ m }: { m: ChatMessage }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by an orchestrator schedule, not typed by Cody.
     return (
@@ -210,4 +245,4 @@ function ChatLine({ m }: { m: ChatMessage }) {
       <Markdown>{m.content}</Markdown>
     </div>
   )
-}
+})

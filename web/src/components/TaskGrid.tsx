@@ -1,6 +1,6 @@
 // The card grid shared by the project Tasks tab and the Yard view: sorted once and held still while agents
 // update (useStableOrder), with the Re-sort pill on top and cards rendered a page at a time.
-import { memo, useState } from "react"
+import { useState } from "react"
 import { useStableOrder, type StableOrder } from "../lib/useStableOrder"
 import type { StableOptions } from "../lib/stableOrder"
 import type { Task } from "../../../shared/types"
@@ -11,9 +11,6 @@ import { ResortPill } from "./ResortPill"
 export function useStableTasks(tasks: readonly Task[], opts: Omit<StableOptions<Task, string>, "key"> & { resetKey: unknown }): StableOrder<Task> {
   return useStableOrder(tasks, { ...opts, key: (t) => t.id })
 }
-
-/** Cards only re-render when their task changes; react-query keeps unchanged task objects identical. */
-const MemoTaskCard = memo(TaskCard)
 
 /** Cards rendered up front; more on request, so a list with hundreds of tasks opens fast. */
 const PAGE = 60
@@ -34,7 +31,7 @@ export function TaskGrid({ stable, projectName, pillClassName }: { stable: Stabl
             // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
             // The wrapper stretches to the row height and the card grows to fill it (flex-1), so cards in a row match.
             <div key={t.id} data-stable-key={t.id} className="flex flex-col [contain-intrinsic-size:auto_12rem] [content-visibility:auto]">
-              <MemoTaskCard task={t} projectName={projectName?.(t.projectId)} stale={stale} />
+              <TaskCard task={t} projectName={projectName?.(t.projectId)} stale={stale} />
             </div>
           ))}
         </div>

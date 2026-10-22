@@ -76,6 +76,8 @@ export const config = {
   gitUserEmail: env.GIT_USER_EMAIL ?? "box-yard@users.noreply.github.com",
 
   mock,
+  /** Mock mode only: seed a heavy dataset (long chat, long task thread, many tasks) for UI performance testing. */
+  mockHeavy: mock && env.BOXYARD_MOCK_HEAVY === "1",
   /** Claude binary used by the orchestrator (and by local workers). */
   claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",

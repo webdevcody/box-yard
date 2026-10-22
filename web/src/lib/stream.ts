@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { useQueryClient } from "@tanstack/react-query"
+import { notifyManager, useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
@@ -9,7 +9,9 @@ export type Connection = "connecting" | "live" | "offline"
 
 /**
  * Subscribe to server events and write them straight into the TanStack Query
- * cache, so every view updates live without refetching.
+ * cache, so every view updates live without refetching. Events are applied in
+ * batches, once per frame, so a burst (streamed text, many task updates) costs
+ * one render instead of one per event.
  */
 export function useServerEvents(enabled: boolean): Connection {
   const qc = useQueryClient()
@@ -21,6 +23,33 @@ export function useServerEvents(enabled: boolean): Connection {
     let retry: ReturnType<typeof setTimeout> | null = null
     let wasOffline = false
     let closed = false
+    let queue: UiEvent[] = []
+    let scheduled = false
+
+    const flush = () => {
+      scheduled = false
+      const events = queue
+      queue = []
+      notifyManager.batch(() => {
+        for (let i = 0; i < events.length; i++) {
+          const ev = events[i]!
+          // Join a run of streamed chunks into one cache write.
+          if (ev.type === "chat.delta") {
+            let text = ev.text
+            while (events[i + 1]?.type === "chat.delta") text += (events[++i] as { text: string }).text
+            apply({ type: "chat.delta", text })
+          } else apply(ev)
+        }
+      })
+    }
+    const enqueue = (ev: UiEvent) => {
+      queue.push(ev)
+      if (scheduled) return
+      scheduled = true
+      // Background tabs get no animation frames; still apply events, just less often.
+      if (document.hidden) setTimeout(flush, 250)
+      else requestAnimationFrame(flush)
+    }
 
     const connect = () => {
       es = new EventSource("/api/stream")
@@ -43,7 +72,7 @@ export function useServerEvents(enabled: boolean): Connection {
         } catch {
           return
         }
-        apply(ev)
+        enqueue(ev)
       }
     }
 
@@ -124,6 +153,7 @@ export function useServerEvents(enabled: boolean): Connection {
     connect()
     return () => {
       closed = true
+      queue = []
       if (retry) clearTimeout(retry)
       es?.close()
     }

@@ -15,6 +15,7 @@ import {
   useUpdateSchedule,
 } from "../lib/queries"
 import { useScrollToHash } from "../lib/hash"
+import { revealChatMessage } from "../lib/reveal"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
 import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
 import { badgeStatus } from "../lib/prState"
@@ -266,7 +267,7 @@ function ChatRunList({ runs }: { runs: ScheduleRun[] }) {
           {r.chatMessageId ? (
             <button
               className="text-xs text-sky-400 hover:text-sky-300"
-              onClick={() => document.getElementById(`chat-${r.chatMessageId}`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+              onClick={() => revealChatMessage(r.chatMessageId!)}
             >
               View in chat
             </button>
