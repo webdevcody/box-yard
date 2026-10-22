@@ -1,31 +1,15 @@
 import { memo } from "react"
 import { Link } from "wouter"
-import { AlarmClock, Check, ExternalLink, Globe, MessageCircleQuestion } from "lucide-react"
-import type { Task } from "../../../shared/types"
-import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
+import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
+import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
-
-/** Flattens markdown to plain text for card previews; drops the task's own PR URL (shown in the footer) and shortens other URLs. */
-export function plainPreview(text: string, prUrl?: string | null): string {
-  let t = text
-  if (prUrl) t = t.split(prUrl).join("")
-  return t
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/https?:\/\/([^\s/)]+)(\/[^\s)]*)?/g, (_, host: string, path?: string) => {
-      const short = host.replace(/^www\./, "") + (path && path !== "/" ? path : "")
-      return short.length > 40 ? short.slice(0, 39) + "…" : short
-    })
-    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
-    .replace(/^\s*>\s?/gm, "")
-    .replace(/^\s*[-*+]\s+/gm, "")
-    .replace(/(\*\*|__|\*|`)/g, "")
-    .replace(/\s*:\s*(?=[.,;]|$)/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-}
+import { cardSummary } from "../lib/taskSummary"
+import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 
 /**
+ * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
+ * space reserved), an optional chips row, then a one-line footer pinned to the bottom (the card grows to fill its flex-column grid cell).
+ *
  * `onMarkDone` adds a "Mark done" check button (inbox cards). `stale` dims a card that no longer belongs in its
  * list (e.g. it finished under the Active filter) but stays put until the list is re-sorted (useStableOrder).
  * Memoized: react-query keeps unchanged task objects identical.
@@ -41,12 +25,13 @@ export const TaskCard = memo(function TaskCard({
   onMarkDone?: (task: Task) => void
   stale?: boolean
 }) {
+  const summary = cardSummary(task)
   return (
     <Link
       href={`/tasks/${task.id}`}
       title={stale ? "No longer matches this list. It leaves on the next re-sort." : undefined}
       className={cx(
-        "group block h-full rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
+        "group flex flex-1 flex-col rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
         task.status === "needs_input" ? "border-amber-500/40" : task.status === "failed" ? "border-red-900/60" : "border-zinc-800/80 hover:border-zinc-700",
         stale && "border-dashed opacity-50 hover:opacity-80",
       )}
@@ -61,32 +46,41 @@ export const TaskCard = memo(function TaskCard({
         </span>
       </div>
 
-      {task.status === "needs_input" && task.question ? (
-        <div className="mt-3 flex gap-2 rounded-lg bg-amber-500/10 px-2.5 py-2 text-sm text-amber-200">
-          <MessageCircleQuestion className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="line-clamp-3">{task.question}</span>
+      <div className="mt-2 min-h-10 text-sm leading-5">
+        {task.status === "needs_input" && task.question ? (
+          <div className="flex gap-2 rounded-lg bg-amber-500/10 px-2.5 py-2 text-amber-200">
+            <MessageCircleQuestion className="mt-0.5 h-4 w-4 shrink-0" />
+            <span className="line-clamp-2 break-words">{task.question}</span>
+          </div>
+        ) : task.status === "failed" && task.error ? (
+          <p className="line-clamp-2 break-words text-red-300/80">{task.error}</p>
+        ) : summary.kind === "activity" ? (
+          <p className="line-clamp-2 break-words text-zinc-400" title="Latest agent activity">
+            <Activity className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px text-zinc-500" />
+            {summary.text}
+          </p>
+        ) : (
+          <p className="line-clamp-2 break-words text-zinc-400">{summary.text}</p>
+        )}
+      </div>
+
+      {task.previews.length > 0 && (
+        <div className="mt-3 flex min-w-0 flex-wrap gap-1.5">
+          {task.previews.map((p) => (
+            <PreviewChip key={p.port} preview={p} />
+          ))}
         </div>
-      ) : task.status === "failed" && task.error ? (
-        <p className="mt-2 line-clamp-2 text-sm text-red-300/80">{task.error}</p>
-      ) : (
-        <p className="mt-2 line-clamp-2 text-sm text-zinc-400">{plainPreview(task.summary ?? task.prompt, task.prUrl)}</p>
       )}
 
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
+      <div className="mt-auto flex min-w-0 items-center gap-2 whitespace-nowrap pt-3 text-xs text-zinc-500">
         <PrChip task={task} variant="link" />
-        {task.previews.map((p) => (
-          <a key={p.port} href={p.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="inline-flex items-center gap-1 text-sky-400 hover:underline">
-            <Globe className="h-3.5 w-3.5" /> {p.label}
-            <ExternalLink className="h-3 w-3" />
-          </a>
-        ))}
         {task.scheduleId && (
-          <span className="inline-flex items-center gap-1" title="Started by a schedule">
+          <span className="inline-flex shrink-0 items-center gap-1" title="Started by a schedule">
             <AlarmClock className="h-3.5 w-3.5" /> scheduled
           </span>
         )}
-        {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
-        <span className="ml-auto">
+        <span className="ml-auto min-w-0 truncate" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
+          {task.pendingCount > 0 && `${task.pendingCount} queued · `}
           <TimeAgo ts={task.updatedAt} />
         </span>
         {onMarkDone && (
@@ -109,3 +103,19 @@ export const TaskCard = memo(function TaskCard({
     </Link>
   )
 })
+
+/** A compact one-line preview chip ("Preview :4030"); the agent's full label and the URL are in the tooltip. */
+function PreviewChip({ preview }: { preview: PreviewLink }) {
+  return (
+    <a
+      href={preview.url}
+      target="_blank"
+      rel="noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      title={preview.label && preview.label !== preview.url ? `${preview.label}\n${preview.url}` : preview.url}
+      className="inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-md border border-sky-900/60 bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20"
+    >
+      <Globe className="h-3 w-3 shrink-0" /> Preview :{preview.port}
+    </a>
+  )
+}

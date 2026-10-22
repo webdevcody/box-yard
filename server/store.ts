@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
 import { shouldNotify } from "../shared/types.js"
+import { activityLine } from "../shared/activity.js"
 import type {
   AppNotification,
   Artifact,
@@ -401,6 +402,7 @@ export class Store {
       previews: json<PreviewLink[]>(row.previews_json, []),
       question: row.question,
       summary: row.summary,
+      activity: row.summary === null ? this.taskActivity(row.id) : null,
       error: row.error,
       turnCount: row.turn_count,
       pendingCount: pending.n,
@@ -414,6 +416,18 @@ export class Store {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
+  }
+
+  /** The latest assistant or tool message that makes a card line (see shared/activity.ts). */
+  taskActivity(taskId: string): string | null {
+    const rows = this.db
+      .prepare("SELECT role, content, meta_json FROM task_messages WHERE task_id = ? AND role IN ('assistant', 'tool') ORDER BY created_at DESC, rowid DESC LIMIT 5")
+      .all(taskId) as { role: string; content: string; meta_json: string | null }[]
+    for (const r of rows) {
+      const line = activityLine(r.role, r.content, json(r.meta_json, null))
+      if (line) return line
+    }
+    return null
   }
 
   getTaskRow(id: string): TaskRow | null {

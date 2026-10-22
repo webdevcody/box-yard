@@ -26,10 +26,11 @@ export function TaskGrid({ stable, projectName, pillClassName }: { stable: Stabl
     <>
       <div ref={stable.listRef} className="scroll-mt-14">
         <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} className={pillClassName} />
-        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid items-stretch gap-3 md:grid-cols-2 2xl:grid-cols-3">
           {stable.entries.slice(0, limit).map(({ item: t, stale }) => (
             // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
-            <div key={t.id} data-stable-key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
+            // The wrapper stretches to the row height and the card grows to fill it (flex-1), so cards in a row match.
+            <div key={t.id} data-stable-key={t.id} className="flex flex-col [contain-intrinsic-size:auto_12rem] [content-visibility:auto]">
               <TaskCard task={t} projectName={projectName?.(t.projectId)} stale={stale} />
             </div>
           ))}

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 import { notifyManager, useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
+import { withActivity } from "./taskSummary"
 import type { AppNotification, Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
@@ -97,6 +98,8 @@ export function useServerEvents(enabled: boolean): Connection {
             }
             return [...list, ev.message]
           })
+          // Cards of tasks without a summary yet show the latest activity line.
+          qc.setQueryData<Task[]>(keys.tasks, (list) => withActivity(list, ev.message))
           break
         case "project":
           qc.setQueryData<Project[]>(keys.projects, (list) => (list ? upsert(list, ev.project) : list))
