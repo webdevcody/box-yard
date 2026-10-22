@@ -23,8 +23,8 @@ export const STATUS: Record<TaskStatus, { label: string; dot: string; chip: stri
 export function StatusBadge({ status }: { status: TaskStatus }) {
   const s = STATUS[status]
   return (
-    <span className={cx("inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium", s.chip)}>
-      <span className={cx("h-1.5 w-1.5 rounded-full", s.dot)} />
+    <span className={cx("inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium", s.chip)}>
+      <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", s.dot)} />
       {s.label}
     </span>
   )
