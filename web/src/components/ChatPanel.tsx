@@ -27,6 +27,7 @@ export function ChatPanel() {
   const [showSettings, setShowSettings] = useState(false)
   const [draft, setDraft] = useState("")
   const box = useRef<HTMLTextAreaElement>(null)
+  const panel = useRef<HTMLElement>(null)
 
   const submit = (text = draft, attachments: Attachment[] = []) => {
     const content = text.trim()
@@ -39,7 +40,7 @@ export function ChatPanel() {
   const messages = chat.data ?? []
 
   return (
-    <section className="flex h-full min-w-0 flex-col bg-zinc-950">
+    <section ref={panel} className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header className="flex items-center gap-2 border-b border-zinc-900 px-4 py-3">
         <Bot className="h-4 w-4 text-yard-400" />
         <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
@@ -115,6 +116,7 @@ export function ChatPanel() {
         onSubmit={(files) => submit(draft, files)}
         placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
         textareaRef={box}
+        panelRef={panel}
       />
     </section>
   )
