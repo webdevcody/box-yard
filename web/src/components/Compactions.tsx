@@ -70,7 +70,7 @@ export function CompactionsView() {
                 </span>
                 <span>{current.trigger} compaction</span>
                 <span>
-                  {current.tokensBefore ?? "?"} -> {current.tokensAfter ?? "?"} tokens
+                  {current.tokensBefore ?? "?"} {"->"} {current.tokensAfter ?? "?"} tokens
                 </span>
               </div>
               <div className="grid gap-2 text-xs text-zinc-500 sm:grid-cols-2">
