@@ -59,7 +59,10 @@ export const ChatPanel = memo(function ChatPanel() {
     const onReveal = (e: Event) => {
       const id = (e as CustomEvent<string>).detail
       if (!reveal(id)) return
-      requestAnimationFrame(() => document.getElementById(`chat-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" }))
+      // Two frames: let the list settle (and stop following the bottom) before scrolling to the message.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => document.getElementById(`chat-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" })),
+      )
     }
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
     return () => window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
