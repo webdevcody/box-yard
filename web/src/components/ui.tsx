@@ -6,6 +6,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import { GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
+import { FileLink, PREVIEW_GROUP } from "./FileLink"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
 import type { PrState, TaskStatus } from "../../../shared/types"
 
@@ -174,7 +175,7 @@ export const Markdown = memo(function Markdown({ children, linkify = true, live 
   const index = useEntityIndex()
   const parser = linkify ? index : null
   return (
-    <div className="prose-chat break-words">
+    <div className="prose-chat break-words" {...PREVIEW_GROUP}>
       {live ? renderMarkdown({ children, remarkPlugins: parserFor(parser).plugins, components: MARKDOWN_COMPONENTS }) : parsedMarkdown(children, parser)}
     </div>
   )
@@ -190,7 +191,7 @@ const MARKDOWN_COMPONENTS: Components = {
 
 /**
  * A link that knows the app: in-app paths navigate through the router (Cmd/Ctrl/middle-click still open a tab),
- * files and other sites open in a new tab. Hovering an entity link shows its title and current status.
+ * previewable files open in the preview modal, other files and sites in a new tab. Hovering an entity link shows its title and current status.
  */
 export function AppLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
   const [, navigate] = useLocation()
@@ -201,6 +202,12 @@ export function AppLink({ href, title, className, children }: { href: string; ti
     const hint = hintForHref(qc, target.href, (s) => STATUS[s].label)
     if (hint) e.currentTarget.title = hint
   }
+  if (target.kind === "file")
+    return (
+      <FileLink href={target.href} title={title} className={className} onMouseEnter={onMouseEnter}>
+        {children}
+      </FileLink>
+    )
   if (target.kind !== "app")
     return (
       <a href={target.href} title={title} className={className} target="_blank" rel="noopener noreferrer" onMouseEnter={onMouseEnter}>

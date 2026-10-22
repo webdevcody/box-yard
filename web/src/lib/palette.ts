@@ -2,6 +2,7 @@
 import { describeCron } from "../../../shared/cron"
 import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
 import { badgeStatus, type BadgeStatus } from "./prState"
+import type { PreviewItem } from "./filePreview"
 
 export type PaletteKind = "action" | "page" | "task" | "project" | "schedule" | "artifact" | "box"
 
@@ -22,6 +23,8 @@ export interface PaletteItem {
   href?: string
   /** Absolute URL to open in a new tab (artifact files). */
   url?: string
+  /** The file behind `url`, so Enter can open it in the preview modal. */
+  file?: PreviewItem
   command?: PaletteCommand
   /** A task's pill: its status, or "merged" when it is done because its PR merged. */
   status?: BadgeStatus
@@ -133,6 +136,7 @@ export function buildItems(data: PaletteData): PaletteItem[] {
       subtitle: [a.projectId ? projectName.get(a.projectId) : null, a.filename].filter(Boolean).join(" · "),
       aliases: [a.filename],
       url: a.url,
+      file: { url: a.url, name: a.filename, size: a.size, mime: a.mime, title: a.title },
       at: a.createdAt,
     })
   }

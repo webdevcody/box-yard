@@ -11,7 +11,7 @@ import {
 } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
-import { Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AppLink, Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
@@ -161,9 +161,9 @@ const Line = memo(function Line({ m }: { m: TaskMessage }) {
       return (
         <div className="pl-6 text-xs text-zinc-500">
           {url ? (
-            <a href={url} target="_blank" rel="noreferrer" className="hover:text-zinc-300 hover:underline">
+            <AppLink href={url} className="hover:text-zinc-300 hover:underline">
               {m.content}
-            </a>
+            </AppLink>
           ) : (
             m.content
           )}

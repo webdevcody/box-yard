@@ -3,6 +3,8 @@ import { useLocation } from "wouter"
 import { AlarmClock, Box, CornerDownLeft, FileText, FolderGit2, History, LayoutGrid, ListTodo, Search, Zap } from "lucide-react"
 import { useArtifacts, useBoxes, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { buildItems, pushRecent, recentKeyFor, searchPalette, parseQuery, type PaletteCommand, type PaletteGroup, type PaletteItem } from "../lib/palette"
+import { isFilePath, previewKind } from "../lib/filePreview"
+import { openPreview } from "../lib/preview"
 import { StatusBadge, TimeAgo, cx } from "./ui"
 import { useOpenSettings } from "./SettingsDialog"
 import { NewProjectDialog } from "./NewProjectDialog"
@@ -138,6 +140,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
     if (item.kind !== "page" && item.kind !== "action") remember(item.key)
     onClose()
     if (item.command) return onCommand(item.command)
+    if (item.file && !newTab && isFilePath(item.file.url) && previewKind(item.file)) return openPreview(item.file)
     if (item.url) return void window.open(item.url, "_blank", "noopener")
     if (!item.href) return
     if (newTab) return void window.open(item.href, "_blank", "noopener")
