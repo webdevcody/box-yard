@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { useSearchParams } from "wouter"
 import { Bot, Boxes, Check, ExternalLink, Info, Network, X, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
@@ -232,7 +233,8 @@ export function SettingsDialog({
     })
   }
 
-  return (
+  // Portaled to <body>: the chat and sidebar columns use CSS transforms, which would trap a fixed overlay inside them.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4" onMouseDown={close}>
       <form
         onMouseDown={(e) => e.stopPropagation()}
@@ -400,7 +402,8 @@ export function SettingsDialog({
           ))}
         </datalist>
       </form>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
