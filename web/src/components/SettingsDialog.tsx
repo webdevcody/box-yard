@@ -112,7 +112,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
       <div className="flex items-center gap-2">
         <input
           type="number"
-          className={cx(inputClass, "w-28 disabled:opacity-50")}
+          className={cx(inputClass, "min-w-0 flex-1 disabled:opacity-50")}
           disabled={!value.enabled}
           value={value.value}
           min={percent ? 10 : AUTOCOMPACT_MIN_TOKENS}
@@ -122,7 +122,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
           aria-label={`${label} threshold`}
         />
         <Select
-          className="min-w-0 flex-1"
+          className="w-36 shrink-0"
           disabled={!value.enabled}
           value={value.unit}
           aria-label={`${label} unit`}
@@ -424,13 +424,13 @@ function LimitsPanel({
   return (
     <Panel section="limits">
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
-        <input id={fid("mb")} type="number" min={1} max={100} className={cx(inputClass, "w-28")} value={s.maxBoxes} onChange={int("maxBoxes")} />
+        <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
       </Row>
       <Row id={fid("spb")} label="Agents per box" help="Claude turns that may run at the same time inside one box." hint={hint("slotsPerBox")}>
-        <input id={fid("spb")} type="number" min={1} max={20} className={cx(inputClass, "w-28")} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
+        <input id={fid("spb")} type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
       </Row>
       <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
-        <input id={fid("ma")} type="number" min={0} max={1000} className={cx(inputClass, "w-28")} value={s.maxAgents} onChange={int("maxAgents")} />
+        <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
