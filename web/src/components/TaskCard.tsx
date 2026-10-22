@@ -23,14 +23,19 @@ export function plainPreview(text: string, prUrl?: string | null): string {
     .trim()
 }
 
-/** `onMarkDone` adds a "Mark done" check button (inbox cards). */
-export function TaskCard({ task, projectName, onMarkDone }: { task: Task; projectName?: string; onMarkDone?: () => void }) {
+/**
+ * `onMarkDone` adds a "Mark done" check button (inbox cards). `stale` dims a card that no longer belongs in its
+ * list (e.g. it finished under the Active filter) but stays put until the list is re-sorted (useStableOrder).
+ */
+export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task; projectName?: string; onMarkDone?: () => void; stale?: boolean }) {
   return (
     <Link
       href={`/tasks/${task.id}`}
+      title={stale ? "No longer matches this list. It leaves on the next re-sort." : undefined}
       className={cx(
-        "group block rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
+        "group block h-full rounded-xl border bg-zinc-900/40 p-4 transition hover:bg-zinc-900",
         task.status === "needs_input" ? "border-amber-500/40" : task.status === "failed" ? "border-red-900/60" : "border-zinc-800/80 hover:border-zinc-700",
+        stale && "border-dashed opacity-50 hover:opacity-80",
       )}
     >
       <div className="flex items-start justify-between gap-3">

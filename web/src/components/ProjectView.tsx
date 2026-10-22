@@ -18,14 +18,17 @@ import {
   DEFAULT_SORT,
   TASK_FILTERS,
   TASK_SORTS,
+  compareTasks,
   filterCounts,
+  isVisible,
   parseFilter,
   parseSort,
-  visibleTasks,
   type TaskFilter,
 } from "../lib/projectTasks"
+import { useStableOrder } from "../lib/useStableOrder"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { TaskCard } from "./TaskCard"
+import { ResortPill } from "./ResortPill"
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 
@@ -246,7 +249,14 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
   }, [])
 
   const counts = filterCounts(tasks, query)
-  const shown = visibleTasks(tasks, { filter, query, sort })
+  // Sorted once, then held still: live updates change cards in place; the pill re-sorts.
+  const stable = useStableOrder(tasks, {
+    key: (t) => t.id,
+    compare: compareTasks(sort),
+    include: (t) => isVisible(t, { filter, query }),
+    resetKey: `${filter}|${sort}|${query}`,
+  })
+  const shown = stable.entries
   const filterLabel = TASK_FILTERS.find((f) => f.key === filter)!.label
 
   return (
@@ -340,10 +350,15 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
               )}
             </Empty>
           ) : (
-            <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              {shown.map((t) => (
-                <TaskCard key={t.id} task={t} />
-              ))}
+            <div ref={stable.listRef} className="scroll-mt-14">
+              <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} className="top-14" />
+              <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                {shown.map(({ item: t, stale }) => (
+                  <div key={t.id} data-stable-key={t.id}>
+                    <TaskCard task={t} stale={stale} />
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

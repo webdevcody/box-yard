@@ -6,6 +6,8 @@ import { inInbox, usePendingCloses } from "../lib/inbox"
 import { api } from "../lib/api"
 import { Button, Empty, inputClass } from "./ui"
 import { TaskCard } from "./TaskCard"
+import { ResortPill } from "./ResortPill"
+import { useStableOrder } from "../lib/useStableOrder"
 import type { Task, TaskStatus } from "../../../shared/types"
 
 const GROUPS: { title: string; statuses: TaskStatus[] }[] = [
@@ -23,26 +25,51 @@ function useProjectNames() {
   return (id: string) => projects.data?.find((p) => p.id === id)?.name
 }
 
-function Grouped({ tasks, groups, onMarkDone }: { tasks: Task[]; groups: typeof GROUPS; onMarkDone?: (task: Task) => void }) {
+/**
+ * Tasks in status sections, held still by useStableOrder: a card stays in the section it was in when the list was
+ * last sorted (showing its new status, dimmed if it no longer belongs) until the Re-sort pill or an idle re-sort.
+ */
+function Grouped({
+  tasks,
+  groups,
+  include,
+  onMarkDone,
+}: {
+  tasks: Task[]
+  groups: typeof GROUPS
+  include?: (task: Task) => boolean
+  onMarkDone?: (task: Task) => void
+}) {
   const name = useProjectNames()
+  const groupOf = (t: Task) => groups.findIndex((g) => g.statuses.includes(t.status))
+  const stable = useStableOrder(tasks, {
+    key: (t) => t.id,
+    compare: (a, b) => groupOf(a) - groupOf(b) || b.updatedAt - a.updatedAt,
+    include: (t) => groupOf(t) >= 0 && (include?.(t) ?? true),
+  })
   return (
-    <div className="space-y-8">
-      {groups.map((g) => {
-        const list = tasks.filter((t) => g.statuses.includes(t.status)).sort((a, b) => b.updatedAt - a.updatedAt)
-        if (!list.length) return null
-        return (
-          <section key={g.title}>
-            <h2 className="mb-3 text-sm font-semibold text-zinc-300">
-              {g.title} <span className="text-zinc-600">{list.length}</span>
-            </h2>
-            <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-              {list.map((t) => (
-                <TaskCard key={t.id} task={t} projectName={name(t.projectId)} onMarkDone={onMarkDone && (() => onMarkDone(t))} />
-              ))}
-            </div>
-          </section>
-        )
-      })}
+    <div ref={stable.listRef}>
+      <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} />
+      <div className="space-y-8">
+        {groups.map((g, i) => {
+          const list = stable.entries.filter((e) => groupOf(e.was) === i)
+          if (!list.length) return null
+          return (
+            <section key={g.title}>
+              <h2 className="mb-3 text-sm font-semibold text-zinc-300">
+                {g.title} <span className="text-zinc-600">{list.length}</span>
+              </h2>
+              <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+                {list.map(({ item: t, stale }) => (
+                  <div key={t.id} data-stable-key={t.id}>
+                    <TaskCard task={t} projectName={name(t.projectId)} stale={stale} onMarkDone={onMarkDone && !stale ? () => onMarkDone(t) : undefined} />
+                  </div>
+                ))}
+              </div>
+            </section>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -78,7 +105,8 @@ export function InboxView() {
   const closing = usePendingCloses()
   const markDone = useMarkDoneFromInbox()
   if (tasks.isLoading) return null
-  const list = (tasks.data ?? []).filter((t) => inInbox(t, closing))
+  const all = tasks.data ?? []
+  const list = all.filter((t) => inInbox(t, closing))
   return (
     <div className="space-y-6">
       <header>
@@ -91,7 +119,10 @@ export function InboxView() {
         </Empty>
       ) : (
         <Grouped
-          tasks={list}
+          // Marked done (here or elsewhere) is a dismissal: those cards leave at once. Anything else that leaves
+          // the inbox (an answered question goes back to working) stays in place, dimmed, until a re-sort.
+          tasks={all.filter((t) => t.status !== "done" && !closing.has(t.id))}
+          include={(t) => inInbox(t, closing)}
           groups={GROUPS.filter((g) => ["Needs you", "Ready for review", "Failed"].includes(g.title))}
           onMarkDone={markDone}
         />
