@@ -1,5 +1,11 @@
 import { useCallback, useMemo, useReducer, useRef } from "react"
 
+/** Index of the first item to render: the pinned one, or the newest `initial` items if it's gone. */
+export function tailStart(items: { id: string }[], pinnedId: string | null, initial: number): number {
+  const at = pinnedId ? items.findIndex((m) => m.id === pinnedId) : -1
+  return at >= 0 ? at : Math.max(0, items.length - initial)
+}
+
 /**
  * Render only the newest part of a long list and grow it towards older items on
  * demand (StickyScroll calls `loadEarlier` as you scroll near the top).
@@ -14,8 +20,7 @@ export function useTail<T extends { id: string }>(items: T[], resetKey: unknown,
   const [, rerender] = useReducer((n: number) => n + 1, 0)
   if (pinned.current.key !== resetKey) pinned.current = { key: resetKey, id: null }
 
-  let start = pinned.current.id ? items.findIndex((m) => m.id === pinned.current.id) : -1
-  if (start < 0) start = Math.max(0, items.length - initial)
+  const start = tailStart(items, pinned.current.id, initial)
   pinned.current.id = items[start]?.id ?? null
 
   const latest = useRef({ items, start })
