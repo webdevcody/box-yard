@@ -3,6 +3,7 @@ import { Link, useLocation } from "wouter"
 import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
+import { inInbox, usePendingCloses } from "../lib/inbox"
 import { cx } from "./ui"
 import { NewProjectDialog } from "./NewProjectDialog"
 import { MOD_KEY, openPalette } from "./CommandPalette"
@@ -18,7 +19,8 @@ export function Sidebar({ connection, onNavigate }: { connection: Connection; on
   const activeSchedules = schedules.data?.filter((s) => s.enabled).length ?? 0
   const [creating, setCreating] = useState(false)
 
-  const inboxCount = tasks.data?.filter((t) => t.status === "needs_input" || t.status === "pr_ready" || t.status === "failed").length ?? 0
+  const closing = usePendingCloses()
+  const inboxCount = tasks.data?.filter((t) => inInbox(t, closing)).length ?? 0
   const needsYou = tasks.data?.filter((t) => t.status === "needs_input").length ?? 0
   const active = (projectId: string) =>
     tasks.data?.filter((t) => t.projectId === projectId && (t.status === "working" || t.status === "starting" || t.status === "queued")).length ?? 0
