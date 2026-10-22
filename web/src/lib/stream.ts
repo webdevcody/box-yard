@@ -85,6 +85,12 @@ export function useServerEvents(enabled: boolean): Connection {
           qc.setQueryData(keys.chatBusy, ev.busy)
           if (!ev.busy) qc.setQueryData(keys.chatStream, "")
           break
+        case "orchestrator.state":
+          qc.setQueryData(keys.orchestrator, ev.state)
+          break
+        case "settings":
+          qc.setQueryData(keys.agentSettings, ev.info)
+          break
         case "artifact":
           qc.setQueryData<Artifact[]>(keys.artifacts, (list) => (list ? upsert(list, ev.artifact, true) : list))
           break

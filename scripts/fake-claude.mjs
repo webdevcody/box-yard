@@ -51,8 +51,21 @@ if (newId && fs.existsSync(sessionFile)) {
   process.exit(1)
 }
 
+const WINDOW = Number(process.env.FAKE_CLAUDE_WINDOW || 200_000)
+const PER_TURN = Number(process.env.FAKE_CLAUDE_TOKENS_PER_TURN || 3000)
+const fmt = (n) => (n >= 1e6 ? `${n / 1e6}m` : n >= 1e3 ? `${Math.round(n / 100) / 10}k` : String(n))
+// Record how we were called, so tests can check flags (set FAKE_CLAUDE_LOG to a file).
+if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args }) + "\n")
+
 const session = resumeId ? JSON.parse(fs.readFileSync(sessionFile, "utf8")) : { id: sessionId, turns: [] }
-const out = (obj) => process.stdout.write(JSON.stringify(obj) + "\n")
+session.tokens ??= 0
+const usageNow = () => ({ input_tokens: session.tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 10 })
+const out = (obj) => {
+  // Every assistant message carries the usage of its API call, like the real CLI.
+  if (obj.type === "assistant") obj.message.usage = usageNow()
+  if (flag("--output-format") !== "stream-json") return // plain text mode prints only the text
+  process.stdout.write(JSON.stringify(obj) + "\n")
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // ---------------------------------------------------------------- MCP clients
@@ -237,7 +250,20 @@ process.stdin.on("end", async () => {
     mcp = loadMcp()
     await mcp?.init()
     const isOrchestrator = mcp?.kind === "orchestrator"
-    if (!mcp) {
+    if (/^\s*\/compact\b/.test(prompt)) {
+      // Like the real CLI: same session, much smaller context, nothing printed as a message.
+      if (!session.turns.length) throw new Error("Nothing to compact")
+      session.tokens = 2000
+      result = ""
+    } else if (/^\s*\/context\b/.test(prompt)) {
+      result = `## Context Usage\n\n**Model:** fake  \n**Tokens:** ${fmt(session.tokens)} / ${fmt(WINDOW)} (${Math.round((session.tokens / WINDOW) * 100)}%)\n`
+      process.stdout.write(result)
+    } else if (/Your context is about to be compacted/.test(prompt)) {
+      result = process.env.FAKE_CLAUDE_BAD_SUMMARY
+        ? "ok"
+        : "## Decisions and preferences\n- Cody prefers short replies.\n\n## Projects and repos\n- demo (acme/demo): a demo project.\n\n## Ongoing work\n- none\n\n## Open threads and next steps\n- none"
+      await say(result)
+    } else if (!mcp) {
       result = "(mock Claude) No MCP server configured."
       await say(result)
     } else if (isOrchestrator) result = await orchestrator(mcp, prompt)
@@ -248,6 +274,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
+  if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   session.turns.push({ prompt, result, at: Date.now() })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
@@ -259,6 +286,8 @@ process.stdin.on("end", async () => {
     duration_ms: Date.now() - started,
     num_turns: 1,
     total_cost_usd: 0,
+    usage: usageNow(),
+    modelUsage: { fake: { contextWindow: WINDOW } },
   })
   process.exit(0)
 })
