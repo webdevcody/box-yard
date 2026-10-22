@@ -127,6 +127,24 @@ const clip = (s, n) => {
 // ---------------------------------------------------------------------------
 // Turn mode
 
+let activeChild = null
+let stopping = false
+
+// `kill -TERM -<pid>` from the orchestrator stops the turn: end Claude, then
+// still write turn_end so the task doesn't look stuck.
+process.on("SIGTERM", () => {
+  if (mode !== "turn" || stopping) return
+  stopping = true
+  try {
+    activeChild?.kill("SIGTERM")
+  } catch {}
+  setTimeout(() => {
+    try {
+      activeChild?.kill("SIGKILL")
+    } catch {}
+  }, 5000).unref()
+})
+
 async function runTurn() {
   const turn = readJson(path.join(taskDir, "turn.json"))
   fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
@@ -147,16 +165,17 @@ async function runTurn() {
 
   // The session file can go missing (fresh box, lost archive). Start a new
   // session that carries a recap instead of failing the task.
-  if (attempt.exitCode !== 0 && turn.resume && /no conversation found|session.*not found/i.test(attempt.errorText)) {
+  if (!stopping && attempt.exitCode !== 0 && turn.resume && /no conversation found|session.*not found/i.test(attempt.errorText)) {
     sessionId = randomUUID()
     await emit({ t: "session_reset", sessionId, reason: "Previous Claude session was not found on this box." })
     const prompt = `${turn.recap ?? ""}\n\n---\n\n${turn.prompt}`.trim()
     attempt = await runClaude({ turn, sessionId, resume: false, prompt, mcpConfigFile })
   }
 
-  const ok = attempt.exitCode === 0 && !attempt.result?.is_error
+  const ok = stopping || (attempt.exitCode === 0 && !attempt.result?.is_error)
   await emit({
     t: "turn_end",
+    stopped: stopping,
     exitCode: attempt.exitCode,
     ok,
     result: attempt.result?.result ?? null,
@@ -192,14 +211,18 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
 
     const workDir = path.join(taskDir, "work")
     const claudeConfigDir = path.join(taskDir, "claude")
-    fs.mkdirSync(claudeConfigDir, { recursive: true })
+    // Keep the session transcript inside the task folder so it moves with the
+    // task between boxes. Local runs that rely on the user's own `claude`
+    // login turn this off, since that login lives in the default config dir.
+    const isolate = task.isolateConfig !== false
+    if (isolate) fs.mkdirSync(claudeConfigDir, { recursive: true })
 
-    const child = spawn(task.claudeBin || "claude", args, {
+    const child = spawn(task.claudeBin || "claude", [...(task.claudeArgs ?? []), ...args], {
       cwd: workDir,
       env: {
         ...process.env,
         ...task.env,
-        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        ...(isolate ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
         IS_SANDBOX: "1",
         DISABLE_AUTOUPDATER: "1",
         PORT: String(task.port ?? 4000),
@@ -209,6 +232,7 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
       stdio: ["pipe", "pipe", "pipe"],
     })
 
+    activeChild = child
     let result = null
     let stderr = ""
     let buf = ""
