@@ -89,6 +89,9 @@ describe("scoreText", () => {
     expect(scoreText("Command Palette", "command")).not.toBeNull()
     expect(scoreText("abcdefghijklmnopqrstuvwxyz", "az")).toBeNull()
     expect(scoreText("Inbox", "outbox")).toBeNull()
+    // Fuzzy hits have to start at a word.
+    expect(scoreText("Deploy nebula", "dpl")).not.toBeNull()
+    expect(scoreText("Command palette", "dpl")).toBeNull()
   })
 
   it("prefers a later word-start hit over an earlier mid-word one", () => {

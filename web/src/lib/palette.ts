@@ -185,10 +185,12 @@ export function scoreText(text: string, q: string): number | null {
   return 600 - Math.min(100, idx) / 10
 }
 
-/** Subsequence match ("cmdpal" → "command palette"); rewards runs and word starts, rejects scattered hits. */
+/** Subsequence match ("cmdpal" → "command palette") starting at a word; rewards runs and word starts, rejects scattered hits. */
 function fuzzy(t: string, q: string): number | null {
   if (q.length < 2) return null
   let from = 0
+  while (from < t.length && (t[from] !== q[0] || (from > 0 && !BOUNDARY.test(t[from - 1]!)))) from++
+  if (from >= t.length) return null
   let prev = -2
   let first = -1
   let bonus = 0
