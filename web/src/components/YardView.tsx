@@ -7,15 +7,18 @@ import {
   DEFAULT_YARD_TAB,
   YARD_TABS,
   inYardTab,
+  inYardView,
   olderFinishedCount,
   parseYardTab,
   recentlyFinished,
+  yardCompare,
   yardCounts,
-  yardTasks,
   type YardTab,
 } from "../lib/yardTasks"
+import { useStableOrder, type StableOrder } from "../lib/useStableOrder"
 import { Empty, STATUS, Select, TimeAgo, cx } from "./ui"
 import { TaskCard } from "./TaskCard"
+import { ResortPill } from "./ResortPill"
 import { SearchBox, SortSelect, TabBar, isTyping, useUrlQuery, withParam } from "./TaskFilters"
 import type { Task } from "../../../shared/types"
 
@@ -43,18 +46,22 @@ const MemoTaskCard = memo(TaskCard)
 /** Cards rendered up front; more on request, so a tab with hundreds of tasks opens fast. */
 const PAGE = 60
 
-function TaskGrid({ tasks, names }: { tasks: Task[]; names: Map<string, string> }) {
+/** The cards of a tab, held still by useStableOrder (live updates change them in place; the pill re-sorts). */
+function TaskGrid({ stable, names }: { stable: StableOrder<Task>; names: Map<string, string> }) {
   const [limit, setLimit] = useState(PAGE)
-  const rest = tasks.length - limit
+  const rest = stable.entries.length - limit
   return (
     <>
-      <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
-        {tasks.slice(0, limit).map((t) => (
-          // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
-          <div key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
-            <MemoTaskCard task={t} projectName={names.get(t.projectId)} />
-          </div>
-        ))}
+      <div ref={stable.listRef}>
+        <ResortPill newCount={stable.newCount} changedCount={stable.changedCount} onResort={stable.resort} />
+        <div className="grid gap-3 md:grid-cols-2 2xl:grid-cols-3">
+          {stable.entries.slice(0, limit).map(({ item: t, stale }) => (
+            // Off-screen cards skip layout and paint, which keeps hundreds of them cheap without a virtual list.
+            <div key={t.id} data-stable-key={t.id} className="[contain-intrinsic-size:auto_9rem] [content-visibility:auto]">
+              <MemoTaskCard task={t} projectName={names.get(t.projectId)} stale={stale} />
+            </div>
+          ))}
+        </div>
       </div>
       {rest > 0 && (
         <button
@@ -85,10 +92,14 @@ export function YardView() {
   const all = tasks.data
   const scoped = useMemo(() => (all ?? []).filter((t) => !projectId || t.projectId === projectId), [all, projectId])
   const counts = useMemo(() => yardCounts(scoped, now), [scoped, now])
-  const shown = useMemo(
-    () => yardTasks(scoped, { tab, now, older, query, sort, projectName: (id) => names.get(id) }),
-    [scoped, tab, now, older, query, sort, names],
-  )
+  // Sorted once per tab, filter and search, then held still while agents update.
+  const stable = useStableOrder(scoped, {
+    key: (t) => t.id,
+    compare: yardCompare({ tab, sort }),
+    include: (t) => inYardView(t, { tab, now, older, query, projectName: (id) => names.get(id) }),
+    resetKey: `${tab}|${projectId}|${older}|${tab === "all" ? `${sort}|${query}` : ""}`,
+  })
+  const shown = stable.entries
   const strip = useMemo(() => (tab === "active" ? recentlyFinished(scoped) : []), [scoped, tab])
   const olderCount = useMemo(() => (tab === "recent" ? olderFinishedCount(scoped, now) : 0), [scoped, tab, now])
   /** Tasks per project in the current tab, for the project picker. */
@@ -182,7 +193,7 @@ export function YardView() {
             <>
               {strip.length > 0 && <RecentStrip tasks={strip} names={names} href={tabHref(params, "recent")} />}
               {shown.length ? (
-                <TaskGrid key={tab} tasks={shown} names={names} />
+                <TaskGrid key={tab} stable={stable} names={names} />
               ) : (
                 <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
                   No agents are working right now. Ask the orchestrator for something new
@@ -202,7 +213,7 @@ export function YardView() {
 
           {tab === "needs_you" &&
             (shown.length ? (
-              <TaskGrid key={tab} tasks={shown} names={names} />
+              <TaskGrid key={tab} stable={stable} names={names} />
             ) : (
               <Empty icon={<InboxIcon className="h-8 w-8" />} title="Nothing needs you">
                 No questions, pull requests or failures waiting.
@@ -213,7 +224,7 @@ export function YardView() {
             <>
               <p className="text-xs text-zinc-500">{older ? "Every finished task, newest first." : "Finished in the last 24 hours, newest first."}</p>
               {shown.length ? (
-                <TaskGrid key={tab} tasks={shown} names={names} />
+                <TaskGrid key={tab} stable={stable} names={names} />
               ) : (
                 <Empty icon={<History className="h-8 w-8" />} title="Nothing finished in the last 24 hours" />
               )}
@@ -235,7 +246,7 @@ export function YardView() {
                 <SortSelect sort={sort} />
               </div>
               {shown.length ? (
-                <TaskGrid key={tab} tasks={shown} names={names} />
+                <TaskGrid key={tab} stable={stable} names={names} />
               ) : (
                 <Empty icon={<Search className="h-8 w-8" />} title={`No tasks match "${query.trim()}"`}>
                   <button className="text-yard-400 hover:text-yard-300" onClick={() => onQuery("")}>

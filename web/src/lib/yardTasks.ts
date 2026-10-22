@@ -1,7 +1,7 @@
 // Tab bucketing for the Yard view (every task across projects). Pure, so it is unit tested.
 import type { Task, TaskStatus } from "../../../shared/types"
 import { INBOX_STATUSES } from "./inbox"
-import { matchesQuery, sortTasks, type TaskSort } from "./projectTasks"
+import { compareTasks, matchesQuery, type TaskSort } from "./projectTasks"
 
 export const YARD_TABS = [
   { key: "active", label: "Active" },
@@ -76,17 +76,23 @@ export interface YardOptions {
   projectName?: (projectId: string) => string | undefined
 }
 
+/** Whether a task shows in the tab (and, on All, matches the search). */
+export function inYardView(task: Task, opts: YardOptions): boolean {
+  if (!inYardTab(task, opts.tab, opts.now, opts.older)) return false
+  return opts.tab !== "all" || matchesQuery(task, opts.query ?? "", opts.projectName?.(task.projectId))
+}
+
 /**
- * The tasks a tab shows, in order. Active and Recent are by last activity, Needs you
- * puts questions before failures before PRs, and All is searchable and sortable.
+ * The order of a tab. Active and Recent are by last activity, Needs you puts questions
+ * before failures before PRs, and All follows the sort picker.
  */
+export function yardCompare(opts: Pick<YardOptions, "tab" | "sort">): (a: Task, b: Task) => number {
+  if (opts.tab === "needs_you") return compareTasks("attention")
+  if (opts.tab !== "all") return newestFirst
+  return compareTasks(opts.sort ?? "attention")
+}
+
+/** The tasks a tab shows, in order. */
 export function yardTasks(tasks: Task[], opts: YardOptions): Task[] {
-  const list = tasks.filter((t) => inYardTab(t, opts.tab, opts.now, opts.older))
-  if (opts.tab === "needs_you") return sortTasks(list, "attention")
-  if (opts.tab !== "all") return list.sort(newestFirst)
-  const query = opts.query ?? ""
-  return sortTasks(
-    list.filter((t) => matchesQuery(t, query, opts.projectName?.(t.projectId))),
-    opts.sort ?? "attention",
-  )
+  return tasks.filter((t) => inYardView(t, opts)).sort(yardCompare(opts))
 }
