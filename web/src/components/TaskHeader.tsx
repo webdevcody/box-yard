@@ -32,6 +32,7 @@ import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 /** Above this much context used, a "Compact" nudge shows next to the status. */
 const COMPACT_NUDGE_PCT = 60
@@ -311,8 +312,9 @@ function TaskMenu({
             <button
               type="button"
               className={cx(itemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10")}
-              onClick={() => {
-                if (!confirm("Delete this task, its workspace and its archive?")) return
+              onClick={async () => {
+                setOpen(false)
+                if (!(await confirmDialog({ title: "Delete task?", body: "Delete this task, its workspace and its archive?", confirmLabel: "Delete task", danger: true }))) return
                 del.mutate(task.id)
                 navigate(project ? `/projects/${project.id}` : "/")
               }}

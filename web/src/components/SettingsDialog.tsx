@@ -1,7 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
-import { createPortal } from "react-dom"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, Volume2, X, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -17,6 +16,8 @@ import {
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
+import { Modal } from "./Modal"
+import { confirmDialog } from "../lib/confirm"
 import { Button, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
@@ -180,8 +181,12 @@ export function SettingsDialog({
   const hint = (k: keyof Settings) => <SourceHint source={current?.sources[k]} env={SETTING_ENV[k]} changed={changed.includes(k)} />
   const fid = (k: string) => `${ids}-${k}`
 
-  const close = () => {
-    if (dirty && !confirm("Discard unsaved settings changes?")) return
+  const close = async () => {
+    if (
+      dirty &&
+      !(await confirmDialog({ title: "Discard unsaved changes?", body: "Your edits to settings haven't been saved.", confirmLabel: "Discard", danger: true }))
+    )
+      return
     onClose()
   }
 
@@ -199,19 +204,6 @@ export function SettingsDialog({
     const t = setTimeout(() => setSavedAt(0), 2500)
     return () => clearTimeout(t)
   }, [savedAt])
-
-  const closeRef = useRef(close)
-  closeRef.current = close
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !e.defaultPrevented) {
-        e.preventDefault()
-        closeRef.current()
-      }
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [])
 
   const onNavKey = (e: ReactKeyboardEvent) => {
     const delta = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key]
@@ -235,142 +227,30 @@ export function SettingsDialog({
     })
   }
 
-  // Portaled to <body>: the chat and sidebar columns use CSS transforms, which would trap a fixed overlay inside them.
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4" onMouseDown={close}>
-      <form
-        onMouseDown={(e) => e.stopPropagation()}
-        onSubmit={submit}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={fid("title")}
-        className="flex h-full w-full flex-col overflow-hidden border-zinc-800 bg-zinc-950 shadow-2xl sm:h-[80vh] sm:max-h-[52rem] sm:max-w-[54rem] sm:rounded-2xl sm:border"
-      >
-        <header className="flex items-center gap-3 border-b border-zinc-900 px-5 py-3.5">
-          <div className="min-w-0">
-            <h2 id={fid("title")} className="text-base font-semibold text-zinc-50">
-              Settings
-            </h2>
-            <p className="text-xs text-zinc-500">Changes apply from the next turn. Values shown are the ones in effect.</p>
-          </div>
-          <button type="button" onClick={close} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200" aria-label="Close">
-            <X className="h-5 w-5" />
-          </button>
-        </header>
-
-        <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-          <div
-            ref={navRef}
-            role="tablist"
-            aria-label="Settings categories"
-            aria-orientation="vertical"
-            onKeyDown={onNavKey}
-            className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:p-3"
-          >
-            {SETTINGS_SECTIONS.map((sec) => {
-              const Icon = SECTION_ICON[sec.key]
-              const on = sec.key === section
-              return (
-                <button
-                  key={sec.key}
-                  type="button"
-                  role="tab"
-                  id={fid(`tab-${sec.key}`)}
-                  data-section={sec.key}
-                  aria-selected={on}
-                  aria-controls={fid("panel")}
-                  tabIndex={on ? 0 : -1}
-                  onClick={() => onSection(sec.key)}
-                  className={cx(
-                    "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
-                    on ? "bg-zinc-800/80 font-medium text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
-                  )}
-                >
-                  <Icon className={cx("h-4 w-4 shrink-0", on ? "text-yard-400" : "text-zinc-500")} />
-                  {sec.label}
-                  {dirtySections.has(sec.key) && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-amber-400" title="Unsaved changes" />}
-                </button>
-              )
-            })}
-          </div>
-
-          <div
-            ref={panelRef}
-            role="tabpanel"
-            id={fid("panel")}
-            aria-labelledby={fid(`tab-${section}`)}
-            className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6"
-          >
-            {section === "about" ? (
-              <AboutPanel />
-            ) : section === "notifications" ? (
-              <NotificationsPanel fid={fid} />
-            ) : section === "voice" ? (
-              <VoicePanel fid={fid} />
-            ) : !s ? (
-              <p className="text-sm text-zinc-500">Loading…</p>
-            ) : section === "orchestrator" ? (
-              <Panel section="orchestrator">
-                <Row id={fid("om")} label="Model" help="The Claude model the orchestrator chat runs on. Type any model id, or pick one." hint={hint("orchestratorModel")}>
-                  <input id={fid("om")} className={inputClass} list="boxyard-models" value={s.orchestratorModel} onChange={(e) => set("orchestratorModel", e.target.value)} />
-                </Row>
-                <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
-                  <Select id={fid("oe")} className="w-full" value={s.orchestratorEffort} onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}>
-                    <EffortOptions />
-                  </Select>
-                </Row>
-                <Row
-                  id={fid("oac")}
-                  label="Auto-compact"
-                  help="Compacts between turns once context usage passes this. A summary is saved to the compaction log first. Off: only the CLI's own last-resort compaction near the window limit."
-                  hint={hint("orchestratorAutoCompact")}
-                >
-                  <AutoCompactControl id={fid("oac")} label="Orchestrator auto-compact" value={s.orchestratorAutoCompact} onChange={(v) => set("orchestratorAutoCompact", v)} />
-                </Row>
-              </Panel>
-            ) : section === "agents" ? (
-              <Panel section="agents">
-                <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on." hint={hint("agentModel")}>
-                  <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
-                </Row>
-                <Row
-                  id={fid("ae")}
-                  label="Effort"
-                  help={
-                    s.agentEffort === "orchestrator"
-                      ? "The orchestrator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding."
-                      : "Every agent turn uses this effort."
-                  }
-                  hint={hint("agentEffort")}
-                >
-                  <Select id={fid("ae")} className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
-                    <option value="orchestrator">Let the orchestrator decide</option>
-                    <EffortOptions />
-                  </Select>
-                </Row>
-                <Row
-                  id={fid("aac")}
-                  label="Custom auto-compact threshold"
-                  help="Passed to each agent's CLI as its auto-compact window (100k–1M tokens). Off: the CLI's own default."
-                  hint={hint("agentAutoCompact")}
-                >
-                  <AutoCompactControl id={fid("aac")} label="Agent auto-compact" value={s.agentAutoCompact} onChange={(v) => set("agentAutoCompact", v)} />
-                </Row>
-              </Panel>
-            ) : (
-              <LimitsPanel s={s} set={set} hint={hint} fid={fid} />
-            )}
-          </div>
-        </div>
-
-        <footer className="flex items-center gap-2 border-t border-zinc-900 px-5 py-3">
+  return (
+    <Modal
+      size="xl"
+      title="Settings"
+      description="Changes apply from the next turn. Values shown are the ones in effect."
+      dirty={dirty}
+      onClose={() => void close()}
+      onSubmit={submit}
+      className="sm:h-[min(80vh,52rem)]"
+      bodyClassName="flex min-h-0 flex-1 flex-col sm:flex-row"
+      footer={
+        <>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             loading={reset.isPending}
             onClick={() => {
-              if (confirm("Forget every value saved here? Env vars and defaults apply again.")) reset.mutate(undefined, { onSuccess: () => setDraft(null) })
+              void confirmDialog({
+                title: "Reset settings to defaults?",
+                body: "Forget every value saved here? Env vars and defaults apply again.",
+                confirmLabel: "Reset",
+                danger: true,
+              }).then((ok) => ok && reset.mutate(undefined, { onSuccess: () => setDraft(null) }))
             }}
             title="Forget saved values: env vars and defaults apply again"
           >
@@ -400,16 +280,139 @@ export function SettingsDialog({
               Save
             </Button>
           </div>
-        </footer>
+        </>
+      }
+    >
+      <div
+        ref={navRef}
+        role="tablist"
+        aria-label="Settings categories"
+        aria-orientation="vertical"
+        onKeyDown={onNavKey}
+        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:p-3"
+      >
+        {SETTINGS_SECTIONS.map((sec) => {
+          const Icon = SECTION_ICON[sec.key]
+          const on = sec.key === section
+          return (
+            <button
+              key={sec.key}
+              type="button"
+              role="tab"
+              id={fid(`tab-${sec.key}`)}
+              data-section={sec.key}
+              aria-selected={on}
+              aria-controls={fid("panel")}
+              tabIndex={on ? 0 : -1}
+              onClick={() => onSection(sec.key)}
+              className={cx(
+                "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
+                on ? "bg-zinc-800/80 font-medium text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
+              )}
+            >
+              <Icon className={cx("h-4 w-4 shrink-0", on ? "text-yard-400" : "text-zinc-500")} />
+              {sec.label}
+              {dirtySections.has(sec.key) && <span className="ml-auto h-1.5 w-1.5 rounded-full bg-amber-400" title="Unsaved changes" />}
+            </button>
+          )
+        })}
+      </div>
 
-        <datalist id="boxyard-models">
-          {MODELS.map((m) => (
-            <option key={m} value={m} />
-          ))}
-        </datalist>
-      </form>
-    </div>,
-    document.body,
+      <div
+        ref={panelRef}
+        role="tabpanel"
+        id={fid("panel")}
+        aria-labelledby={fid(`tab-${section}`)}
+        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6"
+      >
+        {section === "about" ? (
+          <AboutPanel />
+        ) : section === "notifications" ? (
+          <NotificationsPanel fid={fid} />
+        ) : section === "voice" ? (
+          <VoicePanel fid={fid} />
+        ) : !s ? (
+          <p className="text-sm text-zinc-500">Loading…</p>
+        ) : section === "orchestrator" ? (
+          <Panel section="orchestrator">
+            <Row
+              id={fid("om")}
+              label="Model"
+              help="The Claude model the orchestrator chat runs on. Type any model id, or pick one."
+              hint={hint("orchestratorModel")}
+            >
+              <input
+                id={fid("om")}
+                className={inputClass}
+                list="boxyard-models"
+                value={s.orchestratorModel}
+                onChange={(e) => set("orchestratorModel", e.target.value)}
+              />
+            </Row>
+            <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
+              <Select
+                id={fid("oe")}
+                className="w-full"
+                value={s.orchestratorEffort}
+                onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}
+              >
+                <EffortOptions />
+              </Select>
+            </Row>
+            <Row
+              id={fid("oac")}
+              label="Auto-compact"
+              help="Compacts between turns once context usage passes this. A summary is saved to the compaction log first. Off: only the CLI's own last-resort compaction near the window limit."
+              hint={hint("orchestratorAutoCompact")}
+            >
+              <AutoCompactControl
+                id={fid("oac")}
+                label="Orchestrator auto-compact"
+                value={s.orchestratorAutoCompact}
+                onChange={(v) => set("orchestratorAutoCompact", v)}
+              />
+            </Row>
+          </Panel>
+        ) : section === "agents" ? (
+          <Panel section="agents">
+            <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on." hint={hint("agentModel")}>
+              <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
+            </Row>
+            <Row
+              id={fid("ae")}
+              label="Effort"
+              help={
+                s.agentEffort === "orchestrator"
+                  ? "The orchestrator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding."
+                  : "Every agent turn uses this effort."
+              }
+              hint={hint("agentEffort")}
+            >
+              <Select id={fid("ae")} className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
+                <option value="orchestrator">Let the orchestrator decide</option>
+                <EffortOptions />
+              </Select>
+            </Row>
+            <Row
+              id={fid("aac")}
+              label="Custom auto-compact threshold"
+              help="Passed to each agent's CLI as its auto-compact window (100k–1M tokens). Off: the CLI's own default."
+              hint={hint("agentAutoCompact")}
+            >
+              <AutoCompactControl id={fid("aac")} label="Agent auto-compact" value={s.agentAutoCompact} onChange={(v) => set("agentAutoCompact", v)} />
+            </Row>
+          </Panel>
+        ) : (
+          <LimitsPanel s={s} set={set} hint={hint} fid={fid} />
+        )}
+      </div>
+
+      <datalist id="boxyard-models">
+        {MODELS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+    </Modal>
   )
 }
 

@@ -14,6 +14,7 @@ import { ContextMeter } from "./ContextMeter"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import type { Attachment, ChatMessage } from "../../../shared/types"
+import { confirmDialog } from "../lib/confirm"
 
 const SUGGESTIONS = [
   "What's everyone working on?",
@@ -90,7 +91,9 @@ export const ChatPanel = memo(function ChatPanel() {
             variant="ghost"
             title="New conversation"
             onClick={() => {
-              if (confirm("Start a new orchestrator conversation? Projects and tasks are kept.")) void control.reset()
+              void confirmDialog({ title: "Start a new conversation?", body: "Starts a new orchestrator conversation. Projects and tasks are kept.", confirmLabel: "New conversation" }).then(
+                (ok) => ok && void control.reset(),
+              )
             }}
           >
             <RotateCcw className="h-3.5 w-3.5" />
