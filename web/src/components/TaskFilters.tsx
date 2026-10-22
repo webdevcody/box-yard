@@ -127,13 +127,13 @@ export function SearchBox({ value, onChange, placeholder = "Search tasks", label
 }
 
 export const selectClass =
-  "w-32 shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-300 focus:border-yard-500/60 focus:outline-none sm:w-auto sm:px-3"
+  "shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-sm text-zinc-300 focus:border-yard-500/60 focus:outline-none sm:px-3"
 
 /** The task sort dropdown, bound to `?sort=` (the default is left out of the URL). */
 export function SortSelect({ sort }: { sort: TaskSort }) {
   const setParam = useSetParam()
   return (
-    <select className={selectClass} value={sort} onChange={(e) => setParam("sort", e.target.value === DEFAULT_SORT ? null : e.target.value)} aria-label="Sort tasks">
+    <select className={cx(selectClass, "w-32 sm:w-auto")} value={sort} onChange={(e) => setParam("sort", e.target.value === DEFAULT_SORT ? null : e.target.value)} aria-label="Sort tasks">
       {TASK_SORTS.map((s) => (
         <option key={s.key} value={s.key}>
           {s.label}
