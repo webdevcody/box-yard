@@ -1,6 +1,7 @@
 // Items, matching and ranking for the command palette (Cmd+K). Pure, so it is unit tested.
 import { describeCron } from "../../../shared/cron"
 import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
+import { badgeStatus, type BadgeStatus } from "./prState"
 
 export type PaletteKind = "action" | "page" | "task" | "project" | "schedule" | "artifact" | "box"
 
@@ -22,7 +23,8 @@ export interface PaletteItem {
   /** Absolute URL to open in a new tab (artifact files). */
   url?: string
   command?: PaletteCommand
-  status?: TaskStatus
+  /** A task's pill: its status, or "merged" when it is done because its PR merged. */
+  status?: BadgeStatus
   /** Last activity, for recency tie-breaks and the empty-query list. */
   at?: number
 }
@@ -89,9 +91,9 @@ export function buildItems(data: PaletteData): PaletteItem[] {
       title: t.title,
       subtitle: project,
       aliases: [t.id],
-      keywords: [project ?? "", STATUS_WORDS[t.status]],
+      keywords: [project ?? "", STATUS_WORDS[t.status], ...(t.prUrl ? [`pr ${t.prState ?? "open"}`] : [])],
       href: `/tasks/${t.id}`,
-      status: t.status,
+      status: badgeStatus(t),
       at: t.updatedAt,
     })
   }
@@ -288,7 +290,7 @@ function emptyQueryGroups(items: PaletteItem[], recent: string[], limit: number)
     .slice(0, limit)
   const seen = new Set(recentItems.map((i) => i.key))
   const active = items
-    .filter((i) => i.kind === "task" && !seen.has(i.key) && i.status && ACTIVE_STATUSES.includes(i.status))
+    .filter((i) => i.kind === "task" && !seen.has(i.key) && i.status && (ACTIVE_STATUSES as BadgeStatus[]).includes(i.status))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0))
     .slice(0, limit)
   const groups: PaletteGroup[] = []

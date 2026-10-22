@@ -17,6 +17,7 @@ import {
 import { useScrollToHash } from "../lib/hash"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
 import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { badgeStatus } from "../lib/prState"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
 
 const PRESETS: { label: string; cron: string }[] = [
@@ -310,7 +311,7 @@ function RunList({ runs }: { runs: Task[] }) {
         <li key={t.id}>
           <Link href={`/tasks/${t.id}`} className="flex items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
             <span className="min-w-0 flex-1 truncate text-zinc-200">{t.summary ?? t.title}</span>
-            <StatusBadge status={t.status} />
+            <StatusBadge status={badgeStatus(t)} />
             <span className="w-16 shrink-0 text-right text-xs text-zinc-500">
               <TimeAgo ts={t.createdAt} />
             </span>

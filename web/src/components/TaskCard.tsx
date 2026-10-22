@@ -1,7 +1,8 @@
 import { Link } from "wouter"
-import { AlarmClock, Check, ExternalLink, GitPullRequest, Globe, MessageCircleQuestion } from "lucide-react"
+import { AlarmClock, Check, ExternalLink, Globe, MessageCircleQuestion } from "lucide-react"
 import type { Task } from "../../../shared/types"
-import { StatusBadge, TimeAgo, cx } from "./ui"
+import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
+import { badgeStatus } from "../lib/prState"
 
 /** Flattens markdown to plain text for card previews; drops the task's own PR URL (shown in the footer) and shortens other URLs. */
 export function plainPreview(text: string, prUrl?: string | null): string {
@@ -44,7 +45,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
           <div className="line-clamp-2 break-words font-medium text-zinc-100">{task.title}</div>
         </div>
         <span className="mt-0.5 shrink-0">
-          <StatusBadge status={task.status} />
+          <StatusBadge status={badgeStatus(task)} />
         </span>
       </div>
 
@@ -60,11 +61,7 @@ export function TaskCard({ task, projectName, onMarkDone, stale }: { task: Task;
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-        {task.prUrl && (
-          <a href={task.prUrl} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="inline-flex items-center gap-1 text-emerald-400 hover:underline">
-            <GitPullRequest className="h-3.5 w-3.5" /> PR #{task.prUrl.split("/").pop()}
-          </a>
-        )}
+        <PrChip task={task} variant="link" />
         {task.previews.map((p) => (
           <a key={p.port} href={p.url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="inline-flex items-center gap-1 text-sky-400 hover:underline">
             <Globe className="h-3.5 w-3.5" /> {p.label}

@@ -14,7 +14,6 @@ import {
   ExternalLink,
   FileText,
   GitBranch,
-  GitPullRequest,
   Globe,
   Hash,
   Loader2,
@@ -29,7 +28,8 @@ import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask 
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, StatusBadge, TimeAgo, cx } from "./ui"
+import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
+import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 
@@ -80,7 +80,7 @@ export function TaskHeader({
           <h1 className="line-clamp-2 min-w-0 text-lg leading-snug font-semibold tracking-tight break-words text-zinc-50 sm:line-clamp-none sm:truncate" title={task.title}>
             {task.title}
           </h1>
-          <StatusBadge status={task.status} />
+          <StatusBadge status={badgeStatus(task)} />
           <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} className="hidden sm:block" />
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -111,17 +111,7 @@ export function TaskHeader({
           Active <TimeAgo ts={task.updatedAt} />
         </span>
         {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
-        {task.prUrl && (
-          <a
-            href={task.prUrl}
-            target="_blank"
-            rel="noreferrer"
-            title={task.prUrl}
-            className="inline-flex items-center gap-1 rounded-md border border-emerald-900/60 bg-emerald-500/10 px-1.5 py-0.5 font-medium text-emerald-300 transition hover:bg-emerald-500/20"
-          >
-            <GitPullRequest className="h-3 w-3" /> PR #{task.prUrl.split("/").pop()}
-          </a>
-        )}
+        <PrChip task={task} />
         {task.previews.map((p) => (
           <PreviewChip key={p.port} preview={p} />
         ))}
