@@ -35,6 +35,17 @@ const USAGE_KEY = "orchestrator_usage"
 /** Never wait for more than this share of the window: the CLI's own last-resort compaction (no log) kicks in near 96%. */
 const MAX_THRESHOLD_SHARE = 0.95
 
+/** Tools that create something, and the id prefix of what they create. */
+const CREATES: Record<string, string> = { create_task: "task", create_project: "prj", create_schedule: "sch" }
+
+/** The id a create_* tool result names (the first id with the tool's prefix), or null. */
+export function createdId(tool: string, content: unknown): string | null {
+  const prefix = CREATES[tool]
+  if (!prefix) return null
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (typeof c?.text === "string" ? c.text : "")).join("") : ""
+  return new RegExp(`\\b${prefix}_[A-Za-z0-9-]{6,40}\\b`).exec(text)?.[0] ?? null
+}
+
 /** What one run of the claude CLI produced. */
 interface RunResult {
   ok: boolean
@@ -500,6 +511,7 @@ export class Orchestrator {
       let raw = ""
       let said = ""
       let seenSession: string | null = null
+      const created = new Map<string, ChatMessage>()
       const quiet = kind !== "turn"
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
@@ -541,7 +553,20 @@ export class Orchestrator {
             if (b.type !== "tool_use") continue
             const name = String(b.name).replace(/^mcp__boxyard__/, "")
             const m = this.store.addChat("tool", name, { input: b.input })
+            if (CREATES[name] && typeof b.id === "string") created.set(b.id, m)
             this.hub.broadcast({ type: "chat.message", message: m })
+          }
+          return
+        }
+        if (msg.type === "user" && Array.isArray(msg.message?.content)) {
+          // A create_* result names the new task/project/schedule; the chat's tool line links to it.
+          for (const b of msg.message.content) {
+            const m = b?.type === "tool_result" && !b.is_error ? created.get(b.tool_use_id) : undefined
+            if (!m) continue
+            created.delete(b.tool_use_id)
+            const resultId = createdId(m.content, b.content)
+            const updated = resultId ? this.store.setChatMeta(m.id, { ...m.meta, resultId }) : null
+            if (updated) this.hub.broadcast({ type: "chat.message", message: updated })
           }
           return
         }
