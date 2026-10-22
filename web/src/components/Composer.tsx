@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
-import { createPortal } from "react-dom"
+import { createPortal, flushSync } from "react-dom"
 import { AlertTriangle, FileText, Loader2, Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
 import { composerMaxHeight } from "../lib/composer"
 import { useSettings } from "../lib/queries"
 import { Button, cx } from "./ui"
 import { formatSize, isImage } from "./Attachments"
+import { DictationStatus, MicButton } from "./Dictation"
+import { insertTranscript } from "../lib/dictation"
+import { useDictation } from "../lib/useDictation"
 import type { Attachment } from "../../../shared/types"
 
 interface Pending {
@@ -149,12 +152,33 @@ export function Composer({
   }, [value])
 
   const submit = () => {
+    // Still listening: stop, let the last words land, then send (dictation calls submit again).
+    if (dictation.active) return dictation.stopAndSend()
     if (!canSend) return
     onSubmit(value.trim(), ready)
     setValue("")
     files.forEach((f) => f.preview && URL.revokeObjectURL(f.preview))
     setFiles([])
   }
+  const submitRef = useRef(submit)
+  submitRef.current = submit
+
+  // Dictation: final words go into the draft at the caret. flushSync makes the new value (and a fresh
+  // `submit`) current at once, so "send when I release" right after sees every word.
+  const form = useRef<HTMLFormElement>(null)
+  const dictation = useDictation({
+    root: () => form.current,
+    focus: () => input.current?.focus(),
+    insert: (text) => {
+      const el = input.current
+      if (!el) return
+      const next = insertTranscript(el.value, el.selectionStart, el.selectionEnd, text)
+      if (next.value === el.value) return
+      flushSync(() => setValue(next.value))
+      el.setSelectionRange(next.caret, next.caret)
+    },
+    send: () => submitRef.current(),
+  })
 
   const onPaste = (e: ClipboardEvent) => {
     const pasted = Array.from(e.clipboardData.files)
@@ -213,6 +237,7 @@ export function Composer({
 
   return (
     <form
+      ref={form}
       className={className}
       onSubmit={(e) => {
         e.preventDefault()
@@ -272,6 +297,7 @@ export function Composer({
         {files.some((f) => f.status === "error") && (
           <div className="px-2 pb-1 text-xs text-red-400">{files.find((f) => f.status === "error")!.error}</div>
         )}
+        <DictationStatus machine={dictation} />
         <div className="flex items-end gap-2">
           <input
             ref={picker}
@@ -286,6 +312,7 @@ export function Composer({
           <Button type="button" variant="ghost" size="sm" className="h-8 w-8 !p-0" title="Attach files" onClick={() => picker.current?.click()}>
             <Paperclip className="h-4 w-4" />
           </Button>
+          <MicButton machine={dictation} />
           <textarea
             ref={setTextarea}
             rows={1}

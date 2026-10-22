@@ -1,7 +1,9 @@
 import type { ReactNode } from "react"
-import { Volume2 } from "lucide-react"
+import { Mic, Volume2 } from "lucide-react"
 import { setVoiceSettings, speakNow, useVoiceSettings, useVoices, voiceSupported } from "../lib/speech"
 import { VOICE_EVENTS, VOICE_EVENT_LABEL, pickVoice, type VoiceSettings } from "../lib/voice"
+import { DICTATION_KEYS, LANGUAGES, keyLabel, type DictationKey } from "../lib/dictation"
+import { dictationSupported, isMac, setDictationSettings, useDictationSettings } from "../lib/useDictation"
 import { Panel, Row } from "./SettingsDialog"
 import { Button, Select, cx, inputClass } from "./ui"
 
@@ -167,6 +169,69 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
         Saved in this browser only. Toggle voice from the speaker in the orchestrator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
         <kbd className="rounded bg-zinc-800 px-1">Shift</kbd>+<kbd className="rounded bg-zinc-800 px-1">V</kbd>.
       </p>
+      <DictationSection fid={fid} />
     </Panel>
+  )
+}
+
+const OS_DICTATION_TIP = "You can also use your OS dictation in any text box (macOS: press Fn twice; Windows: Win+H)."
+
+/** Settings → Voice → Dictation: the composers' push-to-talk mic. */
+function DictationSection({ fid }: { fid: (k: string) => string }) {
+  const d = useDictationSettings()
+  const supported = dictationSupported()
+  const mac = isMac()
+  const browserLang = typeof navigator !== "undefined" ? navigator.language : "en-US"
+  const languages = LANGUAGES.some(([tag]) => tag === browserLang) ? LANGUAGES : [[browserLang, browserLang] as [string, string], ...LANGUAGES]
+  const off = !d.enabled
+  return (
+    <section className="mt-8 border-t border-zinc-800 pt-6" aria-labelledby={fid("dict")}>
+      <h4 id={fid("dict")} className="flex items-center gap-2 text-sm font-semibold text-zinc-50">
+        <Mic className="h-4 w-4 text-yard-400" /> Dictation
+      </h4>
+      <p className="mt-1 mb-5 text-sm text-zinc-500">Talk instead of typing: a mic in the chat and task message boxes. Words go in at the cursor; nothing is sent until you say so.</p>
+      {!supported ? (
+        <p className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-300" role="status">
+          This browser doesn't support speech recognition, so the mic is hidden. Use your OS dictation instead: it works in any text box (macOS: press
+          Fn twice; Windows: Win+H).
+        </p>
+      ) : (
+        <>
+          <Row id={fid("de")} label="Dictation" help="Show the mic in message boxes. Press and hold it to talk, or click it to start and stop.">
+            <Check id={fid("de")} checked={d.enabled} onChange={(enabled) => setDictationSettings({ enabled })}>
+              {d.enabled ? "On" : "Off"}
+            </Check>
+          </Row>
+          <Row id={fid("dl")} label="Language" help="What you'll speak. Defaults to the browser's language.">
+            <Select id={fid("dl")} className="w-full" disabled={off} value={d.lang} onChange={(e) => setDictationSettings({ lang: e.target.value })}>
+              <option value="">Browser default ({browserLang})</option>
+              {languages.map(([tag, name]) => (
+                <option key={tag} value={tag}>
+                  {name} · {tag}
+                </option>
+              ))}
+            </Select>
+          </Row>
+          <Row id={fid("dk")} label="Push-to-talk key" help="Hold it anywhere in Box Yard to talk into the focused (or last used) message box; let go to stop. A quick tap toggles.">
+            <Select id={fid("dk")} className="w-full" disabled={off} value={d.key} onChange={(e) => setDictationSettings({ key: e.target.value as DictationKey })}>
+              {DICTATION_KEYS.map((k) => (
+                <option key={k} value={k}>
+                  {k === "off" ? "None" : `Hold ${keyLabel(k, mac)}`}
+                </option>
+              ))}
+            </Select>
+          </Row>
+          <Row id={fid("ds")} label="Send when I release" help="Send the message as soon as you let go of a held mic or key. Off: review it, then press Enter.">
+            <Check id={fid("ds")} disabled={off} checked={d.sendOnRelease} onChange={(sendOnRelease) => setDictationSettings({ sendOnRelease })}>
+              Send when I release
+            </Check>
+          </Row>
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+            Uses your browser's speech recognition. In Chrome, audio is sent to Google's servers; in Safari it's processed by Apple. {OS_DICTATION_TIP} Spoken
+            announcements pause while you dictate.
+          </p>
+        </>
+      )}
+    </section>
   )
 }

@@ -65,6 +65,9 @@ const WATCHDOG_SLACK_MS = 4000
 export class SpeechQueue {
   private items: { chunks: string[]; opts: SpeakOptions }[] = []
   private current: { chunks: string[]; opts: SpeakOptions } | null = null
+  /** The chunk being spoken, so hold() can put it back. */
+  private chunk: string | null = null
+  private held = false
   private token = 0
   private watchdog: any = null
   private keepAlive: any = null
@@ -89,8 +92,36 @@ export class SpeechQueue {
     if (!chunks.length) return
     this.items.push({ chunks, opts })
     while (this.items.length > MAX_QUEUE) this.items.shift()
-    if (!this.current) this.next()
+    if (!this.current && !this.held) this.next()
     else this.hooks.onChange?.()
+  }
+
+  /**
+   * Go quiet without forgetting anything (while Cody dictates, so Box Yard doesn't transcribe itself):
+   * the line being spoken is cut off and goes back to the front of the queue; new lines wait.
+   */
+  hold() {
+    if (this.held) return
+    this.held = true
+    const cur = this.current
+    if (!cur) return
+    this.items.unshift({ chunks: this.chunk ? [this.chunk, ...cur.chunks] : cur.chunks, opts: cur.opts })
+    while (this.items.length > MAX_QUEUE) this.items.pop()
+    this.current = null
+    this.chunk = null
+    this.token++
+    this.clearTimers()
+    try {
+      this.synth.cancel()
+    } catch {}
+    this.hooks.onChange?.()
+  }
+
+  /** Carry on after hold(). */
+  release() {
+    if (!this.held) return
+    this.held = false
+    if (!this.current) this.next()
   }
 
   /** Stop at once and forget everything queued. */
@@ -107,7 +138,7 @@ export class SpeechQueue {
   }
 
   private next() {
-    this.current = this.items.shift() ?? null
+    this.current = this.held ? null : (this.items.shift() ?? null)
     if (!this.current) {
       this.clearTimers()
       this.hooks.onChange?.()
@@ -121,6 +152,7 @@ export class SpeechQueue {
     const item = this.current
     if (!item) return
     const chunk = item.chunks.shift()
+    this.chunk = chunk ?? null
     if (chunk === undefined) return this.next()
     const token = ++this.token
     const u = this.utter(chunk)
@@ -456,6 +488,13 @@ export function speakNow(text: string) {
 
 export function stopSpeech() {
   queueInstance?.stop()
+}
+
+/** Hold announcements while dictating (true), then carry on (false). */
+export function holdSpeech(held: boolean) {
+  const q = queue()
+  if (held) q?.hold()
+  else q?.release()
 }
 
 /** The header's speaker button and shortcut: stop talking and turn voice off, or turn it back on. */

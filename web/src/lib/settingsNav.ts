@@ -39,7 +39,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "voice",
     label: "Voice",
-    description: "Hear short spoken updates when work finishes, using this browser's text-to-speech. Saved in this browser only.",
+    description: "Spoken updates when work finishes, and push-to-talk dictation in message boxes, using this browser's speech features. Saved in this browser only.",
     fields: [],
   },
   { key: "about", label: "About", description: "What this Box Yard is running on.", fields: [] },
