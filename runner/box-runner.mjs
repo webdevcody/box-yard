@@ -185,9 +185,8 @@ async function runTurn() {
     sessionId,
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
   })
-  try {
-    fs.unlinkSync(path.join(taskDir, "turn.pid"))
-  } catch {}
+  // turn.pid stays behind on purpose: the orchestrator checks it with kill -0,
+  // and a fast turn must not finish before the orchestrator sees it started.
 }
 
 function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {

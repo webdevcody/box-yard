@@ -417,8 +417,8 @@ export class Store {
   listTaskMessages(taskId: string, limit = 500): TaskMessage[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM (SELECT * FROM task_messages WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)
-         ORDER BY created_at ASC`,
+        `SELECT * FROM (SELECT *, rowid AS rid FROM task_messages WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)
+         ORDER BY created_at ASC, rid ASC`,
       )
       .all(taskId, limit) as {
       id: string
@@ -455,7 +455,7 @@ export class Store {
   listChat(limit = 300): ChatMessage[] {
     const rows = this.db
       .prepare(
-        `SELECT * FROM (SELECT * FROM chat_messages ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC`,
+        `SELECT * FROM (SELECT *, rowid AS rid FROM chat_messages ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC`,
       )
       .all(limit) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
     return rows.map((r) => ({
