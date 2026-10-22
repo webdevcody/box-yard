@@ -9,6 +9,8 @@ export interface EntityRef {
   kind: EntityKind
   id: string
   href: string
+  /** Title or name, for showing instead of the id. */
+  label: string
   /** Hover hint, e.g. the task title and status. */
   hint: string
 }
@@ -17,6 +19,8 @@ export interface EntityIndex {
   byId: Map<string, EntityRef>
   /** Task titles that exactly one task has, so a bold title can link to it. */
   byTitle: Map<string, EntityRef>
+  /** Project and schedule names (`project:<name>`, `schedule:<name>`) that only one has. Tools accept names for ids. */
+  byName: Map<string, EntityRef>
   /** Global regex for every token worth a look: prefixed ids, known box ids and /artifacts/ paths. */
   pattern: RegExp
 }
@@ -42,37 +46,42 @@ export function buildEntityIndex(
   const byId = new Map<string, EntityRef>()
   const projectNames = new Map((data.projects ?? []).map((p) => [p.id, p.name]))
   for (const p of data.projects ?? []) {
-    byId.set(p.id, { kind: "project", id: p.id, href: routes.project(p.id), hint: `Project: ${p.name}${p.repo ? ` (${p.repo})` : ""}` })
+    byId.set(p.id, { kind: "project", id: p.id, href: routes.project(p.id), label: p.name, hint: `Project: ${p.name}${p.repo ? ` (${p.repo})` : ""}` })
   }
   const titleCounts = new Map<string, number>()
   for (const t of data.tasks ?? []) {
     const project = projectNames.get(t.projectId)
-    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · ") })
+    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), label: t.title, hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · ") })
     const title = t.title.trim()
     if (title) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1)
   }
   for (const s of data.schedules ?? []) {
-    byId.set(s.id, { kind: "schedule", id: s.id, href: routes.schedule(s.id), hint: `Schedule: ${s.name} · ${s.enabled ? s.cron : "paused"}` })
+    byId.set(s.id, { kind: "schedule", id: s.id, href: routes.schedule(s.id), label: s.name, hint: `Schedule: ${s.name} · ${s.enabled ? s.cron : "paused"}` })
   }
   for (const a of data.artifacts ?? []) {
-    byId.set(a.id, { kind: "artifact", id: a.id, href: a.url, hint: `Artifact: ${a.title || a.filename}` })
+    byId.set(a.id, { kind: "artifact", id: a.id, href: a.url, label: a.title || a.filename, hint: `Artifact: ${a.title || a.filename}` })
   }
   const boxIds: string[] = []
   for (const b of data.boxes ?? []) {
     if (b.id.length < 6 || byId.has(b.id)) continue
     boxIds.push(b.id)
     const tasks = b.residentTasks.length
-    byId.set(b.id, { kind: "box", id: b.id, href: routes.box(b.id), hint: `Box · ${b.status} · ${tasks} task${tasks === 1 ? "" : "s"}` })
+    byId.set(b.id, { kind: "box", id: b.id, href: routes.box(b.id), label: b.id, hint: `Box · ${b.status} · ${tasks} task${tasks === 1 ? "" : "s"}` })
   }
   const byTitle = new Map<string, EntityRef>()
   for (const t of data.tasks ?? []) {
     const title = t.title.trim()
     if (titleCounts.get(title) === 1) byTitle.set(title, byId.get(t.id)!)
   }
+  const byName = new Map<string, EntityRef>()
+  const names = new Map<string, number>()
+  const named = [...(data.projects ?? []).map((p) => ["project", p.id, p.name]), ...(data.schedules ?? []).map((s) => ["schedule", s.id, s.name])]
+  for (const [kind, , name] of named) names.set(`${kind}:${name}`, (names.get(`${kind}:${name}`) ?? 0) + 1)
+  for (const [kind, id, name] of named) if (names.get(`${kind}:${name}`) === 1) byName.set(`${kind}:${name}`, byId.get(id!)!)
   // Longest box ids first so one id that prefixes another can't win early.
   const ids = [PREFIXED_ID, ...boxIds.sort((a, b) => b.length - a.length).map(escapeRegExp)].join("|")
   const pattern = new RegExp(`${ARTIFACT_PATH}|(?<![\\w-])(?:${ids})(?![\\w-])`, "g")
-  return { byId, byTitle, pattern }
+  return { byId, byTitle, byName, pattern }
 }
 
 /** What a matched token links to, or null for ids nobody knows (those stay plain text). */
@@ -80,7 +89,7 @@ export function resolveToken(token: string, index: EntityIndex): EntityRef | nul
   if (token.startsWith("/artifacts/")) {
     const id = token.split("/")[2] ?? ""
     const known = index.byId.get(id)
-    return { kind: "artifact", id, href: token, hint: known?.kind === "artifact" ? known.hint : "Artifact" }
+    return { kind: "artifact", id, href: token, label: known?.label ?? token, hint: known?.kind === "artifact" ? known.hint : "Artifact" }
   }
   return index.byId.get(token) ?? null
 }
@@ -119,10 +128,66 @@ export function linkTarget(href: string, origin?: string): { kind: "app" | "file
   return { kind: "app", href: path }
 }
 
+// No title here: hover hints are read fresh from the cache (status changes often), see refForHref.
+export interface ClickLike {
+  button: number
+  metaKey: boolean
+  ctrlKey: boolean
+  shiftKey: boolean
+  altKey: boolean
+  defaultPrevented: boolean
+  preventDefault(): void
+}
+
+/**
+ * Click on a link: in-app hrefs go through the router (no reload). Modified or middle clicks, files and other
+ * sites are left to the browser. Returns whether it navigated.
+ */
+export function followAppLink(e: ClickLike, href: string, navigate: (to: string) => void, origin?: string): boolean {
+  if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return false
+  const target = linkTarget(href, origin)
+  if (target.kind !== "app") return false
+  e.preventDefault()
+  navigate(target.href)
+  return true
+}
+
+export type ToolMention = { text: string; ref: EntityRef | null }
+
+/**
+ * What an orchestrator tool call is about, for its line in the chat: the tasks, schedules or projects in its
+ * input (ids or names), or the entity it created (`resultId`, recorded by the server from the tool result).
+ */
+export function toolMentions(tool: string, input: Record<string, unknown>, resultId: string | null, index: EntityIndex): ToolMention[] {
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null)
+  const mention = (kind: EntityKind, ref: string | null): ToolMention | null => {
+    if (!ref) return null
+    const byId = index.byId.get(ref)
+    const found = byId?.kind === kind ? byId : kind === "task" ? index.byTitle.get(ref) : index.byName.get(`${kind}:${ref}`)
+    return { text: found?.label ?? ref, ref: found ?? null }
+  }
+  const created = resultId ? index.byId.get(resultId) : undefined
+  const out: (ToolMention | null)[] = []
+  if (tool === "create_task") out.push(created ? { text: created.label, ref: created } : mention("task", str(input.title)))
+  else if (tool === "create_schedule") out.push(created ? { text: created.label, ref: created } : mention("schedule", str(input.name)))
+  else if (tool === "create_project") out.push(created ? { text: created.label, ref: created } : mention("project", str(input.name)))
+  else {
+    out.push(mention("task", str(input.task)))
+    if (Array.isArray(input.tasks)) for (const t of input.tasks) out.push(mention("task", str(t)))
+    out.push(mention("schedule", str(input.schedule)))
+  }
+  const found = out.filter((m): m is ToolMention => m !== null)
+  // The project only when the call isn't about something more specific (save_note, list_tasks, update_project…).
+  if (!found.length) {
+    const p = mention("project", str(input.project))
+    if (p) found.push(p)
+  }
+  return found
+}
+
 const linkNode = (ref: EntityRef, children: PhrasingContent[]): Link => ({
   type: "link",
   url: ref.href,
-  title: ref.hint,
   children,
   data: { hProperties: { "data-entity": ref.kind } },
 })
