@@ -11,6 +11,7 @@ import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { TaskManager } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
+import { SettingsStore } from "./settings.js"
 import { mcpHandler } from "./mcp.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
@@ -115,11 +116,12 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const provider = opts.provider ?? makeProvider(c)
+  const settings = new SettingsStore(store, c)
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, settings })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
-  const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken })
+  const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   tasks.onNotice = () => orchestrator.nudge()
   const auth = new Auth(c.password, store)
   const publicUrl = () => c.publicUrl
@@ -137,7 +139,7 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the orchestrator's Claude (its own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, settings }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -253,6 +255,9 @@ export function createBoxYard(
   api.post("/tasks/:id/messages", (req, res) => {
     res.json(tasks.sendInput(req.params.id!, parse(schemas.message, req.body).content, "cody"))
   })
+  api.post("/tasks/:id/compact", (req, res) => {
+    res.json(tasks.compactTask(req.params.id!))
+  })
   api.post("/tasks/:id/stop", async (req, res) => {
     res.json(await tasks.stopTask(req.params.id!))
   })
@@ -316,6 +321,25 @@ export function createBoxYard(
   api.post("/chat", (req, res) => {
     const body = parse(schemas.chat, req.body)
     res.status(201).json(orchestrator.send(body.content, body.id))
+  })
+  api.get("/orchestrator", (_req, res) => {
+    res.json(orchestrator.state())
+  })
+  api.post("/orchestrator/compact", (_req, res) => {
+    res.json(orchestrator.requestCompact("button"))
+  })
+  api.get("/agent-settings", (_req, res) => {
+    res.json(settings.info())
+  })
+  api.put("/agent-settings", (req, res) => {
+    const info = settings.update(req.body)
+    hub.broadcast({ type: "settings", info })
+    res.json(info)
+  })
+  api.delete("/agent-settings", (_req, res) => {
+    const info = settings.reset()
+    hub.broadcast({ type: "settings", info })
+    res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {
     orchestrator.cancel()

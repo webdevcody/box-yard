@@ -6,7 +6,20 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import type { ChatMessage } from "../shared/types.js"
+import type { ChatMessage, ContextUsage, OrchestratorState } from "../shared/types.js"
+import { BadRequestError } from "./store.js"
+import { compactThreshold, type SettingsStore } from "./settings.js"
+import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
+import {
+  SUMMARY_PROMPT,
+  cleanSummary,
+  compactionsDir,
+  compactionsPrompt,
+  finishCompaction,
+  lastCompaction,
+  summaryLooksValid,
+  writeCompaction,
+} from "./compactions.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -17,6 +30,21 @@ const MAX_AUTO_TURNS = 8
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
+const USAGE_KEY = "orchestrator_usage"
+/** Never wait for more than this share of the window: the CLI's own last-resort compaction (no log) kicks in near 96%. */
+const MAX_THRESHOLD_SHARE = 0.95
+
+/** What one run of the claude CLI produced. */
+interface RunResult {
+  ok: boolean
+  error: string
+  /** Assistant text (used for the compaction summary). */
+  text: string
+  /** Raw stdout, for non-stream commands like /context. */
+  raw: string
+  sessionId: string | null
+}
+type RunKind = "turn" | "summary" | "compact" | "context"
 
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
@@ -30,7 +58,11 @@ export class Orchestrator {
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
   private child: ChildProcess | null = null
+  private compactWanted: "button" | "auto" | null = null
+  private compacting = false
+  private lastError: string | null = null
   private readonly workdir: string
+  readonly compactionsDir: string
   private readonly mcpConfigPath: string
 
   constructor(
@@ -38,9 +70,11 @@ export class Orchestrator {
     private readonly store: Store,
     private readonly hub: Hub,
     mcp: { url: string; token: string },
+    private readonly settings: SettingsStore,
   ) {
     this.workdir = path.join(c.dataDir, "orchestrator")
-    fs.mkdirSync(this.workdir, { recursive: true })
+    this.compactionsDir = compactionsDir(c.dataDir)
+    fs.mkdirSync(this.compactionsDir, { recursive: true })
     this.mcpConfigPath = path.join(c.dataDir, "orchestrator-mcp.json")
     this.mcpConfig = JSON.stringify({
       mcpServers: { boxyard: { type: "http", url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } },
@@ -108,7 +142,118 @@ export class Orchestrator {
     this.cancel()
     this.store.setKv(SESSION_KEY, null)
     this.store.setKv(STARTED_KEY, null)
+    this.store.setKv(USAGE_KEY, null)
+    this.compactWanted = null
     this.store.clearChat()
+    this.publishState()
+  }
+
+  // ------------------------------------------------------------------ context usage and compaction
+
+  usage(): ContextUsage {
+    try {
+      const u = JSON.parse(this.store.getKv(USAGE_KEY) ?? "null")
+      if (u) return { tokens: u.tokens ?? null, window: u.window ?? null, updatedAt: u.updatedAt ?? null }
+    } catch {}
+    return { tokens: null, window: null, updatedAt: null }
+  }
+
+  private setUsage(tokens: number | null, window?: number | null) {
+    const prev = this.usage()
+    this.store.setKv(USAGE_KEY, JSON.stringify({ tokens, window: window ?? prev.window, updatedAt: Date.now() }))
+    this.publishState()
+  }
+
+  state(): OrchestratorState {
+    return {
+      busy: this.running,
+      usage: this.usage(),
+      compacting: this.compacting,
+      compactQueued: this.compactWanted !== null && !this.compacting,
+      lastCompaction: lastCompaction(this.compactionsDir),
+      compactionsDir: this.compactionsDir,
+      error: this.lastError,
+    }
+  }
+
+  private publishState() {
+    this.hub.broadcast({ type: "orchestrator.state", state: this.state() })
+  }
+
+  /** Compact the orchestrator's session: right now if it is idle, otherwise right after the current turn. */
+  requestCompact(trigger: "button" | "auto" = "button") {
+    if (!this.session().started) throw new BadRequestError("The orchestrator hasn't started a conversation yet, so there is nothing to compact.")
+    if (this.compacting || this.compactWanted) return this.state()
+    this.compactWanted = trigger
+    this.lastError = null
+    this.publishState()
+    void this.drain()
+    return this.state()
+  }
+
+  /** After a turn: queue a compaction when usage passed the configured threshold. */
+  private checkAutoCompact() {
+    if (this.compactWanted || this.compacting) return
+    const { orchestratorAutoCompact: ac } = this.settings.get()
+    const u = this.usage()
+    const threshold = compactThreshold(ac, u.window)
+    if (threshold === null || u.tokens === null) return
+    const cap = u.window ? Math.floor(u.window * MAX_THRESHOLD_SHARE) : Infinity
+    if (u.tokens >= Math.min(threshold, cap)) {
+      this.compactWanted = "auto"
+      this.publishState()
+    }
+  }
+
+  /**
+   * Write the durable summary first, then /compact. If the summary can't be
+   * produced the session is left alone (and the error shown), so every
+   * compaction has a log file.
+   */
+  private async doCompact() {
+    const trigger = this.compactWanted ?? "button"
+    this.compactWanted = null
+    this.compacting = true
+    this.lastError = null
+    this.publishState()
+    try {
+      const s = this.session()
+      const before = this.usage().tokens
+      const model = this.settings.get().orchestratorModel
+      const summary = await this.run(SUMMARY_PROMPT, s.id, true, "summary")
+      const text = cleanSummary(summary.text)
+      if (!summary.ok || !summaryLooksValid(text)) {
+        throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
+      }
+      const file = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before }, text)
+      const compact = await this.run("/compact", s.id, true, "compact")
+      if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
+      // /compact keeps the session id; if a CLI version ever changed it, follow it.
+      let id = s.id
+      if (compact.sessionId && compact.sessionId !== s.id) {
+        id = compact.sessionId
+        this.store.setKv(SESSION_KEY, id)
+      }
+      const report = await this.run("/context", id, true, "context")
+      const after = report.ok ? parseContextReport(report.raw) : null
+      this.setUsage(after?.tokens ?? null, after?.window)
+      finishCompaction(file, after?.tokens ?? null)
+      const note = this.store.addChat(
+        "notice",
+        `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after.tokens)} tokens` : ""} (${trigger === "auto" ? "automatic" : "button"}). Summary saved to ${file}.`,
+        { kind: "compaction" },
+      )
+      // Informational only: the orchestrator doesn't need to see this one.
+      this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(note.id)
+      this.hub.broadcast({ type: "chat.message", message: note })
+    } catch (err) {
+      this.lastError = `Compaction skipped: ${(err as Error).message}`
+      const m = this.store.addChat("error", this.lastError)
+      this.hub.broadcast({ type: "chat.message", message: m })
+    } finally {
+      this.compacting = false
+      this.publishState()
+    }
   }
 
   private session() {
@@ -126,8 +271,10 @@ export class Orchestrator {
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted) {
-        if (this.pending) {
+      while (this.pending || this.wakeWanted || this.compactWanted) {
+        if (this.compactWanted) {
+          await this.doCompact()
+        } else if (this.pending) {
           this.pending = false
           this.wakeWanted = false
           await this.turn()
@@ -139,6 +286,7 @@ export class Orchestrator {
     } finally {
       this.running = false
       this.hub.broadcast({ type: "chat.busy", busy: false })
+      this.publishState()
     }
   }
 
@@ -209,31 +357,50 @@ export class Orchestrator {
       const msg = this.store.addChat("error", `The orchestrator hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "chat.message", message: msg })
     }
+    this.checkAutoCompact()
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean): Promise<{ ok: boolean; error: string }> {
+  /** Arguments for the claude CLI, by kind of run. Settings are read here, so changes apply from the next run. */
+  private claudeArgs(kind: RunKind, sessionId: string, resume: boolean): string[] {
+    const st = this.settings.get()
+    const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
+    const model = ["--model", st.orchestratorModel]
+    if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
+    // /context prints plain text.
+    if (kind === "context") return ["-p", ...session, ...model]
+    return [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      ...(kind === "turn" ? ["--include-partial-messages"] : []),
+      "--strict-mcp-config",
+      "--mcp-config",
+      this.mcpConfigPath,
+      // The summary turn must only write text; Read is for the compaction log (and only that folder).
+      ...(kind === "summary"
+        ? ["--tools", ""]
+        : ["--tools", "Read,WebSearch,WebFetch", "--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")]),
+      "--permission-mode",
+      "dontAsk",
+      "--append-system-prompt",
+      `${ORCHESTRATOR_PROMPT}\n${compactionsPrompt(this.compactionsDir)}`,
+      ...session,
+      ...model,
+      "--effort",
+      st.orchestratorEffort,
+    ]
+  }
+
+  /** Read access is limited to these folders (absolute paths use a `//` prefix in permission rules). */
+  private readRules(): string[] {
+    return [`Read(/${this.compactionsDir}/**)`]
+  }
+
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {
     return new Promise((resolve) => {
       this.writeMcpConfig()
-      const args = [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--strict-mcp-config",
-        "--mcp-config",
-        this.mcpConfigPath,
-        "--tools",
-        "WebSearch,WebFetch",
-        "--allowedTools",
-        "mcp__boxyard,WebSearch,WebFetch",
-        "--permission-mode",
-        "dontAsk",
-        "--append-system-prompt",
-        ORCHESTRATOR_PROMPT,
-        ...(resume ? ["--resume", sessionId] : ["--session-id", sessionId]),
-        ...(this.c.orchestratorModel ? ["--model", this.c.orchestratorModel] : []),
-      ]
+      const args = this.claudeArgs(kind, sessionId, resume)
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
       // When Box Yard itself was started from inside a Claude Code session, don't
@@ -246,7 +413,7 @@ export class Orchestrator {
       try {
         child = spawn(bin!, [...pre, ...args], { cwd: this.workdir, env, stdio: ["pipe", "pipe", "pipe"] })
       } catch (err) {
-        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}` })
+        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
         return
       }
       this.child = child
@@ -255,6 +422,10 @@ export class Orchestrator {
       let sawResult = false
       let resultError: string | null = null
       let settled = false
+      let raw = ""
+      let said = ""
+      let seenSession: string | null = null
+      const quiet = kind !== "turn"
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
@@ -264,7 +435,9 @@ export class Orchestrator {
         } catch {
           return
         }
+        if (typeof msg.session_id === "string") seenSession = msg.session_id
         if (msg.type === "stream_event") {
+          if (quiet) return
           const ev = msg.event
           if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta") {
             this.hub.broadcast({ type: "chat.delta", text: ev.delta.text })
@@ -272,15 +445,19 @@ export class Orchestrator {
           return
         }
         if (msg.type === "system" && msg.subtype === "init") {
-          this.store.setKv(STARTED_KEY, "1")
+          if (kind === "turn") this.store.setKv(STARTED_KEY, "1")
           return
         }
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
+          const tokens = msg.message.model === "<synthetic>" || kind !== "turn" ? null : contextTokens(msg.message.usage)
+          if (tokens) this.setUsage(tokens)
           const text = msg.message.content
             .filter((b: any) => b.type === "text")
             .map((b: any) => b.text)
             .join("")
             .trim()
+          if (text) said = said ? `${said}\n\n${text}` : text
+          if (quiet) return
           if (text && text !== NO_UPDATE) {
             const m = this.store.addChat("assistant", text)
             this.hub.broadcast({ type: "chat.message", message: m })
@@ -295,7 +472,11 @@ export class Orchestrator {
         }
         if (msg.type === "result") {
           sawResult = true
-          this.store.setKv(STARTED_KEY, "1")
+          if (kind === "turn") {
+            this.store.setKv(STARTED_KEY, "1")
+            const window = contextWindowOf(msg.modelUsage)
+            if (window) this.setUsage(this.usage().tokens, window)
+          }
           if (msg.is_error) resultError = String(msg.result ?? msg.subtype ?? "error")
         }
       }
@@ -304,6 +485,7 @@ export class Orchestrator {
         buf += chunk.toString("utf8")
         const lines = buf.split("\n")
         buf = lines.pop() ?? ""
+        if (kind === "context") raw += chunk.toString("utf8")
         for (const line of lines) if (line.trim()) onLine(line)
       })
       child.stderr!.on("data", (chunk: Buffer) => {
@@ -315,9 +497,10 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
-        if (err) return resolve({ ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
-        if (code === 0 && !resultError) return resolve({ ok: true, error: "" })
-        resolve({ ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`) })
+        const base = { text: said, raw, sessionId: seenSession }
+        if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
+        if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })
+        resolve({ ...base, ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`) })
       }
       child.on("error", (err) => finish(null, err))
       child.on("close", (code) => finish(code))

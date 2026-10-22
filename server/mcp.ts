@@ -9,7 +9,8 @@ import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { Scheduler } from "./scheduler.js"
 import { describeCron } from "../shared/cron.js"
-import { TASK_STATUSES, type Project, type Schedule, type Task } from "../shared/types.js"
+import type { SettingsStore } from "./settings.js"
+import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 
 export interface McpDeps {
@@ -19,6 +20,7 @@ export interface McpDeps {
   artifacts: Artifacts
   publicUrl: () => string
   scheduler: Scheduler
+  settings: SettingsStore
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
@@ -38,12 +40,28 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
   }
 }
 
+const effortSchema = z
+  .enum(EFFORTS)
+  .optional()
+  .describe(
+    "How hard the agent should think (reasoning effort). Pick the lowest level that fits: " +
+      "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
+      "medium = small, well-specified edits or config changes; " +
+      "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Default if omitted: high.",
+  )
+
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /** The tools the orchestrator's Claude uses to run Box Yard. */
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { store, tasks, hub, artifacts, scheduler } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
+  // The `effort` param only exists while Cody lets the orchestrator decide. The server is built per
+  // request and the orchestrator's CLI lists tools at the start of every turn, so a settings change
+  // shows up on its next turn. In fixed mode the param is absent (and an extra one would be ignored).
+  const decideEffort = deps.settings.get().agentEffort === "orchestrator"
+  const effortParam: Record<string, typeof effortSchema> = decideEffort ? { effort: effortSchema } : {}
 
   const project = (ref: string): Project => {
     const p = store.findProject(ref)
@@ -243,9 +261,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           .array(z.string())
           .optional()
           .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)"),
+        ...effortParam,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[] }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; effort?: Effort }) => {
       let prompt = a.prompt
       if (a.related_tasks?.length) {
         const context = a.related_tasks.map((ref) => {
@@ -256,7 +275,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         })
         prompt = `${prompt}\n\n## Related earlier work\n${context.join("\n")}`
       }
-      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env })
+      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env, effort: decideEffort ? (a.effort ?? null) : null })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
   )
@@ -266,13 +285,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
+        (decideEffort ? "Set effort for this follow-up: it applies from the agent's next turn on (omit it to keep the effort the agent already has). " : "") +
         "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends.",
-      inputSchema: { task: z.string(), message: z.string().min(1) },
+      inputSchema: { task: z.string(), message: z.string().min(1), ...effortParam },
     },
-    safe(async (a: { task: string; message: string }) => {
+    safe(async (a: { task: string; message: string; effort?: Effort }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, "orchestrator")
+      const t = tasks.sendInput(before.id, a.message, "orchestrator", decideEffort ? (a.effort ?? null) : null)
       return ok({ ...brief(t), delivery: how })
     }),
   )
