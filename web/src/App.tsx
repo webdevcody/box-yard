@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
 import { Menu, MessageSquare, X } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
@@ -12,6 +13,7 @@ import { TaskView } from "./components/TaskView"
 import { SchedulesView } from "./components/Schedules"
 import { HealthBanner, HomeView, InboxView, Login } from "./components/Views"
 import { cx } from "./components/ui"
+import { ResizeHandle, useResizable } from "./lib/resize"
 
 export function App() {
   const me = useMe()
@@ -20,6 +22,8 @@ export function App() {
   const connection = useServerEvents(authed)
   const [navOpen, setNavOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
+  const sidebarSize = useResizable({ key: "box-yard:sidebar-width", defaultWidth: 256, min: 200, max: 360, edge: "right" })
+  const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })
@@ -35,8 +39,11 @@ export function App() {
   return (
     <div className="flex h-full">
       {/* Projects sidebar: fixed on wide screens, a drawer on small ones */}
-      <div className={cx("fixed inset-y-0 left-0 z-40 transition-transform lg:static lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}>
+      <div className={cx("fixed inset-y-0 left-0 z-40 transition-transform w-64 lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
+        style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
+      >
         <Sidebar connection={connection} onNavigate={() => setNavOpen(false)} />
+        <ResizeHandle {...sidebarSize.handle} className="lg:block" />
       </div>
       {navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
 
@@ -70,10 +77,12 @@ export function App() {
       {/* The global orchestrator chat: always visible on wide screens */}
       <div
         className={cx(
-          "fixed inset-y-0 right-0 z-40 w-full max-w-md border-l border-zinc-900 transition-transform xl:static xl:w-[26rem] xl:translate-x-0",
+          "fixed inset-y-0 right-0 z-40 w-full max-w-md border-l border-zinc-900 transition-transform xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
           chatOpen ? "translate-x-0" : "translate-x-full",
         )}
+        style={{ "--panel-w": `${chatSize.width}px` } as CSSProperties}
       >
+        <ResizeHandle {...chatSize.handle} className="xl:block" />
         <button onClick={() => setChatOpen(false)} className="absolute top-3 right-3 z-10 rounded p-1 text-zinc-500 hover:text-zinc-200 xl:hidden">
           <X className="h-4 w-4" />
         </button>
