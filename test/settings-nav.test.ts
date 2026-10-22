@@ -12,6 +12,12 @@ const base: Settings = {
   maxBoxes: 5,
   slotsPerBox: 2,
   maxAgents: 0,
+  costRates: {
+    boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
+    boxKeepAliveMonthlyUsd: { small: 8, medium: 16, large: 32 },
+    boxStorageGbMonthUsd: 0.1,
+  },
+  budget: { dailyUsd: 0, monthlyUsd: 0 },
 }
 
 describe("settings nav", () => {

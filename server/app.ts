@@ -378,6 +378,10 @@ export function createBoxYard(
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())
   })
+  api.get("/usage", (_req, res) => {
+    tasks.boxes()
+    res.json(store.usageReport(settings.get()))
+  })
   api.post("/orchestrator/compact", (_req, res) => {
     res.json(orchestrator.requestCompact("button"))
   })

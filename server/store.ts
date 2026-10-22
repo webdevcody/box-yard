@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
-import { shouldNotify } from "../shared/types.js"
+import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import type {
   AppNotification,
   Artifact,
+  BoxSize,
+  BoxUsageTotals,
+  BudgetSettings,
+  BudgetStatus,
   ChatMessage,
   ChatRole,
+  ClaudeUsageTotals,
+  CostRates,
   Effort,
   PrState,
   PreviewLink,
@@ -21,6 +27,11 @@ import type {
   TaskMessage,
   TaskMessageRole,
   TaskStatus,
+  UsageBoxTotal,
+  UsageProjectTotal,
+  UsageReport,
+  UsageTaskTotal,
+  UsageWindow,
 } from "../shared/types.js"
 
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
@@ -166,6 +177,48 @@ export interface BoxRow {
   status: "creating" | "ready" | "lost" | "deleting"
   created_at: number
   last_used_at: number
+  size: BoxSize
+  keep_alive: number
+  active_ms: number
+  last_metered_at: number | null
+  disk_bytes: number | null
+  disk_updated_at: number | null
+  usage_source: "actual" | "estimated"
+}
+
+export interface ClaudeUsageRow {
+  id: string
+  source: "task" | "orchestrator"
+  run_kind: string
+  task_id: string | null
+  project_id: string | null
+  turn_id: string | null
+  session_id: string | null
+  model: string | null
+  started_at: number
+  ended_at: number
+  duration_ms: number
+  input_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cost_usd: number
+  raw_usage_json: string
+}
+
+interface BoxUsageIntervalRow {
+  id: string
+  box_id: string
+  provider: string
+  size: BoxSize
+  keep_alive: number
+  started_at: number
+  ended_at: number
+  active_ms: number
+  uptime_ms: number
+  disk_bytes: number | null
+  source: "actual" | "estimated"
 }
 
 type TaskPatch = Partial<{
@@ -386,6 +439,7 @@ export class Store {
     const pending = this.db.prepare("SELECT COUNT(*) AS n FROM task_inputs WHERE task_id = ?").get(row.id) as {
       n: number
     }
+    const usage = this.taskClaudeTotals(row.id)
     return {
       id: row.id,
       projectId: row.project_id,
@@ -413,6 +467,8 @@ export class Store {
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
       effort: row.effort ?? null,
+      claudeCostUsd: usage.costUsd,
+      claudeTokens: usage.totalTokens,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -758,6 +814,241 @@ export class Store {
     return rows.map((r) => this.artifactFromRow(r))
   }
 
+  // ---------- usage and costs ----------
+
+  recordClaudeUsage(input: {
+    source: "task" | "orchestrator"
+    runKind: string
+    taskId?: string | null
+    projectId?: string | null
+    turnId?: string | null
+    sessionId?: string | null
+    model?: string | null
+    startedAt: number
+    endedAt: number
+    durationMs?: number | null
+    usage?: {
+      input_tokens?: number
+      cache_creation_input_tokens?: number
+      cache_read_input_tokens?: number
+      output_tokens?: number
+    } | null
+    costUsd?: number | null
+  }) {
+    const u = input.usage ?? {}
+    const inputTokens = intToken(u.input_tokens)
+    const cacheCreation = intToken(u.cache_creation_input_tokens)
+    const cacheRead = intToken(u.cache_read_input_tokens)
+    const outputTokens = intToken(u.output_tokens)
+    const totalTokens = inputTokens + cacheCreation + cacheRead + outputTokens
+    const costUsd = typeof input.costUsd === "number" && Number.isFinite(input.costUsd) ? input.costUsd : 0
+    // Some CLI runs report only cost, or only duration. Keep those rows too.
+    if (totalTokens <= 0 && costUsd <= 0 && !(input.durationMs && input.durationMs > 0)) return
+    this.db
+      .prepare(
+        `INSERT INTO claude_usage
+          (id, source, run_kind, task_id, project_id, turn_id, session_id, model, started_at, ended_at, duration_ms,
+           input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, raw_usage_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        newId("cu"),
+        input.source,
+        input.runKind,
+        input.taskId ?? null,
+        input.projectId ?? null,
+        input.turnId ?? null,
+        input.sessionId ?? null,
+        input.model ?? null,
+        input.startedAt,
+        input.endedAt,
+        Math.max(0, Math.round(input.durationMs ?? input.endedAt - input.startedAt)),
+        inputTokens,
+        cacheCreation,
+        cacheRead,
+        outputTokens,
+        totalTokens,
+        costUsd,
+        JSON.stringify(u),
+      )
+  }
+
+  taskClaudeTotals(taskId: string): ClaudeUsageTotals {
+    const row = this.db
+      .prepare(
+        `SELECT
+          COALESCE(SUM(cost_usd), 0) AS costUsd,
+          COALESCE(SUM(input_tokens), 0) AS inputTokens,
+          COALESCE(SUM(cache_creation_input_tokens), 0) AS cacheCreationInputTokens,
+          COALESCE(SUM(cache_read_input_tokens), 0) AS cacheReadInputTokens,
+          COALESCE(SUM(output_tokens), 0) AS outputTokens,
+          COALESCE(SUM(total_tokens), 0) AS totalTokens,
+          COUNT(*) AS turns,
+          COALESCE(SUM(duration_ms), 0) AS durationMs
+         FROM claude_usage WHERE task_id = ?`,
+      )
+      .get(taskId) as ClaudeUsageTotals
+    return totals(row)
+  }
+
+  recordBoxUsageInterval(input: {
+    boxId: string
+    provider: string
+    size: BoxSize
+    keepAlive: boolean
+    startedAt: number
+    endedAt: number
+    activeMs: number
+    uptimeMs: number
+    diskBytes?: number | null
+    source: "actual" | "estimated"
+  }) {
+    if (input.endedAt <= input.startedAt || input.uptimeMs <= 0) return
+    this.db
+      .prepare(
+        `INSERT INTO box_usage_intervals
+          (id, box_id, provider, size, keep_alive, started_at, ended_at, active_ms, uptime_ms, disk_bytes, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        newId("bu"),
+        input.boxId,
+        input.provider,
+        input.size,
+        input.keepAlive ? 1 : 0,
+        input.startedAt,
+        input.endedAt,
+        Math.max(0, Math.round(input.activeMs)),
+        Math.max(0, Math.round(input.uptimeMs)),
+        input.diskBytes ?? null,
+        input.source,
+      )
+  }
+
+  usageReport(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now()): UsageReport {
+    const windows = usageWindows(now).map((w) => this.usageWindow(w, settings.costRates))
+    const projects = this.usageProjects()
+    const tasks = this.usageTasks()
+    const boxes = this.listBoxes().map((b) => this.boxUsageTotal(b, settings.costRates, now))
+    const orchestrator = this.claudeTotals("WHERE source = 'orchestrator'")
+    return {
+      generatedAt: now,
+      rates: settings.costRates,
+      budget: budgetStatus(settings.budget, windows),
+      windows,
+      projects,
+      tasks,
+      boxes,
+      orchestrator,
+    }
+  }
+
+  usageBudgetStatus(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now()): BudgetStatus {
+    return this.usageReport(settings, now).budget
+  }
+
+  private usageWindow(w: { key: UsageWindow["key"]; label: string; since: number }, rates: CostRates): UsageWindow {
+    const claude = this.claudeTotals("WHERE started_at >= ?", [w.since])
+    const boxes = this.boxTotalsSince(w.since, rates)
+    return { ...w, claude, boxes, totalCostUsd: claude.costUsd + boxes.costUsd }
+  }
+
+  private usageProjects(): UsageProjectTotal[] {
+    const rows = this.db
+      .prepare(
+        `SELECT p.id AS projectId, p.name AS projectName,
+          COALESCE(SUM(u.cost_usd), 0) AS costUsd,
+          COALESCE(SUM(u.input_tokens), 0) AS inputTokens,
+          COALESCE(SUM(u.cache_creation_input_tokens), 0) AS cacheCreationInputTokens,
+          COALESCE(SUM(u.cache_read_input_tokens), 0) AS cacheReadInputTokens,
+          COALESCE(SUM(u.output_tokens), 0) AS outputTokens,
+          COALESCE(SUM(u.total_tokens), 0) AS totalTokens,
+          COUNT(u.id) AS turns,
+          COALESCE(SUM(u.duration_ms), 0) AS durationMs
+         FROM projects p
+         JOIN claude_usage u ON u.project_id = p.id
+         GROUP BY p.id, p.name
+         ORDER BY costUsd DESC, totalTokens DESC`,
+      )
+      .all() as (ClaudeUsageTotals & { projectId: string; projectName: string })[]
+    return rows.map((r) => ({ projectId: r.projectId, projectName: r.projectName, claude: totals(r) }))
+  }
+
+  private usageTasks(): UsageTaskTotal[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.id AS taskId, t.title AS taskTitle, p.id AS projectId, p.name AS projectName,
+          COALESCE(SUM(u.cost_usd), 0) AS costUsd,
+          COALESCE(SUM(u.input_tokens), 0) AS inputTokens,
+          COALESCE(SUM(u.cache_creation_input_tokens), 0) AS cacheCreationInputTokens,
+          COALESCE(SUM(u.cache_read_input_tokens), 0) AS cacheReadInputTokens,
+          COALESCE(SUM(u.output_tokens), 0) AS outputTokens,
+          COALESCE(SUM(u.total_tokens), 0) AS totalTokens,
+          COUNT(u.id) AS turns,
+          COALESCE(SUM(u.duration_ms), 0) AS durationMs
+         FROM tasks t
+         JOIN projects p ON p.id = t.project_id
+         JOIN claude_usage u ON u.task_id = t.id
+         GROUP BY t.id, t.title, p.id, p.name
+         ORDER BY costUsd DESC, totalTokens DESC
+         LIMIT 200`,
+      )
+      .all() as (ClaudeUsageTotals & { taskId: string; taskTitle: string; projectId: string; projectName: string })[]
+    return rows.map((r) => ({ taskId: r.taskId, taskTitle: r.taskTitle, projectId: r.projectId, projectName: r.projectName, claude: totals(r) }))
+  }
+
+  private claudeTotals(where = "", args: unknown[] = []): ClaudeUsageTotals {
+    const row = this.db
+      .prepare(
+        `SELECT
+          COALESCE(SUM(cost_usd), 0) AS costUsd,
+          COALESCE(SUM(input_tokens), 0) AS inputTokens,
+          COALESCE(SUM(cache_creation_input_tokens), 0) AS cacheCreationInputTokens,
+          COALESCE(SUM(cache_read_input_tokens), 0) AS cacheReadInputTokens,
+          COALESCE(SUM(output_tokens), 0) AS outputTokens,
+          COALESCE(SUM(total_tokens), 0) AS totalTokens,
+          COUNT(*) AS turns,
+          COALESCE(SUM(duration_ms), 0) AS durationMs
+         FROM claude_usage ${where}`,
+      )
+      .get(...args) as ClaudeUsageTotals
+    return totals(row)
+  }
+
+  private boxTotalsSince(since: number, rates: CostRates): BoxUsageTotals {
+    const rows = this.db.prepare("SELECT * FROM box_usage_intervals WHERE ended_at >= ? ORDER BY ended_at ASC").all(since) as BoxUsageIntervalRow[]
+    const out: BoxUsageTotals = { activeMs: 0, uptimeMs: 0, diskBytes: 0, costUsd: 0, source: "actual" }
+    for (const r of rows) {
+      const span = Math.max(1, r.ended_at - r.started_at)
+      const overlap = Math.max(0, r.ended_at - Math.max(since, r.started_at))
+      if (!overlap) continue
+      const share = Math.min(1, overlap / span)
+      const activeMs = r.active_ms * share
+      const uptimeMs = r.uptime_ms * share
+      out.activeMs += activeMs
+      out.uptimeMs += uptimeMs
+      out.diskBytes = Math.max(out.diskBytes, r.disk_bytes ?? 0)
+      out.costUsd += boxCost({ activeMs, uptimeMs, diskBytes: r.disk_bytes, size: r.size, keepAlive: Boolean(r.keep_alive) }, rates)
+      if (r.source !== "actual") out.source = "estimated"
+    }
+    return out
+  }
+
+  private boxUsageTotal(row: BoxRow, rates: CostRates, now: number): UsageBoxTotal {
+    const uptimeMs = Math.max(0, now - row.created_at)
+    return {
+      boxId: row.id,
+      provider: row.provider,
+      size: normalizeBoxSize(row.size),
+      keepAlive: Boolean(row.keep_alive),
+      activeMs: row.active_ms ?? 0,
+      uptimeMs,
+      diskBytes: row.disk_bytes ?? null,
+      estimatedCostUsd: boxCost({ activeMs: row.active_ms ?? 0, uptimeMs, diskBytes: row.disk_bytes, size: normalizeBoxSize(row.size), keepAlive: Boolean(row.keep_alive) }, rates),
+      usageSource: row.usage_source ?? "estimated",
+    }
+  }
+
   // ---------- boxes ----------
 
   listBoxes(): BoxRow[] {
@@ -768,13 +1059,32 @@ export class Store {
     return (this.db.prepare("SELECT * FROM boxes WHERE id = ?").get(id) as BoxRow | undefined) ?? null
   }
 
-  upsertBox(row: BoxRow) {
+  upsertBox(row: Pick<BoxRow, "id" | "provider" | "status" | "created_at" | "last_used_at"> & Partial<Omit<BoxRow, "id" | "provider" | "status" | "created_at" | "last_used_at">>) {
     this.db
       .prepare(
-        `INSERT INTO boxes (id, provider, status, created_at, last_used_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET status = excluded.status, last_used_at = excluded.last_used_at`,
+        `INSERT INTO boxes (id, provider, status, created_at, last_used_at, size, keep_alive, active_ms, last_metered_at, disk_bytes, disk_updated_at, usage_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+          status = excluded.status,
+          last_used_at = excluded.last_used_at,
+          size = excluded.size,
+          keep_alive = excluded.keep_alive,
+          usage_source = excluded.usage_source`,
       )
-      .run(row.id, row.provider, row.status, row.created_at, row.last_used_at)
+      .run(
+        row.id,
+        row.provider,
+        row.status,
+        row.created_at,
+        row.last_used_at,
+        normalizeBoxSize(row.size),
+        row.keep_alive ? 1 : 0,
+        row.active_ms ?? 0,
+        row.last_metered_at ?? row.created_at,
+        row.disk_bytes ?? null,
+        row.disk_updated_at ?? null,
+        row.usage_source ?? "estimated",
+      )
   }
 
   setBoxStatus(id: string, status: BoxRow["status"]) {
@@ -783,6 +1093,37 @@ export class Store {
 
   touchBox(id: string) {
     this.db.prepare("UPDATE boxes SET last_used_at = ? WHERE id = ?").run(Date.now(), id)
+  }
+
+  meterBox(
+    id: string,
+    patch: Partial<{
+      activeMs: number
+      lastMeteredAt: number
+      diskBytes: number | null
+      diskUpdatedAt: number | null
+      size: BoxSize
+      keepAlive: boolean
+      usageSource: "actual" | "estimated"
+    }>,
+  ) {
+    const sets: string[] = []
+    const args: unknown[] = []
+    const cols = {
+      activeMs: "active_ms",
+      lastMeteredAt: "last_metered_at",
+      diskBytes: "disk_bytes",
+      diskUpdatedAt: "disk_updated_at",
+      size: "size",
+      keepAlive: "keep_alive",
+      usageSource: "usage_source",
+    } as const
+    for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
+      if (v === undefined) continue
+      sets.push(`${cols[k]} = ?`)
+      args.push(k === "keepAlive" ? (v ? 1 : 0) : k === "size" ? normalizeBoxSize(v as BoxSize) : v)
+    }
+    if (sets.length) this.db.prepare(`UPDATE boxes SET ${sets.join(", ")} WHERE id = ?`).run(...args, id)
   }
 
   removeBox(id: string) {
@@ -1045,6 +1386,65 @@ export class Store {
         .prepare("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .run(key, value)
   }
+}
+
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000
+const GB = 1024 ** 3
+
+function intToken(n: unknown) {
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.round(n) : 0
+}
+
+function totals(row: Partial<ClaudeUsageTotals> | undefined | null): ClaudeUsageTotals {
+  return {
+    costUsd: Number(row?.costUsd ?? 0),
+    inputTokens: Number(row?.inputTokens ?? 0),
+    cacheCreationInputTokens: Number(row?.cacheCreationInputTokens ?? 0),
+    cacheReadInputTokens: Number(row?.cacheReadInputTokens ?? 0),
+    outputTokens: Number(row?.outputTokens ?? 0),
+    totalTokens: Number(row?.totalTokens ?? 0),
+    turns: Number(row?.turns ?? 0),
+    durationMs: Number(row?.durationMs ?? 0),
+  }
+}
+
+export function normalizeBoxSize(size: unknown): BoxSize {
+  return typeof size === "string" && (BOX_SIZES as readonly string[]).includes(size) ? (size as BoxSize) : "small"
+}
+
+export function boxCost(
+  box: { activeMs: number; uptimeMs: number; diskBytes?: number | null; size: BoxSize; keepAlive: boolean },
+  rates: CostRates,
+): number {
+  const size = normalizeBoxSize(box.size)
+  const active = (Math.max(0, box.activeMs) / 3_600_000) * rates.boxActiveCpuHourlyUsd[size]
+  const keepAlive = box.keepAlive ? (Math.max(0, box.uptimeMs) / MONTH_MS) * rates.boxKeepAliveMonthlyUsd[size] : 0
+  const storage = (((box.diskBytes ?? 0) / GB) * Math.max(0, box.uptimeMs) * rates.boxStorageGbMonthUsd) / MONTH_MS
+  return active + keepAlive + storage
+}
+
+function usageWindows(now: number): Pick<UsageWindow, "key" | "label" | "since">[] {
+  const day = new Date(now)
+  day.setHours(0, 0, 0, 0)
+  return [
+    { key: "today", label: "Today", since: day.getTime() },
+    { key: "7d", label: "Last 7 days", since: now - 7 * 24 * 60 * 60 * 1000 },
+    { key: "30d", label: "Last 30 days", since: now - 30 * 24 * 60 * 60 * 1000 },
+  ]
+}
+
+function budgetStatus(budget: BudgetSettings, windows: UsageWindow[]): BudgetStatus {
+  const today = windows.find((w) => w.key === "today")?.totalCostUsd ?? 0
+  const month = windows.find((w) => w.key === "30d")?.totalCostUsd ?? 0
+  const state = (usedUsd: number, limitUsd: number) => ({
+    limitUsd,
+    usedUsd,
+    exceeded: limitUsd > 0 && usedUsd >= limitUsd,
+    warning: limitUsd > 0 && usedUsd >= limitUsd * 0.8,
+  })
+  const daily = state(today, budget.dailyUsd)
+  const monthly = state(month, budget.monthlyUsd)
+  return { daily, monthly, blocked: daily.exceeded || monthly.exceeded }
 }
 
 export class NotFoundError extends Error {

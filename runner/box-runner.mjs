@@ -180,6 +180,7 @@ async function runTurn() {
   }
   await emit({
     t: "turn_end",
+    startedAt: attempt.startedAt,
     stopped: stopping,
     exitCode: attempt.exitCode,
     ok,
@@ -190,6 +191,7 @@ async function runTurn() {
     sessionId,
     compact: Boolean(turn.compact),
     usage,
+    resultUsage: attempt.result?.usage ?? null,
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
   })
   // turn.pid stays behind on purpose: the orchestrator checks it with kill -0,
@@ -254,6 +256,7 @@ function contextReport(sessionId, model) {
 
 function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
   return new Promise((resolve) => {
+    const startedAt = Date.now()
     const args = [
       "-p",
       "--output-format",
@@ -336,7 +339,7 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
       pending.then(() => {
         const window = contextWindowOf(result?.modelUsage)
         if (usage && window) usage.window = window
-        resolve({ exitCode: code ?? 1, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") })
+        resolve({ exitCode: code ?? 1, startedAt, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") })
       })
     })
 

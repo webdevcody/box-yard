@@ -85,6 +85,10 @@ export interface Task {
   compacting: boolean
   /** Effort the orchestrator picked for this agent (used only in "let the orchestrator decide" mode). */
   effort: Effort | null
+  /** Claude Code cost recorded for this task's turns. */
+  claudeCostUsd: number
+  /** Claude Code tokens recorded for this task's turns. */
+  claudeTokens: number
   createdAt: number
   updatedAt: number
 }
@@ -188,11 +192,18 @@ export interface BoxInfo {
   id: string
   provider: string
   status: "creating" | "ready" | "lost" | "deleting"
+  size: BoxSize
+  keepAlive: boolean
   slots: number
   runningTurns: number
   residentTasks: string[]
   /** Names of the projects whose tasks live on this box. */
   projects: string[]
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number | null
+  estimatedCostUsd: number
+  usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
 }
@@ -282,6 +293,22 @@ export interface AutoCompact {
   value: number
 }
 
+export const BOX_SIZES = ["small", "medium", "large"] as const
+export type BoxSize = (typeof BOX_SIZES)[number]
+
+export interface CostRates {
+  boxActiveCpuHourlyUsd: Record<BoxSize, number>
+  boxKeepAliveMonthlyUsd: Record<BoxSize, number>
+  boxStorageGbMonthUsd: number
+}
+
+export interface BudgetSettings {
+  /** 0 disables this budget. */
+  dailyUsd: number
+  /** 0 disables this budget. */
+  monthlyUsd: number
+}
+
 export interface Settings {
   orchestratorModel: string
   orchestratorEffort: Effort
@@ -297,6 +324,10 @@ export interface Settings {
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
   maxAgents: number
+  /** Rates used to estimate Upstash Box infrastructure costs. */
+  costRates: CostRates
+  /** Optional cost guardrail. When exceeded, Box Yard holds queued agent turns. */
+  budget: BudgetSettings
 }
 
 /** Agents that can run at once under a set of limits. */
@@ -316,6 +347,77 @@ export interface SettingsInfo {
   /** Where each value comes from: saved in the UI, an env var, or the built-in default. */
   sources: Record<keyof Settings, SettingSource>
   defaults: Settings
+}
+
+export interface ClaudeUsageTotals {
+  costUsd: number
+  inputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  outputTokens: number
+  totalTokens: number
+  turns: number
+  durationMs: number
+}
+
+export interface BoxUsageTotals {
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number
+  costUsd: number
+  source: "actual" | "estimated"
+}
+
+export interface UsageWindow {
+  key: "today" | "7d" | "30d"
+  label: string
+  since: number
+  claude: ClaudeUsageTotals
+  boxes: BoxUsageTotals
+  totalCostUsd: number
+}
+
+export interface UsageProjectTotal {
+  projectId: string
+  projectName: string
+  claude: ClaudeUsageTotals
+}
+
+export interface UsageTaskTotal {
+  taskId: string
+  taskTitle: string
+  projectId: string
+  projectName: string
+  claude: ClaudeUsageTotals
+}
+
+export interface UsageBoxTotal {
+  boxId: string
+  provider: string
+  size: BoxSize
+  keepAlive: boolean
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number | null
+  estimatedCostUsd: number
+  usageSource: "actual" | "estimated"
+}
+
+export interface BudgetStatus {
+  daily: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
+  monthly: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
+  blocked: boolean
+}
+
+export interface UsageReport {
+  generatedAt: number
+  rates: CostRates
+  budget: BudgetStatus
+  windows: UsageWindow[]
+  projects: UsageProjectTotal[]
+  tasks: UsageTaskTotal[]
+  boxes: UsageBoxTotal[]
+  orchestrator: ClaudeUsageTotals
 }
 
 export interface ContextUsage {

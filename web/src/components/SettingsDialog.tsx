@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -22,11 +22,13 @@ import { Button, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_SIZES,
   EFFORTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
   agentCapacity,
   type AgentEffort,
   type AutoCompact,
+  type BoxSize,
   type Settings,
   type SettingSource,
 } from "../../../shared/types"
@@ -34,7 +36,7 @@ import {
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -402,8 +404,10 @@ export function SettingsDialog({
               <AutoCompactControl id={fid("aac")} label="Agent auto-compact" value={s.agentAutoCompact} onChange={(v) => set("agentAutoCompact", v)} />
             </Row>
           </Panel>
-        ) : (
+        ) : section === "limits" ? (
           <LimitsPanel s={s} set={set} hint={hint} fid={fid} />
+        ) : (
+          <CostsPanel s={s} set={set} hint={hint} fid={fid} />
         )}
       </div>
 
@@ -459,6 +463,79 @@ function LimitsPanel({
             ).
           </p>
         )}
+      </div>
+    </Panel>
+  )
+}
+
+function CostsPanel({
+  s,
+  set,
+  hint,
+  fid,
+}: {
+  s: Settings
+  set: <K extends keyof Settings>(k: K, v: Settings[K]) => void
+  hint: (k: keyof Settings) => ReactNode
+  fid: (k: string) => string
+}) {
+  const money = (value: number, onChange: (n: number) => void, id?: string) => (
+    <input
+      id={id}
+      type="number"
+      min={0}
+      step={0.01}
+      className={inputClass}
+      value={value}
+      onChange={(e) => onChange(Number(e.target.value))}
+    />
+  )
+  const sizeLabel: Record<BoxSize, string> = { small: "Small", medium: "Medium", large: "Large" }
+  return (
+    <Panel section="costs">
+      <Row
+        label="Active CPU rates"
+        help="Estimated Upstash Box active CPU cost per hour. Defaults match the public Small / Medium / Large rates."
+        hint={hint("costRates")}
+      >
+        <div className="grid grid-cols-3 gap-2">
+          {BOX_SIZES.map((size) => (
+            <label key={size} className="space-y-1">
+              <span className="text-[11px] text-zinc-500">{sizeLabel[size]}</span>
+              {money(s.costRates.boxActiveCpuHourlyUsd[size], (n) =>
+                set("costRates", { ...s.costRates, boxActiveCpuHourlyUsd: { ...s.costRates.boxActiveCpuHourlyUsd, [size]: n } }),
+              )}
+            </label>
+          ))}
+        </div>
+      </Row>
+      <Row
+        label="Keep-alive rates"
+        help="Monthly keep-alive rates, prorated by box uptime when a provider reports keep-alive is enabled."
+        hint={hint("costRates")}
+      >
+        <div className="grid grid-cols-3 gap-2">
+          {BOX_SIZES.map((size) => (
+            <label key={size} className="space-y-1">
+              <span className="text-[11px] text-zinc-500">{sizeLabel[size]}</span>
+              {money(s.costRates.boxKeepAliveMonthlyUsd[size], (n) =>
+                set("costRates", { ...s.costRates, boxKeepAliveMonthlyUsd: { ...s.costRates.boxKeepAliveMonthlyUsd, [size]: n } }),
+              )}
+            </label>
+          ))}
+        </div>
+      </Row>
+      <Row id={fid("storage")} label="Storage rate" help="Storage and snapshot cost per GB-month. Disk use is probed from boxes when available." hint={hint("costRates")}>
+        {money(s.costRates.boxStorageGbMonthUsd, (n) => set("costRates", { ...s.costRates, boxStorageGbMonthUsd: n }), fid("storage"))}
+      </Row>
+      <Row id={fid("daily-budget")} label="Daily budget" help="0 disables the daily budget. At 80% Box Yard warns; at 100% queued agent turns pause." hint={hint("budget")}>
+        {money(s.budget.dailyUsd, (n) => set("budget", { ...s.budget, dailyUsd: n }), fid("daily-budget"))}
+      </Row>
+      <Row id={fid("monthly-budget")} label="Monthly budget" help="0 disables the 30-day budget window. Raising this value resumes queued turns immediately." hint={hint("budget")}>
+        {money(s.budget.monthlyUsd, (n) => set("budget", { ...s.budget, monthlyUsd: n }), fid("monthly-budget"))}
+      </Row>
+      <div className="mt-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
+        Claude Code costs come from the CLI's result JSON. Box costs use provider usage when exposed by the API; otherwise active CPU and storage are labeled estimates.
       </div>
     </Panel>
   )

@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store, TaskRow, TurnFlags } from "./store.js"
-import { BadRequestError, NotFoundError, cloneUrl, githubSlug } from "./store.js"
-import type { BoxProvider } from "./providers/types.js"
+import { BadRequestError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
+import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
 import type { Redis } from "./redis.js"
@@ -66,6 +66,18 @@ const usageFields = (u: unknown): { contextTokens?: number; contextWindow?: numb
   }
 }
 
+const usageObject = (u: unknown) => {
+  const x = u as Record<string, unknown> | null | undefined
+  if (!x) return null
+  const out = {
+    input_tokens: typeof x.input_tokens === "number" ? x.input_tokens : 0,
+    cache_creation_input_tokens: typeof x.cache_creation_input_tokens === "number" ? x.cache_creation_input_tokens : 0,
+    cache_read_input_tokens: typeof x.cache_read_input_tokens === "number" ? x.cache_read_input_tokens : 0,
+    output_tokens: typeof x.output_tokens === "number" ? x.output_tokens : 0,
+  }
+  return Object.values(out).some((n) => n > 0) ? out : null
+}
+
 const slugify = (s: string) =>
   s
     .toLowerCase()
@@ -109,6 +121,8 @@ export class TaskManager {
   private archiving = new Set<string>()
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
+  private lastBoxProbeAt = new Map<string, number>()
+  private budgetNoticeAt = 0
   /** Called after every notice, so the orchestrator can wake up and report. */
   onNotice: (() => void) | null = null
 
@@ -368,16 +382,28 @@ export class TaskManager {
   }
 
   boxes(): BoxInfo[] {
+    this.meterBoxes()
+    const rates = this.settings.get().costRates
+    const now = Date.now()
     return this.store.listBoxes().map((b) => {
       const residents = this.store.listTaskRows({ boxId: b.id })
+      const size = normalizeBoxSize(b.size)
+      const uptimeMs = Math.max(0, now - b.created_at)
       return {
         id: b.id,
         provider: b.provider,
         status: b.status,
+        size,
+        keepAlive: Boolean(b.keep_alive),
         slots: this.limits().slotsPerBox,
         runningTurns: residents.filter((r) => r.current_turn_id).length,
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
+        activeMs: b.active_ms ?? 0,
+        uptimeMs,
+        diskBytes: b.disk_bytes ?? null,
+        estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
+        usageSource: b.usage_source ?? "estimated",
         createdAt: b.created_at,
         lastUsedAt: b.last_used_at,
       }
@@ -420,6 +446,8 @@ export class TaskManager {
   }
 
   private async schedulePass() {
+    this.meterBoxes()
+    if (this.budgetBlocked()) return
     const waiting = this.store
       .listTaskRows()
       .filter((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
@@ -578,19 +606,20 @@ export class TaskManager {
     this.creatingBoxes++
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
-    this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now() })
+    this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size: normalizeBoxSize(this.c.workerSize), keep_alive: 0, usage_source: "estimated" })
     this.emitBoxes()
     const project = projectId ? this.store.getProject(projectId) : null
     try {
       const labels = ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
       const id = await this.provider.create({ labels })
       this.store.removeBox(placeholder)
-      this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now() })
+      this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: normalizeBoxSize(this.c.workerSize), keep_alive: 0, usage_source: "estimated" })
       // The new box belongs to the project that asked for it, so its tasks land there.
       if (projectId && this.store.getProject(projectId)) {
         this.store.setKv(projectBoxKey(projectId), id)
         this.store.setKv(boxOwnerKey(id), projectId)
       }
+      void this.refreshBoxUsage(id, true).finally(() => this.emitBoxes())
       this.lastBoxError = null
       console.log(`[box-yard] created box ${id}${project ? ` for project ${project.name}` : ""}`)
     } catch (err) {
@@ -1074,6 +1103,7 @@ export class TaskManager {
     else status = "idle"
 
     const result = typeof ev.result === "string" ? ev.result : null
+    this.recordTaskClaudeUsage(row, ev)
     this.store.updateTask(row.id, {
       status,
       error,
@@ -1117,6 +1147,7 @@ export class TaskManager {
     // The PR may have been merged or closed while the compaction ran.
     if (status === "pr_ready" && isFinalPrState(row.pr_state)) status = row.pr_state === "merged" ? "done" : "idle"
     const usage = usageFields(ev.usage)
+    this.recordTaskClaudeUsage(row, ev)
     this.store.updateTask(row.id, {
       status,
       currentTurnId: null,
@@ -1263,12 +1294,101 @@ export class TaskManager {
     this.emitBoxes()
   }
 
+  // ------------------------------------------------------------------ usage and budget
+
+  private budgetBlocked() {
+    const waiting = this.store
+      .listTaskRows()
+      .some((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
+    if (!waiting) return false
+    const budget = this.store.usageBudgetStatus(this.settings.get())
+    if (!budget.blocked) return false
+    const now = Date.now()
+    if (now - this.budgetNoticeAt > 30 * 60_000) {
+      this.budgetNoticeAt = now
+      const parts = [
+        budget.daily.exceeded ? `daily budget $${budget.daily.limitUsd.toFixed(2)} (used $${budget.daily.usedUsd.toFixed(2)})` : "",
+        budget.monthly.exceeded ? `monthly budget $${budget.monthly.limitUsd.toFixed(2)} (used $${budget.monthly.usedUsd.toFixed(2)})` : "",
+      ].filter(Boolean)
+      this.notice(`⚠️ Usage budget exceeded (${parts.join(", ")}). New agent turns are paused until you raise the budget in Settings or the window resets.`)
+    }
+    return true
+  }
+
+  private recordTaskClaudeUsage(row: TaskRow, ev: WorkerEvent) {
+    const usage = usageObject(ev.resultUsage) ?? usageObject(ev.usage)
+    const hasCost = typeof ev.costUsd === "number" && Number.isFinite(ev.costUsd)
+    if (!usage && !hasCost && typeof ev.durationMs !== "number") return
+    this.store.recordClaudeUsage({
+      source: "task",
+      runKind: ev.compact ? "compact" : "turn",
+      taskId: row.id,
+      projectId: row.project_id,
+      turnId: typeof ev.turnId === "string" ? ev.turnId : row.current_turn_id,
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
+      model: this.settings.get().agentModel,
+      startedAt: typeof ev.startedAt === "number" ? ev.startedAt : Date.now() - (typeof ev.durationMs === "number" ? ev.durationMs : 0),
+      endedAt: Date.now(),
+      durationMs: typeof ev.durationMs === "number" ? ev.durationMs : null,
+      usage,
+      costUsd: hasCost ? (ev.costUsd as number) : null,
+    })
+  }
+
+  private meterBoxes(now = Date.now()) {
+    for (const box of this.store.listBoxes()) {
+      if (box.status === "deleting" || box.status === "lost") continue
+      const last = box.last_metered_at ?? box.created_at
+      const elapsed = Math.max(0, now - last)
+      if (elapsed < 1000) continue
+      const running = this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id)
+      const activeMs = running ? elapsed : 0
+      this.store.recordBoxUsageInterval({
+        boxId: box.id,
+        provider: box.provider,
+        size: normalizeBoxSize(box.size),
+        keepAlive: Boolean(box.keep_alive),
+        startedAt: last,
+        endedAt: now,
+        activeMs,
+        uptimeMs: elapsed,
+        diskBytes: box.disk_bytes,
+        source: box.usage_source ?? "estimated",
+      })
+      this.store.meterBox(box.id, { activeMs: (box.active_ms ?? 0) + activeMs, lastMeteredAt: now })
+    }
+  }
+
+  private async refreshBoxUsage(boxId: string, force = false) {
+    if (!this.provider.usage) return
+    const now = Date.now()
+    if (!force && now - (this.lastBoxProbeAt.get(boxId) ?? 0) < 5 * 60_000) return
+    this.lastBoxProbeAt.set(boxId, now)
+    let probe: BoxUsageProbe
+    try {
+      probe = await this.provider.usage(boxId)
+    } catch {
+      return
+    }
+    const patch: Parameters<Store["meterBox"]>[1] = {
+      ...(probe.size ? { size: normalizeBoxSize(probe.size) } : {}),
+      ...(typeof probe.keepAlive === "boolean" ? { keepAlive: probe.keepAlive } : {}),
+      ...(typeof probe.diskBytes === "number" ? { diskBytes: probe.diskBytes, diskUpdatedAt: now } : {}),
+      usageSource: probe.source,
+    }
+    const row = this.store.getBox(boxId)
+    if (row && typeof probe.activeMs === "number" && probe.activeMs > (row.active_ms ?? 0)) patch.activeMs = probe.activeMs
+    this.store.meterBox(boxId, patch)
+  }
+
   // ------------------------------------------------------------------ health
 
   /** Find stalled turns, dead processes and lost boxes; trim idle boxes. */
   async maintain() {
     if (this.stopped) return
     const now = Date.now()
+    this.meterBoxes(now)
+    for (const box of this.store.listBoxes()) void this.refreshBoxUsage(box.id)
     const active = this.store.listTaskRows({ status: ["working", "starting"] })
     const checkedBoxes = new Map<string, Awaited<ReturnType<BoxProvider["health"]>>>()
     const health = async (boxId: string) => {

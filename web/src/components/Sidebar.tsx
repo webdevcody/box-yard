@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react"
 import { Link, useLocation } from "wouter"
-import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
+import { AlarmClock, Boxes, DollarSign, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
@@ -105,6 +105,9 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
         <Link href="/schedules" className={navItem("/schedules", location === "/schedules")}>
           <AlarmClock className="h-4 w-4" /> Schedules
           {activeSchedules > 0 && <span className="ml-auto text-xs text-zinc-500">{activeSchedules}</span>}
+        </Link>
+        <Link href="/usage" className={navItem("/usage", location === "/usage")}>
+          <DollarSign className="h-4 w-4" /> Usage & costs
         </Link>
       </nav>
 

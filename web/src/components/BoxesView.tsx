@@ -4,6 +4,7 @@ import { Boxes, ChevronRight, ExternalLink, Globe, Settings } from "lucide-react
 import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
+import { bytes, hours, money } from "../lib/usage"
 import { Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
@@ -171,6 +172,7 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
             {box.id}
           </span>
           <span className="text-xs text-zinc-500">{box.provider}</span>
+          <span className="text-xs text-zinc-500">{box.size}</span>
           <span className={cx("rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", st.chip)}>{st.label}</span>
           <span className="flex items-center gap-2 text-xs whitespace-nowrap">
             <span className={over ? "font-medium text-amber-300" : "text-zinc-300"}>
@@ -191,6 +193,19 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
           )}
           <BoxTimes createdAt={box.createdAt} lastUsedAt={box.lastUsedAt} />
         </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800/70 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-500">
+        <span title="Estimated active CPU time tracked by Box Yard">
+          active {hours(box.activeMs)}
+        </span>
+        <span title="Current disk use, including task folders and local snapshots when visible">
+          disk {bytes(box.diskBytes)}
+        </span>
+        <span title={box.usageSource === "actual" ? "Provider usage data was available." : "Estimated from Box Yard runtime and disk probes."}>
+          {money(box.estimatedCostUsd)} {box.usageSource}
+        </span>
+        {box.keepAlive && <span className="text-yard-300">keep-alive</span>}
       </div>
 
       <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/80">

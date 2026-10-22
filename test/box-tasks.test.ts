@@ -28,6 +28,8 @@ function task(status: TaskStatus, createdAt: number, over: Partial<Task> = {}): 
     compactPending: false,
     compacting: false,
     effort: null,
+    claudeCostUsd: 0,
+    claudeTokens: 0,
     createdAt,
     updatedAt: createdAt,
     ...over,

@@ -6,6 +6,17 @@ export interface ExecResult {
 
 export type BoxHealth = "running" | "paused" | "gone" | "error" | "unknown"
 
+export interface BoxUsageProbe {
+  size?: "small" | "medium" | "large"
+  keepAlive?: boolean
+  diskBytes?: number | null
+  /** Actual provider CPU/active time if the API exposes it. */
+  activeMs?: number | null
+  /** Actual provider uptime if the API exposes it. */
+  uptimeMs?: number | null
+  source: "actual" | "estimated"
+}
+
 /**
  * Where worker boxes come from. `upstash` uses Upstash Box; `local` uses
  * folders on this machine so Box Yard runs with no Box account at all.
@@ -36,6 +47,8 @@ export interface BoxProvider {
   destroy(boxId: string): Promise<void>
   /** Ids of boxes carrying a label, to clean up boxes a crash left behind. */
   listIds?(label: string): Promise<string[]>
+  /** Best-effort provider/disk usage metadata. Missing fields are estimated by Box Yard. */
+  usage?(boxId: string): Promise<BoxUsageProbe>
 }
 
 /** Quote a string for a POSIX shell. */

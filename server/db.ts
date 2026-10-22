@@ -217,6 +217,58 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pr_merged_at INTEGER;
   ALTER TABLE tasks ADD COLUMN pr_merged_by TEXT;
   `,
+  `
+  -- Claude Code result usage and costs, one row per headless CLI run that reports usage.
+  CREATE TABLE claude_usage (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    turn_id TEXT,
+    session_id TEXT,
+    model TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    raw_usage_json TEXT NOT NULL DEFAULT '{}'
+  );
+  CREATE INDEX claude_usage_task ON claude_usage(task_id, started_at);
+  CREATE INDEX claude_usage_project ON claude_usage(project_id, started_at);
+  CREATE INDEX claude_usage_started ON claude_usage(started_at);
+
+  ALTER TABLE boxes ADD COLUMN size TEXT NOT NULL DEFAULT 'small';
+  ALTER TABLE boxes ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN active_ms INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN last_metered_at INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_updated_at INTEGER;
+  ALTER TABLE boxes ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'estimated';
+
+  -- Periodic box cost ledger. It lets the Usage page answer today / 7d / 30d
+  -- without trying to reconstruct historic active time from the current box row.
+  CREATE TABLE box_usage_intervals (
+    id TEXT PRIMARY KEY,
+    box_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    size TEXT NOT NULL,
+    keep_alive INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    active_ms INTEGER NOT NULL DEFAULT 0,
+    uptime_ms INTEGER NOT NULL DEFAULT 0,
+    disk_bytes INTEGER,
+    source TEXT NOT NULL DEFAULT 'estimated'
+  );
+  CREATE INDEX box_usage_intervals_time ON box_usage_intervals(ended_at);
+  CREATE INDEX box_usage_intervals_box ON box_usage_intervals(box_id, ended_at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

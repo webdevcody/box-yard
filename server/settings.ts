@@ -4,10 +4,13 @@ import { BadRequestError, type Store } from "./store.js"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_SIZES,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   EFFORTS,
   type AutoCompact,
+  type BoxSize,
+  type CostRates,
   type Settings,
   type SettingSource,
   type SettingsInfo,
@@ -26,6 +29,12 @@ export const DEFAULT_SETTINGS: Settings = {
   maxBoxes: 5,
   slotsPerBox: 2,
   maxAgents: 0,
+  costRates: {
+    boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
+    boxKeepAliveMonthlyUsd: { small: 8, medium: 16, large: 32 },
+    boxStorageGbMonthUsd: 0.1,
+  },
+  budget: { dailyUsd: 0, monthlyUsd: 0 },
 }
 
 /** Env vars that seed the pool limits; saved settings win over them. */
@@ -43,6 +52,16 @@ const autoCompact = z
       ctx.addIssue({ code: "custom", message: `Tokens must be between ${AUTOCOMPACT_MIN_TOKENS} and ${AUTOCOMPACT_MAX_TOKENS}` })
   })
 const model = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
+const usd = z.number().min(0).max(1_000_000)
+const bySize = z.object(Object.fromEntries(BOX_SIZES.map((s) => [s, usd])) as Record<BoxSize, z.ZodNumber>).strict()
+const costRates = z
+  .object({
+    boxActiveCpuHourlyUsd: bySize,
+    boxKeepAliveMonthlyUsd: bySize,
+    boxStorageGbMonthUsd: usd,
+  })
+  .strict() satisfies z.ZodType<CostRates>
+const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 
 export const settingsPatch = z
   .object({
@@ -55,6 +74,8 @@ export const settingsPatch = z
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
+    costRates,
+    budget,
   })
   .partial()
   .strict()
