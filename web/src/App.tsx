@@ -12,6 +12,7 @@ import { ProjectView } from "./components/ProjectView"
 import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
 import { SchedulesView } from "./components/Schedules"
+import { CommandPalette } from "./components/CommandPalette"
 import { HealthBanner, HomeView, InboxView, Login } from "./components/Views"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
@@ -99,6 +100,7 @@ export function App() {
           <MessageSquare className="h-5 w-5" />
         </button>
       )}
+      <CommandPalette />
       <Toasts />
     </div>
   )

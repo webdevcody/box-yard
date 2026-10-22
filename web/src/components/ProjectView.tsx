@@ -76,6 +76,14 @@ export function ProjectView({ id }: { id: string }) {
   // A new task form left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
 
+  // `?new=task` (from the command palette) opens the new task form once.
+  const wantsNew = params.get("new") === "task"
+  useEffect(() => {
+    if (!wantsNew) return
+    setShowNew(true)
+    setParams((p) => withParam(p, "new", null), { replace: true })
+  }, [wantsNew, setParams])
+
   if (projects.isLoading) return null
   if (!project) return <Empty title="Project not found">It may have been deleted.</Empty>
 
@@ -241,8 +249,9 @@ function TasksTab({ projectId, tasks, showNew, onCloseNew }: { projectId: string
       e.preventDefault()
       search.current?.focus()
     }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
+    // On document so it runs before the command palette's "/" (on window), which then backs off.
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
   }, [])
 
   const counts = filterCounts(tasks, query)
