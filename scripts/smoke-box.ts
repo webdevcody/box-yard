@@ -14,7 +14,7 @@ import { UpstashProvider } from "../server/providers/upstash.js"
 
 const args = process.argv.slice(2)
 const keep = args.includes("--keep")
-const existing = args.includes("--box") ? args[args.indexOf("--box") + 1] : ""
+const existing = args.includes("--box") ? (args[args.indexOf("--box") + 1] ?? "") : ""
 const repo = process.env.SMOKE_REPO ?? "webdevcody/box-yard"
 
 if (!config.upstashBoxApiKey) throw new Error("UPSTASH_BOX_API_KEY is not set")
@@ -39,7 +39,7 @@ async function sh(boxId: string, cmd: string) {
   return r.stdout.trim()
 }
 
-let boxId = existing
+let boxId: string = existing
 await check("create box + worker setup", async () => {
   if (boxId) return `using ${boxId}`
   boxId = await p.create({ labels: ["boxyard-smoke"] })
