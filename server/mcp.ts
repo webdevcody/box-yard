@@ -37,6 +37,8 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
   }
 }
 
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}…` : s)
+
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /** The tools the orchestrator's Claude uses to run Box Yard. */
@@ -55,6 +57,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     return t
   }
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
+  const ago = (ts: number) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+    return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : s < 129600 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`
+  }
   const brief = (t: Task) => ({
     id: t.id,
     title: t.title,
@@ -66,7 +72,19 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
+    turns: t.turnCount,
+    lastActive: ago(t.updatedAt),
+    summary: t.summary ? clip(t.summary, 300) : undefined,
   })
+  const BUSY = new Set(["queued", "starting", "working"])
+  /** What happens to a message sent to this task right now. */
+  const delivery = (t: Task) => {
+    if (t.status === "working" || t.status === "starting")
+      return "queued: the agent is mid-turn; the message is delivered (with any others) as soon as this turn ends, in the same session"
+    if (t.status === "queued") return "queued: the task is waiting for a box slot; the message goes out with its next turn"
+    if (t.boxId) return `resuming: the agent's Claude session resumes now on box ${t.boxId} with full context`
+    return "resuming: the workspace and Claude session are restored from the archive onto a box, then the session resumes with full context"
+  }
   const projectView = (p: Project) => ({
     id: p.id,
     name: p.name,
@@ -152,15 +170,26 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   server.registerTool(
     "list_tasks",
     {
-      description: "List tasks, optionally for one project and/or with given statuses.",
+      description:
+        "List tasks (each is one agent with its own Claude session), optionally for one project, with given statuses, or matching words in the title, prompt or summary. Use it to find the agent that already did related work before creating a new task.",
       inputSchema: {
         project: z.string().optional(),
         status: z.array(z.enum(TASK_STATUSES)).optional(),
+        query: z.string().optional().describe("Words to look for in title, prompt and summary (any word matches; best matches first)"),
       },
     },
-    safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][] }) =>
-      ok(store.listTasks({ projectId: a.project ? project(a.project).id : undefined, status: a.status }).map(brief)),
-    ),
+    safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][]; query?: string }) => {
+      let list = store.listTasks({ projectId: a.project ? project(a.project).id : undefined, status: a.status })
+      if (a.query?.trim()) {
+        const words = a.query.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
+        const score = (t: Task) => {
+          const hay = `${t.title} ${t.prompt} ${t.summary ?? ""} ${t.prUrl ?? ""}`.toLowerCase()
+          return words.filter((w) => hay.includes(w)).length
+        }
+        list = list.filter((t) => score(t) > 0).sort((x, y) => score(y) - score(x))
+      }
+      return ok(list.map(brief))
+    }),
   )
 
   server.registerTool(
@@ -180,17 +209,32 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "create_task",
     {
       description:
-        "Start a new agent on a task in a project. It gets its own folder in a worker box (repo cloned if the project has one) and runs Claude Code headless. Write a self-contained prompt.",
+        "Start a NEW agent (a fresh Claude Code session) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
+        "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt.",
       inputSchema: {
         project: z.string().describe("Project id or name"),
         title: z.string().min(1).max(120),
         prompt: z.string().min(1),
         env: envSchema,
+        related_tasks: z
+          .array(z.string())
+          .optional()
+          .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)"),
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string> }) => {
-      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt: a.prompt, env: a.env })
-      return ok(brief(t))
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[] }) => {
+      let prompt = a.prompt
+      if (a.related_tasks?.length) {
+        const context = a.related_tasks.map((ref) => {
+          const r = task(ref)
+          return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${clip(r.summary, 1200)}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
+            .filter(Boolean)
+            .join("\n")
+        })
+        prompt = `${prompt}\n\n## Related earlier work\n${context.join("\n")}`
+      }
+      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env })
+      return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
   )
 
@@ -198,10 +242,52 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "send_to_task",
     {
       description:
-        "Send a message to a task's agent (an answer, feedback, or a follow-up). It resumes the same Claude session; if the agent is busy, the message waits for its next turn.",
+        "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends.",
       inputSchema: { task: z.string(), message: z.string().min(1) },
     },
-    safe(async (a: { task: string; message: string }) => ok(brief(tasks.sendInput(task(a.task).id, a.message, "orchestrator")))),
+    safe(async (a: { task: string; message: string }) => {
+      const before = task(a.task)
+      const how = delivery(before)
+      const t = tasks.sendInput(before.id, a.message, "orchestrator")
+      return ok({ ...brief(t), delivery: how })
+    }),
+  )
+
+  server.registerTool(
+    "wait_for_tasks",
+    {
+      description:
+        "Wait until the given tasks finish their current work (no longer queued/starting/working), up to timeout_seconds. Returns each task's status and the agent's latest reply. " +
+        "Use this instead of polling get_task. If it times out, the tasks keep running: end your turn, and you'll be woken with an update when they finish.",
+      inputSchema: {
+        tasks: z.array(z.string()).min(1),
+        timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+      },
+    },
+    safe(async (a: { tasks: string[]; timeout_seconds?: number }) => {
+      const ids = a.tasks.map((ref) => task(ref).id)
+      const deadline = Date.now() + (a.timeout_seconds ?? 120) * 1000
+      // A task just created or messaged may not have left "idle" yet; give the scheduler a moment.
+      await new Promise((r) => setTimeout(r, 1500))
+      const current = () => ids.map((id) => store.getTask(id)).filter((t): t is Task => Boolean(t))
+      while (Date.now() < deadline && current().some((t) => BUSY.has(t.status) || t.pendingCount > 0)) {
+        await new Promise((r) => setTimeout(r, 1000))
+      }
+      const list = current()
+      const settled = list.filter((t) => !BUSY.has(t.status) && t.pendingCount === 0)
+      store.markNoticesSeen(settled.map((t) => t.id))
+      return ok({
+        allFinished: settled.length === list.length,
+        tasks: list.map((t) => {
+          const reply = store
+            .listTaskMessages(t.id, 40)
+            .filter((m) => m.role === "assistant")
+            .pop()
+          return { ...brief(t), stillRunning: !settled.includes(t), lastReply: reply ? clip(reply.content, 2000) : undefined }
+        }),
+      })
+    }),
   )
 
   server.registerTool(
@@ -419,10 +505,11 @@ export function buildMcpServer(deps: McpDeps): McpServer {
 
   server.registerTool(
     "pool_status",
-    { description: "Show worker boxes, their busy slots, and how many tasks are queued." },
+    { description: "Show worker boxes (which projects live on each, busy slots) and queued tasks. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room." },
     safe(async () =>
       ok({
-        boxes: tasks.boxes(),
+        boxes: tasks.boxes().map((b) => ({ id: b.id, status: b.status, projects: b.projects, running: `${b.runningTurns}/${b.slots}`, tasks: b.residentTasks.length })),
+        pool: tasks.poolLimits(),
         queued: store.listTasks({ status: ["queued"] }).map((t) => `${t.id} ${t.title}`),
       }),
     ),

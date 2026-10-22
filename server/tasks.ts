@@ -85,6 +85,8 @@ export class TaskManager {
   private archiving = new Set<string>()
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
+  /** Called after every notice, so the orchestrator can wake up and report. */
+  onNotice: (() => void) | null = null
 
   constructor(deps: TaskManagerDeps) {
     this.c = deps.config
@@ -279,6 +281,10 @@ export class TaskManager {
     const link = { port, url, label: `Port ${port}` }
     this.upsertPreview(row.id, link)
     return link
+  }
+
+  poolLimits() {
+    return { maxBoxes: this.c.maxBoxes, agentsPerBox: this.c.slotsPerBox, boxes: this.store.listBoxes().length }
   }
 
   boxes(): BoxInfo[] {
@@ -1163,6 +1169,7 @@ export class TaskManager {
   notice(content: string, meta: Record<string, unknown> | null = null) {
     const msg = this.store.addChat("notice", content, meta)
     this.hub.broadcast({ type: "chat.message", message: msg })
+    this.onNotice?.()
   }
 
   emitTask(taskId: string) {

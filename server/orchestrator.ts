@@ -9,6 +9,10 @@ import { ORCHESTRATOR_PROMPT } from "./prompts.js"
 import type { ChatMessage } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
+/** Wait this long after a task update before waking the orchestrator, to batch updates. */
+const WAKE_DEBOUNCE_MS = 4000
+/** Automatic turns in a row (no message from Cody in between) before it stops waking itself. */
+const MAX_AUTO_TURNS = 8
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
 
@@ -20,6 +24,9 @@ const STARTED_KEY = "orchestrator_session_started"
 export class Orchestrator {
   private running = false
   private pending = false
+  private wakeWanted = false
+  private wakeTimer: NodeJS.Timeout | null = null
+  private autoTurns = 0
   private child: ChildProcess | null = null
   private readonly workdir: string
   private readonly mcpConfigPath: string
@@ -51,8 +58,32 @@ export class Orchestrator {
     const msg = this.store.addChat("user", content.trim(), null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
+    this.autoTurns = 0
     void this.drain()
     return msg
+  }
+
+  /**
+   * A task finished, failed, asked something or opened a PR. Wake the
+   * orchestrator (after a short pause to batch updates) so it can tell Cody
+   * and carry on with work he already asked for, without waiting for his
+   * next message.
+   */
+  nudge() {
+    if (!this.c.orchestratorAutoWake || this.wakeTimer) return
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null
+      if (!this.store.hasUnseenNotices()) return
+      this.wakeWanted = true
+      void this.drain()
+    }, WAKE_DEBOUNCE_MS)
+    this.wakeTimer.unref?.()
+  }
+
+  stop() {
+    if (this.wakeTimer) clearTimeout(this.wakeTimer)
+    this.wakeTimer = null
+    this.cancel()
   }
 
   /** Stop the current turn. */
@@ -82,9 +113,15 @@ export class Orchestrator {
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending) {
-        this.pending = false
-        await this.turn()
+      while (this.pending || this.wakeWanted) {
+        if (this.pending) {
+          this.pending = false
+          this.wakeWanted = false
+          await this.turn()
+        } else {
+          this.wakeWanted = false
+          await this.autoTurn()
+        }
       }
     } finally {
       this.running = false
@@ -101,6 +138,22 @@ export class Orchestrator {
       .map((m) => m.content)
   }
 
+  /** A turn with only task updates in it: report them and keep Cody's work moving. */
+  private async autoTurn() {
+    if (this.autoTurns >= MAX_AUTO_TURNS) return
+    const notices = this.store.takeUnseenNotices()
+    if (!notices.length) return
+    this.autoTurns++
+    await this.runPrompt(
+      [
+        `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        `(Automatic wake-up: there is no new message from Cody. Tell him in a line or two what finished, failed or needs him, with links. ` +
+          `If an update completes a step of work Cody already asked for and the next step is clear, start it. ` +
+          `Don't start unrelated work, and don't repeat things you already told him.)`,
+      ].join("\n\n"),
+    )
+  }
+
   private async turn() {
     const messages = this.unansweredUserMessages()
     if (!messages.length) return
@@ -112,7 +165,10 @@ export class Orchestrator {
     ]
       .filter(Boolean)
       .join("\n\n")
+    await this.runPrompt(prompt)
+  }
 
+  private async runPrompt(prompt: string) {
     const s = this.session()
     let result = await this.run(prompt, s.id, s.started)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
@@ -156,6 +212,9 @@ export class Orchestrator {
       ]
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
+      // When Box Yard itself was started from inside a Claude Code session, don't
+      // let the orchestrator think it is that session's child.
+      for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
       if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
       if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
 

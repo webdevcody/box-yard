@@ -43,6 +43,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     maxResidentPerBox: 12,
     boxIdleDeleteMinutes: 0,
     pollMs: 150,
+    orchestratorAutoWake: false,
     archiveWorkspaces: true,
     selfBoxId: "",
     ...overrides,

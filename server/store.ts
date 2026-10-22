@@ -536,6 +536,21 @@ export class Store {
     })()
   }
 
+  hasUnseenNotices(): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM chat_messages WHERE seen_by_orchestrator = 0 LIMIT 1").get())
+  }
+
+  /** Mark notices about these tasks as seen (the orchestrator already looked at the tasks). */
+  markNoticesSeen(taskIds: string[]) {
+    if (!taskIds.length) return
+    const stmt = this.db.prepare(
+      "UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE seen_by_orchestrator = 0 AND role = 'notice' AND json_extract(meta_json, '$.taskId') = ?",
+    )
+    this.db.transaction(() => {
+      for (const id of taskIds) stmt.run(id)
+    })()
+  }
+
   clearChat() {
     this.db.prepare("DELETE FROM chat_messages").run()
   }

@@ -74,6 +74,8 @@ export const config = {
   /** Claude binary used by the orchestrator (and by local workers). */
   claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",
+  /** Wake the orchestrator when a task finishes or needs Cody, so it reports back on its own. */
+  orchestratorAutoWake: (env.BOXYARD_ORCHESTRATOR_AUTOWAKE ?? "1") !== "0",
   workerModel: env.WORKER_MODEL ?? "",
 
   /** Poll interval for worker events. */

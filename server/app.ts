@@ -120,6 +120,7 @@ export function createBoxYard(
   const scheduler = new Scheduler({ config: c, store, tasks, hub, qstash, now: opts.now })
   const mcpToken = randomBytes(24).toString("hex")
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken })
+  tasks.onNotice = () => orchestrator.nudge()
   const auth = new Auth(c.password, store)
   const publicUrl = () => c.publicUrl
 
@@ -392,7 +393,7 @@ export function createBoxYard(
     stop() {
       scheduler.stop()
       tasks.stop()
-      orchestrator.cancel()
+      orchestrator.stop()
       stopSnapshots?.()
       hub.close()
       db.close()
