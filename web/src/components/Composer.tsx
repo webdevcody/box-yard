@@ -46,6 +46,8 @@ export function Composer({
   const [files, setFiles] = useState<Pending[]>([])
   const [dragging, setDragging] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
+  const overflowingRef = useRef(overflowing)
+  overflowingRef.current = overflowing
   const [expanded, setExpanded] = useState(false)
   const input = useRef<HTMLTextAreaElement | null>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -115,7 +117,8 @@ export function Composer({
     row.style.minHeight = ""
     const over = full > max
     el.style.overflowY = over ? "auto" : "hidden"
-    setOverflowing(over)
+    // Only on a change: a same-value setState from a layout effect still costs an extra commit per keystroke.
+    if (over !== overflowingRef.current) setOverflowing(over)
     // Typing or pasting at the end of a capped box: keep the caret in view.
     if (over && document.activeElement === el && el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight
   }, [expanded])
