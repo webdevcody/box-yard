@@ -24,29 +24,30 @@ let nextKey = 0
 /**
  * The message box shared by the orchestrator chat and task threads: Enter
  * sends, Shift+Enter adds a line, files can be picked, dropped or pasted.
- * `onSubmit` gets the uploaded files; the box clears its own attachments.
+ * `onSubmit` gets the text and the uploaded files; the box then clears itself.
+ * The draft lives here, not in the parent, so typing re-renders only this box
+ * and never the (long) message list next to it.
  */
 export function Composer({
-  value,
-  onChange,
   onSubmit,
   placeholder,
   className = "border-t border-zinc-900 p-3",
   textareaRef,
   panelRef,
 }: {
-  value: string
-  onChange: (value: string) => void
-  onSubmit: (attachments: Attachment[]) => void
+  onSubmit: (text: string, attachments: Attachment[]) => void
   placeholder: string
   className?: string
   textareaRef?: Ref<HTMLTextAreaElement>
   /** The panel that accepts dropped files, message list included. It must be `relative`. */
   panelRef: RefObject<HTMLElement | null>
 }) {
+  const [value, setValue] = useState("")
   const [files, setFiles] = useState<Pending[]>([])
   const [dragging, setDragging] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
+  const overflowingRef = useRef(overflowing)
+  overflowingRef.current = overflowing
   const [expanded, setExpanded] = useState(false)
   const input = useRef<HTMLTextAreaElement | null>(null)
   const picker = useRef<HTMLInputElement>(null)
@@ -116,7 +117,8 @@ export function Composer({
     row.style.minHeight = ""
     const over = full > max
     el.style.overflowY = over ? "auto" : "hidden"
-    setOverflowing(over)
+    // Only on a change: a same-value setState from a layout effect still costs an extra commit per keystroke.
+    if (over !== overflowingRef.current) setOverflowing(over)
     // Typing or pasting at the end of a capped box: keep the caret in view.
     if (over && document.activeElement === el && el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight
   }, [expanded])
@@ -148,7 +150,8 @@ export function Composer({
 
   const submit = () => {
     if (!canSend) return
-    onSubmit(ready)
+    onSubmit(value.trim(), ready)
+    setValue("")
     files.forEach((f) => f.preview && URL.revokeObjectURL(f.preview))
     setFiles([])
   }
@@ -287,7 +290,7 @@ export function Composer({
             ref={setTextarea}
             rows={1}
             value={value}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(e) => setValue(e.target.value)}
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {

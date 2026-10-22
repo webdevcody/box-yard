@@ -4,17 +4,26 @@ import { cx } from "./ui"
 
 const NEAR_BOTTOM_PX = 80
 
+// Start loading earlier items this far before the top is reached.
+const LOAD_EARLIER_MARGIN_PX = 800
+
 // A scroll container that follows new content only while the user is at (or near) the bottom.
 // `count` is the number of items; `resetKey` changes when the content is swapped (e.g. another task).
+// With `hidden` > 0 (older items not rendered yet), scrolling near the top calls `onLoadEarlier`,
+// and the view stays on the same content while they are added above it.
 export function StickyScroll({
   count,
   resetKey,
+  hidden = 0,
+  onLoadEarlier,
   className,
   contentClassName,
   children,
 }: {
   count: number
   resetKey?: string
+  hidden?: number
+  onLoadEarlier?: () => void
   className?: string
   contentClassName?: string
   children: ReactNode
@@ -26,6 +35,9 @@ export function StickyScroll({
   const lastCount = useRef(count)
   const [away, setAway] = useState(false)
   const [unread, setUnread] = useState(0)
+  const sentinel = useRef<HTMLButtonElement>(null)
+  // Scroll metrics captured just before older items are added above.
+  const beforePrepend = useRef<{ height: number; top: number; hidden: number } | null>(null)
 
   const toBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scroller.current
@@ -75,6 +87,35 @@ export function StickyScroll({
     if (added > 0 && !stuck.current) setUnread((n) => n + added)
   }, [count])
 
+  const loadEarlier = useCallback(() => {
+    const el = scroller.current
+    if (!el || !onLoadEarlier) return
+    beforePrepend.current = { height: el.scrollHeight, top: el.scrollTop, hidden }
+    onLoadEarlier()
+  }, [onLoadEarlier, hidden])
+
+  // Keep what's on screen in place when older items appear above it.
+  useLayoutEffect(() => {
+    const el = scroller.current
+    const prev = beforePrepend.current
+    if (!el || !prev || prev.hidden === hidden) return
+    beforePrepend.current = null
+    if (!stuck.current) el.scrollTop = prev.top + (el.scrollHeight - prev.height)
+  })
+
+  // Load earlier items before the reader reaches the top.
+  useEffect(() => {
+    const el = sentinel.current
+    const root = scroller.current
+    if (!el || !root || !hidden) return
+    const io = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && loadEarlier(), {
+      root,
+      rootMargin: `${LOAD_EARLIER_MARGIN_PX}px 0px 0px 0px`,
+    })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [hidden, loadEarlier])
+
   const jump = () => {
     stuck.current = true
     setAway(false)
@@ -86,6 +127,16 @@ export function StickyScroll({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scroller} onScroll={onScroll} className={cx("scroll-thin min-h-0 flex-1 overflow-y-auto", className)}>
         <div ref={content} className={contentClassName}>
+          {hidden > 0 && (
+            <button
+              ref={sentinel}
+              type="button"
+              onClick={loadEarlier}
+              className="block w-full py-1 text-center text-xs text-zinc-500 hover:text-zinc-300"
+            >
+              Show {hidden} earlier message{hidden === 1 ? "" : "s"}
+            </button>
+          )}
           {children}
         </div>
       </div>
