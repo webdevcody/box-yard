@@ -1,7 +1,11 @@
-import { useEffect, useState, type ComponentProps, type ReactNode } from "react"
-import ReactMarkdown from "react-markdown"
+import { useEffect, useMemo, useState, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
+import ReactMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { useLocation } from "wouter"
+import { useQueryClient } from "@tanstack/react-query"
 import { Loader2 } from "lucide-react"
+import { hintForHref, useEntityIndex } from "../lib/entities"
+import { followAppLink, linkTarget, remarkEntityLinks } from "../lib/linkify"
 import type { TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
@@ -57,16 +61,54 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
   )
 }
 
-export function Markdown({ children }: { children: string }) {
+export function Markdown({ children, linkify = true }: { children: string; linkify?: boolean }) {
+  const index = useEntityIndex()
+  const plugins = useMemo<Options["remarkPlugins"]>(() => (linkify ? [remarkGfm, [remarkEntityLinks, index]] : [remarkGfm]), [linkify, index])
   return (
     <div className="prose-chat break-words">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{ a: (props) => <a {...props} target="_blank" rel="noreferrer" /> }}
-      >
+      <ReactMarkdown remarkPlugins={plugins} components={MARKDOWN_COMPONENTS}>
         {children}
       </ReactMarkdown>
     </div>
+  )
+}
+
+const MARKDOWN_COMPONENTS: Components = {
+  a: ({ href = "", title, children }) => (
+    <AppLink href={href} title={title}>
+      {children}
+    </AppLink>
+  ),
+}
+
+/**
+ * A link that knows the app: in-app paths navigate through the router (Cmd/Ctrl/middle-click still open a tab),
+ * files and other sites open in a new tab. Hovering an entity link shows its title and current status.
+ */
+export function AppLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
+  const [, navigate] = useLocation()
+  const qc = useQueryClient()
+  const target = linkTarget(href, window.location.origin)
+  const onMouseEnter = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (title || target.kind === "external") return
+    const hint = hintForHref(qc, target.href, (s) => STATUS[s].label)
+    if (hint) e.currentTarget.title = hint
+  }
+  if (target.kind !== "app")
+    return (
+      <a href={target.href} title={title} className={className} target="_blank" rel="noopener noreferrer" onMouseEnter={onMouseEnter}>
+        {children}
+      </a>
+    )
+  const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (!followAppLink(e, target.href, navigate)) return
+    // pushState doesn't fire hashchange; pages that scroll to #id listen for it.
+    if (target.href.includes("#")) window.dispatchEvent(new HashChangeEvent("hashchange"))
+  }
+  return (
+    <a href={target.href} title={title} className={className} onClick={onClick} onMouseEnter={onMouseEnter}>
+      {children}
+    </a>
   )
 }
 
