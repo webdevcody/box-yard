@@ -151,7 +151,7 @@ function sh(cmd) {
 // ---------------------------------------------------------------- behaviors
 
 async function orchestrator(mcp, prompt) {
-  const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard")).join("\n").trim()
+  const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
   const lines = []
   let m
   if ((m = text.match(/create project\s+"?([\w .-]+?)"?(?:\s+repo\s+(\S+))?\s*$/im))) {

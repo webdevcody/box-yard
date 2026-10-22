@@ -175,7 +175,17 @@ export class Orchestrator {
     await this.runPrompt(prompt)
   }
 
-  private async runPrompt(prompt: string) {
+  /** A one-glance view of the yard, so the orchestrator never works from stale memory. */
+  private yardNow(): string {
+    const projects = new Map(this.store.listProjects().map((p) => [p.id, p.name]))
+    const lines = this.store
+      .listTasks({ status: ["queued", "starting", "working", "needs_input", "waiting"] })
+      .map((t) => `- ${t.id} "${t.title}" [${projects.get(t.projectId) ?? "?"}] ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}`)
+    return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
+  }
+
+  private async runPrompt(body: string) {
+    const prompt = `${this.yardNow()}\n\n${body}`
     const s = this.session()
     let result = await this.run(prompt, s.id, s.started)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
