@@ -12,6 +12,7 @@ import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
+import { CaptainManager } from "./captains.js"
 import { SettingsStore } from "./settings.js"
 import { mcpHandler } from "./mcp.js"
 import { Auth } from "./auth.js"
@@ -108,6 +109,7 @@ export interface BoxYard {
   hub: Hub
   tasks: TaskManager
   orchestrator: Orchestrator
+  captains: CaptainManager
   scheduler: Scheduler
   settings: SettingsStore
   start(): Promise<void>
@@ -131,9 +133,20 @@ export function createBoxYard(
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
+  const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
-  tasks.onNotice = () => orchestrator.nudge()
+  tasks.onNotice = (content, meta) => {
+    if (captains.notice(content, meta)) return true
+    orchestrator.nudge()
+    return false
+  }
+  captains.onReport = (projectId, content) => {
+    const project = store.getProject(projectId)
+    const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
+    hub.broadcast({ type: "chat.message", message: msg })
+    orchestrator.nudge()
+  }
   store.onNotification = (notification) => hub.broadcast({ type: "notification", notification })
   const auth = new Auth(c.password, store)
   const publicUrl = () => c.publicUrl
@@ -150,8 +163,8 @@ export function createBoxYard(
   app.set("trust proxy", true)
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
-  // MCP endpoint for the orchestrator's Claude (its own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings }, mcpToken))
+  // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -196,7 +209,7 @@ export function createBoxYard(
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
     const problems = configProblems(c)
-    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found on the orchestrator. Install it: npm i -g @anthropic-ai/claude-code`)
+    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
       ok: problems.length === 0,
@@ -246,6 +259,32 @@ export function createBoxYard(
     const project = store.getProject(id)!
     hub.broadcast({ type: "project", project })
     res.status(201).json(project)
+  })
+  api.get("/projects/:id/captain", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.state(id))
+  })
+  api.get("/projects/:id/captain/messages", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.messages(id, 500))
+  })
+  api.post("/projects/:id/captain/messages", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    const body = parse(schemas.chat, req.body)
+    res.status(201).json(captains.send(id, body.content, body.id))
+  })
+  api.post("/projects/:id/captain/compact", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.requestCompact(id))
+  })
+  api.get("/projects/:id/captain/compactions", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.compactions(id))
   })
 
   // ---- tasks
@@ -366,7 +405,7 @@ export function createBoxYard(
     return files
   }
 
-  // ---- orchestrator chat
+  // ---- Coordinator chat (internal routes keep /orchestrator for compatibility)
   api.get("/chat", (_req, res) => {
     res.json(store.listChat(500))
   })
@@ -483,6 +522,7 @@ export function createBoxYard(
     hub,
     tasks,
     orchestrator,
+    captains,
     scheduler,
     settings,
     async start() {
@@ -492,6 +532,7 @@ export function createBoxYard(
       stopSnapshots = startSelfSnapshots(c, db)
       stopHold = startSelfHold(c, () => {
         if (orchestrator.busy) return true
+        if (captains.anyBusy()) return true
         if (store.listTaskRows({ status: ["queued", "starting", "working"] }).length) return true
         // Without QStash nothing wakes a paused box for a schedule, so stay up for ones due soon.
         if (!qstash) {
@@ -504,6 +545,7 @@ export function createBoxYard(
     stop() {
       scheduler.stop()
       tasks.stop()
+      captains.stop()
       orchestrator.stop()
       stopSnapshots?.()
       stopHold?.()

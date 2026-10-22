@@ -1,0 +1,557 @@
+import { spawn, type ChildProcess } from "node:child_process"
+import { randomUUID } from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
+import type { Config } from "./config.js"
+import type { Hub } from "./hub.js"
+import type { Store } from "./store.js"
+import { BadRequestError } from "./store.js"
+import { compactThreshold, type SettingsStore } from "./settings.js"
+import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
+import { uploadsDir } from "./uploads.js"
+import { captainPrompt } from "./prompts.js"
+import {
+  SUMMARY_PROMPT,
+  captainCompactionsDir,
+  cleanSummary,
+  compactionsPrompt,
+  finishCompaction,
+  lastCompaction,
+  listCompactions,
+  readCompactionFile,
+  readCompactionInfo,
+  summaryLooksValid,
+  writeCompaction,
+} from "./compactions.js"
+import type { CaptainCompaction, CaptainMessage, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
+
+const TURN_TIMEOUT_MS = 15 * 60_000
+const WAKE_DEBOUNCE_MS = 3000
+const MAX_AUTO_TURNS = 6
+const NO_UPDATE = "(no update)"
+const MAX_THRESHOLD_SHARE = 0.95
+
+type RunKind = "turn" | "summary" | "compact" | "context"
+interface RunResult {
+  ok: boolean
+  error: string
+  text: string
+  raw: string
+  sessionId: string | null
+}
+
+const sessionKey = (projectId: string) => `captain_session:${projectId}`
+const startedKey = (projectId: string) => `captain_session_started:${projectId}`
+const usageKey = (projectId: string) => `captain_usage:${projectId}`
+
+function captainSummaryPrompt(project: Project) {
+  return SUMMARY_PROMPT.replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
+}
+
+function briefTask(t: Task) {
+  return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}`
+}
+
+export class CaptainManager {
+  private readonly captains = new Map<string, Captain>()
+  onReport: ((projectId: string, content: string) => void) | null = null
+
+  constructor(
+    private readonly c: Config,
+    private readonly store: Store,
+    private readonly hub: Hub,
+    private readonly mcp: { url: string; token: string },
+    private readonly settings: SettingsStore,
+  ) {}
+
+  get(projectId: string) {
+    const project = this.store.getProject(projectId)
+    if (!project) throw new BadRequestError(`No project ${projectId}`)
+    let captain = this.captains.get(project.id)
+    if (!captain) {
+      captain = new Captain(this.c, this.store, this.hub, this.mcp, this.settings, project, (text) => this.onReport?.(project.id, text))
+      this.captains.set(project.id, captain)
+    }
+    return captain
+  }
+
+  find(ref: string) {
+    const project = this.store.findProject(ref)
+    if (!project) throw new BadRequestError(`No project "${ref}". Use list_projects.`)
+    return this.get(project.id)
+  }
+
+  state(projectId: string) {
+    return this.get(projectId).state()
+  }
+
+  send(projectRef: string, content: string, id?: string) {
+    return this.find(projectRef).send(content, id)
+  }
+
+  async ask(projectRef: string, content: string, timeoutSeconds = 120) {
+    const captain = this.find(projectRef)
+    captain.send(content)
+    return this.wait(captain.projectId, timeoutSeconds)
+  }
+
+  async wait(projectRef: string, timeoutSeconds = 120) {
+    const captain = this.find(projectRef)
+    const deadline = Date.now() + Math.max(5, Math.min(timeoutSeconds, 240)) * 1000
+    await new Promise((r) => setTimeout(r, 300))
+    while (Date.now() < deadline && captain.active) await new Promise((r) => setTimeout(r, 500))
+    const messages = this.store.listCaptainMessages(captain.projectId, 30)
+    const last = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "error")
+    return { allFinished: !captain.active, state: captain.state(), lastReply: last?.content ?? null, messages: messages.slice(-8) }
+  }
+
+  requestCompact(projectId: string) {
+    return this.get(projectId).requestCompact("button")
+  }
+
+  messages(projectId: string, limit = 500) {
+    return this.store.listCaptainMessages(projectId, limit)
+  }
+
+  compactions(projectId: string): CaptainCompaction[] {
+    const dir = captainCompactionsDir(this.c.dataDir, projectId)
+    return listCompactions(dir).flatMap((name) => {
+      const file = path.join(dir, name)
+      const info = readCompactionInfo(file)
+      return info ? [{ ...info, content: readCompactionFile(file) }] : []
+    })
+  }
+
+  /** Route a task notice to its project's Captain. Returns true when handled. */
+  notice(content: string, meta: Record<string, unknown> | null = null): boolean {
+    const taskId = typeof meta?.taskId === "string" ? meta.taskId : null
+    const task = taskId ? this.store.getTask(taskId) : null
+    if (!task) return false
+    const msg = this.store.addCaptainMessage(task.projectId, "notice", content, meta)
+    this.hub.broadcast({ type: "captain.message", message: msg })
+    this.get(task.projectId).nudge()
+    return true
+  }
+
+  stop() {
+    for (const c of this.captains.values()) c.stop()
+  }
+
+  anyBusy() {
+    return [...this.captains.values()].some((c) => c.active)
+  }
+}
+
+class Captain {
+  private running = false
+  private pending = false
+  private wakeWanted = false
+  private wakeTimer: NodeJS.Timeout | null = null
+  private autoTurns = 0
+  private child: ChildProcess | null = null
+  private compactWanted: "button" | "auto" | null = null
+  private compacting = false
+  private lastError: string | null = null
+  private readonly workdir: string
+  private readonly mcpConfigPath: string
+  private readonly mcpConfig: string
+  readonly compactionsDir: string
+
+  constructor(
+    private readonly c: Config,
+    private readonly store: Store,
+    private readonly hub: Hub,
+    mcp: { url: string; token: string },
+    private readonly settings: SettingsStore,
+    private readonly project: Project,
+    private readonly report: (content: string) => void,
+  ) {
+    this.workdir = path.join(c.dataDir, "captains", project.id)
+    this.compactionsDir = captainCompactionsDir(c.dataDir, project.id)
+    fs.mkdirSync(this.workdir, { recursive: true })
+    fs.mkdirSync(this.compactionsDir, { recursive: true })
+    this.mcpConfigPath = path.join(this.workdir, "mcp.json")
+    this.mcpConfig = JSON.stringify({
+      mcpServers: { boxyard: { type: "http", url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } },
+    })
+  }
+
+  get projectId() {
+    return this.project.id
+  }
+
+  get active() {
+    return this.running || this.pending || this.wakeWanted || this.compactWanted !== null
+  }
+
+  private writeMcpConfig() {
+    fs.writeFileSync(this.mcpConfigPath, this.mcpConfig, { mode: 0o600 })
+  }
+
+  send(content: string, id?: string): CaptainMessage {
+    const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), null, id)
+    this.hub.broadcast({ type: "captain.message", message: msg })
+    this.pending = true
+    this.autoTurns = 0
+    void this.drain()
+    return msg
+  }
+
+  nudge() {
+    if (this.wakeTimer) return
+    this.wakeTimer = setTimeout(() => {
+      this.wakeTimer = null
+      const busy = new Set(["queued", "starting", "working"])
+      const ready = this.store.unseenCaptainNoticeTasks(this.project.id).some((id) => !id || !busy.has(this.store.getTask(id)?.status ?? "idle"))
+      if (!ready) return
+      this.wakeWanted = true
+      void this.drain()
+    }, WAKE_DEBOUNCE_MS)
+    this.wakeTimer.unref?.()
+  }
+
+  stop() {
+    if (this.wakeTimer) clearTimeout(this.wakeTimer)
+    this.wakeTimer = null
+    this.child?.kill("SIGTERM")
+  }
+
+  usage(): ContextUsage {
+    try {
+      const u = JSON.parse(this.store.getKv(usageKey(this.project.id)) ?? "null")
+      if (u) return { tokens: u.tokens ?? null, window: u.window ?? null, updatedAt: u.updatedAt ?? null }
+    } catch {}
+    return { tokens: null, window: null, updatedAt: null }
+  }
+
+  private setUsage(tokens: number | null, window?: number | null) {
+    const prev = this.usage()
+    this.store.setKv(usageKey(this.project.id), JSON.stringify({ tokens, window: window ?? prev.window, updatedAt: Date.now() }))
+    this.publishState()
+  }
+
+  state(): CaptainState {
+    return {
+      projectId: this.project.id,
+      busy: this.running,
+      usage: this.usage(),
+      compacting: this.compacting,
+      compactQueued: this.compactWanted !== null && !this.compacting,
+      lastCompaction: lastCompaction(this.compactionsDir),
+      compactionsDir: this.compactionsDir,
+      error: this.lastError,
+    }
+  }
+
+  private publishState() {
+    try {
+      this.hub.broadcast({ type: "captain.state", state: this.state() })
+    } catch {}
+  }
+
+  requestCompact(trigger: "button" | "auto" = "button") {
+    if (!this.session().started) throw new BadRequestError("This Captain hasn't started a conversation yet, so there is nothing to compact.")
+    if (this.compacting || this.compactWanted) return this.state()
+    this.compactWanted = trigger
+    this.lastError = null
+    this.publishState()
+    void this.drain()
+    return this.state()
+  }
+
+  private session() {
+    let id = this.store.getKv(sessionKey(this.project.id))
+    if (!id) {
+      id = randomUUID()
+      this.store.setKv(sessionKey(this.project.id), id)
+      this.store.setKv(startedKey(this.project.id), null)
+    }
+    return { id, started: this.store.getKv(startedKey(this.project.id)) === "1" }
+  }
+
+  private async drain() {
+    if (this.running) return
+    this.running = true
+    this.publishState()
+    try {
+      while (this.pending || this.wakeWanted || this.compactWanted) {
+        if (this.compactWanted) await this.doCompact()
+        else if (this.pending) {
+          this.pending = false
+          this.wakeWanted = false
+          await this.turn()
+        } else {
+          this.wakeWanted = false
+          await this.autoTurn()
+        }
+      }
+    } finally {
+      this.running = false
+      this.publishState()
+    }
+  }
+
+  private unansweredUserMessages(): string[] {
+    const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
+    return this.store
+      .listCaptainMessages(this.project.id, 200)
+      .filter((m) => m.role === "user" && m.createdAt >= since)
+      .map((m) => m.content)
+      .filter((text) => text.trim())
+  }
+
+  private async turn() {
+    const messages = this.unansweredUserMessages()
+    if (!messages.length) return
+    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
+    const notices = this.store.takeUnseenCaptainNotices(this.project.id)
+    const prompt = [notices.length ? `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "", messages.join("\n\n")]
+      .filter(Boolean)
+      .join("\n\n")
+    await this.runPrompt(prompt)
+  }
+
+  private async autoTurn() {
+    if (this.autoTurns >= MAX_AUTO_TURNS) return
+    const notices = this.store.takeUnseenCaptainNotices(this.project.id)
+    if (!notices.length) return
+    this.autoTurns++
+    const result = await this.runPrompt(
+      [
+        `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        `(Automatic wake-up: there is no new message from Cody or the Coordinator. Decide whether a project-local next step is needed. If Cody or the Coordinator should hear about it, say so in a line or two. If nothing needs reporting, reply with exactly ${NO_UPDATE} and nothing else.)`,
+      ].join("\n\n"),
+      true,
+    )
+    if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
+  }
+
+  private projectNow(): string {
+    const tasks = this.store
+      .listTasks({ projectId: this.project.id })
+      .filter((t) => t.status !== "done")
+      .map(briefTask)
+    const notes = this.store.listNotes(this.project.id).slice(-12).map((n) => `- (${n.author}) ${n.content}`)
+    return [
+      `[Project now: ${this.project.name}]`,
+      this.project.repo ? `Repo: ${this.project.repo} (${this.project.baseBranch})` : "No repo.",
+      notes.length ? `Notes:\n${notes.join("\n")}` : "Notes: none.",
+      tasks.length ? `Open tasks:\n${tasks.join("\n")}` : "No open tasks.",
+    ].join("\n")
+  }
+
+  private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string }> {
+    const prompt = `${this.projectNow()}\n\n${body}`
+    const s = this.session()
+    let result = await this.run(prompt, s.id, s.started)
+    if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
+      const fresh = randomUUID()
+      this.store.setKv(sessionKey(this.project.id), fresh)
+      const recap = this.store
+        .listCaptainMessages(this.project.id, 30)
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
+        .join("\n")
+      result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
+    }
+    if (!result.ok) {
+      const msg = this.store.addCaptainMessage(this.project.id, "error", `The Captain hit an error: ${result.error.slice(0, 1500)}`)
+      this.hub.broadcast({ type: "captain.message", message: msg })
+    }
+    if (auto && result.ok && result.text.trim() && result.text.trim() !== NO_UPDATE) this.report(result.text.trim())
+    this.checkAutoCompact()
+    return result
+  }
+
+  private checkAutoCompact() {
+    if (this.compactWanted || this.compacting) return
+    const { orchestratorAutoCompact: ac } = this.settings.get()
+    const u = this.usage()
+    const threshold = compactThreshold(ac, u.window)
+    if (threshold === null || u.tokens === null) return
+    const cap = u.window ? Math.floor(u.window * MAX_THRESHOLD_SHARE) : Infinity
+    if (u.tokens >= Math.min(threshold, cap)) {
+      this.compactWanted = "auto"
+      this.publishState()
+    }
+  }
+
+  private async doCompact() {
+    const trigger = this.compactWanted ?? "button"
+    this.compactWanted = null
+    this.compacting = true
+    this.lastError = null
+    this.publishState()
+    try {
+      const s = this.session()
+      const before = this.usage().tokens
+      const model = this.settings.get().orchestratorModel
+      const summary = await this.run(captainSummaryPrompt(this.project), s.id, true, "summary")
+      const text = cleanSummary(summary.text)
+      if (!summary.ok || !summaryLooksValid(text)) {
+        throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
+      }
+      const file = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before }, text)
+      const compact = await this.run("/compact", s.id, true, "compact")
+      if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
+      let id = s.id
+      if (compact.sessionId && compact.sessionId !== s.id) {
+        id = compact.sessionId
+        this.store.setKv(sessionKey(this.project.id), id)
+      }
+      const report = await this.run("/context", id, true, "context")
+      const after = report.ok ? parseContextReport(report.raw) : null
+      this.setUsage(after?.tokens ?? null, after?.window)
+      finishCompaction(file, after?.tokens ?? null)
+      const msg = this.store.addCaptainMessage(
+        this.project.id,
+        "notice",
+        `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after.tokens)} tokens` : ""} (${trigger === "auto" ? "automatic" : "button"}). Summary saved to ${file}.`,
+        { kind: "compaction" },
+      )
+      this.hub.broadcast({ type: "captain.message", message: msg })
+      this.store.takeUnseenCaptainNotices(this.project.id)
+    } catch (err) {
+      this.lastError = `Compaction skipped: ${(err as Error).message}`
+      const m = this.store.addCaptainMessage(this.project.id, "error", this.lastError)
+      this.hub.broadcast({ type: "captain.message", message: m })
+    } finally {
+      this.compacting = false
+      this.publishState()
+    }
+  }
+
+  private claudeArgs(kind: RunKind, sessionId: string, resume: boolean): string[] {
+    const st = this.settings.get()
+    const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
+    const model = ["--model", st.orchestratorModel]
+    if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
+    if (kind === "context") return ["-p", ...session, ...model]
+    return [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--strict-mcp-config",
+      "--mcp-config",
+      this.mcpConfigPath,
+      ...(kind === "summary"
+        ? ["--tools", ""]
+        : ["--tools", "Read,WebSearch,WebFetch", "--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")]),
+      "--permission-mode",
+      "dontAsk",
+      "--append-system-prompt",
+      `${captainPrompt(this.project)}\n${compactionsPrompt(this.compactionsDir)}`,
+      ...session,
+      ...model,
+      "--effort",
+      st.orchestratorEffort,
+    ]
+  }
+
+  private readRules(): string[] {
+    return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
+  }
+
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {
+    return new Promise((resolve) => {
+      this.writeMcpConfig()
+      const args = this.claudeArgs(kind, sessionId, resume)
+      const [bin, ...pre] = this.c.claudeBin.split(" ")
+      const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
+      for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
+      if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
+      if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
+
+      let child: ChildProcess
+      try {
+        child = spawn(bin!, [...pre, ...args], { cwd: this.workdir, env, stdio: ["pipe", "pipe", "pipe"] })
+      } catch (err) {
+        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
+        return
+      }
+      this.child = child
+      let stderr = ""
+      let buf = ""
+      let raw = ""
+      let said = ""
+      let sawResult = false
+      let resultError: string | null = null
+      let settled = false
+      let seenSession: string | null = null
+      const quiet = kind !== "turn"
+      const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
+
+      const onLine = (line: string) => {
+        let msg: any
+        try {
+          msg = JSON.parse(line)
+        } catch {
+          return
+        }
+        if (typeof msg.session_id === "string") seenSession = msg.session_id
+        if (msg.type === "system" && msg.subtype === "init") {
+          if (kind === "turn") this.store.setKv(startedKey(this.project.id), "1")
+          return
+        }
+        if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
+          const tokens = msg.message.model === "<synthetic>" || kind !== "turn" ? null : contextTokens(msg.message.usage)
+          if (tokens) this.setUsage(tokens)
+          const text = msg.message.content
+            .filter((b: any) => b.type === "text")
+            .map((b: any) => b.text)
+            .join("")
+            .trim()
+          if (text) said = said ? `${said}\n\n${text}` : text
+          if (quiet) return
+          if (text && text !== NO_UPDATE) {
+            const m = this.store.addCaptainMessage(this.project.id, "assistant", text)
+            this.hub.broadcast({ type: "captain.message", message: m })
+          }
+          for (const b of msg.message.content) {
+            if (b.type !== "tool_use") continue
+            const name = String(b.name).replace(/^mcp__boxyard__/, "")
+            const m = this.store.addCaptainMessage(this.project.id, "tool", name, { input: b.input })
+            this.hub.broadcast({ type: "captain.message", message: m })
+          }
+          return
+        }
+        if (msg.type === "result") {
+          sawResult = true
+          if (kind === "turn") {
+            this.store.setKv(startedKey(this.project.id), "1")
+            const window = contextWindowOf(msg.modelUsage)
+            if (window) this.setUsage(this.usage().tokens, window)
+          }
+          if (msg.is_error) resultError = String(msg.result ?? msg.subtype ?? "error")
+        }
+      }
+
+      child.stdout!.on("data", (chunk: Buffer) => {
+        buf += chunk.toString("utf8")
+        const lines = buf.split("\n")
+        buf = lines.pop() ?? ""
+        if (kind === "context") raw += chunk.toString("utf8")
+        for (const line of lines) if (line.trim()) onLine(line)
+      })
+      child.stderr!.on("data", (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString("utf8")).slice(-6000)
+      })
+      const finish = (code: number | null, err?: Error) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (buf.trim()) onLine(buf)
+        this.child = null
+        const base = { text: said, raw, sessionId: seenSession }
+        if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
+        if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })
+        resolve({ ...base, ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`) })
+      }
+      child.on("error", (err) => finish(null, err))
+      child.on("close", (code) => finish(code))
+      child.stdin!.on("error", () => {})
+      child.stdin!.end(prompt)
+    })
+  }
+}

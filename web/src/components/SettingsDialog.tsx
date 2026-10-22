@@ -338,7 +338,7 @@ export function SettingsDialog({
             <Row
               id={fid("om")}
               label="Model"
-              help="The Claude model the orchestrator chat runs on. Type any model id, or pick one."
+              help="The Claude model the Coordinator chat runs on. Type any model id, or pick one."
               hint={hint("orchestratorModel")}
             >
               <input
@@ -367,7 +367,7 @@ export function SettingsDialog({
             >
               <AutoCompactControl
                 id={fid("oac")}
-                label="Orchestrator auto-compact"
+                label="Coordinator auto-compact"
                 value={s.orchestratorAutoCompact}
                 onChange={(v) => set("orchestratorAutoCompact", v)}
               />
@@ -383,13 +383,13 @@ export function SettingsDialog({
               label="Effort"
               help={
                 s.agentEffort === "orchestrator"
-                  ? "The orchestrator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding."
+                  ? "The Coordinator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding."
                   : "Every agent turn uses this effort."
               }
               hint={hint("agentEffort")}
             >
               <Select id={fid("ae")} className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
-                <option value="orchestrator">Let the orchestrator decide</option>
+                <option value="orchestrator">Let the Coordinator decide</option>
                 <EffortOptions />
               </Select>
             </Row>

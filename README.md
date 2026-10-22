@@ -2,16 +2,16 @@
 
 One chat that runs a yard of Claude Code agents, each working inside an [Upstash Box](https://upstash.com/docs/box).
 
-You tell the **orchestrator** what you want. It sets up **projects** (with or without a GitHub repo) and starts **tasks**. Each task is a headless Claude Code agent with its own folder in a worker box. Agents ask you questions, message each other, open pull requests, share preview URLs and publish files. All of it shows up live in the web app. Box Yard itself can run in a box too, so you can close your laptop and the yard keeps working.
+You tell the **Coordinator** what you want. It sets up **projects** (with or without a GitHub repo) and routes project work to each project's **Captain**. Captains start and follow up on **tasks**. Each task is a headless Claude Code agent with its own folder in a worker box. Agents ask you questions, message each other, open pull requests, share preview URLs and publish files. All of it shows up live in the web app. Box Yard itself can run in a box too, so you can close your laptop and the yard keeps working.
 
 ```
  ┌──────────── web app (React + TanStack Query, live over SSE) ───────────┐
- │  projects sidebar · task cards · inbox · global orchestrator chat      │
+ │  projects sidebar · task cards · inbox · global Coordinator chat       │
  └───────────────────────────────┬────────────────────────────────────────┘
                                  │ REST + SSE
  ┌───────────────────────────────▼────────────────────────────────────────┐
  │ Box Yard server (Node + SQLite)                                        │
- │  orchestrator = `claude -p --resume` + Box Yard MCP tools              │
+ │  Coordinator + per-project Captains = `claude -p --resume` + MCP tools │
  │  task manager = box pool, queue, turns, archives, agent messaging      │
  └──────┬──────────────────────────────────────────────▲──────────────────┘
         │ Box API: create box, write files, start turn │ events (Redis stream,
@@ -38,10 +38,10 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 
 | Variable | What it's for |
 | --- | --- |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code login for the orchestrator and every agent. Run `claude setup-token` to get one. `ANTHROPIC_API_KEY` works too. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code login for the Coordinator, Captains and every agent. Run `claude setup-token` to get one. `ANTHROPIC_API_KEY` works too. |
 | `UPSTASH_BOX_API_KEY` | Worker boxes. Without it, agents run in folders on this machine (`BOX_PROVIDER=local`). |
 | `GITHUB_TOKEN` | Clone private repos, push branches, open PRs. A fine-grained token with Contents and Pull requests (read/write) is enough. |
-| `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and the orchestrator. |
+| `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and Box Yard. |
 | `BOXYARD_PASSWORD` | Web UI password. Leave it empty on localhost, and always set it when the app is public. |
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
@@ -62,19 +62,21 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 
 ## How it works
 
-**Orchestrator.** Each chat message runs `claude -p` with `--resume <session>`, so the conversation keeps its context across messages and restarts. The orchestrator gets Box Yard's MCP tools (`create_project`, `create_task`, `send_to_task`, `wait_for_tasks`, `list_tasks`, `list_inbox`, `get_preview_url`, `create_artifact`, `save_note`, `pool_status`, and more) at `/mcp`. Every turn starts with a snapshot of the agents that are busy right now, so it never works from stale memory.
+**Coordinator.** Each top-level chat message runs `claude -p` with `--resume <session>`, so the conversation keeps its context across messages and restarts. The Coordinator gets Box Yard's MCP tools at `/mcp`. It handles cross-project requests and routes project-scoped work to Captains with `send_to_captain`, `ask_captain` and `wait_for_captain`.
 
-**Routing.** For each request the orchestrator decides where the work goes:
+**Captains.** Each project has one Captain: its own persistent Claude session, project notes, task history and compaction history. Captains are created lazily on first use and have no running process while idle. A Captain owns `create_task`, `send_to_task`, `wait_for_tasks`, model/effort routing and project-local follow-up for its project. Task events wake that project's Captain first; the Captain decides whether to report a concise update back to the Coordinator.
+
+**Routing.** For each request the Coordinator and Captains decide where the work goes:
 
 | Request | What happens |
 | --- | --- |
-| Follow-up on work an agent did ("close those issues", "fix that PR") | `send_to_task` to that agent. Its Claude session resumes with full context, restored from the archive if it was parked. |
+| Follow-up on work an agent did ("close those issues", "fix that PR") | The Coordinator routes to the project's Captain, which uses `send_to_task` on that agent. Its Claude session resumes with full context, restored from the archive if it was parked. |
 | Follow-up while that agent is mid-turn | Same call. The message is queued and goes out as soon as the turn ends, in the same session. |
-| New, independent work in a known project | `create_task`: a fresh session on the project's box. `related_tasks` passes along earlier outcomes. |
-| A repo with no project yet | `create_project`, then `create_task`. One project per repo. |
-| Several repos or independent pieces | One task each, all started at once. |
+| New, independent work in a known project | The Captain uses `create_task`: a fresh session on the project's box. `related_tasks` passes along earlier outcomes. |
+| A repo with no project yet | The Coordinator uses `create_project`, then routes the work to the new Captain. One project per repo. |
+| Several repos or independent pieces | The Coordinator fans out to multiple Captains; each Captain starts one or more tasks in its project. |
 
-`list_tasks` takes a `query`, so even a fresh orchestrator session finds the agent that did related work. For quick work it calls `wait_for_tasks` and answers in the same reply. For long work it ends its turn. When an agent finishes, fails, asks something or opens a PR, a notice lands in the chat and the orchestrator wakes up on its own to tell you, and to start the next step of what you asked for (`BOXYARD_ORCHESTRATOR_AUTOWAKE=0` turns this off). Notices from an agent that's still mid-turn wait for its end-of-turn notice, so you get one report.
+`list_tasks` takes a `query`, so even a fresh Captain session finds the agent that did related work. For quick work the Captain calls `wait_for_tasks` and answers in the same reply. For long work it ends its turn. When an agent finishes, fails, asks something or opens a PR, the project's Captain wakes up, checks whether a project-local next step is needed, and reports a concise result upward when Cody or the Coordinator should hear it.
 
 **Tasks and turns.** A task's agent runs one headless turn per incoming message (`claude -p --session-id` the first time, then `--resume`). Messages that arrive while it's busy wait in a queue and go out together in the next turn. Each task's Claude config lives in its own folder (`CLAUDE_CONFIG_DIR`), so the session moves with the task.
 
@@ -108,32 +110,32 @@ A project whose box has all its slots busy gets a second box while there's room.
 - If a Claude session can't be found, the agent starts a fresh one with a recap of the conversation.
 - When the server restarts, it reattaches to turns that are still running inside boxes.
 
-**Agents talk to each other.** Agents can call `list_agents` and `message_agent` (optionally waiting for a reply), `save_note` and `read_notes` for project memory that every future agent sees, and `ask_user` to ask you. Messages go through the orchestrator, because boxes can't reach each other directly. Agent-to-agent messages are rate limited to stop loops.
+**Agents talk to each other.** Agents can call `list_agents` and `message_agent` (optionally waiting for a reply), `save_note` and `read_notes` for project memory that every future agent sees, and `ask_user` to ask you. Messages go through Box Yard, because boxes can't reach each other directly. Agent-to-agent messages are rate limited to stop loops.
 
 **Previews and artifacts.** An agent starts a dev server on its own port range (`$PORT` to `$PORT+9`) and calls `report_preview`. Box Yard then asks the box for a public URL (`getPublicURL`). For files, `publish_artifact` copies the file to the server, and Box Yard hosts it at `/artifacts/...`. The agent gets the final URL back right away, so it can pass the link on.
 
 **Pull requests.** When a turn ends on a task with a PR, Box Yard asks GitHub for its state. A merged PR marks the task done. A closed one means there's nothing left to review.
 
-**Schedules.** A schedule is a cron job inside a project: a name, a 5-field cron expression (or `@hourly`, `@daily`, `@weekly`, `@monthly`), a time zone and a prompt. Each time it fires, Box Yard starts an ordinary task in that project, so you watch the run live like any other task. The Schedules page shows a live tail of a run that is going, plus each schedule's run history. The prompt for each run also says how the previous run ended, so runs can build on each other. Create, pause, run now and delete schedules from the Schedules page, a project page, or the orchestrator chat (`create_schedule`, `list_schedules`, `update_schedule`, `run_schedule_now`, `delete_schedule`).
+**Schedules.** A schedule is a cron job inside a project or in the Coordinator chat: a name, a 5-field cron expression (or `@hourly`, `@daily`, `@weekly`, `@monthly`), a time zone and a prompt. Project schedules start an ordinary task in that project, so you watch the run live like any other task. Coordinator schedules inject a prompt into the top-level chat for cross-project digests and reminders (internally they still use target `"orchestrator"` for compatibility). Create, pause, run now and delete schedules from the Schedules page, a project page, or the Coordinator chat (`create_schedule`, `list_schedules`, `update_schedule`, `run_schedule_now`, `delete_schedule`).
 
 - The server's own timer checks for due schedules every 15 seconds (`BOXYARD_SCHEDULER_TICK_MS`).
 - If the server was down when runs were due, it starts one catch-up run when it comes back, and tells the agent how many runs it missed. Set a schedule's missed-runs option to "skip" to drop them instead.
 - A new run is skipped while the previous run is still going, unless the schedule allows overlap. The reason shows on the schedule card.
-- Optional: with `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY` (and `QSTASH_NEXT_SIGNING_KEY`) plus `BOXYARD_PUBLIC_URL`, each schedule is also created in Upstash QStash, which POSTs to `/qstash/schedules/<id>`. That request wakes a paused orchestrator box, so runs happen on time. Box Yard checks the QStash signature, and the local timer and QStash can't both start the same run.
+- Optional: with `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY` (and `QSTASH_NEXT_SIGNING_KEY`) plus `BOXYARD_PUBLIC_URL`, each schedule is also created in Upstash QStash, which POSTs to `/qstash/schedules/<id>`. That request wakes a paused Box Yard box, so runs happen on time. Box Yard checks the QStash signature, and the local timer and QStash can't both start the same run.
 - New schedules use `BOXYARD_TIMEZONE`, or the server's time zone if that isn't set.
 
 **Context usage, compaction and settings.**
-- Every task's header and the orchestrator panel show how full the Claude context window is (`84k / 1m · 8%`), updated after each model call. The number is the last call's input + cache + output tokens; the window comes from the CLI.
-- **Compact** summarises a session in place. For a task it runs `/compact` as its own turn on the resumed session (right after the current turn if one is running, and before any queued messages). For the orchestrator it first asks the orchestrator to write a summary, saves that, then runs `/compact`.
-- **Orchestrator compaction log.** Each orchestrator compaction (button or auto) writes `<data>/orchestrator/compactions/<UTC time>.md` (for example `2026-10-22T18-40-05Z.md`): frontmatter (timestamp, session id, model, trigger, tokens before and after) and four sections (decisions and preferences, projects and repos, ongoing work, open threads). The orchestrator's system prompt gives it the folder path and tells it to read the newest files when it needs history it no longer has. It gets `Read` access to that folder only. If the summary can't be written, nothing is compacted and the chat shows why.
-- **Auto-compact.** The orchestrator's threshold (percent of the window, or tokens) is checked by Box Yard between turns, not by the CLI, so the summary is always written first. Turning it off leaves only the CLI's own last-resort compaction near the window limit (no log file). Box agents use the CLI's `--autocompact <tokens>` when a custom threshold is set.
-- **Settings** (gear icon at the top of the orchestrator panel): model and effort (`low`, `medium`, `high`, `xhigh`, `max`) for the orchestrator and for box agents, plus the auto-compact thresholds. Box agent effort can be "Let the orchestrator decide": `create_task` and `send_to_task` then take an `effort` param (low for one-command chores, high for real coding, and so on); in a fixed mode that param doesn't exist. Defaults are `claude-opus-5-5` with `high`. `ORCHESTRATOR_MODEL` and `WORKER_MODEL` override the defaults, and values saved in the UI override both. Settings are stored in SQLite and read at the start of every turn.
+- Every task's header and the Coordinator/Captain panels show how full the Claude context window is (`84k / 1m · 8%`), updated after each model call. The number is the last call's input + cache + output tokens; the window comes from the CLI.
+- **Compact** summarises a session in place. For a task it runs `/compact` as its own turn on the resumed session (right after the current turn if one is running, and before any queued messages). For the Coordinator and Captains, Box Yard first asks the session to write a durable summary, saves that, then runs `/compact`.
+- **Compaction logs.** Coordinator compactions write `<data>/orchestrator/compactions/<UTC time>.md` for compatibility with existing installs. Captain compactions write `<data>/captains/<project id>/compactions/<UTC time>.md`, so each project's history is tracked independently and keyed by its task ids in the summary. The relevant system prompt gives the session its folder path and tells it to read the newest files when it needs history it no longer has. If the summary can't be written, nothing is compacted and the UI shows why.
+- **Auto-compact.** The Coordinator and Captain threshold (percent of the window, or tokens) is checked by Box Yard between turns, not by the CLI, so the summary is always written first. Turning it off leaves only the CLI's own last-resort compaction near the window limit (no log file). Box agents use the CLI's `--autocompact <tokens>` when a custom threshold is set.
+- **Settings** (gear icon at the top of the Coordinator panel): model and effort (`low`, `medium`, `high`, `xhigh`, `max`) for the Coordinator/Captains and for box agents, plus the auto-compact thresholds. Box agent effort can be "Let the Coordinator decide": `create_task` and `send_to_task` then take an `effort` param (low for one-command chores, high for real coding, and so on); in a fixed mode that param doesn't exist. Defaults are `claude-opus-5-5` with `high`. `ORCHESTRATOR_MODEL` and `WORKER_MODEL` override the defaults, and values saved in the UI override both. Settings are stored in SQLite and read at the start of every turn.
 
 **Event bus.** The worker runner appends every event to `events.jsonl` in the box. If Upstash Redis is configured, it also adds the event to a Redis stream. Events carry sequence numbers, so the server can read either source without duplicates. If Redis misses something, the server falls back to the file.
 
-### Where the SQLite data lives when the orchestrator runs in a box
+### Where the SQLite data lives when Box Yard runs in a box
 
-The database is a normal SQLite file (WAL mode) on the orchestrator box's own disk, at `/workspace/home/box-yard-data`. Box disks persist across pauses and redeploys, so this is the primary copy. For an off-box copy, the server snapshots its own box every 6 hours (`BOXYARD_SELF_SNAPSHOT_HOURS`) and keeps the last 3 snapshots. It checkpoints the WAL before each snapshot. If the box is ever lost, restore it with `npm run deploy:box -- --from-snapshot <id>`.
+The database is a normal SQLite file (WAL mode) on the Box Yard box's own disk, at `/workspace/home/box-yard-data`. Box disks persist across pauses and redeploys, so this is the primary copy. For an off-box copy, the server snapshots its own box every 6 hours (`BOXYARD_SELF_SNAPSHOT_HOURS`) and keeps the last 3 snapshots. It checkpoints the WAL before each snapshot. If the box is ever lost, restore it with `npm run deploy:box -- --from-snapshot <id>`.
 
 Redis is only the message bus. It never holds the source of truth, so losing it loses nothing.
 

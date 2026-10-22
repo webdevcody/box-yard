@@ -11,6 +11,10 @@ export function compactionsDir(dataDir: string) {
   return path.join(dataDir, "orchestrator", "compactions")
 }
 
+export function captainCompactionsDir(dataDir: string, projectId: string) {
+  return path.join(dataDir, "captains", projectId, "compactions")
+}
+
 /** What the orchestrator is asked to write before its context is compacted. */
 export const SUMMARY_PROMPT = `[Box Yard] Your context is about to be compacted. Before that, write a durable record of what matters, as plain markdown.
 It goes into a folder of files that is kept for months or years and may be read by other tools, so make it self-contained and don't rely on this conversation or on Claude-specific wording.
@@ -100,7 +104,10 @@ export function listCompactions(dir: string): string[] {
 export function lastCompaction(dir: string): CompactionInfo | null {
   const name = listCompactions(dir).at(-1)
   if (!name) return null
-  const file = path.join(dir, name)
+  return readCompactionInfo(path.join(dir, name))
+}
+
+export function readCompactionInfo(file: string): CompactionInfo | null {
   try {
     const head = fs.readFileSync(file, "utf8").slice(0, 600)
     const get = (k: string) => new RegExp(`^${k}: (.*)$`, "m").exec(head)?.[1]?.trim()
@@ -115,6 +122,10 @@ export function lastCompaction(dir: string): CompactionInfo | null {
   } catch {
     return null
   }
+}
+
+export function readCompactionFile(file: string): string {
+  return fs.readFileSync(file, "utf8")
 }
 
 /** The section of the orchestrator's system prompt that points at the log. */

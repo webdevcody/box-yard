@@ -109,8 +109,8 @@ export class TaskManager {
   private archiving = new Set<string>()
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
-  /** Called after every notice, so the orchestrator can wake up and report. */
-  onNotice: (() => void) | null = null
+  /** Called after every notice; return true when another owner handled delivery. */
+  onNotice: ((content: string, meta: Record<string, unknown> | null) => boolean | void) | null = null
 
   constructor(deps: TaskManagerDeps) {
     this.c = deps.config
@@ -1401,11 +1401,11 @@ export class TaskManager {
     this.hub.broadcast({ type: "task.message", message: msg })
   }
 
-  /** A line in the orchestrator chat; the orchestrator reads it on its next turn. */
+  /** A line for the owner of a task update; by default the Coordinator reads it on its next turn. */
   notice(content: string, meta: Record<string, unknown> | null = null) {
+    if (this.onNotice?.(content, meta)) return
     const msg = this.store.addChat("notice", content, meta)
     this.hub.broadcast({ type: "chat.message", message: msg })
-    this.onNotice?.()
   }
 
   emitTask(taskId: string) {

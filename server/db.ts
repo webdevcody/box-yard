@@ -217,6 +217,21 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pr_merged_at INTEGER;
   ALTER TABLE tasks ADD COLUMN pr_merged_by TEXT;
   `,
+  `
+  -- One durable transcript per project captain. Captains are lazily created from
+  -- projects, so the table only stores their chat history and unread notices.
+  CREATE TABLE captain_messages (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    meta_json TEXT,
+    seen_by_captain INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX captain_messages_project ON captain_messages(project_id, created_at);
+  CREATE INDEX captain_messages_unseen ON captain_messages(project_id, seen_by_captain);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

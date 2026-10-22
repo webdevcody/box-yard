@@ -14,7 +14,7 @@ export interface SectionInfo {
 export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
-    label: "Orchestrator",
+    label: "Coordinator",
     description: "The model behind the chat that runs the yard, and when it compacts its context.",
     fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact"],
   },

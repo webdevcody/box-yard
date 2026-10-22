@@ -115,7 +115,7 @@ export function buildItems(data: PaletteData): PaletteItem[] {
   }
 
   for (const s of data.schedules ?? []) {
-    const target = s.target === "orchestrator" ? "Orchestrator" : (projectName.get(s.projectId ?? "") ?? "Project")
+    const target = s.target === "orchestrator" ? "Coordinator" : (projectName.get(s.projectId ?? "") ?? "Project")
     items.push({
       key: `schedule:${s.id}`,
       kind: "schedule",

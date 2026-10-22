@@ -5,6 +5,7 @@ import { activityLine } from "../shared/activity.js"
 import type {
   AppNotification,
   Artifact,
+  CaptainMessage,
   ChatMessage,
   ChatRole,
   Effort,
@@ -691,6 +692,68 @@ export class Store {
 
   clearChat() {
     this.db.prepare("DELETE FROM chat_messages").run()
+  }
+
+  // ---------- project captains ----------
+
+  addCaptainMessage(projectId: string, role: ChatRole, content: string, meta: Record<string, unknown> | null = null, id?: string): CaptainMessage {
+    if (!this.getProject(projectId)) throw new NotFoundError(`Project ${projectId} not found`)
+    const msg: CaptainMessage = { id: id ?? newId("cap"), projectId, role, content, meta, createdAt: Date.now() }
+    const seen = role === "notice" ? 0 : 1
+    this.db
+      .prepare(
+        "INSERT INTO captain_messages (id, project_id, role, content, meta_json, seen_by_captain, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(msg.id, projectId, role, content, meta ? JSON.stringify(meta) : null, seen, msg.createdAt)
+    return msg
+  }
+
+  listCaptainMessages(projectId: string, limit = 300): CaptainMessage[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid FROM captain_messages WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?)
+         ORDER BY created_at ASC, rid ASC`,
+      )
+      .all(projectId, limit) as { id: string; project_id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({
+      id: r.id,
+      projectId: r.project_id,
+      role: r.role,
+      content: r.content,
+      meta: json(r.meta_json, null),
+      createdAt: r.created_at,
+    }))
+  }
+
+  takeUnseenCaptainNotices(projectId: string): string[] {
+    return this.db.transaction(() => {
+      const rows = this.db
+        .prepare("SELECT content FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC")
+        .all(projectId) as { content: string }[]
+      this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE project_id = ? AND seen_by_captain = 0").run(projectId)
+      return rows.map((r) => r.content)
+    })()
+  }
+
+  unseenCaptainNoticeTasks(projectId: string): (string | null)[] {
+    const rows = this.db
+      .prepare("SELECT json_extract(meta_json, '$.taskId') AS task_id FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0")
+      .all(projectId) as { task_id: string | null }[]
+    return rows.map((r) => r.task_id)
+  }
+
+  markCaptainNoticesSeen(projectId: string, taskIds: string[]) {
+    if (!taskIds.length) return
+    const stmt = this.db.prepare(
+      "UPDATE captain_messages SET seen_by_captain = 1 WHERE project_id = ? AND seen_by_captain = 0 AND role = 'notice' AND json_extract(meta_json, '$.taskId') = ?",
+    )
+    this.db.transaction(() => {
+      for (const id of taskIds) stmt.run(projectId, id)
+    })()
+  }
+
+  clearCaptainMessages(projectId: string) {
+    this.db.prepare("DELETE FROM captain_messages WHERE project_id = ?").run(projectId)
   }
 
   // ---------- artifacts ----------

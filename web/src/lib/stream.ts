@@ -4,7 +4,7 @@ import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
-import type { AppNotification, Artifact, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
+import type { AppNotification, Artifact, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -127,6 +127,22 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "orchestrator.state":
           qc.setQueryData(keys.orchestrator, ev.state)
+          break
+        case "captain.message":
+          qc.setQueryData<CaptainMessage[]>(keys.captainMessages(ev.message.projectId), (list) => {
+            if (!list) return list
+            if (list.some((m) => m.id === ev.message.id)) return list
+            const tmp = list.findIndex((m) => m.id.startsWith("tmp-") && m.role === ev.message.role && m.content === ev.message.content)
+            if (tmp >= 0) {
+              const next = list.slice()
+              next[tmp] = ev.message
+              return next
+            }
+            return [...list, ev.message]
+          })
+          break
+        case "captain.state":
+          qc.setQueryData(keys.captain(ev.state.projectId), ev.state)
           break
         case "settings":
           qc.setQueryData(keys.agentSettings, ev.info)

@@ -70,8 +70,8 @@ export function SchedulesView() {
             <AlarmClock className="h-6 w-6 text-yard-400" /> Schedules
           </h1>
           <p className="mt-1 max-w-2xl text-sm text-zinc-500">
-            Recurring jobs. A project schedule starts a fresh task in its project each run, which you can watch live like any task. An orchestrator schedule
-            sends its prompt to the orchestrator chat, for cross-project work like digests and reminders.
+            Recurring jobs. A project schedule starts a fresh task in its project each run, which you can watch live like any task. A Coordinator schedule
+            sends its prompt to the Coordinator chat, for cross-project work like digests and reminders.
             {settings.data && (
               <span className="ml-1">
                 Triggered by {settings.data.scheduler === "qstash" ? "Upstash QStash and the server's own timer" : "the server's own timer"}.
@@ -88,12 +88,12 @@ export function SchedulesView() {
 
       {schedules.isLoading ? null : list.length === 0 ? (
         <Empty icon={<AlarmClock className="h-8 w-8" />} title="No schedules yet">
-          Create one here, or tell the orchestrator something like "every morning, summarize open PRs across all repos".
+          Create one here, or tell the Coordinator something like "every morning, summarize open PRs across all repos".
         </Empty>
       ) : (
         <div className="space-y-6">
           {orchestratorList.length > 0 && (
-            <ScheduleGroup title="Orchestrator" icon={<Bot className="h-4 w-4" />} schedules={orchestratorList} />
+            <ScheduleGroup title="Coordinator" icon={<Bot className="h-4 w-4" />} schedules={orchestratorList} />
           )}
           {groups.map((g) => (
             <ScheduleGroup key={g.project.id} title={g.project.name} href={`/projects/${g.project.id}?tab=schedules`} schedules={g.schedules} />
@@ -249,7 +249,7 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
   )
 }
 
-/** Runs of an orchestrator schedule: each links to the chat message it injected. */
+/** Runs of a Coordinator schedule: each links to the chat message it injected. */
 function ChatRunList({ runs }: { runs: ScheduleRun[] }) {
   if (!runs.length) return <p className="text-xs text-zinc-500">No runs yet.</p>
   const tone: Record<ScheduleRun["status"], string> = {
@@ -399,7 +399,7 @@ function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: 
                 onClick={() => setTarget(t)}
                 className={cx("rounded-md px-3 py-1 text-xs", target === t ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400 hover:text-zinc-200")}
               >
-                {t === "project" ? "Project (starts a task)" : "Orchestrator (message in chat)"}
+                {t === "project" ? "Project (starts a task)" : "Coordinator (message in chat)"}
               </button>
             ))}
           </div>
@@ -456,10 +456,10 @@ function NewScheduleDialog({ projectId, onDone }: { projectId?: string; onDone: 
       </Field>
 
       <Field
-        label={orchestrator ? "What should the orchestrator do each run?" : "What should the agent do each run?"}
+        label={orchestrator ? "What should the Coordinator do each run?" : "What should the agent do each run?"}
         hint={
           orchestrator
-            ? 'Each run posts "[Scheduled: name] <this prompt>" in the chat; it waits until the orchestrator is free.'
+            ? 'Each run posts "[Scheduled: name] <this prompt>" in the chat; it waits until the Coordinator is free.'
             : "Each run is a new task with this prompt, plus a note on how the previous run ended."
         }
       >
