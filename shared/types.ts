@@ -384,6 +384,8 @@ export interface Settings {
   workspaceRetentionDays: number
   /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
   archiveRetentionDays: number
+  /** Never prune the archive of a task touched within this many days (on top of archiveRetentionDays). 0 = no extra protection. */
+  archiveKeepTouchedDays: number
 }
 
 /** Agents that can run at once under a set of limits. */

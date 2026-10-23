@@ -90,14 +90,24 @@ export function followupPrompt(inputs: { source: string; content: string }[], pr
     .join("\n\n---\n\n")
 }
 
+/** What a recapped session finds in its folder: a fresh clone, not its old work tree. */
+export function recapWorkspaceNote(branch: string | null, checkout: "origin" | "base" | undefined, baseBranch: string): string {
+  const lost = "Uncommitted changes and anything not pushed from the old workspace are gone."
+  if (!branch) return `Your old workspace is gone too; the folder was set up fresh. ${lost}`
+  if (checkout === "base")
+    return `Your old workspace is gone too. Branch ${branch} no longer exists on origin, so it was recreated from ${baseBranch}; earlier commits that were never pushed are lost. Check the pull request (if any) before redoing work. ${lost}`
+  return `Your old workspace is gone too. The folder is a fresh clone with branch ${branch} checked out from origin. ${lost}`
+}
+
 /** Used when a session is lost: enough context for a fresh session to carry on. */
-export function recapPrompt(task: Pick<Task, "title" | "prompt" | "summary" | "prUrl" | "branch">, messages: TaskMessage[]): string {
+export function recapPrompt(task: Pick<Task, "title" | "prompt" | "summary" | "prUrl" | "branch">, messages: TaskMessage[], opts: { workspace?: string } = {}): string {
   const recent = messages
     .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "agent")
     .slice(-30)
     .map((m) => `[${m.role}] ${m.content.slice(0, 1500)}`)
   return [
     `Your previous Claude session for this task was lost, so here is a recap. Check the working directory (git status/log) to see where things stand.`,
+    opts.workspace ?? "",
     `Original task "${task.title}":`,
     task.prompt,
     task.branch ? `Branch: ${task.branch}` : "",
@@ -123,7 +133,7 @@ How the yard is built:
 
 Routing every request (check list_projects / list_tasks first when you're not sure what exists):
 1. Project-scoped work: send it to that project's Captain. Use ask_captain when you want to wait for an immediate answer; use send_to_captain for long work, then wait_for_captain only when it is quick. For cross-project requests, fan out to all relevant Captains and synthesize their replies.
-2. Follow-up on work an agent already did (same issue, PR, branch, or "those"/"that"/"it"; corrections; "also do X there"): route it to the Captain for that task's project so it can send_to_task to the right agent. It resumes the same session with full context, even if it's done. Don't start a new agent for it.
+2. Follow-up on work an agent already did (same issue, PR, branch, or "those"/"that"/"it"; corrections; "also do X there"): route it to the Captain for that task's project so it can send_to_task to the right agent. It resumes the same session with full context, even if it's done, as long as its workspace is on a box or in an archive. If its archive has expired (Settings → Boxes & limits), send_to_task still works: the agent starts a new session from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch, and the tool result says so. Don't start a new agent for it.
    - If that agent is mid-turn, send_to_task still works: the message is queued and goes out as soon as its turn ends. Do that when the new request depends on or changes what it's doing.
    - If the follow-up spans several agents (e.g. "close all those issues" after issues were opened by agents in different projects), send_to_task to each of them.
 3. New, independent work in an existing project: route to its Captain. The Captain will create_task in that project (a fresh session on the project's box) or reuse context when appropriate.
@@ -168,6 +178,7 @@ export function captainPrompt(project: Project): string {
     ``,
     `Your job is to own all work inside this one project. The global Coordinator routes project requests to you; Cody may also message you directly from the project page.`,
     `You have Box Yard MCP tools. Use create_task for new independent work in this project, send_to_task for follow-ups, wait_for_tasks for quick results, save_note for durable project memory, and list_tasks/get_task before choosing an existing agent.`,
+    `send_to_task resumes the agent's same session, even when it's done, while its workspace is on a box or in an archive. Archives of tasks with an unmerged PR or recent activity are kept; when an older one has expired, the agent restarts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch. The tool result's delivery field tells you which happened, so mention a recap when it matters.`,
     `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,
