@@ -150,8 +150,12 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     if (t.status === "working" || t.status === "starting")
       return "queued: the agent is mid-turn; the message is delivered (with any others) as soon as this turn ends, in the same session"
     if (t.status === "queued") return "queued: the task is waiting for a box slot; the message goes out with its next turn"
-    if (t.boxId) return `resuming: the agent's Claude session resumes now on box ${t.boxId} with full context`
-    return "resuming: the workspace and Claude session are restored from the archive onto a box, then the session resumes with full context"
+    const mode = tasks.resumeMode(t.id)
+    if (mode === "box") return `resuming: the agent's Claude session resumes now on box ${t.boxId} with full context`
+    if (mode === "archive") return "resuming: the workspace and Claude session are restored from the archive onto a box, then the session resumes with full context"
+    if (mode === "recap")
+      return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. Tell Cody if that matters`
+    return "starting: the agent's first turn starts as soon as a box slot is free"
   }
   const projectView = (p: Project) => ({
     id: p.id,
@@ -434,7 +438,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
         "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
       inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...routeParams },
     },
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {

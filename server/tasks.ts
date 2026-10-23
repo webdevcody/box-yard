@@ -16,6 +16,7 @@ import {
   firstTurnPrompt,
   followupPrompt,
   recapPrompt,
+  recapWorkspaceNote,
   workerSystemPrompt,
   type DirectoryEntry,
 } from "./prompts.js"
@@ -40,6 +41,7 @@ const STALL_MS = 45_000
 const START_TIMEOUT_MS = 15 * 60_000
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
+const BRANCH_MARK = "boxyard-branch="
 
 export interface TaskManagerDeps {
   config: Config
@@ -688,9 +690,14 @@ export class TaskManager {
 
       const check = await this.provider.exec(boxId, `[ -d ${q(dir + "/work")} ] && echo present || echo missing`)
       if (check.exitCode !== 0) throw new Error(`box not responding: ${check.stderr.slice(-300)}`)
-      if (check.stdout.includes("missing")) await this.prepareWorkspace(row, boxId, dir)
+      const prepared = check.stdout.includes("missing") ? await this.prepareWorkspace(row, boxId, dir) : null
       row = this.requireRow(taskId)
 
+      // The task ran before but its folder came back without an archive (expired,
+      // never made, or lost with its box): its Claude session is gone too. Start a
+      // fresh session that carries a recap instead of resuming a missing one.
+      const recapped = Boolean(prepared && !prepared.restored && row.session_started)
+      if (recapped && row.compact_pending) throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
       const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
       // A compaction is a turn of its own; queued messages wait for the next one.
       const queued = compact ? [] : this.store.peekInputs(taskId)
@@ -698,11 +705,17 @@ export class TaskManager {
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
+      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }])
+      if (recapped) {
+        row = this.recapSession(row, prepared!.branch, project.baseBranch)
+      }
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followupPrompt(inputs)] : [] })
-        : followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }])
+        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [] })
+        : recapped
+        ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
+        : followup
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
@@ -715,7 +728,7 @@ export class TaskManager {
           turnId,
           prompt,
           sessionId: row.session_id,
-          resume: !firstTurn,
+          resume: !firstTurn && !recapped,
           compact,
           ...agent,
           systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
@@ -790,6 +803,14 @@ export class TaskManager {
     }
   }
 
+  /** A resumed task whose session is gone gets a new session id; say so in its thread. */
+  private recapSession(row: TaskRow, branch: "origin" | "base" | undefined, baseBranch: string): TaskRow {
+    this.store.updateTask(row.id, { sessionId: randomUUID() })
+    const checkout = !row.branch ? "a fresh workspace" : branch === "base" ? `branch ${row.branch} recreated from ${baseBranch} (it is gone from origin)` : `a fresh checkout of branch ${row.branch}`
+    this.addEvent(row.id, `Resumed from a recap: no workspace archive was left, so a new Claude session started on ${checkout} with the task's summary, PR and recent messages.`)
+    return this.requireRow(row.id)
+  }
+
   /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
   private agentSettings(row: TaskRow) {
     const s = this.settings.get()
@@ -861,8 +882,12 @@ export class TaskManager {
     }
   }
 
-  /** Fresh folder for a task: restore its archive, or clone its repo. */
-  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string) {
+  /**
+   * Fresh folder for a task: restore its archive, or clone its repo. `branch`
+   * says how a clone got the task's branch: from origin, or recreated from the
+   * base branch because it no longer exists there.
+   */
+  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string): Promise<{ restored: boolean; branch?: "origin" | "base" }> {
     const root = this.provider.root(boxId)
     if (row.archive_path && fs.existsSync(row.archive_path)) {
       const remote = `${root}/.boxyard/restore-${row.id}.tgz`
@@ -877,7 +902,7 @@ export class TaskManager {
       const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
       this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
       this.addEvent(row.id, `Workspace restored on box ${boxId}.`)
-      return
+      return { restored: true }
     }
 
     const project = this.store.getProject(row.project_id)!
@@ -901,7 +926,7 @@ export class TaskManager {
         `git config user.name ${q(this.c.gitUserName)}`,
         `git config user.email ${q(this.c.gitUserEmail)}`,
       )
-      if (row.branch) steps.push(`(git checkout ${q(row.branch)} 2>/dev/null || git checkout -b ${q(row.branch)})`)
+      if (row.branch) steps.push(`( (git checkout ${q(row.branch)} >/dev/null 2>&1 && echo ${BRANCH_MARK}origin) || (git checkout -b ${q(row.branch)} && echo ${BRANCH_MARK}base) )`)
     } else {
       steps.push(`mkdir -p ${q(dir + "/work")}`)
     }
@@ -912,6 +937,8 @@ export class TaskManager {
     }
     this.store.updateTask(row.id, { eventCursor: null })
     this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
+    const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
+    return { restored: false, branch: mark }
   }
 
   /** Keep an exec stream open while the turn runs so the box isn't paused for being idle. */
@@ -1304,6 +1331,17 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ archives
 
+  /**
+   * How the task's next turn gets its workspace and session back: still on its
+   * box, restored from its archive, or (archive gone) a fresh session from a recap.
+   */
+  resumeMode(taskId: string): "box" | "archive" | "recap" | "new" {
+    const row = this.requireRow(taskId)
+    if (row.box_id) return "box"
+    if (row.archive_path && fs.existsSync(row.archive_path)) return "archive"
+    return row.session_started ? "recap" : "new"
+  }
+
   private hasFreshArchive(row: TaskRow) {
     return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
   }
@@ -1518,6 +1556,17 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Archives that retention must never delete: the work behind a PR that isn't
+   * merged yet, and anything touched in the last `archiveKeepTouchedDays`.
+   */
+  private archiveProtected(row: TaskRow, now: number) {
+    if (row.pr_url && row.pr_state !== "merged") return true
+    const keepDays = this.settings.get().archiveKeepTouchedDays
+    const touched = Math.max(row.last_active_at, row.updated_at)
+    return keepDays > 0 && touched > now - keepDays * 24 * 60 * 60_000
+  }
+
   private async pruneArchives(now: number) {
     const days = this.settings.get().archiveRetentionDays
     if (days <= 0) return
@@ -1536,7 +1585,7 @@ export class TaskManager {
         continue
       }
       const longDone = row.status === "done" && !row.current_turn_id && !this.store.hasInputs(row.id) && row.last_active_at <= cutoff
-      if (!longDone) continue
+      if (!longDone || this.archiveProtected(row, now)) continue
       fs.rmSync(file, { force: true })
       if (row.archive_path === file) this.store.updateTask(row.id, { archivePath: null, lastArchivedAt: null }, { touch: false })
     }
