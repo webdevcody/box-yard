@@ -26,6 +26,7 @@ import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -937,6 +938,11 @@ export class TaskManager {
     if (!row) return
     const flags = this.store.turnFlags(row)
     const say = (role: "assistant" | "tool" | "event" | "agent", content: string, meta: Record<string, unknown> | null = null) => {
+      if (role === "assistant") {
+        const parsed = parseNextSteps(content)
+        if (parsed.nextSteps.length) meta = { ...(meta ?? {}), [NEXT_STEPS_META_KEY]: parsed.nextSteps }
+        content = parsed.content
+      }
       const msg = this.store.addTaskMessage(taskId, role, content, meta)
       this.hub.broadcast({ type: "task.message", message: msg })
     }
