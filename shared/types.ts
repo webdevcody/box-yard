@@ -245,10 +245,36 @@ export interface BoxInfo {
   diskLow: boolean
   /** The running cleanup, or the last one. */
   cleanup: BoxCleanup | null
+  /** What is being done to the box right now; its Clean up, Clear and Delete buttons wait for it. */
+  operation: BoxOperation | null
   estimatedCostUsd: number
   usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
+}
+
+export type BoxOperation = "cleanup" | "clear" | "delete"
+
+/** What Clear box and Delete box would touch, for their confirmations. */
+export interface BoxContents {
+  boxId: string
+  tasks: {
+    id: string
+    title: string
+    projectId: string
+    status: TaskStatus
+    /** A turn is running (or setting up) on the box right now. */
+    running: boolean
+    /** Changed or untracked files in the workspace (git status), null when it couldn't tell. Archived before anything is removed. */
+    uncommitted: number | null
+    /** The workspace already has an archive newer than its last activity. */
+    archived: boolean
+  }[]
+  /** Agents running on the box: Clear and Delete refuse unless asked to stop them. */
+  running: number
+  /** Disk in use on the box (df), and how much of it is Box Yard's folders (du). */
+  diskUsedBytes: number | null
+  diskBytes: number | null
 }
 
 export interface Health {

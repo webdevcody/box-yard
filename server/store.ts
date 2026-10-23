@@ -1994,6 +1994,11 @@ export class BadRequestError extends Error {
   status = 400
 }
 
+/** The request is fine but the thing is busy or in the way right now (e.g. agents running on a box). */
+export class ConflictError extends Error {
+  status = 409
+}
+
 /** Accept `owner/name`, `github.com/owner/name`, or a full URL. Returns null for empty. */
 export function normalizeRepo(repo: string | null | undefined): string | null {
   if (!repo) return null
