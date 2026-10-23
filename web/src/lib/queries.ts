@@ -502,7 +502,7 @@ export function useSendCaptainMessage(projectId: string) {
           projectId,
           role: "user",
           content: input.content,
-          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+          meta: { pending: true, source: "cody", ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
           createdAt: Date.now(),
         }),
       )

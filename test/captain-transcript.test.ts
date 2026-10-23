@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { captainRows, groupLabel, linkLabel, parseNotice, plainText, segments } from "../web/src/lib/captainTranscript"
+import { captainRows, captainToolView, groupLabel, isLongMessage, linkLabel, parseNotice, plainText, segments } from "../web/src/lib/captainTranscript"
 import type { CaptainMessage } from "../shared/types"
 
 let n = 0
@@ -95,5 +95,27 @@ describe("captainRows", () => {
   it("labels groups by whether they're all task updates", () => {
     expect(groupLabel([msg("notice", "", { taskId: "t" }), msg("notice", "", { taskId: "u" })])).toBe("2 task updates")
     expect(groupLabel([msg("notice", "", { taskId: "t" }), msg("notice", "", { kind: "compaction" })])).toBe("2 updates")
+  })
+})
+
+describe("Captain tool lines", () => {
+  const ref = { kind: "project" as const, id: "prj_demo01", href: "/projects/prj_demo01", label: "demo", hint: "demo" }
+  const index = { byId: new Map([[ref.id, ref]]), byTitle: new Map(), byName: new Map([["project:demo", ref]]), pattern: /$^/g }
+
+  it("find the project by result id or by the name the Coordinator used", () => {
+    expect(captainToolView("send_to_captain", { input: { project: "demo", message: "go" } }, index)).toMatchObject({ href: "/projects/prj_demo01?tab=captain", message: "go", waits: false })
+    expect(captainToolView("ask_captain", { input: { project: "x" }, captain: { projectId: "prj_demo01", reply: "ok", finished: true } }, index)).toMatchObject({
+      href: "/projects/prj_demo01?tab=captain",
+      waits: true,
+      reply: "ok",
+      finished: true,
+    })
+    expect(captainToolView("wait_for_captain", { input: { project: "gone" } }, index)).toMatchObject({ project: null, href: null, message: null, reply: null, finished: null })
+  })
+
+  it("fold long messages", () => {
+    expect(isLongMessage("short")).toBe(false)
+    expect(isLongMessage("x".repeat(701))).toBe(true)
+    expect(isLongMessage(Array(13).fill("line").join("\n"))).toBe(true)
   })
 })

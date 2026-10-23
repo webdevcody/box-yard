@@ -1,6 +1,7 @@
 // The project Captain's transcript as chat rows: task notices become slim one-line rows,
 // and runs of consecutive notices collapse into one expandable "N task updates" group.
-import type { CaptainMessage } from "../../../shared/types"
+import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
+import type { EntityIndex, EntityRef } from "./linkify"
 
 export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "artifact" | "message" | "warning" | "compaction" | "info"
 
@@ -149,4 +150,44 @@ export function groupLabel(messages: CaptainMessage[]): string {
 /** A compaction file's markdown without its YAML front matter (timestamps and token counts shown elsewhere). */
 export function stripFrontMatter(md: string): string {
   return md.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trimStart()
+}
+
+/** Long enough to fold behind "Show more": many characters or many lines. */
+export function isLongMessage(text: string, maxChars = 700, maxLines = 12): boolean {
+  return text.length > maxChars || text.split("\n").length > maxLines
+}
+
+/** Coordinator tools that talk to a project Captain (server/orchestrator.ts CAPTAIN_TOOLS). */
+export const CAPTAIN_TOOLS: ReadonlySet<string> = new Set(["send_to_captain", "ask_captain", "wait_for_captain"])
+
+export interface CaptainToolView {
+  /** The project whose Captain was messaged, when it's known. */
+  project: EntityRef | null
+  /** Its Captain tab. */
+  href: string | null
+  /** What the Coordinator sent (send/ask). */
+  message: string | null
+  /** Whether this tool waits for an answer (ask/wait). */
+  waits: boolean
+  reply: string | null
+  /** False when the Coordinator stopped waiting while the Captain kept working; null when unknown. */
+  finished: boolean | null
+}
+
+/** What a send_to_captain/ask_captain/wait_for_captain tool line shows: the project, the message and the reply. */
+export function captainToolView(tool: string, meta: Record<string, unknown> | null, index: EntityIndex): CaptainToolView {
+  const input = (meta?.input ?? {}) as Record<string, unknown>
+  const result = (meta?.captain ?? null) as Partial<CaptainToolResult> | null
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null)
+  const ref = str(result?.projectId) ?? str(input.project)
+  const byId = ref ? index.byId.get(ref) : undefined
+  const project = (byId?.kind === "project" ? byId : ref ? index.byName.get(`project:${ref}`) : undefined) ?? null
+  return {
+    project,
+    href: project ? `${project.href}?tab=captain` : null,
+    message: typeof input.message === "string" && input.message.trim() ? input.message : null,
+    waits: tool !== "send_to_captain",
+    reply: str(result?.reply),
+    finished: typeof result?.finished === "boolean" ? result.finished : null,
+  }
 }

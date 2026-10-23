@@ -3,6 +3,7 @@
 // notices folded into one-line rows, and the shared Composer to message the Captain directly.
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ComponentProps, type KeyboardEvent, type MouseEvent } from "react"
 import {
+  AlarmClock,
   AlertTriangle,
   Archive,
   Bot,
@@ -15,6 +16,7 @@ import {
   Minimize2,
   MoreHorizontal,
   Paperclip,
+  UserRound,
   XCircle,
   type LucideIcon,
 } from "lucide-react"
@@ -31,14 +33,16 @@ import { useTail } from "../lib/tail"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
 import { AppLink, Button, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
-import { ChatLine } from "./ChatLine"
+import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
+import { AttachmentList } from "./Attachments"
+import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll } from "./StickyScroll"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
 import { menuItem, usePopover } from "./TaskHeader"
-import type { Attachment, CaptainCompaction, CaptainMessage, CaptainState, Project } from "../../../shared/types"
+import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
 const NO_MESSAGES: CaptainMessage[] = []
 
@@ -172,9 +176,39 @@ const Row = memo(function Row({
   onToggle: (id: string) => void
   onFollowUp: (message: string) => void
 }) {
-  if (row.type === "message") return <ChatLine m={row.message} onFollowUp={onFollowUp} />
+  if (row.type === "message")
+    return row.message.role === "user" ? <InboundMessage m={row.message} /> : <ChatLine m={row.message} onFollowUp={onFollowUp} />
   if (row.type === "notice") return <NoticeRow m={row.message} />
   return <NoticeGroup id={row.id} messages={row.messages} open={open} onToggle={onToggle} />
+})
+
+const INBOUND: Record<CaptainSource, { label: string; icon: LucideIcon; box: string; head: string }> = {
+  cody: { label: "You", icon: UserRound, box: "rounded-br-md bg-yard-500/15", head: "text-yard-300" },
+  coordinator: { label: "From Coordinator", icon: Bot, box: "rounded-bl-md border border-sky-500/25 bg-sky-500/5", head: "text-sky-300" },
+  schedule: { label: "Scheduled", icon: AlarmClock, box: "rounded-bl-md border border-violet-500/25 bg-violet-500/5", head: "text-violet-300" },
+}
+
+/** A message to the Captain, labelled by who sent it: Cody (right), the Coordinator or a schedule (left). Long ones fold. */
+const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }) {
+  const source = captainSourceOf(m)
+  const s = INBOUND[source]
+  const Icon = s.icon
+  const tool = typeof m.meta?.tool === "string" ? m.meta.tool : null
+  return (
+    <div id={`captain-${m.id}`} data-testid="captain-inbound" data-source={source} className={cx("flex", source === "cody" && "justify-end")}>
+      <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
+        <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
+          <Icon className="h-3 w-3" /> {s.label}
+          {tool && <span className="font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
+          <span className="ml-auto pl-2 font-normal tracking-normal normal-case text-zinc-500">
+            <TimeAgo ts={m.createdAt} />
+          </span>
+        </div>
+        {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
+        <AttachmentList files={m.meta?.attachments} />
+      </div>
+    </div>
+  )
 })
 
 /** One task notice on one line: status icon, linked task title, a plain summary and the time. Click to see all of it. */
