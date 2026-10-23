@@ -13,7 +13,6 @@ import {
   CircleStop,
   Copy,
   ExternalLink,
-  FileText,
   GitBranch,
   Globe,
   Hash,
@@ -30,7 +29,7 @@ import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
 import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
-import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
+import { FilesChip } from "./TaskFiles"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
@@ -123,15 +122,7 @@ export function TaskHeader({
         {task.previews.map((p) => (
           <PreviewChip key={p.port} preview={p} />
         ))}
-        {files.length > 0 && (
-          <span className="contents" {...PREVIEW_GROUP}>
-            {files.map((a) => (
-              <ArtifactLink key={a.id} artifact={a} className="inline-flex min-h-11 max-w-60 items-center gap-1 rounded-lg pr-2 text-yard-400 hover:underline sm:min-h-0">
-                <FileText className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{a.title}</span>
-              </ArtifactLink>
-            ))}
-          </span>
-        )}
+        <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
         {task.compacting || task.compactPending ? (
           <span className="inline-flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
