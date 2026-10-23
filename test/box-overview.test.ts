@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { boxAttention, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary } from "../web/src/lib/boxOverview"
+import { boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, statusCounts } from "../web/src/lib/boxOverview"
 import type { BoxCleanup, BoxInfo, Task, TaskStatus } from "../shared/types"
 
 const MB = 1024 * 1024
@@ -23,6 +23,7 @@ const box = (id: string, over: Partial<BoxInfo> = {}): BoxInfo => ({
   diskCheckedAt: 1,
   diskLow: false,
   cleanup: null,
+  operation: null,
   estimatedCostUsd: 0.1,
   usageSource: "estimated",
   createdAt: 1,
@@ -119,5 +120,22 @@ describe("running now", () => {
     expect(r.task).toBe(working)
     expect(r.more).toBe(2)
     expect(nowRunning([waiting])!.task).toBe(waiting)
+  })
+})
+
+describe("clear/delete helpers", () => {
+  it("groups a box's tasks by status in status order", () => {
+    expect(statusCounts([{ status: "done" }, { status: "working" }, { status: "done" }, { status: "idle" }])).toEqual([
+      { status: "working", count: 1 },
+      { status: "idle", count: 1 },
+      { status: "done", count: 2 },
+    ])
+  })
+
+  it("says why the box's actions are disabled", () => {
+    expect(boxBusyReason({ operation: null, cleanup: null })).toBeNull()
+    expect(boxBusyReason({ operation: "delete", cleanup: null })).toBe("This box is being deleted")
+    expect(boxBusyReason({ operation: null, cleanup: cleanup({ status: "running", reason: "manual" }) })).toBe("A disk cleanup is running on this box")
+    expect(boxBusyReason({ operation: null, cleanup: cleanup({ status: "running", reason: "clear" }) })).toBe("This box is being cleared")
   })
 })

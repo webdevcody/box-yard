@@ -1,6 +1,6 @@
 // The Boxes page overview: which boxes need attention and why, the filter tabs, and the one-line "running now".
 import { formatBytes } from "../../../shared/disk"
-import type { BoxInfo, Task } from "../../../shared/types"
+import { TASK_STATUSES, type BoxInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { splitBoxTasks } from "./boxTasks"
 import { cleanupLine, diskMeter } from "./diskCleanup"
 
@@ -96,4 +96,18 @@ export function nowRunning(tasks: Task[]): { task: Task; more: number } | null {
   const busy = active.filter((t) => t.status === "working" || t.status === "starting")
   const first = busy[0] ?? active[0]!
   return { task: first, more: active.length - 1 }
+}
+
+/** Tasks on a box grouped by status, in the usual status order, for the Clear/Delete confirmations. */
+export function statusCounts(tasks: { status: TaskStatus }[]): { status: TaskStatus; count: number }[] {
+  return TASK_STATUSES.map((status) => ({ status, count: tasks.filter((t) => t.status === status).length })).filter((s) => s.count > 0)
+}
+
+/** Why a box's Clean up / Clear / Delete buttons are disabled right now, or null when they aren't. */
+export function boxBusyReason(box: Pick<BoxInfo, "operation" | "cleanup">): string | null {
+  const op = box.operation ?? (box.cleanup?.status === "running" ? (box.cleanup.reason === "clear" ? "clear" : "cleanup") : null)
+  if (op === "cleanup") return "A disk cleanup is running on this box"
+  if (op === "clear") return "This box is being cleared"
+  if (op === "delete") return "This box is being deleted"
+  return null
 }

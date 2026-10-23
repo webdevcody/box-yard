@@ -1,17 +1,18 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, ExternalLink, Globe, HardDrive, Info, MoreHorizontal, PanelTopOpen, Settings, Sparkles, X } from "lucide-react"
+import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
-import { BOX_FILTERS, boxAttention, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
+import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
 import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter } from "../lib/diskCleanup"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
 import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
 import { Modal } from "./Modal"
-import { menuItem, usePopover } from "./TaskHeader"
+import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
+import { BoxActionDialog, type BoxAction } from "./BoxActionDialog"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
@@ -51,6 +52,9 @@ export function BoxesView() {
   const queued = all.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt)
   const shown = filterBoxes(list, filter)
   const selected = list.find((b) => b.id === hash) ?? null
+  const [action, setAction] = useState<{ boxId: string; kind: BoxAction } | null>(null)
+  const actionBox = action ? list.find((b) => b.id === action.boxId) ?? null : null
+  const onAction = (boxId: string, kind: BoxAction) => setAction({ boxId, kind })
 
   // Opening a row pushes #<id> so Back closes the details; closing pops it again (or drops a hash we arrived with).
   const openedHere = useRef(false)
@@ -96,7 +100,7 @@ export function BoxesView() {
       ) : (
         <section className="space-y-2">
           <FilterTabs boxes={list} selected={filter} />
-          <BoxTable boxes={shown} filter={filter} highlighted={hash} tasksOn={tasksOn} onOpen={openBox} />
+          <BoxTable boxes={shown} filter={filter} highlighted={hash} tasksOn={tasksOn} onOpen={openBox} onAction={onAction} />
         </section>
       )}
 
@@ -115,7 +119,18 @@ export function BoxesView() {
         )}
       </section>
 
-      {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} />}
+      {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} onAction={onAction} />}
+      {action && actionBox && (
+        <BoxActionDialog
+          key={`${action.boxId}-${action.kind}`}
+          box={actionBox}
+          action={action.kind}
+          onClose={() => setAction(null)}
+          onDone={() => {
+            if (action.kind === "delete" && hash === action.boxId) closeBox()
+          }}
+        />
+      )}
     </div>
   )
 }
@@ -238,12 +253,14 @@ function BoxTable({
   highlighted,
   tasksOn,
   onOpen,
+  onAction,
 }: {
   boxes: BoxInfo[]
   filter: BoxFilter
   highlighted: string
   tasksOn: (boxId: string) => Task[]
   onOpen: (id: string) => void
+  onAction: (boxId: string, kind: BoxAction) => void
 }) {
   return (
     <div className="@container rounded-xl border border-zinc-800/80 bg-zinc-900/40" data-testid="box-table">
@@ -260,7 +277,7 @@ function BoxTable({
       ) : (
         <div className="divide-y divide-zinc-800/80">
           {boxes.map((box) => (
-            <BoxRow key={box.id} box={box} tasks={tasksOn(box.id)} highlighted={highlighted === box.id} onOpen={onOpen} />
+            <BoxRow key={box.id} box={box} tasks={tasksOn(box.id)} highlighted={highlighted === box.id} onOpen={onOpen} onAction={onAction} />
           ))}
         </div>
       )}
@@ -268,13 +285,26 @@ function BoxTable({
   )
 }
 
-function BoxRow({ box, tasks, highlighted, onOpen }: { box: BoxInfo; tasks: Task[]; highlighted: boolean; onOpen: (id: string) => void }) {
+function BoxRow({
+  box,
+  tasks,
+  highlighted,
+  onOpen,
+  onAction,
+}: {
+  box: BoxInfo
+  tasks: Task[]
+  highlighted: boolean
+  onOpen: (id: string) => void
+  onAction: (boxId: string, kind: BoxAction) => void
+}) {
   const st = BOX_STATUS[box.status]
   const attention = boxAttention(box)
   const disk = diskMeter(box)
   const tone = diskTone(box)
   const now = nowRunning(tasks)
   const over = box.runningTurns > box.slots
+  const busy = boxBusyReason(box)
   // A plain click opens the details here; Cmd/Ctrl or middle click opens them in a new tab. Not an <a>: the row holds links and a menu.
   const open = (e: MouseEvent | KeyboardEvent) => {
     if ((e.target as HTMLElement).closest("a, button, [role=menu]")) return
@@ -310,6 +340,11 @@ function BoxRow({ box, tasks, highlighted, onOpen }: { box: BoxInfo; tasks: Task
             {box.id}
           </span>
           <AttentionIcon reasons={attention} />
+          {busy && (
+            <span role="img" aria-label={busy} title={busy} className="shrink-0">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-300" />
+            </span>
+          )}
           <span className="shrink-0 text-zinc-500 @2xl:hidden">{box.size}</span>
         </div>
         <div className="mt-0.5 hidden truncate pl-4 text-[11px] text-zinc-500 @2xl:block">
@@ -350,7 +385,7 @@ function BoxRow({ box, tasks, highlighted, onOpen }: { box: BoxInfo; tasks: Task
       </div>
 
       <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-6">
-        <BoxMenu box={box} tasks={tasks} onOpen={() => onOpen(box.id)} />
+        <BoxMenu box={box} tasks={tasks} onOpen={() => onOpen(box.id)} onAction={(kind) => onAction(box.id, kind)} />
       </div>
     </div>
   )
@@ -386,13 +421,18 @@ function RunningNow({ now }: { now: ReturnType<typeof nowRunning> }) {
 }
 
 /** ⋯ on a row: details, Clean up now, and a shortcut to each active task and preview. */
-function BoxMenu({ box, tasks, onOpen }: { box: BoxInfo; tasks: Task[]; onOpen: () => void }) {
+function BoxMenu({ box, tasks, onOpen, onAction }: { box: BoxInfo; tasks: Task[]; onOpen: () => void; onAction: (kind: BoxAction) => void }) {
   const { open, setOpen, root, trigger } = usePopover()
   const clean = useCleanBox()
   const panel = useRef<HTMLDivElement>(null)
   const { active } = splitBoxTasks(tasks)
   const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
   const cleaning = box.cleanup?.status === "running" || clean.isPending
+  const busy = boxBusyReason(box)
+  const act = (kind: BoxAction) => {
+    setOpen(false)
+    onAction(kind)
+  }
   useEffect(() => {
     if (open) panel.current?.querySelector<HTMLElement>("button, a")?.focus()
   }, [open])
@@ -423,10 +463,24 @@ function BoxMenu({ box, tasks, onOpen }: { box: BoxInfo; tasks: Task[]; onOpen: 
             <PanelTopOpen className="h-4 w-4 text-zinc-500" /> Details
           </button>
           {box.status === "ready" && (
-            <button role="menuitem" className={menuItem} disabled={cleaning} onClick={() => clean.mutate(box.id, { onSettled: () => setOpen(false) })}>
-              <Sparkles className="h-4 w-4 text-zinc-500" /> {cleaning ? "Cleaning up…" : "Clean up now"}
-            </button>
+            <>
+              <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={cleaning || Boolean(busy)} title={busy ?? undefined} onClick={() => clean.mutate(box.id, { onSettled: () => setOpen(false) })}>
+                <Sparkles className="h-4 w-4 text-zinc-500" /> {cleaning ? "Cleaning up…" : "Clean up now"}
+              </button>
+              <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it; keep the box"} onClick={() => act("clear")}>
+                <Eraser className="h-4 w-4 text-zinc-500" /> Clear box…
+              </button>
+            </>
           )}
+          <button
+            role="menuitem"
+            className={cx(menuItemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10 disabled:opacity-50")}
+            disabled={Boolean(busy)}
+            title={busy ?? "Archive every workspace, then destroy the box"}
+            onClick={() => act("delete")}
+          >
+            <Trash2 className="h-4 w-4" /> Delete box…
+          </button>
           {active.length > 0 && <div className="mx-2 mt-1.5 mb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Open task</div>}
           {active.map((t) => (
             <Link key={t.id} role="menuitem" href={`/tasks/${t.id}`} className={menuItem} onClick={() => setOpen(false)}>
@@ -452,7 +506,20 @@ function BoxMenu({ box, tasks, onOpen }: { box: BoxInfo; tasks: Task[]; onOpen: 
 
 type DetailTab = "running" | "finished" | "disk" | "previews"
 
-function BoxDetails({ box, tasks, projectName, onClose }: { box: BoxInfo; tasks: Task[]; projectName: (id: string) => string; onClose: () => void }) {
+function BoxDetails({
+  box,
+  tasks,
+  projectName,
+  onClose,
+  onAction,
+}: {
+  box: BoxInfo
+  tasks: Task[]
+  projectName: (id: string) => string
+  onClose: () => void
+  onAction: (boxId: string, kind: BoxAction) => void
+}) {
+  const busy = boxBusyReason(box)
   const st = BOX_STATUS[box.status]
   const attention = boxAttention(box)
   const { active, finished } = splitBoxTasks(tasks)
@@ -480,7 +547,20 @@ function BoxDetails({ box, tasks, projectName, onClose }: { box: BoxInfo; tasks:
           {box.keepAlive && " · keep-alive"}
         </>
       }
-      className="sm:h-[min(38rem,calc(100dvh-2rem))]"
+      className="sm:h-[min(40rem,calc(100dvh-2rem))]"
+      footer={
+        <>
+          {busy && <span className="mr-auto text-xs text-amber-300">{busy}…</span>}
+          {box.status === "ready" && (
+            <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it from the box; the box stays"} onClick={() => onAction(box.id, "clear")}>
+              <Eraser className="h-4 w-4" /> Clear box…
+            </Button>
+          )}
+          <Button type="button" variant="danger" disabled={Boolean(busy)} title={busy ?? "Archive every workspace, then destroy the box"} onClick={() => onAction(box.id, "delete")}>
+            <Trash2 className="h-4 w-4" /> Delete box…
+          </Button>
+        </>
+      }
     >
       {attention.length > 0 && (
         <ul className="space-y-1.5" data-testid="box-attention-list">
@@ -764,17 +844,19 @@ function DiskPanel({ box }: { box: BoxInfo }) {
 function CleanUpButton({ box }: { box: BoxInfo }) {
   const clean = useCleanBox()
   const running = box.cleanup?.status === "running"
+  const busy = running ? null : boxBusyReason(box)
   return (
     <Button
       size="sm"
       variant="subtle"
       loading={running || clean.isPending}
+      disabled={Boolean(busy)}
       onClick={() => clean.mutate(box.id)}
       className="shrink-0"
-      title="Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."
+      title={busy ?? "Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."}
     >
       {!running && !clean.isPending && <Sparkles className="h-3.5 w-3.5" />}
-      {running ? "Cleaning up…" : "Clean up now"}
+      {running ? (box.cleanup?.reason === "clear" ? "Clearing…" : "Cleaning up…") : "Clean up now"}
     </Button>
   )
 }
