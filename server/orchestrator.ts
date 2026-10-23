@@ -22,6 +22,8 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
+import { routingInstructions } from "./routing.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -549,7 +551,7 @@ export class Orchestrator {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${ORCHESTRATOR_PROMPT}\n${compactionsPrompt(this.compactionsDir)}`,
+      `${ORCHESTRATOR_PROMPT}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
       ...session,
       ...model,
       "--effort",
@@ -629,7 +631,9 @@ export class Orchestrator {
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
           if (text && text !== NO_UPDATE) {
-            const m = this.store.addChat("assistant", text)
+            const parsed = parseNextSteps(text)
+            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
+            const m = this.store.addChat("assistant", parsed.content, meta)
             this.hub.broadcast({ type: "chat.message", message: m })
             reply = m
           } else if (text === NO_UPDATE) reply = null

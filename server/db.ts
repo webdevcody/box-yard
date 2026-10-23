@@ -218,6 +218,28 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pr_merged_by TEXT;
   `,
   `
+  -- Per-task routing choice and per-turn ledger for cost attribution.
+  ALTER TABLE tasks ADD COLUMN model TEXT;
+  ALTER TABLE tasks ADD COLUMN routing_rule TEXT;
+  ALTER TABLE tasks ADD COLUMN routing_reason TEXT;
+
+  CREATE TABLE task_turns (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    turn_index INTEGER NOT NULL,
+    model TEXT,
+    effort TEXT,
+    routing_rule TEXT,
+    routing_reason TEXT,
+    status TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    cost_usd REAL,
+    error TEXT
+  );
+  CREATE INDEX task_turns_task ON task_turns(task_id, started_at);
+  `,
+  `
   -- Durable context snapshots written before orchestrator/task compactions.
   -- These rows intentionally do not cascade from tasks: compaction history must
   -- remain readable after a task or workspace archive is deleted.
