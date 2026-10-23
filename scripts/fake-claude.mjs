@@ -272,7 +272,7 @@ process.stdin.on("end", async () => {
     } else if (/^\s*\/context\b/.test(prompt)) {
       result = `## Context Usage\n\n**Model:** fake  \n**Tokens:** ${fmt(session.tokens)} / ${fmt(WINDOW)} (${Math.round((session.tokens / WINDOW) * 100)}%)\n`
       process.stdout.write(result)
-    } else if (/Your context is about to be compacted/.test(prompt)) {
+    } else if (/Your (Captain )?context( for project "[^"]*")? is about to be compacted/.test(prompt)) {
       result = process.env.FAKE_CLAUDE_BAD_SUMMARY
         ? "ok"
         : "## Decisions and preferences\n- Cody prefers short replies.\n\n## Projects and repos\n- demo (acme/demo): a demo project.\n\n## Ongoing work\n- none\n\n## Open threads and next steps\n- none"
