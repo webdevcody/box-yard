@@ -1,8 +1,9 @@
 import { Box } from "@upstash/box"
 import fs from "node:fs"
 import type { Config } from "../config.js"
+import type { WorkerSize } from "../../shared/types.js"
 import { retry } from "../util/retry.js"
-import { q, type BoxHealth, type BoxProvider, type ExecResult } from "./types.js"
+import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
 
 const ROOT = "/workspace/home"
 const READ_CHUNK = 8 * 1024 * 1024 // server limit for one ranged read
@@ -41,7 +42,7 @@ export class UpstashProvider implements BoxProvider {
     return box
   }
 
-  async create({ labels }: { labels: string[] }): Promise<string> {
+  async create({ labels, size }: { labels: string[]; size?: WorkerSize }): Promise<string> {
     const env: Record<string, string> = { DISABLE_AUTOUPDATER: "1", IS_SANDBOX: "1" }
     if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
     if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
@@ -49,7 +50,7 @@ export class UpstashProvider implements BoxProvider {
     const opts = {
       apiKey: this.c.upstashBoxApiKey,
       runtime: this.c.workerRuntime as "node",
-      size: this.c.workerSize,
+      size: size ?? this.c.workerSize,
       labels: labels.map((l) => l.replace(/[^\w.:-]/g, "-").slice(0, 20)).slice(0, 5),
       env,
       git: this.c.githubToken
@@ -154,9 +155,32 @@ export class UpstashProvider implements BoxProvider {
     return res.url
   }
 
+  private async diskBytes(boxId: string): Promise<number | null> {
+    const res = await this.exec(boxId, `du -sk ${q(ROOT)} 2>/dev/null | awk '{print $1}'`)
+    if (res.exitCode !== 0) return null
+    const kb = Number.parseInt(res.stdout.trim(), 10)
+    return Number.isFinite(kb) ? kb * 1024 : null
+  }
+
   async listIds(label: string): Promise<string[]> {
     const boxes = await retry(() => Box.list({ apiKey: this.c.upstashBoxApiKey, label }))
     return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
+  }
+
+  async usage(boxId: string): Promise<BoxUsageProbe> {
+    const box = await this.box(boxId)
+    const status = await retry(() => box.getStatus()).catch(() => ({}))
+    const raw = status as Record<string, unknown>
+    const diskBytes = await this.diskBytes(boxId).catch(() => null)
+    const size = sizeOf(raw) ?? sizeOf(box as unknown as Record<string, unknown>) ?? this.c.workerSize
+    return {
+      size,
+      keepAlive: boolOf(raw, ["keepAlive", "keep_alive", "keepalive", "isKeepAlive"]) ?? boolOf(box as unknown as Record<string, unknown>, ["keepAlive", "keep_alive", "keepalive", "isKeepAlive"]) ?? false,
+      diskBytes,
+      activeMs: millisOf(raw, ["activeMs", "active_ms", "activeCpuMs", "active_cpu_ms", "cpuMs", "cpu_ms"]),
+      uptimeMs: millisOf(raw, ["uptimeMs", "uptime_ms", "uptime"]),
+      source: hasActualUsage(raw) ? "actual" : "estimated",
+    }
   }
 
   async destroy(boxId: string) {
@@ -170,4 +194,26 @@ export class UpstashProvider implements BoxProvider {
       this.cache.delete(boxId)
     }
   }
+}
+
+function sizeOf(obj: Record<string, unknown>): BoxUsageProbe["size"] | undefined {
+  const v = String(obj.size ?? obj.boxSize ?? obj.runtimeSize ?? "").toLowerCase()
+  return v === "small" || v === "medium" || v === "large" ? v : undefined
+}
+
+function boolOf(obj: Record<string, unknown>, keys: string[]) {
+  for (const k of keys) if (typeof obj[k] === "boolean") return obj[k] as boolean
+  return undefined
+}
+
+function millisOf(obj: Record<string, unknown>, keys: string[]) {
+  for (const k of keys) {
+    const v = obj[k]
+    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.round(k.toLowerCase().includes("second") ? v * 1000 : v))
+  }
+  return null
+}
+
+function hasActualUsage(obj: Record<string, unknown>) {
+  return millisOf(obj, ["activeMs", "active_ms", "activeCpuMs", "active_cpu_ms", "cpuMs", "cpu_ms", "uptimeMs", "uptime_ms", "uptime"]) !== null
 }

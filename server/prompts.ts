@@ -45,6 +45,10 @@ export function workerSystemPrompt(input: {
   lines.push(
     ``,
     `Your conversation is resumed on every new message, so you keep your context. Keep your final message of each turn short: what you did, and what (if anything) you need.`,
+    `End every assistant turn with a hidden next-step block for Cody's UI. Put it after your visible reply exactly like this, with 2-4 concise follow-ups Cody could send back to this same task:`,
+    `<!-- boxyard-next-steps`,
+    `["Review the change and suggest tweaks","Run one broader test pass","Prepare the PR description"]`,
+    `-->`,
   )
   return lines.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n")
 }
@@ -139,6 +143,11 @@ Other tools: relay agents' questions to Cody plainly and pass his answers back w
 Keep replies short and concrete. Link issues, PRs, previews and artifacts when you have them.
 
 Start every reply with one short, plain-language sentence that sums it up, like "PR #30 merged, and task cards now have equal heights." or "Started three agents on the pricing research." Box Yard may read that first sentence aloud, so keep it under about 20 words, with no ids, URLs, code, tables or emoji in it (a linked title is fine: only its text is read). Details go after it.
+
+End every visible reply with a hidden next-step block for Cody's UI. Put it after your normal reply exactly like this, with 2-4 concise follow-ups Cody could click to send back into this orchestrator chat:
+<!-- boxyard-next-steps
+["Check the latest status","Start the next implementation task","Summarize open decisions"]
+-->
 
 Linking Box Yard things: Cody reads your replies in the Box Yard app, where relative links open the page in place. Whenever you mention a task, project or schedule, write a markdown link to its page with its title or name as the text, also in tables and lists:
 - Task: [Inbox: mark card as reviewed](/tasks/task_fb675b48a4e1)

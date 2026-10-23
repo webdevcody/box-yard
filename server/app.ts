@@ -417,8 +417,30 @@ export function createBoxYard(
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())
   })
+  api.get("/usage", (_req, res) => {
+    tasks.boxes()
+    res.json(store.usageReport(settings.get()))
+  })
   api.post("/orchestrator/compact", (_req, res) => {
     res.json(orchestrator.requestCompact("button"))
+  })
+
+  // ---- compaction history
+  api.get("/compactions", (req, res) => {
+    const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined
+    const limit = Number.parseInt(String(req.query.limit ?? "50"), 10)
+    res.json(store.listOrchestratorCompactions({ taskId, limit: Number.isFinite(limit) ? limit : 50 }))
+  })
+  api.get("/compactions/:id", (req, res) => {
+    const record = store.getOrchestratorCompaction(req.params.id!, true)
+    if (!record) return void res.status(404).json({ error: "Compaction not found" })
+    res.json(record)
+  })
+  api.get("/task-compactions", (req, res) => {
+    const taskId = typeof req.query.taskId === "string" ? req.query.taskId : undefined
+    const sessionId = typeof req.query.sessionId === "string" ? req.query.sessionId : undefined
+    const limit = Number.parseInt(String(req.query.limit ?? "50"), 10)
+    res.json(store.listTaskCompactions({ taskId, sessionId, limit: Number.isFinite(limit) ? limit : 50 }))
   })
   /** New limits take effect now: waiting tasks may start, and boxes/health refresh. Nothing running is stopped. */
   const applyPoolChange = () => {

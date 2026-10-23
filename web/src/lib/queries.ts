@@ -13,6 +13,7 @@ import type {
   CaptainState,
   ChatMessage,
   Health,
+  OrchestratorCompactionRecord,
   OrchestratorState,
   Settings,
   SettingsInfo,
@@ -22,8 +23,10 @@ import type {
   ScheduleTarget,
   CatchUp,
   Task,
+  TaskCompactionRecord,
   TaskMessage,
   TaskStatus,
+  UsageReport,
 } from "../../../shared/types"
 
 export const keys = {
@@ -39,6 +42,9 @@ export const keys = {
   boxes: ["boxes"] as const,
   schedules: ["schedules"] as const,
   scheduleRuns: ["schedule-runs"] as const,
+  compactions: ["compactions"] as const,
+  compaction: (id: string) => ["compaction", id] as const,
+  taskCompactions: (id: string) => ["task-compactions", id] as const,
   settings: ["settings"] as const,
   orchestrator: ["orchestrator"] as const,
   captain: (projectId: string) => ["captain", projectId] as const,
@@ -46,6 +52,7 @@ export const keys = {
   captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
   notifications: ["notifications"] as const,
+  usage: ["usage"] as const,
 }
 
 // ------------------------------------------------------------------ cache helpers
@@ -87,6 +94,11 @@ export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<
 export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
 export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
 export const useScheduleRuns = () => useQuery({ queryKey: keys.scheduleRuns, queryFn: () => api<ScheduleRun[]>("/api/schedule-runs") })
+export const useCompactions = () => useQuery({ queryKey: keys.compactions, queryFn: () => api<OrchestratorCompactionRecord[]>("/api/compactions") })
+export const useCompaction = (id: string | null) =>
+  useQuery({ queryKey: id ? keys.compaction(id) : ["compaction", "none"], queryFn: () => api<OrchestratorCompactionRecord>(`/api/compactions/${id}`), enabled: Boolean(id) })
+export const useTaskCompactions = (taskId: string) =>
+  useQuery({ queryKey: keys.taskCompactions(taskId), queryFn: () => api<TaskCompactionRecord[]>(`/api/task-compactions?taskId=${encodeURIComponent(taskId)}`) })
 export const useSettings = () =>
   useQuery({
     queryKey: keys.settings,
@@ -107,6 +119,7 @@ export const useAgentSettings = () =>
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
+export const useUsage = () => useQuery({ queryKey: keys.usage, queryFn: () => api<UsageReport>("/api/usage"), refetchInterval: 30_000 })
 
 export const useChatStream = () =>
   useQuery({ queryKey: keys.chatStream, queryFn: () => "", initialData: "", staleTime: Infinity, gcTime: Infinity })
@@ -259,7 +272,12 @@ export function useCreateTask() {
           contextWindow: null,
           compactPending: false,
           compacting: false,
+          model: null,
           effort: null,
+          claudeCostUsd: 0,
+          claudeTokens: 0,
+          routingRule: null,
+          routingReason: null,
           createdAt: now,
           updatedAt: now,
         }),

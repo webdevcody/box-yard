@@ -4,6 +4,7 @@ import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucid
 import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
+import { compactTokens, money } from "../lib/usage"
 import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 
 /**
@@ -72,14 +73,24 @@ export const TaskCard = memo(function TaskCard({
         </div>
       )}
 
-      <div className="mt-auto flex min-w-0 items-center gap-2 whitespace-nowrap pt-3 text-xs text-zinc-500">
+      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 pt-3 text-xs text-zinc-500 sm:flex-nowrap sm:whitespace-nowrap">
         <PrChip task={task} variant="link" />
         {task.scheduleId && (
           <span className="inline-flex shrink-0 items-center gap-1" title="Started by a schedule">
             <AlarmClock className="h-3.5 w-3.5" /> scheduled
           </span>
         )}
-        <span className="ml-auto min-w-0 truncate" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
+        {(task.claudeCostUsd > 0 || task.claudeTokens > 0) && (
+          <span className="shrink-0" title={`${compactTokens(task.claudeTokens)} Claude tokens`}>
+            {money(task.claudeCostUsd)}
+          </span>
+        )}
+        {(task.model || task.effort) && (
+          <span className="shrink-0 truncate" title={[task.model, task.effort ? `${task.effort} effort` : "", task.routingRule, task.routingReason].filter(Boolean).join(" · ")}>
+            {[task.model, task.effort].filter(Boolean).join(" · ")}
+          </span>
+        )}
+        <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
           {task.pendingCount > 0 && `${task.pendingCount} queued · `}
           <TimeAgo ts={task.updatedAt} />
         </span>
@@ -94,7 +105,7 @@ export const TaskCard = memo(function TaskCard({
               e.stopPropagation()
               onMarkDone(task)
             }}
-            className="-my-1 -mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-md border border-zinc-700 text-zinc-400 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100 hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none [@media(hover:none)]:opacity-100"
+            className="-mr-1 grid h-11 w-11 shrink-0 place-items-center rounded-md border border-zinc-700 text-zinc-400 opacity-0 transition group-hover:opacity-100 group-focus-visible:opacity-100 hover:border-emerald-500/60 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:outline-none sm:-my-1 sm:h-6 sm:w-6 [@media(hover:none)]:opacity-100"
           >
             <Check className="h-3.5 w-3.5" />
           </button>

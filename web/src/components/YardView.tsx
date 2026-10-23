@@ -94,7 +94,7 @@ export function YardView() {
   return (
     // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
     <div className="space-y-5 pb-6">
-      <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
+      <header className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:gap-x-4">
         <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">The yard</h1>
           <p className="mt-1 text-sm text-zinc-500">
@@ -104,7 +104,7 @@ export function YardView() {
         </div>
         {list.length > 0 && (
           <Select
-            className={cx("w-44 shrink-0 text-zinc-300 sm:w-56", projectId && "border-yard-500/40 text-zinc-100")}
+            className={cx("w-full shrink-0 text-zinc-300 sm:w-56", projectId && "border-yard-500/40 text-zinc-100")}
             value={projectId ?? ""}
             onChange={(e) => setParam("project", e.target.value || null)}
             aria-label="Filter by project"
@@ -142,7 +142,7 @@ export function YardView() {
           />
 
           {projectName && (
-            <div className="flex items-center gap-2 text-xs text-zinc-500">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
               Showing <span className="font-medium text-zinc-300">{projectName}</span> only.
               <Link href={`/projects/${projectId}`} className="text-yard-400 hover:text-yard-300">
                 Open project
@@ -195,7 +195,7 @@ export function YardView() {
               {(olderCount > 0 || older) && (
                 <button
                   onClick={() => setParam("older", older ? null : "1", true)}
-                  className="w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
+                  className="min-h-11 w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300"
                 >
                   {older ? "Hide tasks older than 24 hours" : `${olderCount} older finished ${olderCount === 1 ? "task" : "tasks"} · Show older`}
                 </button>
@@ -205,7 +205,7 @@ export function YardView() {
 
           {tab === "all" && (
             <>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <SearchBox value={query} onChange={onQuery} placeholder="Search every task" />
                 <SortSelect sort={sort} />
               </div>
@@ -236,7 +236,7 @@ function RecentStrip({ tasks, names, href }: { tasks: Task[]; names: Map<string,
           See recent <ChevronRight className="h-3.5 w-3.5" />
         </Link>
       </div>
-      <div className="scroll-thin -mx-1 grid auto-cols-[minmax(10rem,1fr)] grid-flow-col gap-2 overflow-x-auto px-1 pb-1">
+      <div className="scroll-thin -mx-1 grid auto-cols-[minmax(14rem,1fr)] grid-flow-col gap-2 overflow-x-auto px-1 pb-1 sm:auto-cols-[minmax(10rem,1fr)]">
         {tasks.map((t) => (
           <Link
             key={t.id}

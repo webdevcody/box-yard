@@ -4,13 +4,19 @@ import { BadRequestError, type Store } from "./store.js"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_SIZES,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   EFFORTS,
+  SIZE_DEFAULTS,
+  WORKER_SIZES,
   type AutoCompact,
+  type BoxSize,
+  type CostRates,
   type Settings,
   type SettingSource,
   type SettingsInfo,
+  type WorkerSize,
 } from "../shared/types.js"
 
 const KEY = "settings"
@@ -21,18 +27,35 @@ export const DEFAULT_SETTINGS: Settings = {
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
   agentModel: DEFAULT_MODEL,
   agentEffort: DEFAULT_EFFORT,
+  agentRoutingConfig: "",
   // Off means the CLI's own default (compact near the model's window) applies.
   agentAutoCompact: { enabled: false, unit: "percent", value: 80 },
+  workerSize: "small",
   maxBoxes: 5,
-  slotsPerBox: 2,
+  slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
+  costRates: {
+    boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
+    boxKeepAliveMonthlyUsd: { small: 8, medium: 16, large: 32 },
+    boxStorageGbMonthUsd: 0.1,
+  },
+  budget: { dailyUsd: 0, monthlyUsd: 0 },
+  maxResidentPerBox: SIZE_DEFAULTS.small.maxResidentPerBox,
+  boxIdleDeleteMinutes: 0,
+  workspaceRetentionDays: 7,
+  archiveRetentionDays: 7,
 }
 
-/** Env vars that seed the pool limits; saved settings win over them. */
-const POOL_ENV: Record<"maxBoxes" | "slotsPerBox" | "maxAgents", string> = {
+/** Env vars that seed box/pool settings; saved settings win over them. */
+const BOX_ENV: Partial<Record<keyof Settings, string>> = {
+  workerSize: "WORKER_SIZE",
   maxBoxes: "BOX_POOL_MAX",
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
+  maxResidentPerBox: "BOX_MAX_RESIDENT",
+  boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
+  workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
+  archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
 }
 
 const autoCompact = z
@@ -43,6 +66,16 @@ const autoCompact = z
       ctx.addIssue({ code: "custom", message: `Tokens must be between ${AUTOCOMPACT_MIN_TOKENS} and ${AUTOCOMPACT_MAX_TOKENS}` })
   })
 const model = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
+const usd = z.number().min(0).max(1_000_000)
+const bySize = z.object(Object.fromEntries(BOX_SIZES.map((s) => [s, usd])) as Record<BoxSize, z.ZodNumber>).strict()
+const costRates = z
+  .object({
+    boxActiveCpuHourlyUsd: bySize,
+    boxKeepAliveMonthlyUsd: bySize,
+    boxStorageGbMonthUsd: usd,
+  })
+  .strict() satisfies z.ZodType<CostRates>
+const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 
 export const settingsPatch = z
   .object({
@@ -51,10 +84,18 @@ export const settingsPatch = z
     orchestratorAutoCompact: autoCompact,
     agentModel: model,
     agentEffort: z.enum([...EFFORTS, "orchestrator"]),
+    agentRoutingConfig: z.string().max(50_000),
     agentAutoCompact: autoCompact,
+    workerSize: z.enum(WORKER_SIZES),
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
+    costRates,
+    budget,
+    maxResidentPerBox: z.number().int().min(1).max(200),
+    boxIdleDeleteMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    workspaceRetentionDays: z.number().int().min(0).max(3650),
+    archiveRetentionDays: z.number().int().min(0).max(3650),
   })
   .partial()
   .strict()
@@ -67,7 +108,21 @@ export const settingsPatch = z
 export class SettingsStore {
   constructor(
     private readonly store: Store,
-    private readonly c: Pick<Config, "orchestratorModel" | "workerModel" | "maxBoxes" | "slotsPerBox" | "maxAgents">,
+    private readonly c: Partial<
+      Pick<
+      Config,
+      | "orchestratorModel"
+      | "workerModel"
+      | "workerSize"
+      | "maxBoxes"
+      | "slotsPerBox"
+      | "maxAgents"
+      | "maxResidentPerBox"
+      | "boxIdleDeleteMinutes"
+      | "workspaceRetentionDays"
+      | "archiveRetentionDays"
+      >
+    >,
   ) {}
 
   private saved(): Partial<Settings> {
@@ -86,13 +141,30 @@ export class SettingsStore {
     const env: Partial<Settings> = {}
     if (this.c.orchestratorModel) env.orchestratorModel = this.c.orchestratorModel
     if (this.c.workerModel) env.agentModel = this.c.workerModel
-    // Config already holds the env var or the built-in default for the pool limits.
-    const pool = { maxBoxes: this.c.maxBoxes, slotsPerBox: this.c.slotsPerBox, maxAgents: this.c.maxAgents }
-    const defaults = { ...DEFAULT_SETTINGS, ...pool }
+    const configWorkerSize = this.c.workerSize ?? DEFAULT_SETTINGS.workerSize
+    if (process.env.WORKER_SIZE !== undefined) env.workerSize = configWorkerSize
+    const workerSize = (saved.workerSize ?? configWorkerSize) as WorkerSize
+    const sizeDefaults = SIZE_DEFAULTS[workerSize]
+    const configSizeDefaults = SIZE_DEFAULTS[configWorkerSize]
+    const configSlots = this.c.slotsPerBox ?? configSizeDefaults.slotsPerBox
+    const configResidents = this.c.maxResidentPerBox ?? configSizeDefaults.maxResidentPerBox
+    const slotsExplicit = process.env.BOX_SLOTS !== undefined || configSlots !== configSizeDefaults.slotsPerBox
+    const residentsExplicit = process.env.BOX_MAX_RESIDENT !== undefined || configResidents !== configSizeDefaults.maxResidentPerBox
+    // Config already holds either explicit env vars or defaults derived from the effective worker size.
+    const pool = {
+      maxBoxes: this.c.maxBoxes ?? DEFAULT_SETTINGS.maxBoxes,
+      slotsPerBox: slotsExplicit ? configSlots : sizeDefaults.slotsPerBox,
+      maxAgents: this.c.maxAgents ?? DEFAULT_SETTINGS.maxAgents,
+      maxResidentPerBox: residentsExplicit ? configResidents : sizeDefaults.maxResidentPerBox,
+      boxIdleDeleteMinutes: this.c.boxIdleDeleteMinutes ?? DEFAULT_SETTINGS.boxIdleDeleteMinutes,
+      workspaceRetentionDays: this.c.workspaceRetentionDays ?? DEFAULT_SETTINGS.workspaceRetentionDays,
+      archiveRetentionDays: this.c.archiveRetentionDays ?? DEFAULT_SETTINGS.archiveRetentionDays,
+    }
+    const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings
     const sources = {} as Record<keyof Settings, SettingSource>
     for (const k of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
-      const fromEnv = k in env || (k in POOL_ENV && process.env[POOL_ENV[k as keyof typeof POOL_ENV]] !== undefined)
+      const fromEnv = k in env || (BOX_ENV[k] !== undefined && process.env[BOX_ENV[k]!] !== undefined)
       sources[k] = k in saved ? "ui" : fromEnv ? "env" : "default"
     }
     return { settings, sources, defaults }

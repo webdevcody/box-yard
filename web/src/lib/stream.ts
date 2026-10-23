@@ -81,10 +81,12 @@ export function useServerEvents(enabled: boolean): Connection {
       switch (ev.type) {
         case "task":
           qc.setQueryData<Task[]>(keys.tasks, (list) => (list ? upsert(list, ev.task) : list))
+          void qc.invalidateQueries({ queryKey: keys.usage })
           break
         case "task.deleted":
           qc.setQueryData<Task[]>(keys.tasks, (list) => list?.filter((t) => t.id !== ev.taskId))
           qc.setQueryData<AppNotification[]>(keys.notifications, (list) => list?.filter((n) => n.taskId !== ev.taskId))
+          void qc.invalidateQueries({ queryKey: keys.usage })
           break
         case "task.message":
           qc.setQueryData<TaskMessage[]>(keys.taskMessages(ev.message.taskId), (list) => {
@@ -147,12 +149,14 @@ export function useServerEvents(enabled: boolean): Connection {
         case "settings":
           qc.setQueryData(keys.agentSettings, ev.info)
           void qc.invalidateQueries({ queryKey: keys.health })
+          void qc.invalidateQueries({ queryKey: keys.usage })
           break
         case "artifact":
           qc.setQueryData<Artifact[]>(keys.artifacts, (list) => (list ? upsert(list, ev.artifact, true) : list))
           break
         case "boxes":
           qc.setQueryData(keys.boxes, ev.boxes)
+          void qc.invalidateQueries({ queryKey: keys.usage })
           break
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))

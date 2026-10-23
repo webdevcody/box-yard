@@ -2,7 +2,7 @@ import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
-import type { BoxHealth, BoxProvider, ExecResult } from "./types.js"
+import type { BoxHealth, BoxProvider, BoxUsageProbe, ExecResult } from "./types.js"
 
 /**
  * "Boxes" that are folders on this machine. Good for trying Box Yard with no
@@ -79,9 +79,26 @@ export class LocalProvider implements BoxProvider {
     return `http://localhost:${port}`
   }
 
+  async usage(boxId: string): Promise<BoxUsageProbe> {
+    return { diskBytes: dirSize(this.root(boxId)), source: "estimated" }
+  }
+
   async destroy(boxId: string) {
     // Stop any turn still running in this box before removing its folder.
     await this.exec(boxId, `for f in tasks/*/turn.pid; do [ -f "$f" ] && kill -TERM -- -$(cat "$f") 2>/dev/null; kill -TERM $(cat "$f") 2>/dev/null; done; true`)
     fs.rmSync(this.root(boxId), { recursive: true, force: true })
   }
+}
+
+function dirSize(file: string): number {
+  let st: fs.Stats
+  try {
+    st = fs.statSync(file)
+  } catch {
+    return 0
+  }
+  if (!st.isDirectory()) return st.size
+  let total = st.size
+  for (const entry of fs.readdirSync(file)) total += dirSize(path.join(file, entry))
+  return total
 }

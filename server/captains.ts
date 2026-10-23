@@ -7,7 +7,8 @@ import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
-import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
+import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
+import { routingInstructions } from "./routing.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import {
@@ -391,7 +392,7 @@ class Captain {
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
       }
-      const file = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before }, text)
+      const { markdownFile: file } = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before, heading: `Captain compaction summary: ${this.project.name}` }, text)
       const compact = await this.run("/compact", s.id, true, "compact")
       if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
       let id = s.id
@@ -441,7 +442,7 @@ class Captain {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${captainPrompt(this.project)}\n${compactionsPrompt(this.compactionsDir)}`,
+      `${captainPrompt(this.project)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
       ...session,
       ...model,
       "--effort",
@@ -479,6 +480,11 @@ class Captain {
       let resultError: string | null = null
       let settled = false
       let seenSession: string | null = null
+      let resultUsage: ReturnType<typeof resultUsageObject> = null
+      let resultCostUsd: number | null = null
+      let resultDurationMs: number | null = null
+      let resultModel: string | null = null
+      const startedAt = Date.now()
       const quiet = kind !== "turn"
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
@@ -518,6 +524,10 @@ class Captain {
         }
         if (msg.type === "result") {
           sawResult = true
+          resultUsage = resultUsageObject(msg.usage)
+          resultCostUsd = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : null
+          resultDurationMs = typeof msg.duration_ms === "number" ? msg.duration_ms : null
+          resultModel = typeof msg.model === "string" ? msg.model : null
           if (kind === "turn") {
             this.store.setKv(startedKey(this.project.id), "1")
             const window = contextWindowOf(msg.modelUsage)
@@ -543,6 +553,21 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        // Captain runs count toward the orchestrator bucket and the project's totals.
+        if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
+          this.store.recordClaudeUsage({
+            source: "orchestrator",
+            runKind: kind,
+            projectId: this.project.id,
+            sessionId,
+            model: resultModel ?? this.settings.get().orchestratorModel,
+            startedAt,
+            endedAt: Date.now(),
+            durationMs: resultDurationMs,
+            usage: resultUsage,
+            costUsd: resultCostUsd,
+          })
+        }
         const base = { text: said, raw, sessionId: seenSession }
         if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
         if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })

@@ -218,6 +218,133 @@ const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pr_merged_by TEXT;
   `,
   `
+  -- Per-task routing choice and per-turn ledger for cost attribution.
+  ALTER TABLE tasks ADD COLUMN model TEXT;
+  ALTER TABLE tasks ADD COLUMN routing_rule TEXT;
+  ALTER TABLE tasks ADD COLUMN routing_reason TEXT;
+
+  CREATE TABLE task_turns (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    turn_index INTEGER NOT NULL,
+    model TEXT,
+    effort TEXT,
+    routing_rule TEXT,
+    routing_reason TEXT,
+    status TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    cost_usd REAL,
+    error TEXT
+  );
+  CREATE INDEX task_turns_task ON task_turns(task_id, started_at);
+  `,
+  `
+  -- Durable context snapshots written before orchestrator/task compactions.
+  -- These rows intentionally do not cascade from tasks: compaction history must
+  -- remain readable after a task or workspace archive is deleted.
+  CREATE TABLE orchestrator_compactions (
+    id TEXT PRIMARY KEY,
+    at INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    tokens_before INTEGER,
+    tokens_after INTEGER,
+    markdown_path TEXT NOT NULL,
+    json_path TEXT NOT NULL,
+    markdown TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX orchestrator_compactions_at ON orchestrator_compactions(at);
+
+  CREATE TABLE orchestrator_compaction_tasks (
+    compaction_id TEXT NOT NULL REFERENCES orchestrator_compactions(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    branch TEXT,
+    pr_url TEXT,
+    session_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    last_active_at INTEGER NOT NULL,
+    PRIMARY KEY (compaction_id, task_id)
+  );
+  CREATE INDEX orchestrator_compaction_tasks_task ON orchestrator_compaction_tasks(task_id, compaction_id);
+
+  CREATE TABLE task_compactions (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    status_before TEXT,
+    status_after TEXT,
+    tokens_before INTEGER,
+    tokens_after INTEGER,
+    summary TEXT NOT NULL,
+    archive_path TEXT,
+    archive_available INTEGER NOT NULL DEFAULT 0,
+    archive_note TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX task_compactions_task ON task_compactions(task_id, at);
+  CREATE INDEX task_compactions_session ON task_compactions(session_id, at);
+  `,
+  `
+  -- Claude Code result usage and costs, one row per headless CLI run that reports usage.
+  CREATE TABLE claude_usage (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    turn_id TEXT,
+    session_id TEXT,
+    model TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    raw_usage_json TEXT NOT NULL DEFAULT '{}'
+  );
+  CREATE INDEX claude_usage_task ON claude_usage(task_id, started_at);
+  CREATE INDEX claude_usage_project ON claude_usage(project_id, started_at);
+  CREATE INDEX claude_usage_started ON claude_usage(started_at);
+
+  ALTER TABLE boxes ADD COLUMN size TEXT NOT NULL DEFAULT 'small';
+  ALTER TABLE boxes ADD COLUMN keep_alive INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN active_ms INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN last_metered_at INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_updated_at INTEGER;
+  ALTER TABLE boxes ADD COLUMN usage_source TEXT NOT NULL DEFAULT 'estimated';
+
+  -- Periodic box cost ledger. It lets the Usage page answer today / 7d / 30d
+  -- without trying to reconstruct historic active time from the current box row.
+  CREATE TABLE box_usage_intervals (
+    id TEXT PRIMARY KEY,
+    box_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    size TEXT NOT NULL,
+    keep_alive INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    active_ms INTEGER NOT NULL DEFAULT 0,
+    uptime_ms INTEGER NOT NULL DEFAULT 0,
+    disk_bytes INTEGER,
+    source TEXT NOT NULL DEFAULT 'estimated'
+  );
+  CREATE INDEX box_usage_intervals_time ON box_usage_intervals(ended_at);
+  CREATE INDEX box_usage_intervals_box ON box_usage_intervals(box_id, ended_at);
+  `,
+  `
   -- One durable transcript per project captain. Captains are lazily created from
   -- projects, so the table only stores their chat history and unread notices.
   CREATE TABLE captain_messages (

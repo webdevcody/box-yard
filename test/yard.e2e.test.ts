@@ -3,7 +3,8 @@ import fs from "node:fs"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
-import type { AppNotification, BoxInfo, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
+import type { AppNotification, BoxInfo, ChatMessage, Project, Task, TaskMessage, UsageReport } from "../shared/types.js"
+import { NEXT_STEPS_META_KEY } from "../shared/nextSteps.js"
 import { fakeRedis, freePort, testConfig, waitFor } from "./helpers.js"
 
 // End-to-end: the real server, task manager, worker runner and MCP servers,
@@ -85,6 +86,45 @@ describe("box yard end to end", () => {
 
     // The workspace gets archived so the task can move boxes later.
     await waitFor(async () => (await getTask(r, t.id)).lastArchivedAt, "archive")
+    const messages = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
+    const reply = [...messages].reverse().find((m) => m.role === "assistant")
+    expect(reply?.content).not.toContain("boxyard-next-steps")
+    expect(reply?.meta?.[NEXT_STEPS_META_KEY]).toEqual(["Review the mock result", "Run a broader check", "Ask for a PR-ready summary"])
+  })
+
+  it("records Claude usage per task and project", async () => {
+    const r = await start()
+    const p = await project(r, "usage")
+    const t = await task(r, p.id, "Measure", "write things")
+    await untilStatus(r, t.id, "done")
+
+    const taskAfter = await getTask(r, t.id)
+    expect(taskAfter.claudeTokens).toBeGreaterThan(0)
+
+    const usage = await call<UsageReport>(r, "GET", "/api/usage")
+    expect(usage.windows.find((w) => w.key === "today")!.claude.totalTokens).toBeGreaterThan(0)
+    expect(usage.projects.find((x) => x.projectId === p.id)?.claude.totalTokens).toBeGreaterThan(0)
+    expect(usage.tasks.find((x) => x.taskId === t.id)?.claude.totalTokens).toBeGreaterThan(0)
+  })
+
+  it("pauses new agent turns when a budget is exceeded", async () => {
+    const r = await start()
+    r.yard.store.recordClaudeUsage({
+      source: "orchestrator",
+      runKind: "turn",
+      startedAt: Date.now(),
+      endedAt: Date.now(),
+      usage: { input_tokens: 1 },
+      costUsd: 2,
+    })
+    await call(r, "PUT", "/api/agent-settings", { budget: { dailyUsd: 1, monthlyUsd: 0 } })
+    const p = await project(r, "budget")
+    const t = await task(r, p.id, "Paused", "write things")
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const queued = await getTask(r, t.id)
+    expect(queued.status).toBe("queued")
+    expect(await call<BoxInfo[]>(r, "GET", "/api/boxes")).toHaveLength(0)
+    expect((await call<UsageReport>(r, "GET", "/api/usage")).budget.blocked).toBe(true)
   })
 
   it("asks Cody a question, then resumes the same session with the answer", async () => {
@@ -228,6 +268,9 @@ describe("box yard end to end", () => {
     const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
     expect(chat.filter((m) => m.role === "tool").map((m) => m.content)).toEqual(expect.arrayContaining(["create_project", "create_task"]))
     expect(chat.some((m) => m.role === "assistant" && m.content.includes("Started task"))).toBe(true)
+    const reply = [...chat].reverse().find((m) => m.role === "assistant")
+    expect(reply?.content).not.toContain("boxyard-next-steps")
+    expect(reply?.meta?.[NEXT_STEPS_META_KEY]).toEqual(["Check the latest yard status", "Start a related task", "Summarize open decisions"])
     // Second message resumed the same orchestrator session.
     expect(r.yard.store.getKv("orchestrator_session_started")).toBe("1")
   })

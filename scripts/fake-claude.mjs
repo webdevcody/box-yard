@@ -145,6 +145,10 @@ async function say(text) {
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } })
 }
 
+function withNextSteps(text, steps) {
+  return `${text}\n\n<!-- boxyard-next-steps\n${JSON.stringify(steps)}\n-->`
+}
+
 async function useTool(mcp, name, input) {
   const id = `t${Date.now()}`
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name: `mcp__boxyard__${name}`, input }] } })
@@ -203,7 +207,7 @@ async function orchestrator(mcp, prompt) {
     )
   }
   if (/\[slow\]/i.test(text)) await sleep(2000)
-  await say(lines.join("\n"))
+  await say(withNextSteps(lines.join("\n"), ["Check the latest yard status", "Start a related task", "Summarize open decisions"]))
   return lines.join("\n")
 }
 
@@ -240,7 +244,7 @@ async function worker(mcp, prompt) {
     await useTool(mcp, "mark_done", { summary: "The mock agent wrote box-yard-demo.md." })
   }
   const reply = "Done for now. I wrote box-yard-demo.md."
-  await say(reply)
+  await say(withNextSteps(reply, ["Review the mock result", "Run a broader check", "Ask for a PR-ready summary"]))
   return reply
 }
 

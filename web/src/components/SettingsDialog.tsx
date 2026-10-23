@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -22,19 +22,24 @@ import { Button, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_SIZES,
   EFFORTS,
+  SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
+  WORKER_SIZES,
   agentCapacity,
   type AgentEffort,
   type AutoCompact,
+  type BoxSize,
   type Settings,
   type SettingSource,
+  type WorkerSize,
 } from "../../../shared/types"
 
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -113,7 +118,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
         <input id={id} type="checkbox" checked={value.enabled} onChange={(e) => onChange({ ...value, enabled: e.target.checked })} />
         Enabled
       </label>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="number"
           className={cx(inputClass, "min-w-0 flex-1 disabled:opacity-50")}
@@ -126,7 +131,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
           aria-label={`${label} threshold`}
         />
         <Select
-          className="w-36 shrink-0"
+          className="w-full shrink-0 sm:w-36"
           disabled={!value.enabled}
           value={value.unit}
           aria-label={`${label} unit`}
@@ -256,7 +261,7 @@ export function SettingsDialog({
           >
             Reset to defaults
           </Button>
-          <div className="ml-auto flex items-center gap-3">
+          <div className="flex flex-col-reverse gap-2 sm:ml-auto sm:flex-row sm:items-center sm:gap-3">
             {dirty ? (
               <span className="text-xs text-amber-300" role="status">
                 {changed.length === 1 ? "1 unsaved change" : `${changed.length} unsaved changes`}
@@ -306,7 +311,7 @@ export function SettingsDialog({
               tabIndex={on ? 0 : -1}
               onClick={() => onSection(sec.key)}
               className={cx(
-                "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
+                "flex min-h-11 shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none sm:min-h-0",
                 on ? "bg-zinc-800/80 font-medium text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
               )}
             >
@@ -323,7 +328,7 @@ export function SettingsDialog({
         role="tabpanel"
         id={fid("panel")}
         aria-labelledby={fid(`tab-${section}`)}
-        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6"
+        className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6"
       >
         {section === "about" ? (
           <AboutPanel />
@@ -394,6 +399,21 @@ export function SettingsDialog({
               </Select>
             </Row>
             <Row
+              id={fid("arc")}
+              label="Routing YAML"
+              help="Optional rules the orchestrator reads when choosing a task model and effort. Also works from routing.yaml in the data directory."
+              hint={hint("agentRoutingConfig")}
+            >
+              <textarea
+                id={fid("arc")}
+                className={cx(inputClass, "min-h-40 resize-y font-mono text-xs leading-5")}
+                spellCheck={false}
+                value={s.agentRoutingConfig}
+                onChange={(e) => set("agentRoutingConfig", e.target.value)}
+                placeholder={"fallback:\n  model: claude-opus-5-5\n  effort: high\nrules:\n  - name: docs-small-fixes\n    when: docs, typos, small fixes\n    model: claude-haiku-5-5\n    effort: low"}
+              />
+            </Row>
+            <Row
               id={fid("aac")}
               label="Custom auto-compact threshold"
               help="Passed to each agent's CLI as its auto-compact window (100k–1M tokens). Off: the CLI's own default."
@@ -402,8 +422,10 @@ export function SettingsDialog({
               <AutoCompactControl id={fid("aac")} label="Agent auto-compact" value={s.agentAutoCompact} onChange={(v) => set("agentAutoCompact", v)} />
             </Row>
           </Panel>
-        ) : (
+        ) : section === "limits" ? (
           <LimitsPanel s={s} set={set} hint={hint} fid={fid} />
+        ) : (
+          <CostsPanel s={s} set={set} hint={hint} fid={fid} />
         )}
       </div>
 
@@ -430,19 +452,69 @@ function LimitsPanel({
   fid: (k: string) => string
 }) {
   const health = useHealth()
-  const int = (k: "maxBoxes" | "slotsPerBox" | "maxAgents") => (e: React.ChangeEvent<HTMLInputElement>) => set(k, Math.trunc(Number(e.target.value)))
+  const int =
+    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays") =>
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
   const upstash = health.data?.provider === "upstash"
+  const sizeDefault = SIZE_DEFAULTS[s.workerSize]
   return (
     <Panel section="limits">
+      <Row
+        id={fid("ws")}
+        label="Worker size"
+        help="Upstash Box size for newly created boxes. Existing boxes keep the size they were created with."
+        hint={hint("workerSize")}
+      >
+        <Select id={fid("ws")} className="w-full" value={s.workerSize} onChange={(e) => set("workerSize", e.target.value as WorkerSize)}>
+          {WORKER_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {size} ({SIZE_DEFAULTS[size].slotsPerBox} slots, {SIZE_DEFAULTS[size].maxResidentPerBox} resident tasks by default)
+            </option>
+          ))}
+        </Select>
+      </Row>
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
       </Row>
-      <Row id={fid("spb")} label="Agents per box" help="Claude turns that may run at the same time inside one box." hint={hint("slotsPerBox")}>
+      <Row
+        id={fid("spb")}
+        label="Agents per box"
+        help={`Claude turns that may run at the same time inside one box. Default for ${s.workerSize}: ${sizeDefault.slotsPerBox}.`}
+        hint={hint("slotsPerBox")}
+      >
         <input id={fid("spb")} type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
       </Row>
       <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
+      </Row>
+      <Row
+        id={fid("mr")}
+        label="Resident tasks per box"
+        help={`Task folders kept on one box before older archived workspaces are parked. Default for ${s.workerSize}: ${sizeDefault.maxResidentPerBox}.`}
+        hint={hint("maxResidentPerBox")}
+      >
+        <input id={fid("mr")} type="number" min={1} max={200} className={inputClass} value={s.maxResidentPerBox} onChange={int("maxResidentPerBox")} />
+      </Row>
+      <Row id={fid("bid")} label="Idle box deletion" help="Delete an idle worker box after this many minutes, but only when every resident workspace has a fresh archive. 0 keeps boxes." hint={hint("boxIdleDeleteMinutes")}>
+        <input id={fid("bid")} type="number" min={0} max={43_200} className={inputClass} value={s.boxIdleDeleteMinutes} onChange={int("boxIdleDeleteMinutes")} />
+      </Row>
+      <Row
+        id={fid("wrd")}
+        label="Workspace retention"
+        help="After this many idle days, archived resting task folders are removed from boxes and restored from the archive on the next message. 0 keeps folders."
+        hint={hint("workspaceRetentionDays")}
+      >
+        <input id={fid("wrd")} type="number" min={0} max={3650} className={inputClass} value={s.workspaceRetentionDays} onChange={int("workspaceRetentionDays")} />
+      </Row>
+      <Row
+        id={fid("ard")}
+        label="Archive retention"
+        help="After this many days, orphan archives and long-done task archives are pruned. Archives for resumable parked tasks are kept. 0 keeps archives."
+        hint={hint("archiveRetentionDays")}
+      >
+        <input id={fid("ard")} type="number" min={0} max={3650} className={inputClass} value={s.archiveRetentionDays} onChange={int("archiveRetentionDays")} />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
@@ -459,6 +531,79 @@ function LimitsPanel({
             ).
           </p>
         )}
+      </div>
+    </Panel>
+  )
+}
+
+function CostsPanel({
+  s,
+  set,
+  hint,
+  fid,
+}: {
+  s: Settings
+  set: <K extends keyof Settings>(k: K, v: Settings[K]) => void
+  hint: (k: keyof Settings) => ReactNode
+  fid: (k: string) => string
+}) {
+  const money = (value: number, onChange: (n: number) => void, id?: string) => (
+    <input
+      id={id}
+      type="number"
+      min={0}
+      step={0.01}
+      className={inputClass}
+      value={value}
+      onChange={(e) => onChange(Number(e.target.value))}
+    />
+  )
+  const sizeLabel: Record<BoxSize, string> = { small: "Small", medium: "Medium", large: "Large" }
+  return (
+    <Panel section="costs">
+      <Row
+        label="Active CPU rates"
+        help="Estimated Upstash Box active CPU cost per hour. Defaults match the public Small / Medium / Large rates."
+        hint={hint("costRates")}
+      >
+        <div className="grid grid-cols-3 gap-2">
+          {BOX_SIZES.map((size) => (
+            <label key={size} className="space-y-1">
+              <span className="text-[11px] text-zinc-500">{sizeLabel[size]}</span>
+              {money(s.costRates.boxActiveCpuHourlyUsd[size], (n) =>
+                set("costRates", { ...s.costRates, boxActiveCpuHourlyUsd: { ...s.costRates.boxActiveCpuHourlyUsd, [size]: n } }),
+              )}
+            </label>
+          ))}
+        </div>
+      </Row>
+      <Row
+        label="Keep-alive rates"
+        help="Monthly keep-alive rates, prorated by box uptime when a provider reports keep-alive is enabled."
+        hint={hint("costRates")}
+      >
+        <div className="grid grid-cols-3 gap-2">
+          {BOX_SIZES.map((size) => (
+            <label key={size} className="space-y-1">
+              <span className="text-[11px] text-zinc-500">{sizeLabel[size]}</span>
+              {money(s.costRates.boxKeepAliveMonthlyUsd[size], (n) =>
+                set("costRates", { ...s.costRates, boxKeepAliveMonthlyUsd: { ...s.costRates.boxKeepAliveMonthlyUsd, [size]: n } }),
+              )}
+            </label>
+          ))}
+        </div>
+      </Row>
+      <Row id={fid("storage")} label="Storage rate" help="Storage and snapshot cost per GB-month. Disk use is probed from boxes when available." hint={hint("costRates")}>
+        {money(s.costRates.boxStorageGbMonthUsd, (n) => set("costRates", { ...s.costRates, boxStorageGbMonthUsd: n }), fid("storage"))}
+      </Row>
+      <Row id={fid("daily-budget")} label="Daily budget" help="0 disables the daily budget. At 80% Box Yard warns; at 100% queued agent turns pause." hint={hint("budget")}>
+        {money(s.budget.dailyUsd, (n) => set("budget", { ...s.budget, dailyUsd: n }), fid("daily-budget"))}
+      </Row>
+      <Row id={fid("monthly-budget")} label="Monthly budget" help="0 disables the 30-day budget window. Raising this value resumes queued turns immediately." hint={hint("budget")}>
+        {money(s.budget.monthlyUsd, (n) => set("budget", { ...s.budget, monthlyUsd: n }), fid("monthly-budget"))}
+      </Row>
+      <div className="mt-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
+        Claude Code costs come from the CLI's result JSON. Box costs use provider usage when exposed by the API; otherwise active CPU and storage are labeled estimates.
       </div>
     </Panel>
   )

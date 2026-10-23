@@ -110,7 +110,7 @@ function FilePreview({ item, position }: { item: PreviewItem; position: [number,
       className={cx(kind && TALL.includes(kind) && "sm:h-[85vh]", kind && isTextKind(kind) && "sm:max-h-[85vh]")}
       bodyClassName="relative flex min-h-0 flex-1 flex-col"
     >
-      <header className="flex shrink-0 items-center gap-2 border-b border-zinc-900 py-2.5 pr-3 pl-5">
+      <header className="flex min-h-14 shrink-0 items-center gap-1 border-b border-zinc-900 py-2 pr-2 pl-4 sm:gap-2 sm:py-2.5 sm:pr-3 sm:pl-5">
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-sm font-semibold text-zinc-50" title={name}>
             {name}
@@ -155,7 +155,7 @@ function ToolButton({ label, active, onClick, children }: { label: string; activ
       aria-label={label}
       aria-pressed={active}
       className={cx(
-        "inline-flex shrink-0 items-center gap-1 rounded-md p-1.5 text-xs font-medium hover:bg-zinc-800 hover:text-zinc-100",
+        "inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-1 rounded-md p-1.5 text-xs font-medium hover:bg-zinc-800 hover:text-zinc-100 sm:min-h-0 sm:min-w-0",
         active ? "bg-zinc-800 text-zinc-100" : "text-zinc-400",
       )}
     >
@@ -164,7 +164,7 @@ function ToolButton({ label, active, onClick, children }: { label: string; activ
   )
 }
 
-const actionClass = "inline-flex shrink-0 items-center rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+const actionClass = "inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 sm:min-h-0 sm:min-w-0"
 
 function FileActions({ url, name }: { url: string; name: string }) {
   const [copied, setCopied] = useState(false)
@@ -200,7 +200,7 @@ function StepButton({ side, onClick }: { side: "left" | "right"; onClick: () => 
       aria-label={side === "left" ? "Previous image (←)" : "Next image (→)"}
       title={side === "left" ? "Previous (←)" : "Next (→)"}
       className={cx(
-        "absolute top-1/2 z-10 rounded-full bg-zinc-950/70 p-2 text-zinc-300 shadow-lg ring-1 ring-zinc-800 backdrop-blur hover:bg-zinc-900 hover:text-white",
+        "absolute top-1/2 z-10 grid h-11 w-11 place-items-center rounded-full bg-zinc-950/70 text-zinc-300 shadow-lg ring-1 ring-zinc-800 backdrop-blur hover:bg-zinc-900 hover:text-white sm:h-10 sm:w-10",
         side === "left" ? "left-3" : "right-3",
       )}
     >
@@ -419,7 +419,7 @@ function TextPreview({ item, kind, raw }: { item: PreviewItem; kind: "markdown" 
   const { text } = file
   if (!raw && kind === "markdown")
     return (
-      <div className="prose-doc scroll-thin min-h-0 flex-1 overflow-auto px-6 py-5 text-sm text-zinc-200">
+      <div className="prose-doc scroll-thin min-h-0 flex-1 overflow-auto px-4 py-5 text-sm text-zinc-200 sm:px-6">
         <Markdown>{text}</Markdown>
       </div>
     )
@@ -437,7 +437,7 @@ function CodeView({ text, note }: { text: string; note?: string }) {
   return (
     <div className="scroll-thin min-h-0 flex-1 overflow-auto bg-zinc-950">
       {note && <div className="border-b border-zinc-900 px-4 py-2 text-xs text-amber-300/80">{note}</div>}
-      <div className="flex min-w-max font-mono text-xs leading-5">
+      <div className="flex w-max min-w-full font-mono text-xs leading-5">
         <pre aria-hidden className="sticky left-0 shrink-0 border-r border-zinc-900 bg-zinc-950 py-3 pr-3 pl-4 text-right text-zinc-600 select-none">
           {lineNumbers(text)}
         </pre>

@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import type { CompactionInfo } from "../shared/types.js"
+import type { CompactionInfo, CompactionTaskSnapshot } from "../shared/types.js"
 
 /** `2026-10-22T18-40-05Z`: ISO time without colons or millis, so names sort chronologically on every filesystem. */
 export function compactionStamp(at: number): string {
@@ -40,9 +40,18 @@ export interface CompactionMeta {
   model: string
   trigger: "button" | "auto"
   tokensBefore: number | null
+  /** Markdown heading for the summary; defaults to the orchestrator's. */
+  heading?: string
 }
 
-const frontmatter = (m: CompactionMeta, after: number | null | "pending") =>
+export interface CompactionFiles {
+  id: string
+  markdownFile: string
+  jsonFile: string
+  markdown: string
+}
+
+const frontmatter = (m: CompactionMeta, after: number | null | "pending", tasks: CompactionTaskSnapshot[] = []) =>
   [
     "---",
     `timestamp: ${new Date(m.at).toISOString().replace(/\.\d+Z$/, "Z")}`,
@@ -51,6 +60,7 @@ const frontmatter = (m: CompactionMeta, after: number | null | "pending") =>
     `trigger: ${m.trigger}`,
     `tokens_before: ${m.tokensBefore ?? "unknown"}`,
     `tokens_after: ${after ?? "unknown"}`,
+    `task_ids: ${tasks.map((t) => t.taskId).join(", ") || "none"}`,
     "---",
     "",
   ].join("\n")
@@ -70,16 +80,39 @@ export function summaryLooksValid(text: string): boolean {
   return text.length >= 60 && /^## Decisions and preferences/m.test(text)
 }
 
-/** Write the log file (temp file + rename, so a crash never leaves half a file). Returns its path. */
-export function writeCompaction(dir: string, meta: CompactionMeta, summary: string): string {
+const compactionIdFromMarkdown = (file: string) => path.basename(file, ".md")
+const sidecar = (file: string) => file.replace(/\.md$/, ".json")
+
+function sidecarPayload(meta: CompactionMeta, after: number | null | "pending", markdownFile: string, summary: string, tasks: CompactionTaskSnapshot[]) {
+  return {
+    id: compactionIdFromMarkdown(markdownFile),
+    timestamp: new Date(meta.at).toISOString().replace(/\.\d+Z$/, "Z"),
+    sessionId: meta.sessionId,
+    model: meta.model,
+    trigger: meta.trigger,
+    tokensBefore: meta.tokensBefore,
+    tokensAfter: after === "pending" ? null : after,
+    markdownFile,
+    tasks,
+    summary,
+  }
+}
+
+/** Write the log files (temp file + rename, so a crash never leaves half a file). */
+export function writeCompaction(dir: string, meta: CompactionMeta, summary: string, tasks: CompactionTaskSnapshot[] = []): CompactionFiles {
   fs.mkdirSync(dir, { recursive: true })
   const stamp = compactionStamp(meta.at)
   let file = path.join(dir, `${stamp}.md`)
   for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${stamp}-${n}.md`)
+  const jsonFile = sidecar(file)
+  const markdown = `${frontmatter(meta, "pending", tasks)}# ${meta.heading ?? "Orchestrator compaction summary"}\n\n${summary.trim()}\n`
   const tmp = `${file}.tmp`
-  fs.writeFileSync(tmp, `${frontmatter(meta, "pending")}# Orchestrator compaction summary\n\n${summary.trim()}\n`)
+  fs.writeFileSync(tmp, markdown)
   fs.renameSync(tmp, file)
-  return file
+  const jsonTmp = `${jsonFile}.tmp`
+  fs.writeFileSync(jsonTmp, JSON.stringify(sidecarPayload(meta, "pending", file, summary.trim(), tasks), null, 2) + "\n")
+  fs.renameSync(jsonTmp, jsonFile)
+  return { id: compactionIdFromMarkdown(file), markdownFile: file, jsonFile, markdown }
 }
 
 /** Fill in tokens_after once the compaction has run. */
@@ -89,6 +122,15 @@ export function finishCompaction(file: string, tokensAfter: number | null) {
   const tmp = `${file}.tmp`
   fs.writeFileSync(tmp, next)
   fs.renameSync(tmp, file)
+  const jsonFile = sidecar(file)
+  try {
+    const data = JSON.parse(fs.readFileSync(jsonFile, "utf8")) as Record<string, unknown>
+    data.tokensAfter = tokensAfter
+    fs.writeFileSync(`${jsonFile}.tmp`, JSON.stringify(data, null, 2) + "\n")
+    fs.renameSync(`${jsonFile}.tmp`, jsonFile)
+  } catch {
+    // Old compactions may not have sidecars; the markdown frontmatter is still updated.
+  }
 }
 
 /** Log files, oldest first (the names sort chronologically). */

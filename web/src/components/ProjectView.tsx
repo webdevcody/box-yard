@@ -154,7 +154,7 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
   if (failed) stats.push({ label: "failed", n: failed, dot: STATUS.failed.dot, filter: "failed" })
 
   return (
-    <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
+    <header className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-start sm:gap-x-4">
       <div className="min-w-0 flex-1">
         <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">{project.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
@@ -199,7 +199,7 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
           ))}
         </div>
       </div>
-      <Button variant="primary" onClick={onNewTask}>
+      <Button variant="primary" onClick={onNewTask} className="w-full sm:w-auto">
         <Plus className="h-4 w-4" /> New task
       </Button>
     </header>
@@ -232,7 +232,7 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
         </Empty>
       ) : (
         <>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <SearchBox value={query} onChange={onQuery} />
             <SortSelect sort={sort} />
           </div>
@@ -249,7 +249,7 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
                   aria-selected={selected}
                   onClick={() => setParam("status", f.key === DEFAULT_FILTER ? null : f.key)}
                   className={cx(
-                    "inline-flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium whitespace-nowrap transition",
+                    "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full px-3 py-2 text-xs font-medium whitespace-nowrap transition sm:min-h-0 sm:py-1",
                     selected ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800/80 text-zinc-400 hover:text-zinc-200",
                     !selected && n === 0 && "opacity-50",
                   )}
@@ -285,7 +285,7 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
           )}
 
           {filter === "open" && counts.done > 0 && shown.length > 0 && (
-            <button onClick={() => setParam("status", "done")} className="w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
+            <button onClick={() => setParam("status", "done")} className="min-h-11 w-full rounded-xl border border-dashed border-zinc-800 py-2.5 text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
               {counts.done} done {counts.done === 1 ? "task" : "tasks"} hidden · Show done
             </button>
           )}
@@ -508,12 +508,12 @@ function Files({ files }: { files: Artifact[] }) {
       {[...files]
         .sort((a, b) => b.createdAt - a.createdAt)
         .map((a) => (
-          <li key={a.id} className="flex items-center gap-3 px-4 py-2.5 text-sm">
+          <li key={a.id} className="flex min-h-11 flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
             <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
             <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
               {a.title}
             </ArtifactLink>
-            <span className="ml-auto shrink-0 text-xs text-zinc-500">
+            <span className="ml-auto shrink-0 text-xs text-zinc-500 max-sm:w-full max-sm:pl-7">
               {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
             </span>
           </li>
@@ -565,7 +565,7 @@ function NewTaskDialog({ projectId, onDone }: { projectId: string; onDone: () =>
           <textarea className={`${inputClass} font-mono text-xs`} rows={2} value={env} onChange={(e) => setEnv(e.target.value)} />
         </Field>
       ) : (
-        <button type="button" className="text-xs whitespace-nowrap text-zinc-500 hover:text-zinc-300" onClick={() => setShowEnv(true)}>
+        <button type="button" className="min-h-11 text-left text-xs whitespace-nowrap text-zinc-500 hover:text-zinc-300 sm:min-h-0" onClick={() => setShowEnv(true)}>
           + env vars
         </button>
       )}
@@ -597,8 +597,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         <Field label="Name">
           <input className={inputClass} value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <div className="sm:col-span-2">
             <Field label="Repo">
               <input className={inputClass} value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="owner/name" />
             </Field>
@@ -618,7 +618,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
               type="button"
               key={k}
               onClick={() => setRemoveKeys((r) => (r.includes(k) ? r.filter((x) => x !== k) : [...r, k]))}
-              className={`rounded-md px-2 py-0.5 font-mono text-xs ${removeKeys.includes(k) ? "bg-red-500/20 text-red-300 line-through" : "bg-zinc-800 text-zinc-300"}`}
+              className={`min-h-11 rounded-md px-2 py-1 font-mono text-xs sm:min-h-0 sm:py-0.5 ${removeKeys.includes(k) ? "bg-red-500/20 text-red-300 line-through" : "bg-zinc-800 text-zinc-300"}`}
               title="Click to remove"
             >
               {k}
@@ -627,10 +627,11 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         </div>
         <textarea className={`${inputClass} font-mono text-xs`} rows={2} value={env} onChange={(e) => setEnv(e.target.value)} placeholder="NEW_KEY=value" />
       </Field>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <Button
           type="button"
           variant="danger"
+          className="sm:mr-auto"
           onClick={async () => {
             if (await confirmDialog({ title: "Delete project?", body: `Delete ${project.name} and all its tasks? This can't be undone.`, confirmLabel: "Delete project", danger: true })) {
               remove.mutate(project.id)
@@ -640,7 +641,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         >
           <Trash2 className="h-4 w-4" /> Delete project
         </Button>
-        <div className="ml-auto flex gap-2">
+        <div className="flex gap-2 max-sm:flex-col-reverse sm:ml-auto">
           <Button type="button" variant="ghost" onClick={onDone}>
             Cancel
           </Button>

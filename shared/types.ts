@@ -83,8 +83,18 @@ export interface Task {
   compactPending: boolean
   /** A compaction turn is running right now. */
   compacting: boolean
-  /** Effort the orchestrator picked for this agent (used only in "let the orchestrator decide" mode). */
+  /** Model currently selected for subsequent turns, when routing overrode the global agent model. */
+  model: string | null
+  /** Effort currently selected for subsequent turns, when routing or the orchestrator overrode the global effort. */
   effort: Effort | null
+  /** Claude Code cost recorded for this task's turns. */
+  claudeCostUsd: number
+  /** Claude Code tokens recorded for this task's turns. */
+  claudeTokens: number
+  /** Routing rule name or id that picked the current model/effort, if any. */
+  routingRule: string | null
+  /** Short explanation of why that route was picked. */
+  routingReason: string | null
   createdAt: number
   updatedAt: number
 }
@@ -197,11 +207,18 @@ export interface BoxInfo {
   id: string
   provider: string
   status: "creating" | "ready" | "lost" | "deleting"
+  size: BoxSize
+  keepAlive: boolean
   slots: number
   runningTurns: number
   residentTasks: string[]
   /** Names of the projects whose tasks live on this box. */
   projects: string[]
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number | null
+  estimatedCostUsd: number
+  usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
 }
@@ -213,7 +230,7 @@ export interface Health {
   bus: "redis" | "file"
   claude: { available: boolean; version: string | null }
   problems: string[]
-  pool: { maxBoxes: number; slotsPerBox: number; maxAgents: number }
+  pool: { maxBoxes: number; slotsPerBox: number; maxAgents: number; maxResidentPerBox: number; boxIdleDeleteMinutes: number }
   orchestratorBusy: boolean
   /** How schedules are triggered: the server's own timer, or QStash plus the timer. */
   scheduler: "local" | "qstash"
@@ -286,11 +303,36 @@ export const DEFAULT_EFFORT: Effort = "high"
 export const AUTOCOMPACT_MIN_TOKENS = 100_000
 export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
 
+export const WORKER_SIZES = ["small", "medium", "large"] as const
+export type WorkerSize = (typeof WORKER_SIZES)[number]
+
+export const SIZE_DEFAULTS: Record<WorkerSize, { slotsPerBox: number; maxResidentPerBox: number }> = {
+  small: { slotsPerBox: 1, maxResidentPerBox: 3 },
+  medium: { slotsPerBox: 2, maxResidentPerBox: 8 },
+  large: { slotsPerBox: 4, maxResidentPerBox: 18 },
+}
+
 export interface AutoCompact {
   enabled: boolean
   unit: "percent" | "tokens"
   /** Percent of the context window (10-95) or a token count. */
   value: number
+}
+
+export const BOX_SIZES = WORKER_SIZES
+export type BoxSize = WorkerSize
+
+export interface CostRates {
+  boxActiveCpuHourlyUsd: Record<BoxSize, number>
+  boxKeepAliveMonthlyUsd: Record<BoxSize, number>
+  boxStorageGbMonthUsd: number
+}
+
+export interface BudgetSettings {
+  /** 0 disables this budget. */
+  dailyUsd: number
+  /** 0 disables this budget. */
+  monthlyUsd: number
 }
 
 export interface Settings {
@@ -300,14 +342,30 @@ export interface Settings {
   orchestratorAutoCompact: AutoCompact
   agentModel: string
   agentEffort: AgentEffort
+  /** YAML routing rules the orchestrator uses to choose per-task/per-turn model and effort. */
+  agentRoutingConfig: string
   /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
   agentAutoCompact: AutoCompact
+  /** Upstash Box size used for new worker boxes. */
+  workerSize: WorkerSize
   /** Most worker boxes alive at once. */
   maxBoxes: number
   /** Claude turns that may run at once inside one box. */
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
   maxAgents: number
+  /** Rates used to estimate Upstash Box infrastructure costs. */
+  costRates: CostRates
+  /** Optional cost guardrail. When exceeded, Box Yard holds queued agent turns. */
+  budget: BudgetSettings
+  /** Task folders kept in one box before old archived ones are parked. */
+  maxResidentPerBox: number
+  /** Delete a worker box after this many idle minutes. 0 = keep boxes until removed manually. */
+  boxIdleDeleteMinutes: number
+  /** Park archived resting task folders from boxes after this many idle days. 0 = keep folders. */
+  workspaceRetentionDays: number
+  /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
+  archiveRetentionDays: number
 }
 
 /** Agents that can run at once under a set of limits. */
@@ -329,6 +387,77 @@ export interface SettingsInfo {
   defaults: Settings
 }
 
+export interface ClaudeUsageTotals {
+  costUsd: number
+  inputTokens: number
+  cacheCreationInputTokens: number
+  cacheReadInputTokens: number
+  outputTokens: number
+  totalTokens: number
+  turns: number
+  durationMs: number
+}
+
+export interface BoxUsageTotals {
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number
+  costUsd: number
+  source: "actual" | "estimated"
+}
+
+export interface UsageWindow {
+  key: "today" | "7d" | "30d"
+  label: string
+  since: number
+  claude: ClaudeUsageTotals
+  boxes: BoxUsageTotals
+  totalCostUsd: number
+}
+
+export interface UsageProjectTotal {
+  projectId: string
+  projectName: string
+  claude: ClaudeUsageTotals
+}
+
+export interface UsageTaskTotal {
+  taskId: string
+  taskTitle: string
+  projectId: string
+  projectName: string
+  claude: ClaudeUsageTotals
+}
+
+export interface UsageBoxTotal {
+  boxId: string
+  provider: string
+  size: BoxSize
+  keepAlive: boolean
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number | null
+  estimatedCostUsd: number
+  usageSource: "actual" | "estimated"
+}
+
+export interface BudgetStatus {
+  daily: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
+  monthly: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
+  blocked: boolean
+}
+
+export interface UsageReport {
+  generatedAt: number
+  rates: CostRates
+  budget: BudgetStatus
+  windows: UsageWindow[]
+  projects: UsageProjectTotal[]
+  tasks: UsageTaskTotal[]
+  boxes: UsageBoxTotal[]
+  orchestrator: ClaudeUsageTotals
+}
+
 export interface ContextUsage {
   tokens: number | null
   window: number | null
@@ -341,6 +470,44 @@ export interface CompactionInfo {
   tokensBefore: number | null
   tokensAfter: number | null
   file: string
+}
+
+export interface CompactionTaskSnapshot {
+  taskId: string
+  title: string
+  status: TaskStatus
+  projectId: string
+  projectName: string
+  branch: string | null
+  prUrl: string | null
+  sessionId: string
+  summary: string
+  lastActiveAt: number
+}
+
+export interface OrchestratorCompactionRecord extends CompactionInfo {
+  id: string
+  sessionId: string
+  model: string
+  jsonFile: string
+  taskCount: number
+  tasks: CompactionTaskSnapshot[]
+  markdown?: string
+}
+
+export interface TaskCompactionRecord {
+  id: string
+  taskId: string
+  sessionId: string
+  at: number
+  statusBefore: TaskStatus | null
+  statusAfter: TaskStatus | null
+  tokensBefore: number | null
+  tokensAfter: number | null
+  summary: string
+  archivePath: string | null
+  archiveAvailable: boolean
+  archiveNote: string | null
 }
 
 export interface OrchestratorState {

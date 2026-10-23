@@ -46,3 +46,16 @@ export function formatTokens(n: number): string {
   if (n >= 1e3) return `${Math.round(n / 1e3)}k`
   return String(n)
 }
+
+/** Token counts from a CLI `result` message, or null when it reported none. */
+export function resultUsageObject(u: unknown) {
+  const x = u as Record<string, unknown> | null | undefined
+  if (!x) return null
+  const out = {
+    input_tokens: typeof x.input_tokens === "number" ? x.input_tokens : 0,
+    cache_creation_input_tokens: typeof x.cache_creation_input_tokens === "number" ? x.cache_creation_input_tokens : 0,
+    cache_read_input_tokens: typeof x.cache_read_input_tokens === "number" ? x.cache_read_input_tokens : 0,
+    output_tokens: typeof x.output_tokens === "number" ? x.output_tokens : 0,
+  }
+  return Object.values(out).some((n) => n > 0) ? out : null
+}

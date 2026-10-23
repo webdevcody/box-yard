@@ -10,6 +10,8 @@ import { ChatPanel } from "./components/ChatPanel"
 import { ProjectView } from "./components/ProjectView"
 import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
+import { UsageView } from "./components/UsageView"
+import { CompactionsView } from "./components/Compactions"
 import { SchedulesView } from "./components/Schedules"
 import { CommandPalette } from "./components/CommandPalette"
 import { Toasts } from "./components/Toasts"
@@ -21,6 +23,7 @@ import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
+import { BrandLogo } from "./components/BrandLogo"
 
 export function App() {
   const me = useMe()
@@ -45,9 +48,9 @@ export function App() {
   if (!authed) return <Login />
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-[100dvh] min-h-0 overflow-hidden">
       {/* Projects sidebar: fixed on wide screens, a drawer on small ones */}
-      <div className={cx("fixed inset-y-0 left-0 z-40 transition-transform w-64 lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
+      <div className={cx("fixed inset-y-0 left-0 z-40 w-[min(20rem,calc(100vw-2rem))] transition-transform lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
         style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
       >
         <Sidebar connection={connection} onNavigate={closeNav} />
@@ -55,19 +58,19 @@ export function App() {
       </div>
       {navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
 
-      <main className="relative flex min-w-0 flex-1 flex-col">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         <HealthBanner />
-        <div className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 lg:hidden">
-          <button onClick={() => setNavOpen(true)} className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800">
+        <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-zinc-900 px-3 pt-[env(safe-area-inset-top)] lg:hidden">
+          <button onClick={() => setNavOpen(true)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800" aria-label="Open navigation">
             <Menu className="h-5 w-5" />
           </button>
-          <span className="font-semibold text-zinc-100">Box Yard</span>
-          <button onClick={() => setChatOpen(true)} className="ml-auto rounded p-1.5 text-zinc-400 hover:bg-zinc-800 xl:hidden">
+          <BrandLogo markClassName="h-6 w-6" textClassName="font-semibold text-zinc-100" />
+          <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 xl:hidden" aria-label="Open orchestrator">
             <MessageSquare className="h-5 w-5" />
           </button>
         </div>
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto h-full max-w-6xl px-6 py-6">
+          <div className="mx-auto h-full max-w-6xl px-4 py-4 sm:px-6 sm:py-6">
             <Routes />
           </div>
         </div>
@@ -78,13 +81,13 @@ export function App() {
       {/* The global orchestrator chat: always visible on wide screens */}
       <div
         className={cx(
-          "fixed inset-y-0 right-0 z-40 w-full max-w-md border-l border-zinc-900 transition-transform xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
+          "fixed inset-y-0 right-0 z-40 w-full max-w-none border-l border-zinc-900 transition-transform sm:max-w-md xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
           chatOpen ? "translate-x-0" : "translate-x-full",
         )}
         style={{ "--panel-w": `${chatSize.width}px` } as CSSProperties}
       >
         <ResizeHandle {...chatSize.handle} className="xl:block" />
-        <button onClick={() => setChatOpen(false)} className="absolute top-3 right-3 z-10 rounded p-1 text-zinc-500 hover:text-zinc-200 xl:hidden">
+        <button onClick={() => setChatOpen(false)} className="absolute top-[calc(0.5rem+env(safe-area-inset-top))] right-3 z-10 grid h-11 w-11 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200 xl:hidden" aria-label="Close orchestrator">
           <X className="h-4 w-4" />
         </button>
         <ChatPanel />
@@ -115,6 +118,8 @@ const Routes = memo(function Routes() {
       <Route path="/" component={YardView} />
       <Route path="/inbox" component={InboxView} />
       <Route path="/boxes" component={BoxesView} />
+      <Route path="/usage" component={UsageView} />
+      <Route path="/compactions" component={CompactionsView} />
       <Route path="/schedules" component={SchedulesView} />
       <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
       <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>

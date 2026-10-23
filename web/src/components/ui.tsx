@@ -89,8 +89,8 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
       {...rest}
       disabled={disabled || loading}
       className={cx(
-        "inline-flex items-center justify-center gap-1.5 rounded-lg font-medium whitespace-nowrap transition disabled:cursor-not-allowed disabled:opacity-50",
-        size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm",
+        "inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-lg font-medium whitespace-nowrap transition disabled:cursor-not-allowed disabled:opacity-50 sm:min-h-0 sm:min-w-0",
+        size === "sm" ? "px-3 py-2 text-xs sm:px-2.5 sm:py-1" : "px-3.5 py-2 text-sm",
         variant === "primary" && "bg-yard-500 text-zinc-950 hover:bg-yard-400",
         variant === "subtle" && "bg-zinc-800 text-zinc-200 hover:bg-zinc-700",
         variant === "ghost" && "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
@@ -282,11 +282,11 @@ export function Empty({ icon, title, children }: { icon?: ReactNode; title: stri
 }
 
 export const inputClass =
-  "w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-yard-500/60 focus:outline-none focus:ring-2 focus:ring-yard-500/20"
+  "w-full min-h-11 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-base text-zinc-100 placeholder:text-zinc-600 focus:border-yard-500/60 focus:outline-none focus:ring-2 focus:ring-yard-500/20 sm:min-h-0 sm:text-sm"
 
 const SELECT_SIZE = {
-  md: "rounded-lg py-2 pr-9 pl-3 text-sm",
-  sm: "select-sm rounded-md py-1 pr-7 pl-2 text-xs",
+  md: "min-h-11 rounded-lg py-2 pr-9 pl-3 text-base sm:min-h-0 sm:text-sm",
+  sm: "select-sm min-h-11 rounded-md py-2 pr-8 pl-3 text-sm sm:min-h-0 sm:py-1 sm:pr-7 sm:pl-2 sm:text-xs",
 }
 
 /** Native <select> with our own chevron, inset from the right edge, and room so long options never run under it. Pass width via className. */
