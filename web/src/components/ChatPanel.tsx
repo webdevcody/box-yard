@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
-import { Bot, RotateCcw, Settings as SettingsIcon, Square } from "lucide-react"
+import { Bot, Settings as SettingsIcon, Square, X } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
@@ -15,7 +15,6 @@ import { ChatLine } from "./ChatLine"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, ChatMessage } from "../../../shared/types"
-import { confirmDialog } from "../lib/confirm"
 
 const SUGGESTIONS = [
   "What's everyone working on?",
@@ -25,7 +24,8 @@ const SUGGESTIONS = [
 
 const NO_MESSAGES: ChatMessage[] = []
 
-export const ChatPanel = memo(function ChatPanel() {
+/** `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). */
+export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => void }) {
   const chat = useChat()
   const busy = useChatBusy()
   const send = useSendChat()
@@ -84,11 +84,11 @@ export const ChatPanel = memo(function ChatPanel() {
 
   return (
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
-      <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 px-4 pt-[env(safe-area-inset-top)] xl:min-h-0 xl:py-3 xl:pt-3">
-        <Bot className="h-4 w-4 text-yard-400" />
-        <div className="text-sm font-semibold text-zinc-100">Coordinator</div>
-        {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
-        <div className="ml-auto flex items-center gap-1">
+      <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4">
+        <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+        <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">Coordinator</div>
+        {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <VoiceControl />
           <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
             <SettingsIcon className="h-3.5 w-3.5" />
@@ -98,18 +98,17 @@ export const ChatPanel = memo(function ChatPanel() {
               <Square className="h-3.5 w-3.5" />
             </Button>
           )}
-          <Button
-            size="sm"
-            variant="ghost"
-            title="New conversation"
-            onClick={() => {
-              void confirmDialog({ title: "Start a new conversation?", body: "Starts a new Coordinator conversation. Projects and tasks are kept.", confirmLabel: "New conversation" }).then(
-                (ok) => ok && void control.reset(),
-              )
-            }}
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-          </Button>
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              title="Close"
+              aria-label="Close the Coordinator"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 xl:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </header>
       <ContextMeter

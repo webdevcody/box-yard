@@ -1113,10 +1113,6 @@ export class Store {
     })()
   }
 
-  clearChat() {
-    this.db.prepare("DELETE FROM chat_messages").run()
-  }
-
   // ---------- project captains ----------
 
   addCaptainMessage(projectId: string, role: ChatRole, content: string, meta: Record<string, unknown> | null = null, id?: string): CaptainMessage {
@@ -1200,10 +1196,6 @@ export class Store {
 
   markCaptainMessageSeen(id: string) {
     this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE id = ?").run(id)
-  }
-
-  clearCaptainMessages(projectId: string) {
-    this.db.prepare("DELETE FROM captain_messages WHERE project_id = ?").run(projectId)
   }
 
   // ---------- artifacts ----------
