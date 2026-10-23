@@ -36,6 +36,7 @@ import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } fr
 import { ProjectSchedules } from "./Schedules"
 import type { Artifact, BoxInfo, CaptainMessage, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { rememberProjectTab } from "../lib/breadcrumb"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -74,6 +75,9 @@ export function ProjectView({ id }: { id: string }) {
   const [showNew, setShowNew] = useState(false)
   const project = projects.data?.find((p) => p.id === id)
   const tab: Tab = TABS.find((t) => t.key === params.get("tab"))?.key ?? "tasks"
+
+  // The task page breadcrumb returns to this tab.
+  useEffect(() => rememberProjectTab(id, tab), [id, tab])
 
   // A new task dialog left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
