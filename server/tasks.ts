@@ -23,6 +23,7 @@ import {
 import type { Uploads, StoredUpload } from "./uploads.js"
 import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxInfo, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
+import { withOwner } from "../shared/owner.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
@@ -370,7 +371,7 @@ export class TaskManager {
       this.store.clearInputs(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
-    this.addEvent(row.id, "Stopped by Cody.")
+    this.addEvent(row.id, withOwner("Stopped by Cody.", this.owner()))
     this.emitTask(row.id)
     return this.store.getTask(row.id)!
   }
@@ -505,7 +506,7 @@ export class TaskManager {
     for (const row of this.store.listTaskRows({ boxId })) {
       if (row.current_turn_id) await this.killTurn(row).catch(() => {})
     }
-    await this.loseBox(boxId, "Box deleted by Cody.")
+    await this.loseBox(boxId, withOwner("Box deleted by Cody.", this.owner()))
     await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
   }
 
@@ -951,14 +952,15 @@ export class TaskManager {
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
       const projectName = (id: string) => this.store.getProject(id)?.name
-      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName)
+      const ownerName = this.owner()
+      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
       if (recapped) {
         row = this.recapSession(row, prepared!.branch, project.baseBranch)
       }
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [] })
+        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [], ownerName })
         : recapped
         ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
         : followup
@@ -977,7 +979,7 @@ export class TaskManager {
           resume: !firstTurn && !recapped,
           compact,
           ...agent,
-          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
+          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
           recap: recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60)),
@@ -1108,6 +1110,11 @@ export class TaskManager {
     return this.requireRow(row.id)
   }
 
+  /** What Box Yard calls its human (Settings.ownerName). */
+  owner(): string {
+    return this.settings.get().ownerName
+  }
+
   /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
   private agentSettings(row: TaskRow) {
     const s = this.settings.get()
@@ -1174,6 +1181,8 @@ export class TaskManager {
       // isolate when we have a token to log in with.
       isolateConfig: !local || Boolean(this.c.claudeOauthToken || this.c.anthropicApiKey),
       port: row.port_base ?? PORT_BASE,
+      // The runner puts it into its MCP tool descriptions and replies.
+      ownerName: this.owner(),
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
       publicUrl: this.c.publicUrl || null,
@@ -1387,7 +1396,7 @@ export class TaskManager {
       case "ask_user": {
         const question = String(ev.question ?? "")
         this.store.updateTask(taskId, { turnFlags: { ...flags, asked: question }, question })
-        say("event", `Asked Cody: ${question}`, { kind: "question" })
+        say("event", `${withOwner("Asked Cody:", this.owner())} ${question}`, { kind: "question" })
         return this.emitTask(taskId)
       }
       case "message_agent":
@@ -1524,7 +1533,7 @@ export class TaskManager {
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
     const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
     const more = this.store.hasInputs(row.id) ? " (more messages are queued for it)" : ""
-    if (noopIgnored.length) this.addEvent(row.id, `The agent marked this run a no-op, but it isn't quiet: ${noopIgnored.join(", ")}.`)
+    if (noopIgnored.length) this.addEvent(row.id, withOwner(`The agent marked this run a no-op, but it isn't quiet: ${noopIgnored.join(", ")}.`, this.owner()))
     const finished = this.store.getTask(row.id)
     if (finished && isQuietRun(finished)) {
       // Nothing happened: no notice for the Captain or Coordinator, and the run's start notice is dropped too.
@@ -1638,14 +1647,14 @@ export class TaskManager {
     }
     if (log.length >= AGENT_MSG_LIMIT) {
       say(from.id, `Message to ${to} not delivered: too many agent messages in 10 minutes.`, { to, blocked: true })
-      this.store.queueInput(from.id, "system", `Your message to ${to} was not delivered because you sent too many agent messages recently. Ask Cody with ask_user if you are stuck.`)
+      this.store.queueInput(from.id, "system", withOwner(`Your message to ${to} was not delivered because you sent too many agent messages recently. Ask Cody with ask_user if you are stuck.`, this.owner()))
       return
     }
     log.push(now)
     this.agentMsgLog.set(from.id, log)
 
     if (/^(cody|user|human|orchestrator)$/i.test(to)) {
-      say(from.id, `→ Cody: ${message}`, { to: "cody" })
+      say(from.id, `→ ${this.owner()}: ${message}`, { to: "cody" })
       this.notice(`💬 **${from.title}** says: ${message}`, { taskId: from.id })
       return
     }

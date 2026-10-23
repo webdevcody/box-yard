@@ -713,7 +713,7 @@ export class Store {
   }
 
   /**
-   * `quiet` skips the notification for a status change Cody caused himself (stop, close).
+   * `quiet` skips the notification for a status change Cody caused themselves (stop, close).
    * Compaction turns never notify: they hand back the status from before the compaction.
    * `touch: false` keeps updated_at (the "last active" time) as it was.
    */
