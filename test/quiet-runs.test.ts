@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { isQuietRun, noopBlockers, parseOutcome, withoutQuiet, type RunEvidence } from "../shared/quiet.js"
 import type { Task, TaskStatus } from "../shared/types.js"
-import { inYardView, olderFinishedCount, quietCount, recentlyFinished, yardCounts, yardTasks } from "../web/src/lib/yardTasks.js"
+import { inYardView, olderFinishedCount, quietCount, yardCounts, yardTasks } from "../web/src/lib/yardTasks.js"
 import { filterCounts, isVisible, visibleTasks } from "../web/src/lib/projectTasks.js"
 import { inInbox } from "../web/src/lib/inbox.js"
 import { openDb } from "../server/db.js"
@@ -129,12 +129,11 @@ describe("the Yard hides quiet runs by default", () => {
   const old = quietRun({ updatedAt: NOW - 48 * HOUR })
   const all = [quiet, failedNoop, normal, old]
 
-  it("leaves them out of Recent, All, the counts and the recent strip", () => {
+  it("leaves them out of Recent, All and the counts", () => {
     expect(yardTasks(all, { tab: "recent", now: NOW }).map((t) => t.id).sort()).toEqual([normal.id, failedNoop.id].sort())
     expect(yardTasks(all, { tab: "all", now: NOW }).map((t) => t.id)).not.toContain(quiet.id)
     expect(yardCounts(all, NOW)).toMatchObject({ recent: 2, all: 2 })
     expect(olderFinishedCount(all, NOW)).toBe(0)
-    expect(recentlyFinished(all).map((t) => t.id)).not.toContain(quiet.id)
   })
 
   it("the toggle shows them again", () => {
