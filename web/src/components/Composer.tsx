@@ -265,12 +265,23 @@ export function Composer({
           </div>,
           panelRef.current,
         )}
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-2 focus-within:border-yard-500/50">
+      {/* Like the Claude and ChatGPT composers: attachments, then the text at full width, then a row of buttons. */}
+      <div
+        className="rounded-xl border border-zinc-800 bg-zinc-900 focus-within:border-yard-500/50"
+        onMouseDown={(e) => {
+          // A press on the box's empty space (around the text, between the buttons) puts the caret in the text.
+          const target = e.target as HTMLElement
+          if (target.closest("button, a, input, textarea, [data-attachment]")) return
+          e.preventDefault()
+          input.current?.focus()
+        }}
+      >
         {files.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-1 pb-2">
+          <div className="flex flex-wrap gap-2 px-3 pt-3">
             {files.map((f) => (
               <div
                 key={f.key}
+                data-attachment
                 title={f.error ?? `${f.name} · ${formatSize(f.size)}`}
                 className={cx(
                   "relative flex items-center gap-1.5 rounded-lg border bg-zinc-950 text-xs text-zinc-300",
@@ -305,10 +316,29 @@ export function Composer({
           </div>
         )}
         {files.some((f) => f.status === "error") && (
-          <div className="px-2 pb-1 text-xs text-red-400">{files.find((f) => f.status === "error")!.error}</div>
+          <div className="px-3 pt-1.5 text-xs text-red-400">{files.find((f) => f.status === "error")!.error}</div>
         )}
-        <DictationStatus machine={dictation} />
-        <div className="flex items-end gap-2">
+        <div className="px-1 pt-1.5 empty:hidden">
+          <DictationStatus machine={dictation} />
+        </div>
+        <textarea
+          ref={setTextarea}
+          rows={1}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onPaste={onPaste}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault()
+              submit()
+            }
+          }}
+          placeholder={placeholder}
+          // The text starts at the box's left padding and wraps under nothing. A long placeholder stays on
+          // one line (ellipsis) instead of growing an empty box on narrow screens.
+          className="scroll-thin block w-full resize-none overflow-y-hidden bg-transparent px-3 pt-3 pb-1 text-base leading-6 text-zinc-100 placeholder:text-zinc-600 placeholder-shown:truncate focus:outline-none sm:pt-2.5 sm:text-sm sm:leading-5"
+        />
+        <div className="flex items-center gap-1 px-1.5 pb-1.5">
           <input
             ref={picker}
             type="file"
@@ -323,25 +353,7 @@ export function Composer({
             <Paperclip className="h-4 w-4" />
           </Button>
           <MicButton machine={dictation} />
-          <textarea
-            ref={setTextarea}
-            rows={1}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            onPaste={onPaste}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault()
-                submit()
-              }
-            }}
-            placeholder={placeholder}
-            // One line is exactly as tall as the buttons (44px phone, 32px desktop: padding + line height), so the
-            // text centers on them; the row is items-end, so as it grows they stay on the last line. A long
-            // placeholder stays on one line (ellipsis) instead of growing an empty box on narrow screens.
-            className="scroll-thin min-h-11 flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-2.5 text-base leading-6 text-zinc-100 placeholder:text-zinc-600 placeholder-shown:truncate focus:outline-none sm:min-h-8 sm:py-1.5 sm:text-sm sm:leading-5"
-          />
-          <div className="flex flex-col items-center gap-1">
+          <div className="ml-auto flex items-center gap-1">
             {(overflowing || expanded) && (
               <Button
                 type="button"
@@ -359,7 +371,7 @@ export function Composer({
                 {expanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
               </Button>
             )}
-            <Button type="submit" variant="primary" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" disabled={!canSend}>
+            <Button type="submit" variant="primary" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" disabled={!canSend} aria-label="Send">
               <Send className="h-4 w-4" />
             </Button>
           </div>
