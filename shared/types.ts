@@ -529,6 +529,10 @@ export interface CaptainState {
   lastCompaction: CompactionInfo | null
   compactionsDir: string
   error: string | null
+  /** Unattended wake-ups since Cody or the Coordinator last wrote. */
+  autoTurns?: number
+  /** Set while the loop guard holds back automatic wake-ups; queued updates go out when it ends. */
+  throttledUntil?: number | null
 }
 
 export interface CaptainCompaction extends CompactionInfo {
