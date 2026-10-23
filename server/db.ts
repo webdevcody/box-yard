@@ -7,7 +7,7 @@ export type DB = Database.Database
 /**
  * Migrations run in order, once each. Never edit a shipped migration; add a new one.
  */
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   `
   CREATE TABLE projects (
     id TEXT PRIMARY KEY,
@@ -424,11 +424,12 @@ export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
   return db
 }
 
-export function migrate(db: DB) {
+/** Apply pending migrations, up to `upTo` of them (tests stop early to seed old-shaped rows). */
+export function migrate(db: DB, upTo = MIGRATIONS.length) {
   db.exec("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)")
   const row = db.prepare("SELECT MAX(version) AS v FROM _migrations").get() as { v: number | null }
   const current = row.v ?? 0
-  for (let i = current; i < MIGRATIONS.length; i++) {
+  for (let i = current; i < Math.min(upTo, MIGRATIONS.length); i++) {
     db.transaction(() => {
       db.exec(MIGRATIONS[i]!)
       db.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)").run(i + 1, Date.now())
