@@ -13,6 +13,7 @@ import {
   stepSection,
   type SettingsSection,
 } from "../lib/settingsNav"
+import { LEGACY_POOL_DEFAULTS, sizeCapacities } from "../lib/capacity"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
@@ -377,6 +378,24 @@ export function SettingsDialog({
                 onChange={(v) => set("orchestratorAutoCompact", v)}
               />
             </Row>
+            <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
+            <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
+              share the auto-compact threshold above.
+            </p>
+            <Row
+              id={fid("cm")}
+              label="Captain model"
+              help="The Claude model every project Captain runs on. Type any model id, or pick one."
+              hint={hint("captainModel")}
+            >
+              <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
+            </Row>
+            <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Lower is faster and cheaper." hint={hint("captainEffort")}>
+              <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
+                <EffortOptions />
+              </Select>
+            </Row>
           </Panel>
         ) : section === "agents" ? (
           <Panel section="agents">
@@ -423,7 +442,7 @@ export function SettingsDialog({
             </Row>
           </Panel>
         ) : section === "limits" ? (
-          <LimitsPanel s={s} set={set} hint={hint} fid={fid} />
+          <LimitsPanel s={s} set={set} hint={hint} fid={fid} sources={current?.sources} changed={changed} />
         ) : (
           <CostsPanel s={s} set={set} hint={hint} fid={fid} />
         )}
@@ -445,11 +464,15 @@ function LimitsPanel({
   set,
   hint,
   fid,
+  sources,
+  changed,
 }: {
   s: Settings
   set: <K extends keyof Settings>(k: K, v: Settings[K]) => void
   hint: (k: keyof Settings) => ReactNode
   fid: (k: string) => string
+  sources?: Record<keyof Settings, SettingSource>
+  changed: (keyof Settings)[]
 }) {
   const health = useHealth()
   const int =
@@ -475,6 +498,7 @@ function LimitsPanel({
           ))}
         </Select>
       </Row>
+      <SizeCapacityTable s={s} sources={sources} changed={changed} />
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
       </Row>
@@ -541,6 +565,51 @@ function LimitsPanel({
         )}
       </div>
     </Panel>
+  )
+}
+
+/** Agents and resident folders per box for each worker size, so a small box's lower capacity is visible. */
+function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Record<keyof Settings, SettingSource>; changed: (keyof Settings)[] }) {
+  const rows = sizeCapacities(s, sources, { slotsPerBox: changed.includes("slotsPerBox"), maxResidentPerBox: changed.includes("maxResidentPerBox") })
+  const overridden = rows[0]!.slotsOverridden || rows[0]!.residentOverridden
+  return (
+    <div className="mb-4 overflow-hidden rounded-xl border border-zinc-900 text-xs" data-testid="size-capacity">
+      <table className="w-full text-left tabular-nums">
+        <thead className="bg-zinc-900/60 text-zinc-500">
+          <tr>
+            <th className="px-3 py-2 font-medium">Worker size</th>
+            <th className="px-3 py-2 font-medium">Agents per box</th>
+            <th className="px-3 py-2 font-medium">Resident tasks per box</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.size} className={cx("border-t border-zinc-900", r.current ? "bg-yard-500/10 text-zinc-100" : "text-zinc-400")}>
+              <td className="px-3 py-2 capitalize">
+                {r.size}
+                {r.current && <span className="ml-2 rounded bg-yard-500/20 px-1.5 py-px text-[10px] text-yard-300 normal-case">in use</span>}
+              </td>
+              <td className="px-3 py-2">
+                {r.slotsPerBox}
+                {r.slotsOverridden && r.slotsPerBox !== r.defaults.slotsPerBox && <span className="ml-1 text-zinc-600">(size default {r.defaults.slotsPerBox})</span>}
+              </td>
+              <td className="px-3 py-2">
+                {r.maxResidentPerBox}
+                {r.residentOverridden && r.maxResidentPerBox !== r.defaults.maxResidentPerBox && (
+                  <span className="ml-1 text-zinc-600">(size default {r.defaults.maxResidentPerBox})</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="border-t border-zinc-900 px-3 py-2 leading-relaxed text-zinc-500">
+        {overridden
+          ? "Your saved or env values below replace the size defaults for every size."
+          : `Values come from the worker size: small boxes run ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keep ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders. Set the fields below to override.`}{" "}
+        Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} agents and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
+      </p>
+    </div>
   )
 }
 

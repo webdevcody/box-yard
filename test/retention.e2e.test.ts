@@ -49,6 +49,12 @@ const project = (r: Running, name: string) => call<Project>(r, "POST", "/api/pro
 const task = (r: Running, projectId: string, title: string, prompt = "write a haiku") => call<Task>(r, "POST", "/api/tasks", { projectId, title, prompt })
 const send = (r: Running, taskId: string, content: string) => call<Task>(r, "POST", `/api/tasks/${taskId}/messages`, { content })
 const getTask = (r: Running, id: string) => call<Task>(r, "GET", `/api/tasks/${id}`)
+const put = (file: string, content = "x\n") => {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, content)
+}
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { cwd, stdio: "pipe" })
 const archivedDone = (r: Running, id: string, turnCount = 1) =>
   waitFor(async () => {
     const t = await getTask(r, id)
@@ -207,6 +213,45 @@ describe("workspace retention", () => {
     expect(second.boxId).toBe(first.boxId)
     expect(fs.existsSync(path.join(dir, "work", "box-yard-demo.md"))).toBe(true)
     expect(fs.existsSync(path.join(dir, "work", "node_modules"))).toBe(false)
+  })
+
+  it("only removes dirs git ignores and does not track, keeping committed build output", async () => {
+    const r = await start()
+    const p = await project(r, "alpha")
+    const first = await archivedDone(r, (await task(r, p.id, "cleanup repo")).id)
+    const work = path.join(r.yard.tasks.taskDir(first.boxId!, first.id), "work")
+    const repo = path.join(work, "app") // a repo cloned into a subfolder of a scratch work/
+    put(path.join(repo, ".gitignore"), "node_modules/\ndist/\n.next/\n")
+    put(path.join(repo, "build", "index.html"), "<h1>committed</h1>\n")
+    put(path.join(repo, "dist", "lib.js"), "committed despite .gitignore\n")
+    put(path.join(repo, "packages", "ui", "build", "out.css"))
+    git(repo, "init", "-q")
+    git(repo, "add", ".gitignore", "build", "packages")
+    git(repo, "add", "-f", "dist/lib.js")
+    git(repo, "commit", "-qm", "init")
+    put(path.join(repo, "dist", "extra.js")) // ignored file inside a tracked dir
+    put(path.join(repo, "node_modules", "left-pad", "index.js"))
+    put(path.join(repo, "packages", "ui", "node_modules", "x", "index.js"))
+    put(path.join(repo, ".next", "cache", "a"))
+    put(path.join(repo, "coverage", "lcov.info")) // untracked but not ignored: maybe the agent's work
+    put(path.join(work, "notes", "build", "draft.md")) // outside any repo: not clearly generated
+    put(path.join(work, "notes", "node_modules", "y", "index.js"))
+
+    await send(r, first.id, "continue")
+    await archivedDone(r, first.id, 2)
+
+    const exists = (rel: string) => fs.existsSync(path.join(work, rel))
+    expect(exists("app/build/index.html")).toBe(true)
+    expect(exists("app/dist/lib.js")).toBe(true)
+    expect(exists("app/dist/extra.js")).toBe(true)
+    expect(exists("app/packages/ui/build/out.css")).toBe(true)
+    expect(exists("app/coverage/lcov.info")).toBe(true)
+    expect(exists("notes/build/draft.md")).toBe(true)
+    expect(exists("app/node_modules")).toBe(false)
+    expect(exists("app/packages/ui/node_modules")).toBe(false)
+    expect(exists("app/.next")).toBe(false)
+    expect(exists("notes/node_modules")).toBe(false)
+    expect(git(repo, "status", "--porcelain").toString()).toBe("?? coverage/\n")
   })
 
   it("parks old resting workspaces only when a fresh archive exists", async () => {

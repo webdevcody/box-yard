@@ -171,7 +171,7 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
 }
 
 /** Closes on Escape (focus goes back to the trigger) and on a click outside. */
-function usePopover() {
+export function usePopover() {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -195,8 +195,8 @@ function usePopover() {
   return { open, setOpen, root, trigger }
 }
 
-const itemBase = "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm focus-visible:outline-none sm:min-h-0 sm:py-1.5"
-const item = cx(itemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus-visible:bg-zinc-800")
+export const menuItemBase = "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm focus-visible:outline-none sm:min-h-0 sm:py-1.5"
+export const menuItem = cx(menuItemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus-visible:bg-zinc-800")
 
 function TaskMenu({
   task,
@@ -298,7 +298,7 @@ function TaskMenu({
           </div>
 
           <div className="border-t border-zinc-800/80 pt-1.5">
-            <button type="button" role="switch" aria-checked={showTools} className={item} onClick={() => onShowTools(!showTools)}>
+            <button type="button" role="switch" aria-checked={showTools} className={menuItem} onClick={() => onShowTools(!showTools)}>
               <Wrench className="h-3.5 w-3.5 text-zinc-500" />
               <span className="flex-1">Show tool calls</span>
               <span className={cx("relative h-4 w-7 rounded-full transition", showTools ? "bg-yard-500" : "bg-zinc-700")} aria-hidden>
@@ -308,14 +308,14 @@ function TaskMenu({
             {portOpen ? (
               <OpenPortForm taskId={task.id} onDone={() => setOpen(false)} />
             ) : (
-              <button type="button" className={item} onClick={() => setPortOpen(true)}>
+              <button type="button" className={menuItem} onClick={() => setPortOpen(true)}>
                 <Plug className="h-3.5 w-3.5 text-zinc-500" /> Open a port…
               </button>
             )}
             {primary !== "done" && task.status !== "done" && (
               <button
                 type="button"
-                className={item}
+                className={menuItem}
                 onClick={() => {
                   close.mutate(task.id)
                   setOpen(false)
@@ -329,7 +329,7 @@ function TaskMenu({
           <div className="mt-1.5 border-t border-zinc-800/80 pt-1.5">
             <button
               type="button"
-              className={cx(itemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10")}
+              className={cx(menuItemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10")}
               onClick={async () => {
                 setOpen(false)
                 if (!(await confirmDialog({ title: "Delete task?", body: "Delete this task, its workspace and its archive?", confirmLabel: "Delete task", danger: true }))) return

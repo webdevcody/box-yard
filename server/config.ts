@@ -1,7 +1,7 @@
 import path from "node:path"
 import fs from "node:fs"
 import { fileURLToPath } from "node:url"
-import { SIZE_DEFAULTS, WORKER_SIZES, type WorkerSize } from "../shared/types.js"
+import { EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
 function loadDotEnv(file: string) {
@@ -32,6 +32,12 @@ function int(name: string, fallback: number) {
 function workerSize(name: string, fallback: WorkerSize): WorkerSize {
   const v = process.env[name]
   return v && (WORKER_SIZES as readonly string[]).includes(v) ? (v as WorkerSize) : fallback
+}
+
+/** An effort level from an env value; empty (use the Settings default) when unset or unknown. */
+export function envEffort(value: string | undefined): Effort | "" {
+  const v = value?.trim().toLowerCase()
+  return v && (EFFORTS as readonly string[]).includes(v) ? (v as Effort) : ""
 }
 
 const env = process.env
@@ -98,6 +104,9 @@ export const config = {
   /** Wake the orchestrator when a task finishes or needs Cody, so it reports back on its own. */
   orchestratorAutoWake: (env.BOXYARD_ORCHESTRATOR_AUTOWAKE ?? "1") !== "0",
   workerModel: env.WORKER_MODEL ?? "",
+  /** Per-project Captains' model and effort; empty means the Settings default. */
+  captainModel: env.CAPTAIN_MODEL?.trim() ?? "",
+  captainEffort: envEffort(env.CAPTAIN_EFFORT),
 
   /** Poll interval for worker events. */
   pollMs: int("BOXYARD_POLL_MS", 1500),

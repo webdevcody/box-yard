@@ -180,7 +180,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     safe(async (a: { project: string; message: string }) => {
       if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-      const msg = deps.captains.send(a.project, a.message)
+      const msg = deps.captains.send(a.project, a.message, { source: "coordinator", tool: "send_to_captain" })
       return ok({ delivered: true, projectId: msg.projectId, messageId: msg.id, state: deps.captains.state(msg.projectId) })
     }),
   )
