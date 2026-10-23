@@ -272,6 +272,7 @@ export function useCreateTask() {
           question: null,
           summary: null,
           error: null,
+          waitReason: null,
           turnCount: 0,
           pendingCount: 0,
           lastArchivedAt: null,
