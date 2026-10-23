@@ -14,14 +14,19 @@ const memStore = () => new Store(openDb(tmpDir(), ":memory:"))
 const noEnv = { orchestratorModel: "", workerModel: "", captainModel: "", captainEffort: "" as const }
 
 describe("Captain settings", () => {
-  it("default to Sonnet at medium, separate from the Coordinator", () => {
-    const info = new SettingsStore(memStore(), noEnv).info()
-    expect(info.settings.captainModel).toBe("claude-sonnet-5-5")
-    expect(info.settings.captainEffort).toBe("medium")
+  it("default to Opus 5.5 at high, as separate settings from the Coordinator's", () => {
+    const store = memStore()
+    const info = new SettingsStore(store, noEnv).info()
+    expect(info.settings.captainModel).toBe("claude-opus-5-5")
+    expect(info.settings.captainEffort).toBe("high")
     expect(info.settings.orchestratorModel).toBe("claude-opus-5-5")
     expect(info.settings.orchestratorEffort).toBe("high")
     expect(info.sources.captainModel).toBe("default")
     expect(info.sources.captainEffort).toBe("default")
+    // Changing the Coordinator doesn't move the Captain defaults, and vice versa.
+    const after = new SettingsStore(store, noEnv).update({ orchestratorModel: "claude-haiku-5-5", orchestratorEffort: "low" })
+    expect(after.settings.captainModel).toBe("claude-opus-5-5")
+    expect(after.settings.captainEffort).toBe("high")
   })
 
   it("CAPTAIN_MODEL / CAPTAIN_EFFORT override the defaults, and UI-saved values win over env", () => {

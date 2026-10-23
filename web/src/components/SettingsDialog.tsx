@@ -380,8 +380,8 @@ export function SettingsDialog({
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
-              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. A cheaper model and effort keep that cost down. Captains share the
-              auto-compact threshold above.
+              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
+              share the auto-compact threshold above.
             </p>
             <Row
               id={fid("cm")}
@@ -391,7 +391,7 @@ export function SettingsDialog({
             >
               <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
             </Row>
-            <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Medium is plenty for routing and status." hint={hint("captainEffort")}>
+            <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Lower is faster and cheaper." hint={hint("captainEffort")}>
               <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
                 <EffortOptions />
               </Select>

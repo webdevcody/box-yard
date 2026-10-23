@@ -299,9 +299,9 @@ export type AgentEffort = Effort | "orchestrator"
 
 export const DEFAULT_MODEL = "claude-opus-5-5"
 export const DEFAULT_EFFORT: Effort = "high"
-/** Captains run often (every project event can wake one), so they default to a cheaper model and effort. */
-export const DEFAULT_CAPTAIN_MODEL = "claude-sonnet-5-5"
-export const DEFAULT_CAPTAIN_EFFORT: Effort = "medium"
+/** Captains have their own model/effort settings; like every default they start at Opus 5.5, high effort. */
+export const DEFAULT_CAPTAIN_MODEL = DEFAULT_MODEL
+export const DEFAULT_CAPTAIN_EFFORT: Effort = DEFAULT_EFFORT
 /** The CLI accepts an auto-compact window between these many tokens. */
 export const AUTOCOMPACT_MIN_TOKENS = 100_000
 export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
