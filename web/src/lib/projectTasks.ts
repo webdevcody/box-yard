@@ -1,5 +1,6 @@
 // Filtering, searching and sorting for the Tasks tab of a project page. Pure, so it is unit tested.
 import type { Task, TaskStatus } from "../../../shared/types"
+import { isQuietRun } from "../../../shared/quiet"
 
 export const TASK_FILTERS = [
   { key: "open", label: "Open", statuses: ["needs_input", "failed", "working", "starting", "waiting", "queued", "pr_ready", "idle"] },
@@ -61,18 +62,18 @@ export function sortTasks(tasks: Task[], sort: TaskSort): Task[] {
   return [...tasks].sort(compareTasks(sort))
 }
 
-/** Whether a task shows under the filter and search. */
-export function isVisible(task: Task, opts: { filter: TaskFilter; query: string }): boolean {
-  return inFilter(task, opts.filter) && matchesQuery(task, opts.query)
+/** Whether a task shows under the filter and search. Quiet schedule runs only show with `showQuiet`. */
+export function isVisible(task: Task, opts: { filter: TaskFilter; query: string; showQuiet?: boolean }): boolean {
+  return (opts.showQuiet || !isQuietRun(task)) && inFilter(task, opts.filter) && matchesQuery(task, opts.query)
 }
 
 /** How many of `tasks` match the query in each filter, for the chip counts. */
-export function filterCounts(tasks: Task[], query: string): Record<TaskFilter, number> {
-  const matching = tasks.filter((t) => matchesQuery(t, query))
+export function filterCounts(tasks: Task[], query: string, showQuiet = false): Record<TaskFilter, number> {
+  const matching = tasks.filter((t) => (showQuiet || !isQuietRun(t)) && matchesQuery(t, query))
   return Object.fromEntries(TASK_FILTERS.map((f) => [f.key, matching.filter((t) => inFilter(t, f.key)).length])) as Record<TaskFilter, number>
 }
 
-export function visibleTasks(tasks: Task[], opts: { filter: TaskFilter; query: string; sort: TaskSort }): Task[] {
+export function visibleTasks(tasks: Task[], opts: { filter: TaskFilter; query: string; sort: TaskSort; showQuiet?: boolean }): Task[] {
   return sortTasks(
     tasks.filter((t) => isVisible(t, opts)),
     opts.sort,

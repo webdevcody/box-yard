@@ -40,6 +40,18 @@ export function StatusBadge({ status }: { status: BadgeStatus }) {
   )
 }
 
+/** Marks a quiet schedule run (the agent found nothing to do; shared/quiet.ts). */
+export function QuietPill({ className }: { className?: string }) {
+  return (
+    <span
+      title="Quiet run: the agent found nothing to do and changed nothing, so it's hidden from Recent and notifications."
+      className={cx("inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400", className)}
+    >
+      Quiet
+    </span>
+  )
+}
+
 /** GitHub's PR colors and icons: open green, draft gray, merged purple, closed red. */
 export const PR_STYLE: Record<PrState, { icon: LucideIcon; chip: string; link: string }> = {
   open: { icon: GitPullRequest, chip: "border-emerald-900/60 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20", link: "text-emerald-400" },

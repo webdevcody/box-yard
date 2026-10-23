@@ -1,7 +1,7 @@
-// List controls shared by the project Tasks tab and the Yard view: tab bar, search box, sort select.
+// List controls shared by the project Tasks tab and the Yard view: tab bar, search box, sort select, quiet-runs toggle.
 import { useEffect, useRef, useState, type ComponentType } from "react"
 import { Link, useSearchParams } from "wouter"
-import { Search, X } from "lucide-react"
+import { Moon, Search, X } from "lucide-react"
 import { DEFAULT_SORT, TASK_SORTS, type TaskSort } from "../lib/projectTasks"
 import { Select, cx, inputClass } from "./ui"
 
@@ -139,4 +139,39 @@ export function SortSelect({ sort }: { sort: TaskSort }) {
       ))}
     </Select>
   )
+}
+
+/** `?quiet=1`: show quiet schedule runs (shared/quiet.ts) in task lists. Off by default. */
+export function useShowQuiet(): [boolean, (show: boolean) => void] {
+  const [params] = useSearchParams()
+  const setParam = useSetParam()
+  return [params.get("quiet") === "1", (show) => setParam("quiet", show ? "1" : null)]
+}
+
+/** The "Show quiet runs" switch. `count` is how many quiet runs it would show (or is showing). */
+export function QuietSwitch({ checked, onChange, count, className }: { checked: boolean; onChange: (show: boolean) => void; count?: number; className?: string }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      title="Quiet runs are schedule runs that found nothing to do and changed nothing."
+      className={cx(
+        "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-xs font-medium whitespace-nowrap transition sm:min-h-9",
+        checked ? "border-yard-500/40 bg-yard-500/10 text-yard-300" : "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
+        className,
+      )}
+    >
+      <Moon className="h-3.5 w-3.5" />
+      Show quiet runs
+      {count !== undefined && <span className={cx("tabular-nums", checked ? "text-yard-300/70" : "text-zinc-500")}>{count}</span>}
+    </button>
+  )
+}
+
+/** The "Show quiet runs" switch bound to `?quiet=1`, for the Yard and the project Tasks tab. */
+export function QuietToggle({ count, className }: { count?: number; className?: string }) {
+  const [show, setShow] = useShowQuiet()
+  return <QuietSwitch checked={show} onChange={setShow} count={count} className={className} />
 }

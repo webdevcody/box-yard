@@ -28,12 +28,13 @@ import { Modal } from "./Modal"
 import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
-import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
+import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 import { rememberProjectTab } from "../lib/breadcrumb"
+import { isQuietRun } from "../../../shared/quiet"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -214,13 +215,15 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
   const sort = parseSort(params.get("sort"))
   const [query, onQuery] = useUrlQuery()
   const setParam = useSetParam()
+  const [showQuiet] = useShowQuiet()
 
-  const counts = filterCounts(tasks, query)
+  const counts = filterCounts(tasks, query, showQuiet)
+  const quiet = tasks.filter((t) => isQuietRun(t) && isVisible(t, { filter, query, showQuiet: true })).length
   // Sorted once, then held still: live updates change cards in place; the pill re-sorts.
   const stable = useStableTasks(tasks, {
     compare: compareTasks(sort),
-    include: (t) => isVisible(t, { filter, query }),
-    resetKey: `${filter}|${sort}|${query}`,
+    include: (t) => isVisible(t, { filter, query, showQuiet }),
+    resetKey: `${filter}|${sort}|${query}|${showQuiet}`,
   })
   const shown = stable.entries
   const filterLabel = TASK_FILTERS.find((f) => f.key === filter)!.label
@@ -237,6 +240,7 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <SearchBox value={query} onChange={onQuery} />
             <SortSelect sort={sort} />
+            {(quiet > 0 || showQuiet) && <QuietToggle count={quiet} />}
           </div>
 
           <div className="scroll-thin -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Filter by status">
