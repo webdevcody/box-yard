@@ -34,8 +34,9 @@ function workerSize(name: string, fallback: WorkerSize): WorkerSize {
   return v && (WORKER_SIZES as readonly string[]).includes(v) ? (v as WorkerSize) : fallback
 }
 
-function effort(name: string): Effort | "" {
-  const v = process.env[name]?.trim().toLowerCase()
+/** An effort level from an env value; empty (use the Settings default) when unset or unknown. */
+export function envEffort(value: string | undefined): Effort | "" {
+  const v = value?.trim().toLowerCase()
   return v && (EFFORTS as readonly string[]).includes(v) ? (v as Effort) : ""
 }
 
@@ -103,7 +104,7 @@ export const config = {
   workerModel: env.WORKER_MODEL ?? "",
   /** Per-project Captains' model and effort; empty means the Settings default. */
   captainModel: env.CAPTAIN_MODEL?.trim() ?? "",
-  captainEffort: effort("CAPTAIN_EFFORT"),
+  captainEffort: envEffort(env.CAPTAIN_EFFORT),
 
   /** Poll interval for worker events. */
   pollMs: int("BOXYARD_POLL_MS", 1500),
