@@ -76,8 +76,11 @@ export function UsageView() {
         label={rangeLabel(range.from, range.to)}
       />
 
-      {usage.isLoading && !data ? null : !data || !period ? (
+      {usage.isLoading && !data ? null : !data ? (
         <Empty title="Usage unavailable">The server did not return a usage report.</Empty>
+      ) : !period ? (
+        // A server from before the period report ignores ?from= and sends only all-time totals.
+        <Empty title="Restart the server to see this page">This Box Yard server is older than the web app and doesn't send per-period usage yet.</Empty>
       ) : (
         <div className={cx("space-y-5 transition-opacity", usage.isPlaceholderData && "opacity-60")}>
           {data.budget.blocked && (
