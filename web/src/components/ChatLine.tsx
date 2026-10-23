@@ -17,9 +17,9 @@ export function CollapsibleMarkdown({ children, className }: { children: string;
   const [open, setOpen] = useState(false)
   return (
     <div className={className}>
-      <div className={cx(long && !open && "relative max-h-48 overflow-hidden")}>
+      {/* A mask, not an overlay, so the fade works on any bubble background. */}
+      <div className={cx(long && !open && "max-h-48 overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]")}>
         <Markdown>{children}</Markdown>
-        {long && !open && <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-zinc-950 to-transparent" />}
       </div>
       {long && (
         <button
