@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "limits" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -31,6 +31,12 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     fields: ["workerSize", "maxBoxes", "slotsPerBox", "maxAgents", "maxResidentPerBox", "boxIdleDeleteMinutes", "workspaceRetentionDays", "archiveRetentionDays"],
   },
   {
+    key: "costs",
+    label: "Usage & costs",
+    description: "Upstash Box rates and optional spending budgets.",
+    fields: ["costRates", "budget"],
+  },
+  {
     key: "notifications",
     label: "Notifications",
     description: "How this browser tells you a task finished or needs you. Saved in this browser only.",
@@ -49,7 +55,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { boxes: "limits", agent: "agents", workers: "agents", speech: "voice", tts: "voice" }
+const ALIASES: Record<string, SettingsSection> = { boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

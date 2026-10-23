@@ -4,6 +4,7 @@ import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucid
 import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
+import { compactTokens, money } from "../lib/usage"
 import { PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 
 /**
@@ -77,6 +78,11 @@ export const TaskCard = memo(function TaskCard({
         {task.scheduleId && (
           <span className="inline-flex shrink-0 items-center gap-1" title="Started by a schedule">
             <AlarmClock className="h-3.5 w-3.5" /> scheduled
+          </span>
+        )}
+        {(task.claudeCostUsd > 0 || task.claudeTokens > 0) && (
+          <span className="shrink-0" title={`${compactTokens(task.claudeTokens)} Claude tokens`}>
+            {money(task.claudeCostUsd)}
           </span>
         )}
         {(task.model || task.effort) && (

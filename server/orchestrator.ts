@@ -68,6 +68,18 @@ function attachmentNote(files: unknown): string {
   return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
 }
 
+function usageObject(u: unknown) {
+  const x = u as Record<string, unknown> | null | undefined
+  if (!x) return null
+  const out = {
+    input_tokens: typeof x.input_tokens === "number" ? x.input_tokens : 0,
+    cache_creation_input_tokens: typeof x.cache_creation_input_tokens === "number" ? x.cache_creation_input_tokens : 0,
+    cache_read_input_tokens: typeof x.cache_read_input_tokens === "number" ? x.cache_read_input_tokens : 0,
+    output_tokens: typeof x.output_tokens === "number" ? x.output_tokens : 0,
+  }
+  return Object.values(out).some((n) => n > 0) ? out : null
+}
+
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
  * tools. Every chat message runs `claude -p --resume <session>` so the
@@ -592,6 +604,10 @@ export class Orchestrator {
       let settled = false
       let raw = ""
       let said = ""
+      let resultUsage: Record<string, number> | null = null
+      let resultCostUsd: number | null = null
+      let resultDurationMs: number | null = null
+      let resultModel: string | null = null
       // The turn's final reply: the last text, unless a tool call came after it.
       let reply: ChatMessage | null = null
       const startedAt = Date.now()
@@ -666,6 +682,10 @@ export class Orchestrator {
             const window = contextWindowOf(msg.modelUsage)
             if (window) this.setUsage(this.usage().tokens, window)
           }
+          resultUsage = usageObject(msg.usage)
+          resultCostUsd = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : null
+          resultDurationMs = typeof msg.duration_ms === "number" ? msg.duration_ms : null
+          resultModel = typeof msg.model === "string" ? msg.model : null
           if (msg.is_error) resultError = String(msg.result ?? msg.subtype ?? "error")
         }
       }
@@ -686,6 +706,19 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
+          this.store.recordClaudeUsage({
+            source: "orchestrator",
+            runKind: kind,
+            sessionId,
+            model: resultModel ?? this.settings.get().orchestratorModel,
+            startedAt,
+            endedAt: Date.now(),
+            durationMs: resultDurationMs,
+            usage: resultUsage,
+            costUsd: resultCostUsd,
+          })
+        }
         // Lets the client speak a one-line summary of the reply (lib/speech.ts).
         if (!quiet) this.hub.broadcast({ type: "chat.turn", startedAt, replyId: reply?.id ?? null })
         const base = { text: said, raw, sessionId: seenSession }

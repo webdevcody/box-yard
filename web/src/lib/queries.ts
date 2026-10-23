@@ -23,6 +23,7 @@ import type {
   TaskCompactionRecord,
   TaskMessage,
   TaskStatus,
+  UsageReport,
 } from "../../../shared/types"
 
 export const keys = {
@@ -45,6 +46,7 @@ export const keys = {
   orchestrator: ["orchestrator"] as const,
   agentSettings: ["agent-settings"] as const,
   notifications: ["notifications"] as const,
+  usage: ["usage"] as const,
 }
 
 // ------------------------------------------------------------------ cache helpers
@@ -105,6 +107,7 @@ export const useAgentSettings = () =>
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
+export const useUsage = () => useQuery({ queryKey: keys.usage, queryFn: () => api<UsageReport>("/api/usage"), refetchInterval: 30_000 })
 
 export const useChatStream = () =>
   useQuery({ queryKey: keys.chatStream, queryFn: () => "", initialData: "", staleTime: Infinity, gcTime: Infinity })
@@ -259,6 +262,8 @@ export function useCreateTask() {
           compacting: false,
           model: null,
           effort: null,
+          claudeCostUsd: 0,
+          claudeTokens: 0,
           routingRule: null,
           routingReason: null,
           createdAt: now,

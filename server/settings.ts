@@ -4,12 +4,15 @@ import { BadRequestError, type Store } from "./store.js"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_SIZES,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   EFFORTS,
   SIZE_DEFAULTS,
   WORKER_SIZES,
   type AutoCompact,
+  type BoxSize,
+  type CostRates,
   type Settings,
   type SettingSource,
   type SettingsInfo,
@@ -31,6 +34,12 @@ export const DEFAULT_SETTINGS: Settings = {
   maxBoxes: 5,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
+  costRates: {
+    boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
+    boxKeepAliveMonthlyUsd: { small: 8, medium: 16, large: 32 },
+    boxStorageGbMonthUsd: 0.1,
+  },
+  budget: { dailyUsd: 0, monthlyUsd: 0 },
   maxResidentPerBox: SIZE_DEFAULTS.small.maxResidentPerBox,
   boxIdleDeleteMinutes: 0,
   workspaceRetentionDays: 7,
@@ -57,6 +66,16 @@ const autoCompact = z
       ctx.addIssue({ code: "custom", message: `Tokens must be between ${AUTOCOMPACT_MIN_TOKENS} and ${AUTOCOMPACT_MAX_TOKENS}` })
   })
 const model = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
+const usd = z.number().min(0).max(1_000_000)
+const bySize = z.object(Object.fromEntries(BOX_SIZES.map((s) => [s, usd])) as Record<BoxSize, z.ZodNumber>).strict()
+const costRates = z
+  .object({
+    boxActiveCpuHourlyUsd: bySize,
+    boxKeepAliveMonthlyUsd: bySize,
+    boxStorageGbMonthUsd: usd,
+  })
+  .strict() satisfies z.ZodType<CostRates>
+const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 
 export const settingsPatch = z
   .object({
@@ -71,6 +90,8 @@ export const settingsPatch = z
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
+    costRates,
+    budget,
     maxResidentPerBox: z.number().int().min(1).max(200),
     boxIdleDeleteMinutes: z.number().int().min(0).max(30 * 24 * 60),
     workspaceRetentionDays: z.number().int().min(0).max(3650),

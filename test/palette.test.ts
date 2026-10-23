@@ -29,6 +29,8 @@ function task(title: string, status: TaskStatus = "idle", over: Partial<Task> = 
     compacting: false,
     model: null,
     effort: null,
+    claudeCostUsd: 0,
+    claudeTokens: 0,
     routingRule: null,
     routingReason: null,
     createdAt: n,

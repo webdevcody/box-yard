@@ -29,6 +29,8 @@ function task(status: TaskStatus, createdAt: number, over: Partial<Task> = {}): 
     compacting: false,
     model: null,
     effort: null,
+    claudeCostUsd: 0,
+    claudeTokens: 0,
     routingRule: null,
     routingReason: null,
     createdAt,

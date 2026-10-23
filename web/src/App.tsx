@@ -10,6 +10,7 @@ import { ChatPanel } from "./components/ChatPanel"
 import { ProjectView } from "./components/ProjectView"
 import { TaskView } from "./components/TaskView"
 import { BoxesView } from "./components/BoxesView"
+import { UsageView } from "./components/UsageView"
 import { CompactionsView } from "./components/Compactions"
 import { SchedulesView } from "./components/Schedules"
 import { CommandPalette } from "./components/CommandPalette"
@@ -117,6 +118,7 @@ const Routes = memo(function Routes() {
       <Route path="/" component={YardView} />
       <Route path="/inbox" component={InboxView} />
       <Route path="/boxes" component={BoxesView} />
+      <Route path="/usage" component={UsageView} />
       <Route path="/compactions" component={CompactionsView} />
       <Route path="/schedules" component={SchedulesView} />
       <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
