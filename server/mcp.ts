@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js"
 import type { Request, Response } from "express"
 import { z } from "zod"
@@ -27,6 +27,9 @@ export interface McpDeps {
   settings?: SettingsStore
   captains?: CaptainManager
 }
+
+/** Who is calling the MCP server. Captains only see and touch their own project. */
+export type McpCaller = { kind: "coordinator" } | { kind: "captain"; projectId: string }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
 const ok = (value: unknown): ToolResult => ({
@@ -76,20 +79,55 @@ const routingReasonSchema = z.string().trim().min(1).max(500).optional().describ
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
-/** The tools the Coordinator and project Captains use to run Box Yard. */
-export function buildMcpServer(deps: McpDeps): McpServer {
+/**
+ * The tools the Coordinator and project Captains use to run Box Yard.
+ * A Captain caller is scoped on the server: Coordinator-only tools are not registered, and every
+ * project, task, schedule, note, preview and artifact reference must belong to its own project.
+ */
+export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
   const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
-  const project = (ref: string): Project => {
-    const p = store.findProject(ref)
-    if (!p) throw new Error(`No project "${ref}". Use list_projects.`)
+  const scopeId = caller.kind === "captain" ? caller.projectId : null
+  const ownProject = (): Project => {
+    const p = scopeId ? store.getProject(scopeId) : null
+    if (!p) throw new Error(`This Captain's project ${scopeId} no longer exists.`)
     return p
   }
+  const outOfScope = (what: string) =>
+    new Error(
+      `Out of scope: ${what}. You are the Captain for project "${ownProject().name}" and can only work inside that project. ` +
+        `If Cody wants work in another project, say so in your reply and the Coordinator will route it.`,
+    )
+  const project = (ref: string): Project => {
+    const p = store.findProject(ref)
+    if (!p) throw new Error(scopeId ? `No project "${ref}".` : `No project "${ref}". Use list_projects.`)
+    if (scopeId && p.id !== scopeId) throw outOfScope(`project "${p.name}" belongs to another Captain`)
+    return p
+  }
+  /** An optional project filter: a Captain defaults to (and is limited to) its own project. */
+  const projectFilter = (ref?: string): string | undefined => (ref ? project(ref).id : (scopeId ?? undefined))
   const task = (ref: string): Task => {
-    const t = store.getTask(ref) ?? store.listTasks().find((x) => x.title.toLowerCase() === ref.toLowerCase())
-    if (!t) throw new Error(`No task "${ref}". Use list_tasks.`)
+    const byId = store.getTask(ref)
+    if (byId && scopeId && byId.projectId !== scopeId) {
+      throw outOfScope(`task ${byId.id} ("${byId.title}") is in project "${store.getProject(byId.projectId)?.name ?? byId.projectId}"`)
+    }
+    const t = byId ?? store.listTasks(scopeId ? { projectId: scopeId } : {}).find((x) => x.title.toLowerCase() === ref.toLowerCase())
+    if (!t) throw new Error(`No task "${ref}"${scopeId ? " in this project" : ""}. Use list_tasks.`)
     return t
   }
+  const schedule = (ref: string): Schedule => {
+    const s = scheduler.require(ref)
+    if (scopeId && s.projectId !== scopeId) {
+      throw outOfScope(s.projectId ? `schedule "${s.name}" belongs to another project` : `schedule "${s.name}" is a Coordinator schedule`)
+    }
+    return s
+  }
+  /** Captains never see the Coordinator-only tools, so they can't call them either. */
+  const coordinatorOnly = (tool: RegisteredTool) => {
+    if (scopeId) tool.remove()
+  }
+  /** How worker messages from this caller are labelled (#51). */
+  const inputSource = scopeId ? (`captain:${scopeId}` as const) : ("orchestrator" as const)
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
   const ago = (ts: number) => {
     const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
@@ -164,125 +202,137 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
 
-  server.registerTool(
-    "send_to_captain",
-    {
-      description:
-        "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
-      inputSchema: {
-        project: z.string().describe("Project id or name"),
-        message: z.string().min(1).describe("The project-scoped request for the Captain."),
+  coordinatorOnly(
+    server.registerTool(
+      "send_to_captain",
+      {
+        description:
+          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
+        inputSchema: {
+          project: z.string().describe("Project id or name"),
+          message: z.string().min(1).describe("The project-scoped request for the Captain."),
+        },
       },
-    },
-    safe(async (a: { project: string; message: string }) => {
-      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-      const msg = deps.captains.send(a.project, a.message, { source: "coordinator", tool: "send_to_captain" })
-      return ok({ delivered: true, projectId: msg.projectId, messageId: msg.id, state: deps.captains.state(msg.projectId) })
-    }),
+      safe(async (a: { project: string; message: string }) => {
+        if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+        const msg = deps.captains.send(a.project, a.message, { source: "coordinator", tool: "send_to_captain" })
+        return ok({ delivered: true, projectId: msg.projectId, messageId: msg.id, state: deps.captains.state(msg.projectId) })
+      }),
+    ),
   )
 
-  server.registerTool(
-    "ask_captain",
-    {
-      description:
-        "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
-      inputSchema: {
-        project: z.string().describe("Project id or name"),
-        message: z.string().min(1),
-        timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+  coordinatorOnly(
+    server.registerTool(
+      "ask_captain",
+      {
+        description:
+          "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
+        inputSchema: {
+          project: z.string().describe("Project id or name"),
+          message: z.string().min(1),
+          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+        },
       },
-    },
-    safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
-      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-      return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
-    }),
+      safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
+        if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
+      }),
+    ),
   )
 
-  server.registerTool(
-    "wait_for_captain",
-    {
-      description:
-        "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
-      inputSchema: {
-        project: z.string().describe("Project id or name"),
-        timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+  coordinatorOnly(
+    server.registerTool(
+      "wait_for_captain",
+      {
+        description:
+          "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
+        inputSchema: {
+          project: z.string().describe("Project id or name"),
+          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+        },
       },
-    },
-    safe(async (a: { project: string; timeout_seconds?: number }) => {
-      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-      return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
-    }),
+      safe(async (a: { project: string; timeout_seconds?: number }) => {
+        if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
+      }),
+    ),
   )
 
   server.registerTool(
     "list_projects",
     { description: "List all projects with their repo, env var names, notes and tasks." },
-    safe(async () => ok(store.listProjects().map(projectView))),
+    safe(async () => ok(scopeId ? [projectView(ownProject())] : store.listProjects().map(projectView))),
   )
 
-  server.registerTool(
-    "create_project",
-    {
-      description:
-        "Create a project. repo is optional (owner/name or git URL); leave it out for non-coding work. env vars are given to every task in the project.",
-      inputSchema: {
-        name: z.string().min(1),
-        description: z.string().optional(),
-        repo: z.string().optional(),
-        base_branch: z.string().optional(),
-        env: envSchema,
+  coordinatorOnly(
+    server.registerTool(
+      "create_project",
+      {
+        description:
+          "Create a project. repo is optional (owner/name or git URL); leave it out for non-coding work. env vars are given to every task in the project.",
+        inputSchema: {
+          name: z.string().min(1),
+          description: z.string().optional(),
+          repo: z.string().optional(),
+          base_branch: z.string().optional(),
+          env: envSchema,
+        },
       },
-    },
-    safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> }) => {
-      if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
-      const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env })
-      hub.broadcast({ type: "project", project: p })
-      return ok(projectView(p))
-    }),
+      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> }) => {
+        if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
+        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env })
+        hub.broadcast({ type: "project", project: p })
+        return ok(projectView(p))
+      }),
+    ),
   )
 
-  server.registerTool(
-    "update_project",
-    {
-      description: "Change a project's name, description, repo, base branch or env vars.",
-      inputSchema: {
-        project: z.string().describe("Project id or name"),
-        name: z.string().optional(),
-        description: z.string().optional(),
-        repo: z.string().nullable().optional(),
-        base_branch: z.string().optional(),
-        env: envSchema,
-        remove_env: z.array(z.string()).optional(),
+  coordinatorOnly(
+    server.registerTool(
+      "update_project",
+      {
+        description: "Change a project's name, description, repo, base branch or env vars.",
+        inputSchema: {
+          project: z.string().describe("Project id or name"),
+          name: z.string().optional(),
+          description: z.string().optional(),
+          repo: z.string().nullable().optional(),
+          base_branch: z.string().optional(),
+          env: envSchema,
+          remove_env: z.array(z.string()).optional(),
+        },
       },
-    },
-    safe(async (a: { project: string; name?: string; description?: string; repo?: string | null; base_branch?: string; env?: Record<string, string>; remove_env?: string[] }) => {
-      const p = store.updateProject(project(a.project).id, {
-        name: a.name,
-        description: a.description,
-        repo: a.repo,
-        baseBranch: a.base_branch,
-        env: a.env,
-        removeEnv: a.remove_env,
-      })
-      hub.broadcast({ type: "project", project: p })
-      return ok(projectView(p))
-    }),
+      safe(async (a: { project: string; name?: string; description?: string; repo?: string | null; base_branch?: string; env?: Record<string, string>; remove_env?: string[] }) => {
+        const p = store.updateProject(project(a.project).id, {
+          name: a.name,
+          description: a.description,
+          repo: a.repo,
+          baseBranch: a.base_branch,
+          env: a.env,
+          removeEnv: a.remove_env,
+        })
+        hub.broadcast({ type: "project", project: p })
+        return ok(projectView(p))
+      }),
+    ),
   )
 
-  server.registerTool(
-    "delete_project",
-    {
-      description: "Delete a project and all its tasks. Only do this when Cody explicitly asks.",
-      inputSchema: { project: z.string() },
-    },
-    safe(async (a: { project: string }) => {
-      const p = project(a.project)
-      for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
-      for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
-      store.deleteProject(p.id)
-      hub.broadcast({ type: "project.deleted", projectId: p.id })
-      return ok(`Deleted project ${p.name}.`)
-    }),
+  coordinatorOnly(
+    server.registerTool(
+      "delete_project",
+      {
+        description: "Delete a project and all its tasks. Only do this when Cody explicitly asks.",
+        inputSchema: { project: z.string() },
+      },
+      safe(async (a: { project: string }) => {
+        const p = project(a.project)
+        for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
+        for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
+        store.deleteProject(p.id)
+        hub.broadcast({ type: "project.deleted", projectId: p.id })
+        return ok(`Deleted project ${p.name}.`)
+      }),
+    ),
   )
 
   server.registerTool(
@@ -297,7 +347,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][]; query?: string }) => {
-      let list = store.listTasks({ projectId: a.project ? project(a.project).id : undefined, status: a.status })
+      let list = store.listTasks({ projectId: projectFilter(a.project), status: a.status })
       if (a.query?.trim()) {
         const words = a.query.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
         const score = (t: Task) => {
@@ -310,33 +360,37 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     }),
   )
 
-  server.registerTool(
-    "list_compactions",
-    {
-      description:
-        "List orchestrator compaction records, newest first. Use this to recover prior context after the orchestrator was compacted; pass task to filter to compactions that mentioned or snapshotted that task.",
-      inputSchema: {
-        task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
-        limit: z.number().int().min(1).max(100).optional(),
+  coordinatorOnly(
+    server.registerTool(
+      "list_compactions",
+      {
+        description:
+          "List orchestrator compaction records, newest first. Use this to recover prior context after the orchestrator was compacted; pass task to filter to compactions that mentioned or snapshotted that task.",
+        inputSchema: {
+          task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
+          limit: z.number().int().min(1).max(100).optional(),
+        },
       },
-    },
-    safe(async (a: { task?: string; limit?: number }) => {
-      const taskId = a.task ? task(a.task).id : undefined
-      return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
-    }),
+      safe(async (a: { task?: string; limit?: number }) => {
+        const taskId = a.task ? task(a.task).id : undefined
+        return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
+      }),
+    ),
   )
 
-  server.registerTool(
-    "read_compaction",
-    {
-      description: "Read one orchestrator compaction's markdown summary and linked task snapshots.",
-      inputSchema: { compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z") },
-    },
-    safe(async (a: { compaction: string }) => {
-      const c = store.getOrchestratorCompaction(a.compaction, true)
-      if (!c) throw new Error(`No compaction "${a.compaction}". Use list_compactions.`)
-      return ok(compactionView(c, true))
-    }),
+  coordinatorOnly(
+    server.registerTool(
+      "read_compaction",
+      {
+        description: "Read one orchestrator compaction's markdown summary and linked task snapshots.",
+        inputSchema: { compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z") },
+      },
+      safe(async (a: { compaction: string }) => {
+        const c = store.getOrchestratorCompaction(a.compaction, true)
+        if (!c) throw new Error(`No compaction "${a.compaction}". Use list_compactions.`)
+        return ok(compactionView(c, true))
+      }),
+    ),
   )
 
   server.registerTool(
@@ -350,7 +404,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       const t = task(a.task)
       return ok({
         task: brief(t),
-        orchestratorCompactions: store.listOrchestratorCompactions({ taskId: t.id, limit: a.limit ?? 20 }).map((c) => compactionView(c)),
+        // Coordinator compactions span every project, so Captains only get the task's own.
+        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit: a.limit ?? 20 }).map((c) => compactionView(c)),
         taskCompactions: store.listTaskCompactions({ taskId: t.id, limit: a.limit ?? 20 }),
       })
     }),
@@ -423,6 +478,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         effort: a.effort ?? null,
         routingRule: a.routing_rule ?? null,
         routingReason: a.routing_reason ?? null,
+        source: inputSource,
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -440,7 +496,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, "orchestrator", uploads.resolveAll(a.attachments), {
+      const t = tasks.sendInput(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
         model: a.model,
         effort: a.effort,
         routingRule: a.routing_rule,
@@ -533,7 +589,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "list_inbox",
     { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures." },
     safe(async () =>
-      ok(store.listTasks({ status: ["needs_input", "pr_ready", "failed"] }).map(brief)),
+      ok(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] }).map(brief)),
     ),
   )
 
@@ -545,7 +601,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     safe(async (a: { project: string; content: string }) => {
       const p = project(a.project)
-      store.addNote(p.id, "orchestrator", a.content)
+      store.addNote(p.id, scopeId ? "captain" : "orchestrator", a.content)
       tasks.publishNotes(p.id)
       hub.broadcast({ type: "project", project: store.getProject(p.id)! })
       return ok("Saved.")
@@ -572,7 +628,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         title: a.title,
         filename: a.filename,
         data: Buffer.from(a.content, a.encoding === "base64" ? "base64" : "utf8"),
-        projectId: a.project ? project(a.project).id : (t?.projectId ?? null),
+        projectId: a.project ? project(a.project).id : (t?.projectId ?? scopeId),
         taskId: t?.id ?? null,
       })
       hub.broadcast({ type: "artifact", artifact })
@@ -589,7 +645,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     safe(async (a: { project?: string; task?: string }) =>
       ok(
         store
-          .listArtifacts({ projectId: a.project ? project(a.project).id : undefined, taskId: a.task ? task(a.task).id : undefined })
+          .listArtifacts({ projectId: projectFilter(a.project), taskId: a.task ? task(a.task).id : undefined })
           .map((x) => ({ id: x.id, title: x.title, url: absolute(x.url), size: x.size, task: x.taskId })),
       ),
     ),
@@ -638,6 +694,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     },
     safe(async (a: { project?: string; target?: "project" | "orchestrator" }) => {
       const orchestratorOnly = a.project?.toLowerCase() === "none" || a.target === "orchestrator"
+      if (scopeId) {
+        if (orchestratorOnly) throw outOfScope("Coordinator schedules belong to the Coordinator")
+        return ok(scheduler.list({ projectId: projectFilter(a.project), target: "project" }).map(scheduleView))
+      }
       const list = scheduler.list({
         projectId: a.project && !orchestratorOnly ? project(a.project).id : undefined,
         target: orchestratorOnly ? "orchestrator" : a.target,
@@ -670,12 +730,13 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       },
     },
     safe(
-      async (a: { project?: string; target?: "project" | "orchestrator"; name: string; cron: string; prompt: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
-        ok(
+      async (a: { project?: string; target?: "project" | "orchestrator"; name: string; cron: string; prompt: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) => {
+        if (scopeId && a.target === "orchestrator") throw outOfScope("Coordinator schedules belong to the Coordinator")
+        return ok(
           scheduleView(
             await scheduler.create({
-              target: a.target,
-              projectId: a.project ? project(a.project).id : undefined,
+              target: scopeId ? "project" : a.target,
+              projectId: projectFilter(a.project),
               name: a.name,
               cron: a.cron,
               prompt: a.prompt,
@@ -685,7 +746,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
               enabled: a.enabled,
             }),
           ),
-        ),
+        )
+      },
     ),
   )
 
@@ -708,7 +770,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       async (a: { schedule: string; name?: string; cron?: string; prompt?: string; timezone?: string; catch_up?: "once" | "skip"; allow_overlap?: boolean; enabled?: boolean }) =>
         ok(
           scheduleView(
-            await scheduler.update(a.schedule, {
+            await scheduler.update(schedule(a.schedule).id, {
               name: a.name,
               cron: a.cron,
               prompt: a.prompt,
@@ -726,7 +788,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "delete_schedule",
     { description: "Delete a schedule (either kind). Tasks from past project runs stay.", inputSchema: { schedule: z.string().describe("Schedule id or name") } },
     safe(async (a: { schedule: string }) => {
-      const s = scheduler.require(a.schedule)
+      const s = schedule(a.schedule)
       await scheduler.remove(s.id)
       return ok(`Deleted schedule ${s.name}.`)
     }),
@@ -739,13 +801,13 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         "Start a run of a schedule right now (doesn't change its next planned run). A project schedule starts a task; a Coordinator schedule queues its prompt into this chat (delivered after your current turn ends, so don't wait on it).",
       inputSchema: { schedule: z.string() },
     },
-    safe(async (a: { schedule: string }) => ok(anyRunView(scheduler.runNow(a.schedule)))),
+    safe(async (a: { schedule: string }) => ok(anyRunView(scheduler.runNow(schedule(a.schedule).id)))),
   )
 
   server.registerTool(
     "list_schedule_runs",
     { description: "Past runs of a schedule, newest first: tasks for a project schedule; for a Coordinator schedule, the injected chat messages with their status (queued, running, done, failed).", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
-    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(a.schedule, a.limit ?? 10).map(anyRunView))),
+    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(schedule(a.schedule).id, a.limit ?? 10).map(anyRunView))),
   )
 
   server.registerTool(
@@ -755,7 +817,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       ok({
         boxes: tasks.boxes().map((b) => ({ id: b.id, status: b.status, projects: b.projects, running: `${b.runningTurns}/${b.slots}`, tasks: b.residentTasks.length })),
         pool: tasks.poolLimits(),
-        queued: store.listTasks({ status: ["queued"] }).map((t) => `${t.id} ${t.title}`),
+        queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}`),
       }),
     ),
   )
@@ -763,10 +825,20 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   return server
 }
 
+/** The Coordinator's token gets every tool; a Captain's own token is scoped to its project. */
+function callerFor(deps: McpDeps, token: string, auth: string | undefined): McpCaller | null {
+  const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null
+  if (!bearer) return null
+  if (bearer === token) return { kind: "coordinator" }
+  const projectId = deps.captains?.projectForToken(bearer)
+  return projectId ? { kind: "captain", projectId } : null
+}
+
 /** Stateless Streamable HTTP endpoint: a fresh server per request. */
 export function mcpHandler(deps: McpDeps, token: string) {
   return async (req: Request, res: Response) => {
-    if (req.headers.authorization !== `Bearer ${token}`) {
+    const caller = callerFor(deps, token, req.headers.authorization)
+    if (!caller) {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized" }, id: null })
       return
     }
@@ -774,7 +846,7 @@ export function mcpHandler(deps: McpDeps, token: string) {
       res.status(405).set("Allow", "POST").end()
       return
     }
-    const server = buildMcpServer(deps)
+    const server = buildMcpServer(deps, caller)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
     res.on("close", () => {
       void transport.close()

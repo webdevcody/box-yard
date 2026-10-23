@@ -74,12 +74,16 @@ export function firstTurnPrompt(input: {
   return parts.join("\n")
 }
 
-/** Format queued messages (from Cody, the Coordinator, or other agents) into one prompt. */
-export function followupPrompt(inputs: { source: string; content: string }[]): string {
+/** Format queued messages (from Cody, the Coordinator, a project Captain, or other agents) into one prompt. */
+export function followupPrompt(inputs: { source: string; content: string }[], projectName: (projectId: string) => string | undefined = () => undefined): string {
   return inputs
     .map(({ source, content }) => {
       if (source === "cody") return `Message from Cody:\n\n${content}`
       if (source === "orchestrator") return `Message from the Box Yard Coordinator (on Cody's behalf):\n\n${content}`
+      if (source.startsWith("captain:")) {
+        const name = projectName(source.slice("captain:".length))
+        return `Message from the ${name ? `${name} ` : "project "}Captain (on Cody's behalf):\n\n${content}`
+      }
       if (source === "system") return `Box Yard notice:\n\n${content}`
       return content // agent messages are already labelled
     })
@@ -164,7 +168,7 @@ export function captainPrompt(project: Project): string {
     ``,
     `Your job is to own all work inside this one project. The global Coordinator routes project requests to you; Cody may also message you directly from the project page.`,
     `You have Box Yard MCP tools. Use create_task for new independent work in this project, send_to_task for follow-ups, wait_for_tasks for quick results, save_note for durable project memory, and list_tasks/get_task before choosing an existing agent.`,
-    `Stay inside this project. Do not create work in other projects unless Cody explicitly asks and the Coordinator routed that cross-project request to you.`,
+    `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,
     `When you answer a message (not an automatic wake-up), you may end with a hidden block of 2-4 short follow-ups Cody could click on the project's Captain tab, exactly like this:`,
