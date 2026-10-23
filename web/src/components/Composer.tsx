@@ -328,7 +328,10 @@ export function Composer({
               }
             }}
             placeholder={placeholder}
-            className="scroll-thin min-h-11 flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-2.5 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:min-h-[2.25rem] sm:py-1.5 sm:text-sm"
+            // One line is exactly as tall as the buttons (44px phone, 32px desktop: padding + line height), so the
+            // text centers on them; the row is items-end, so as it grows they stay on the last line. A long
+            // placeholder stays on one line (ellipsis) instead of growing an empty box on narrow screens.
+            className="scroll-thin min-h-11 flex-1 resize-none overflow-y-hidden bg-transparent px-2 py-2.5 text-base leading-6 text-zinc-100 placeholder:text-zinc-600 placeholder-shown:truncate focus:outline-none sm:min-h-8 sm:py-1.5 sm:text-sm sm:leading-5"
           />
           <div className="flex flex-col items-center gap-1">
             {(overflowing || expanded) && (
