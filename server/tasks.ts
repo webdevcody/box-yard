@@ -155,6 +155,7 @@ export class TaskManager {
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
   private diskHold = new Map<string, string>()
+  private lowDiskNoticeAt = new Map<string, number>()
   /** Called after every notice; return true when another owner handled delivery. */
   onNotice: ((content: string, meta: Record<string, unknown> | null) => boolean | void) | null = null
 
@@ -784,7 +785,10 @@ export class TaskManager {
     this.diskCache.delete(report.boxId)
     if (report.enough && report.targetFreeBytes !== null) this.lowBoxes.delete(report.boxId)
     const summary = cleanupSummary(report)
-    if (report.reason !== "manual" && !report.enough && this.store.getBox(report.boxId)) {
+    // At most one "still low" notice per box an hour: each one can wake the Coordinator.
+    const quiet = Date.now() - (this.lowDiskNoticeAt.get(report.boxId) ?? 0) < 60 * 60_000
+    if (report.reason !== "manual" && !report.enough && !quiet && this.store.getBox(report.boxId)) {
+      this.lowDiskNoticeAt.set(report.boxId, Date.now())
       const free = report.freeAfter !== null ? `${formatBytes(report.freeAfter)} free` : "free space unknown"
       this.notice(
         `⚠️ Box ${report.boxId} is low on disk: cleanup ${summary}, and it has ${free}; new workspaces need ${formatBytes(report.targetFreeBytes)}. ` +
@@ -930,7 +934,7 @@ export class TaskManager {
       const check = await this.provider.exec(boxId, `[ -d ${q(dir + "/work")} ] && echo present || echo missing`)
       if (check.exitCode !== 0) throw new Error(`box not responding: ${check.stderr.slice(-300)}`)
       fresh = check.stdout.includes("missing")
-      const prepared = fresh ? await this.prepareWorkspace(row, boxId, dir).finally(() => this.release(boxId, taskId)) : null
+      const prepared = fresh ? await this.prepareWorkspace(row, boxId, dir) : null
       this.release(boxId, taskId)
       row = this.requireRow(taskId)
 
