@@ -29,6 +29,11 @@ function int(name: string, fallback: number) {
   return Number.isFinite(n) ? n : fallback
 }
 
+function num(name: string, fallback: number) {
+  const n = Number.parseFloat(process.env[name] ?? "")
+  return Number.isFinite(n) ? n : fallback
+}
+
 function workerSize(name: string, fallback: WorkerSize): WorkerSize {
   const v = process.env[name]
   return v && (WORKER_SIZES as readonly string[]).includes(v) ? (v as WorkerSize) : fallback
@@ -85,6 +90,10 @@ export const config = {
   archiveRetentionDays: int("BOXYARD_ARCHIVE_RETENTION_DAYS", 7),
   /** Keep the archive of any task touched within this many days, whatever archiveRetentionDays says. 0 = no extra protection. */
   archiveKeepTouchedDays: int("BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS", 30),
+  /** A new workspace needs at least this much free disk on its box (MB)... */
+  diskMinFreeMb: int("BOXYARD_DISK_MIN_FREE_MB", 1024),
+  /** ...and at least this many times its repo's last clone size. */
+  diskCloneFactor: num("BOXYARD_DISK_CLONE_FACTOR", 2),
 
   redisUrl: env.UPSTASH_REDIS_REST_URL ?? "",
   redisToken: env.UPSTASH_REDIS_REST_TOKEN ?? "",

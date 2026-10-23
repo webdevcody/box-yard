@@ -502,6 +502,10 @@ export function createBoxYard(
   api.get("/boxes", (_req, res) => {
     res.json(tasks.boxes())
   })
+  /** Start a graduated disk cleanup on a box; answers right away with the running report (SSE box.cleanup follows). */
+  api.post("/boxes/:id/cleanup", async (req, res) => {
+    res.status(202).json(await tasks.cleanBox(req.params.id!))
+  })
   api.delete("/boxes/:id", async (req, res) => {
     await tasks.destroyBox(req.params.id!)
     res.json({ ok: true })

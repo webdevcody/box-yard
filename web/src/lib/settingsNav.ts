@@ -27,8 +27,20 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "Worker box size, capacity, and cleanup retention.",
-    fields: ["workerSize", "maxBoxes", "slotsPerBox", "maxAgents", "maxResidentPerBox", "boxIdleDeleteMinutes", "workspaceRetentionDays", "archiveRetentionDays", "archiveKeepTouchedDays"],
+    description: "Worker box size, capacity, disk headroom and cleanup retention.",
+    fields: [
+      "workerSize",
+      "maxBoxes",
+      "slotsPerBox",
+      "maxAgents",
+      "maxResidentPerBox",
+      "boxIdleDeleteMinutes",
+      "workspaceRetentionDays",
+      "archiveRetentionDays",
+      "archiveKeepTouchedDays",
+      "diskMinFreeMb",
+      "diskCloneFactor",
+    ],
   },
   {
     key: "costs",
@@ -86,6 +98,8 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
   archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
   archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
+  diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
+  diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
 }
 
 /** Settings whose draft value differs from the one in effect. */
@@ -109,6 +123,8 @@ const POOL_KEYS = [
   "workspaceRetentionDays",
   "archiveRetentionDays",
   "archiveKeepTouchedDays",
+  "diskMinFreeMb",
+  "diskCloneFactor",
 ] as const
 
 /** What Save sends. Pool limits go only when edited, so an untouched form doesn't pin them over env changes. */

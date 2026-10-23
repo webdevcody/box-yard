@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { Link } from "wouter"
-import { Bot, MessageCircleQuestion, Users } from "lucide-react"
+import { Bot, HardDrive, MessageCircleQuestion, Users } from "lucide-react"
 import {
   newClientId,
   useArtifacts,
@@ -64,6 +64,12 @@ export function TaskView({ id }: { id: string }) {
             <div className="text-xs font-semibold tracking-wide text-amber-400 uppercase">The agent needs you</div>
             <div className="mt-1 text-sm">{task.question}</div>
           </div>
+        </div>
+      )}
+      {task.status === "queued" && task.waitReason && (
+        <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+          <HardDrive className="h-4 w-4 shrink-0 text-amber-300" />
+          <span>{task.waitReason}. It starts on its own once there is room.</span>
         </div>
       )}
       {task.status === "failed" && task.error && (

@@ -1,6 +1,6 @@
 import { memo } from "react"
 import { Link } from "wouter"
-import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
+import { Activity, AlarmClock, Check, Globe, HardDrive, MessageCircleQuestion } from "lucide-react"
 import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
@@ -57,6 +57,11 @@ export const TaskCard = memo(function TaskCard({
             <MessageCircleQuestion className="mt-0.5 h-4 w-4 shrink-0" />
             <span className="line-clamp-2 break-words">{task.question}</span>
           </div>
+        ) : task.status === "queued" && task.waitReason ? (
+          <p className="line-clamp-2 break-words text-amber-200/80">
+            <HardDrive className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
+            {task.waitReason}
+          </p>
         ) : task.status === "failed" && task.error ? (
           <p className="line-clamp-2 break-words text-red-300/80">{task.error}</p>
         ) : summary.kind === "activity" ? (
