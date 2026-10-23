@@ -77,6 +77,8 @@ export const config = {
   workspaceRetentionDays: int("BOXYARD_WORKSPACE_RETENTION_DAYS", 7),
   /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
   archiveRetentionDays: int("BOXYARD_ARCHIVE_RETENTION_DAYS", 7),
+  /** Keep the archive of any task touched within this many days, whatever archiveRetentionDays says. 0 = no extra protection. */
+  archiveKeepTouchedDays: int("BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS", 30),
 
   redisUrl: env.UPSTASH_REDIS_REST_URL ?? "",
   redisToken: env.UPSTASH_REDIS_REST_TOKEN ?? "",

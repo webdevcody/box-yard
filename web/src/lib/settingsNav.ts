@@ -28,7 +28,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "limits",
     label: "Boxes & limits",
     description: "Worker box size, capacity, and cleanup retention.",
-    fields: ["workerSize", "maxBoxes", "slotsPerBox", "maxAgents", "maxResidentPerBox", "boxIdleDeleteMinutes", "workspaceRetentionDays", "archiveRetentionDays"],
+    fields: ["workerSize", "maxBoxes", "slotsPerBox", "maxAgents", "maxResidentPerBox", "boxIdleDeleteMinutes", "workspaceRetentionDays", "archiveRetentionDays", "archiveKeepTouchedDays"],
   },
   {
     key: "costs",
@@ -83,6 +83,7 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
   archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
+  archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
 }
 
 /** Settings whose draft value differs from the one in effect. */
@@ -105,6 +106,7 @@ const POOL_KEYS = [
   "boxIdleDeleteMinutes",
   "workspaceRetentionDays",
   "archiveRetentionDays",
+  "archiveKeepTouchedDays",
 ] as const
 
 /** What Save sends. Pool limits go only when edited, so an untouched form doesn't pin them over env changes. */

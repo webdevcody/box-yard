@@ -453,7 +453,7 @@ function LimitsPanel({
 }) {
   const health = useHealth()
   const int =
-    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays") =>
+    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -511,10 +511,18 @@ function LimitsPanel({
       <Row
         id={fid("ard")}
         label="Archive retention"
-        help="After this many days, orphan archives and long-done task archives are pruned. Archives for resumable parked tasks are kept. 0 keeps archives."
+        help="After this many days, orphan archives and long-done task archives are pruned. Archives of tasks with an open or unmerged PR are always kept. A done task whose archive was pruned restarts from a recap on its next message. 0 keeps archives."
         hint={hint("archiveRetentionDays")}
       >
         <input id={fid("ard")} type="number" min={0} max={3650} className={inputClass} value={s.archiveRetentionDays} onChange={int("archiveRetentionDays")} />
+      </Row>
+      <Row
+        id={fid("akt")}
+        label="Keep recent archives"
+        help="Never prune the archive of a task touched in the last this many days, so recent work resumes with its full session. 0 = only archive retention applies."
+        hint={hint("archiveKeepTouchedDays")}
+      >
+        <input id={fid("akt")} type="number" min={0} max={3650} className={inputClass} value={s.archiveKeepTouchedDays} onChange={int("archiveKeepTouchedDays")} />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>

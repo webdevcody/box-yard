@@ -24,6 +24,7 @@ const base: Settings = {
   boxIdleDeleteMinutes: 0,
   workspaceRetentionDays: 7,
   archiveRetentionDays: 7,
+  archiveKeepTouchedDays: 30,
 }
 
 describe("settings nav", () => {
