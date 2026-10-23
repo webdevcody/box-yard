@@ -10,6 +10,9 @@
 // Orchestrator chat understands:
 //   create project <name> [repo owner/name]
 //   task <project>: <title> -- <prompt>       (prompt is optional)
+//   tell captain <project>: <message>         (send_to_captain)
+//   ask captain <project>: <message>          (ask_captain, waits for the reply)
+//   wait captain <project>                    (wait_for_captain)
 //   status
 // Worker prompts understand these markers anywhere in the text:
 //   [ask] [fail] [slow] [preview] [artifact] [agent:<taskId>] [note]
@@ -190,6 +193,16 @@ async function orchestrator(mcp, prompt) {
   while ((m = oscheduleRe.exec(text))) {
     const r = await useTool(mcp, "create_schedule", { cron: m[1], name: m[2].trim(), prompt: (m[3] ?? m[2]).trim() })
     lines.push(r.startsWith("{") ? `Scheduled **${m[2].trim()}** for the orchestrator (\`${m[1]}\`).` : `Couldn't create that schedule: ${r}`)
+  }
+  const captainRe = /^(ask|tell) captain\s+([\w .-]+?):\s*(.+)$/gim
+  while ((m = captainRe.exec(text))) {
+    const ask = m[1].toLowerCase() === "ask"
+    const r = await useTool(mcp, ask ? "ask_captain" : "send_to_captain", { project: m[2].trim(), message: m[3].trim(), ...(ask ? { timeout_seconds: 30 } : {}) })
+    lines.push(ask ? `The ${m[2].trim()} Captain answered.` : `Sent that to the ${m[2].trim()} Captain.`, "```json", r.slice(0, 300), "```")
+  }
+  if ((m = text.match(/^wait captain\s+([\w .-]+?)\s*$/im))) {
+    await useTool(mcp, "wait_for_captain", { project: m[1].trim(), timeout_seconds: 30 })
+    lines.push(`The ${m[1].trim()} Captain is done.`)
   }
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))

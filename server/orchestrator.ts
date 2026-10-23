@@ -6,7 +6,7 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import type { Attachment, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
+import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
@@ -49,6 +49,30 @@ export function createdId(tool: string, content: unknown): string | null {
   return new RegExp(`\\b${prefix}_[A-Za-z0-9-]{6,40}\\b`).exec(text)?.[0] ?? null
 }
 
+/** Coordinator tools that talk to a project Captain; their tool lines keep the result as meta.captain. */
+export const CAPTAIN_TOOLS = new Set(["send_to_captain", "ask_captain", "wait_for_captain"])
+
+/** The Captain's project and reply from a send/ask/wait_for_captain result, or null if it isn't one. */
+export function captainToolResult(tool: string, content: unknown): CaptainToolResult | null {
+  if (!CAPTAIN_TOOLS.has(tool)) return null
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => (typeof c?.text === "string" ? c.text : "")).join("") : ""
+  let r: any
+  try {
+    r = JSON.parse(text)
+  } catch {
+    return null
+  }
+  if (!r || typeof r !== "object") return null
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null)
+  // ask_captain names only what was said after the question; wait_for_captain the latest reply.
+  const reply = tool === "send_to_captain" ? null : tool === "ask_captain" && "reply" in r ? str(r.reply) : str(r.lastReply)
+  return {
+    projectId: str(r.projectId) ?? str(r.state?.projectId),
+    reply: reply ? reply.slice(0, 20_000) : null,
+    finished: typeof r.allFinished === "boolean" ? r.allFinished : null,
+  }
+}
+
 /** What one run of the claude CLI produced. */
 interface RunResult {
   ok: boolean
@@ -62,7 +86,7 @@ interface RunResult {
 type RunKind = "turn" | "summary" | "compact" | "context"
 
 /** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
-function attachmentNote(files: unknown): string {
+export function attachmentNote(files: unknown): string {
   if (!Array.isArray(files) || !files.length) return ""
   const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
   return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
@@ -646,19 +670,25 @@ export class Orchestrator {
             reply = null
             const name = String(b.name).replace(/^mcp__boxyard__/, "")
             const m = this.store.addChat("tool", name, { input: b.input })
-            if (CREATES[name] && typeof b.id === "string") created.set(b.id, m)
+            if ((CREATES[name] || CAPTAIN_TOOLS.has(name)) && typeof b.id === "string") created.set(b.id, m)
             this.hub.broadcast({ type: "chat.message", message: m })
           }
           return
         }
         if (msg.type === "user" && Array.isArray(msg.message?.content)) {
           // A create_* result names the new task/project/schedule; the chat's tool line links to it.
+          // A Captain tool's result keeps the project and the Captain's reply, shown when the line is expanded.
           for (const b of msg.message.content) {
             const m = b?.type === "tool_result" && !b.is_error ? created.get(b.tool_use_id) : undefined
             if (!m) continue
             created.delete(b.tool_use_id)
             const resultId = createdId(m.content, b.content)
-            const updated = resultId ? this.store.setChatMeta(m.id, { ...m.meta, resultId }) : null
+            const captain = captainToolResult(m.content, b.content)
+            const updated = resultId
+              ? this.store.setChatMeta(m.id, { ...m.meta, resultId })
+              : captain
+                ? this.store.setChatMeta(m.id, { ...m.meta, captain })
+                : null
             if (updated) this.hub.broadcast({ type: "chat.message", message: updated })
           }
           return

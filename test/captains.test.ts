@@ -4,7 +4,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer } from "../server/mcp.js"
-import type { CaptainMessage, ChatMessage, Project, Task } from "../shared/types.js"
+import { captainToolResult } from "../server/orchestrator.js"
+import { captainSourceOf } from "../shared/captain.js"
+import type { CaptainMessage, CaptainToolResult, ChatMessage, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, waitFor } from "./helpers.js"
 
 interface Running {
@@ -57,6 +59,8 @@ describe("project Captains", () => {
     await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy, "Captain idle")
     const messages = await call<CaptainMessage[]>(r, "GET", `/api/projects/${p.id}/captain/messages`)
     expect(messages.map((m) => m.role)).toContain("user")
+    // Labelled as Cody's on the Captain tab.
+    expect(messages.find((m) => m.id === "cap_abc123def456")?.meta).toMatchObject({ source: "cody" })
     expect(messages.some((m) => m.role === "assistant" && /Started task/i.test(m.content))).toBe(true)
     const tasks = await call<Task[]>(r, "GET", `/api/tasks?projectId=${p.id}`)
     expect(tasks).toHaveLength(1)
@@ -98,6 +102,34 @@ describe("project Captains", () => {
     await mcp.close()
   })
 
+  it("stores the Coordinator's orders on the Captain transcript and the Captain's reply on the Coordinator's tool line", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    await call(r, "POST", "/api/chat", { content: "tell captain demo: status please\nask captain demo: status" })
+
+    const chat = await waitFor(async () => {
+      const list = await call<ChatMessage[]>(r, "GET", "/api/chat")
+      const ask = list.find((m) => m.role === "tool" && m.content === "ask_captain")
+      return ask?.meta?.captain ? list : null
+    }, "ask_captain result on the tool line", 30_000)
+    const ask = chat.find((m) => m.content === "ask_captain")!
+    expect(ask.meta?.input).toMatchObject({ project: "demo", message: "status" })
+    expect(ask.meta?.captain).toMatchObject({ projectId: p.id, finished: true })
+    expect((ask.meta?.captain as CaptainToolResult).reply).toMatch(/No tasks yet/)
+    const tell = chat.find((m) => m.content === "send_to_captain")!
+    expect(tell.meta?.captain).toMatchObject({ projectId: p.id, reply: null })
+
+    const transcript = await call<CaptainMessage[]>(r, "GET", `/api/projects/${p.id}/captain/messages`)
+    const inbound = transcript.filter((m) => m.role === "user")
+    expect(inbound.map((m) => [m.content, m.meta?.source, m.meta?.tool])).toEqual([
+      ["status please", "coordinator", "send_to_captain"],
+      ["status", "coordinator", "ask_captain"],
+    ])
+    // Let both sessions finish before the store closes.
+    await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy, "Captain idle")
+    await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", "/api/orchestrator")).busy, "Coordinator idle")
+  })
+
   it("routes task notices to the owning Captain before reporting to the Coordinator", async () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
@@ -115,5 +147,29 @@ describe("project Captains", () => {
       return list.some((m) => m.role === "notice" && m.meta?.captain === true) ? list : null
     }, "Captain report to Coordinator", 30_000)
     expect(chat.some((m) => m.content.startsWith("Captain for demo:"))).toBe(true)
+  })
+})
+
+describe("Captain message helpers", () => {
+  it("labels inbound messages by meta.source, falling back to the id shape for older rows", () => {
+    expect(captainSourceOf({ id: "cap_x", meta: { source: "cody" } })).toBe("cody")
+    expect(captainSourceOf({ id: "cap_x", meta: { scheduleId: "sch_1" } })).toBe("schedule")
+    expect(captainSourceOf({ id: "chat_abcdef123456", meta: null })).toBe("cody")
+    expect(captainSourceOf({ id: "cap_abcdef123456", meta: null })).toBe("coordinator")
+  })
+
+  it("reads the Captain's project and reply from send/ask/wait_for_captain results", () => {
+    const text = (v: unknown) => [{ type: "text", text: JSON.stringify(v) }]
+    expect(captainToolResult("send_to_captain", text({ delivered: true, projectId: "prj_a", messageId: "cap_1" }))).toEqual({ projectId: "prj_a", reply: null, finished: null })
+    // ask_captain: only the reply to this question, never an older lastReply.
+    expect(captainToolResult("ask_captain", text({ projectId: "prj_a", allFinished: true, lastReply: "old", reply: null }))).toEqual({ projectId: "prj_a", reply: null, finished: true })
+    expect(captainToolResult("ask_captain", text({ projectId: "prj_a", allFinished: true, lastReply: "x", reply: "Two open tasks." }))?.reply).toBe("Two open tasks.")
+    expect(captainToolResult("wait_for_captain", JSON.stringify({ state: { projectId: "prj_b" }, allFinished: false, lastReply: "Working on it" }))).toEqual({
+      projectId: "prj_b",
+      reply: "Working on it",
+      finished: false,
+    })
+    expect(captainToolResult("list_tasks", text({}))).toBeNull()
+    expect(captainToolResult("ask_captain", "Captains are not available")).toBeNull()
   })
 })
