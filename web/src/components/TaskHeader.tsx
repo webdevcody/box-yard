@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
-  ArrowLeft,
+  ChevronRight,
   Bot,
   Box,
   Check,
@@ -13,7 +13,6 @@ import {
   CircleStop,
   Copy,
   ExternalLink,
-  FileText,
   GitBranch,
   Globe,
   Hash,
@@ -30,11 +29,12 @@ import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
 import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
-import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
+import { FilesChip } from "./TaskFiles"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 
 /** Above this much context used, a "Compact" nudge shows next to the status. */
 const COMPACT_NUDGE_PCT = 60
@@ -74,10 +74,10 @@ export function TaskHeader({
   const primary = primaryAction(task.status)
   const pct = contextPct(task.contextTokens, task.contextWindow)
   const canCompact = task.turnCount > 0 && task.status !== "failed"
-  const backHref = project ? `/projects/${project.id}` : "/"
 
   return (
     <header className="mb-4 space-y-1">
+      <Breadcrumb task={task} project={project} />
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <h1 className="line-clamp-2 min-w-0 text-lg leading-snug font-semibold tracking-tight break-words text-zinc-50 sm:line-clamp-none sm:truncate" title={task.title}>
@@ -107,9 +107,6 @@ export function TaskHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-        <Link href={backHref} className="inline-flex min-h-11 max-w-48 items-center gap-1 rounded-lg pr-2 hover:text-zinc-300 sm:min-h-0">
-          <ArrowLeft className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{project?.name ?? "Back"}</span>
-        </Link>
         <span>
           Active <TimeAgo ts={task.updatedAt} />
         </span>
@@ -123,15 +120,7 @@ export function TaskHeader({
         {task.previews.map((p) => (
           <PreviewChip key={p.port} preview={p} />
         ))}
-        {files.length > 0 && (
-          <span className="contents" {...PREVIEW_GROUP}>
-            {files.map((a) => (
-              <ArtifactLink key={a.id} artifact={a} className="inline-flex min-h-11 max-w-60 items-center gap-1 rounded-lg pr-2 text-yard-400 hover:underline sm:min-h-0">
-                <FileText className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{a.title}</span>
-              </ArtifactLink>
-            ))}
-          </span>
-        )}
+        <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
         {task.compacting || task.compactPending ? (
           <span className="inline-flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
@@ -152,6 +141,52 @@ export function TaskHeader({
         )}
       </div>
     </header>
+  )
+}
+
+/** "box-yard › task_…" above the title: the project (on the tab used last) and the task id, which copies on click. */
+function Breadcrumb({ task, project }: { task: Task; project: Project | undefined }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(t)
+  }, [copied])
+  const crumb = "rounded focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none"
+  return (
+    <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-xs text-zinc-500">
+      {project ? (
+        <Link href={projectCrumbHref(project.id, lastProjectTab(project.id))} className={cx(crumb, "min-w-0 truncate py-1 hover:text-zinc-300 hover:underline sm:py-0")}>
+          {project.name}
+        </Link>
+      ) : (
+        <Link href="/" className={cx(crumb, "shrink-0 py-1 hover:text-zinc-300 hover:underline sm:py-0")}>
+          Yard
+        </Link>
+      )}
+      <ChevronRight className="h-3 w-3 shrink-0 text-zinc-700" aria-hidden />
+      <span className="relative shrink-0">
+        <Link
+          href={`/tasks/${task.id}`}
+          aria-current="page"
+          title={`${task.title}\nClick to copy the id`}
+          className={cx(crumb, "py-1 font-mono text-[11px] text-zinc-400 hover:text-zinc-200 sm:py-0")}
+          onClick={async (e) => {
+            // Plain clicks copy; Cmd/Ctrl and middle clicks keep the link and open the task in a new tab.
+            const result = await copyIdOnClick(e, task.id)
+            if (result === "copied") setCopied(true)
+            else if (result === "failed") toast.error("Couldn't copy", "The browser blocked clipboard access.")
+          }}
+        >
+          {task.id}
+        </Link>
+        {copied && (
+          <span role="status" className="absolute top-full left-1/2 z-20 mt-1 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] whitespace-nowrap text-zinc-200 shadow-lg">
+            <Check className="mr-0.5 inline h-3 w-3 text-emerald-400" /> Copied
+          </span>
+        )}
+      </span>
+    </nav>
   )
 }
 
