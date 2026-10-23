@@ -21,6 +21,7 @@ import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
+import { BrandLogo } from "./components/BrandLogo"
 
 export function App() {
   const me = useMe()
@@ -61,7 +62,7 @@ export function App() {
           <button onClick={() => setNavOpen(true)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800" aria-label="Open navigation">
             <Menu className="h-5 w-5" />
           </button>
-          <span className="font-semibold text-zinc-100">Box Yard</span>
+          <BrandLogo markClassName="h-6 w-6" textClassName="font-semibold text-zinc-100" />
           <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 xl:hidden" aria-label="Open orchestrator">
             <MessageSquare className="h-5 w-5" />
           </button>

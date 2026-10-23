@@ -1,7 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Box Yard">
-  <rect width="512" height="512" rx="112" fill="#09090b"/>
-  <rect x="82" y="164" width="348" height="244" rx="48" fill="#f59e0b"/>
-  <path d="M82 205c0-23 19-41 41-41h266c23 0 41 18 41 41v44H82v-44Z" fill="#b45309"/>
-  <path d="M154 164h204l-35-60c-9-16-26-25-44-25h-46c-18 0-35 9-44 25l-35 60Z" fill="#fbbf24"/>
-  <rect x="128" y="288" width="256" height="48" rx="24" fill="#09090b" opacity=".18"/>
+  <defs>
+    <filter id="amber-glow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="18" flood-color="#fbbf24" flood-opacity="0.65"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="#09090b"/>
+  <g transform="translate(96 96) scale(5)">
+    <g fill="#27272a" stroke="#3f3f46" stroke-width="1">
+      <rect x="4" y="4" width="16" height="16" rx="4"/>
+      <rect x="24" y="4" width="16" height="16" rx="4"/>
+      <rect x="24" y="24" width="16" height="16" rx="4"/>
+      <rect x="44" y="24" width="16" height="16" rx="4"/>
+      <rect x="4" y="44" width="16" height="16" rx="4"/>
+      <rect x="44" y="44" width="16" height="16" rx="4"/>
+    </g>
+    <g filter="url(#amber-glow)">
+      <rect x="44" y="4" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+      <rect x="4" y="24" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+      <rect x="24" y="44" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+    </g>
+  </g>
 </svg>

@@ -1,6 +1,6 @@
 import { memo, useMemo, useState } from "react"
 import { Link, useLocation } from "wouter"
-import { AlarmClock, Boxes, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
+import { AlarmClock, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
@@ -9,6 +9,7 @@ import { NewProjectDialog } from "./NewProjectDialog"
 import { RecentActivity } from "./RecentActivity"
 import { MOD_KEY, openPalette } from "./CommandPalette"
 import type { Connection } from "../lib/stream"
+import { BrandLogo } from "./BrandLogo"
 
 export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
   const [location, navigate] = useLocation()
@@ -56,10 +57,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
   return (
     <aside className="flex h-full w-full shrink-0 flex-col border-r border-zinc-900 bg-zinc-950">
       <div className="flex items-center gap-2 px-4 pt-[calc(1rem+env(safe-area-inset-top))] pb-3 lg:pt-4">
-        <div className="grid h-7 w-7 place-items-center rounded-md bg-yard-500 text-zinc-950">
-          <Boxes className="h-4 w-4" />
-        </div>
-        <div className="font-semibold tracking-tight text-zinc-50">Box Yard</div>
+        <BrandLogo className="min-w-0" />
         {health.data?.mock && (
           <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300" title="A fake claude is answering. Set real keys and drop BOXYARD_MOCK to go live.">
             MOCK
