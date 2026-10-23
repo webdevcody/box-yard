@@ -43,6 +43,21 @@ describe("per-run Claude cost", () => {
     expect(rows.reduce((a, r) => a + r.c, 0)).toBeCloseTo(1 + 2 + 0 + 3 + 0.5 + 0.25 + 1 + 2, 9)
   })
 
+  it("charges a resumed session's first logged run its tokens, not the spend from before logging", () => {
+    const store = memStore()
+    const t0 = Date.now()
+    const run = (sessionId: string, reported: number, tokens: number, resumed: boolean, i: number) =>
+      store.recordClaudeUsage({ source: "task", runKind: "turn", sessionId, model: "m", startedAt: t0 + i, endedAt: t0 + i, usage: { input_tokens: tokens }, costUsd: reported, resumed })
+    expect(run("fresh", 2, 1000, false, 1)).toBe(2) // a new session: its report is its cost, $0.002/token
+    expect(run("old", 50, 500, true, 2)).toBeCloseTo(1, 9) // resumed, nothing logged before: 500 tokens at $0.002
+    expect(run("old", 51.5, 100, true, 3)).toBeCloseTo(1.5, 9) // then exact steps again
+    const flags = store.db.prepare("SELECT session_id AS s, cost_estimated AS e FROM claude_usage ORDER BY ended_at").all()
+    expect(flags).toEqual([{ s: "fresh", e: 0 }, { s: "old", e: 1 }, { s: "old", e: 0 }])
+    // With no rate to go on, the report stands.
+    const empty = memStore()
+    expect(empty.recordClaudeUsage({ source: "task", runKind: "turn", sessionId: "x", startedAt: t0, endedAt: t0, usage: { input_tokens: 10 }, costUsd: 7, resumed: true })).toBe(7)
+  })
+
   it("a crash that reports $0 doesn't reset the baseline", () => {
     const store = memStore()
     const t0 = Date.now()
@@ -62,6 +77,9 @@ describe("usage migration", () => {
     const store = new Store(db)
     const p = store.createProject({ name: "demo" })
     const task = store.createTask({ projectId: p.id, title: "t", prompt: "t" })
+    const older = store.createTask({ projectId: p.id, title: "older", prompt: "o" })
+    // `older` had a turn before usage was logged, so its first logged turn resumed its session.
+    db.prepare("INSERT INTO task_turns (id, task_id, turn_index, status, started_at) VALUES ('tt1', ?, 1, 'done', 10), ('tt2', ?, 2, 'done', 1005)").run(older.id, older.id)
     let n = 0
     const legacy = (source: string, session: string, reported: number, extra: { projectId?: string; taskId?: string } = {}) =>
       db
@@ -70,23 +88,28 @@ describe("usage migration", () => {
            VALUES (?, ?, 'turn', ?, ?, ?, ?, ?, 100, 100, ?)`,
         )
         .run(`cu_${++n}`, source, extra.taskId ?? null, extra.projectId ?? null, session, 1000 + n, 1000 + n, reported)
-    legacy("orchestrator", "coord", 1)
-    legacy("orchestrator", "coord", 2.5)
-    legacy("orchestrator", "coord", 2.5) // /context probe
-    legacy("orchestrator", "coord", 4)
+    // The Coordinator's session was already $40 in when logging started.
+    legacy("orchestrator", "coord", 40)
+    legacy("orchestrator", "coord", 41.5)
+    legacy("orchestrator", "coord", 41.5) // /context probe
+    legacy("orchestrator", "coord", 43)
     legacy("orchestrator", "cap", 0.5, { projectId: p.id }) // Captain row from before source='captain'
     legacy("orchestrator", "cap", 0.75, { projectId: p.id })
     legacy("task", "task-s", 3, { projectId: p.id, taskId: task.id })
     legacy("task", "task-s", 5, { projectId: p.id, taskId: task.id })
+    legacy("task", "older-s", 10, { projectId: p.id, taskId: older.id })
     migrate(db)
 
-    const rows = db.prepare("SELECT source, cost_usd AS c, reported_cost_usd AS r FROM claude_usage ORDER BY ended_at").all() as { source: string; c: number; r: number }[]
-    expect(rows.map((r) => r.c)).toEqual([1, 1.5, 0, 1.5, 0.5, 0.25, 3, 2])
-    expect(rows.map((r) => r.r)).toEqual([1, 2.5, 2.5, 4, 0.5, 0.75, 3, 5])
+    const rows = db.prepare("SELECT source, cost_usd AS c, reported_cost_usd AS r, cost_estimated AS e FROM claude_usage ORDER BY ended_at").all() as { source: string; c: number; r: number; e: number }[]
+    // Exact steps: 1.5 + 0 + 1.5 + 0.25 + 2 = $5.25 over 500 tokens, so $0.0105/token for the carried-over first runs.
+    const est = 100 * (5.25 / 500)
+    rows.forEach((r, i) => expect(r.c, `row ${i}`).toBeCloseTo([est, 1.5, 0, 1.5, 0.5, 0.25, 3, 2, est][i]!, 9))
+    expect(rows.map((r) => r.e)).toEqual([1, 0, 0, 0, 0, 0, 0, 0, 1])
+    expect(rows.map((r) => r.r)).toEqual([40, 41.5, 41.5, 43, 0.5, 0.75, 3, 5, 10])
     expect(rows.filter((r) => r.source === "captain")).toHaveLength(2)
 
     // New runs continue from the migrated running totals.
-    expect(store.recordClaudeUsage({ source: "orchestrator", runKind: "turn", sessionId: "coord", startedAt: 2000, endedAt: 2000, usage: { input_tokens: 1 }, costUsd: 4.5 })).toBeCloseTo(0.5, 9)
+    expect(store.recordClaudeUsage({ source: "orchestrator", runKind: "turn", sessionId: "coord", startedAt: 2000, endedAt: 2000, usage: { input_tokens: 1 }, costUsd: 43.5 })).toBeCloseTo(0.5, 9)
 
     // Deleting the task and its project keeps the spend (it was ON DELETE CASCADE).
     const before = store.usagePeriod(0, 10_000, rates())
@@ -95,8 +118,8 @@ describe("usage migration", () => {
     const after = store.usagePeriod(0, 10_000, rates())
     expect(after.totalCostUsd).toBeCloseTo(before.totalCostUsd, 9)
     expect(after.categories.captains.costUsd).toBeCloseTo(0.75, 9)
-    expect(after.categories.coordinator.costUsd).toBeCloseTo(4.5, 9)
-    expect(after.byProject.find((r) => r.key === "deleted")?.costUsd).toBeCloseTo(5.75, 9)
+    expect(after.categories.coordinator.costUsd).toBeCloseTo(est + 3.5, 9)
+    expect(after.byProject.find((r) => r.key === "deleted")?.costUsd).toBeCloseTo(5.75 + est, 9)
     expectReconciles(after)
   })
 })

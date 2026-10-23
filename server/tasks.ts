@@ -1505,6 +1505,8 @@ export class TaskManager {
       durationMs: typeof ev.durationMs === "number" ? ev.durationMs : null,
       usage,
       costUsd: hasCost ? (ev.costUsd as number) : null,
+      // Runners before this field didn't say; then a session's first logged turn is charged what it reported.
+      resumed: ev.resumed === true,
     })
     return hasCost ? cost : null
   }

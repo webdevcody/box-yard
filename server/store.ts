@@ -238,6 +238,7 @@ export interface ClaudeUsageRow {
   cost_usd: number
   /** What the CLI reported: the session's running total. */
   reported_cost_usd: number
+  cost_estimated: number
   raw_usage_json: string
 }
 
@@ -1267,6 +1268,8 @@ export class Store {
       output_tokens?: number
     } | null
     costUsd?: number | null
+    /** The run resumed an existing session (so its report includes the session's earlier spend). */
+    resumed?: boolean
   }) {
     const u = input.usage ?? {}
     const inputTokens = intToken(u.input_tokens)
@@ -1277,13 +1280,13 @@ export class Store {
     const reportedUsd = typeof input.costUsd === "number" && Number.isFinite(input.costUsd) && input.costUsd > 0 ? input.costUsd : 0
     // Some CLI runs report only cost, or only duration. Keep those rows too.
     if (totalTokens <= 0 && reportedUsd <= 0 && !(input.durationMs && input.durationMs > 0)) return 0
-    const costUsd = this.runCost(input.sessionId ?? null, reportedUsd)
+    const { costUsd, estimated } = this.runCost({ sessionId: input.sessionId ?? null, reportedUsd, totalTokens, model: input.model ?? null, resumed: Boolean(input.resumed) })
     this.db
       .prepare(
         `INSERT INTO claude_usage
           (id, source, run_kind, task_id, project_id, turn_id, session_id, model, started_at, ended_at, duration_ms,
-           input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, reported_cost_usd, raw_usage_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, reported_cost_usd, cost_estimated, raw_usage_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         newId("cu"),
@@ -1304,19 +1307,41 @@ export class Store {
         totalTokens,
         costUsd,
         reportedUsd,
+        estimated ? 1 : 0,
         JSON.stringify(u),
       )
     return costUsd
   }
 
-  /** This run's share of a session's running cost total (see recordClaudeUsage). */
-  private runCost(sessionId: string | null, reportedUsd: number): number {
-    if (!sessionId || reportedUsd <= 0) return reportedUsd
+  /**
+   * This run's share of a session's running cost total (see recordClaudeUsage). With no
+   * earlier report for a resumed session, the report also holds spend from before Box Yard
+   * logged the session, so the run is charged its tokens at the model's recent rate instead.
+   */
+  private runCost(r: { sessionId: string | null; reportedUsd: number; totalTokens: number; model: string | null; resumed: boolean }): { costUsd: number; estimated: boolean } {
+    if (!r.sessionId || r.reportedUsd <= 0) return { costUsd: r.reportedUsd, estimated: false }
     const prev = this.db
       .prepare("SELECT reported_cost_usd AS r FROM claude_usage WHERE session_id = ? AND reported_cost_usd > 0 ORDER BY ended_at DESC, rowid DESC LIMIT 1")
-      .get(sessionId) as { r: number } | undefined
-    if (!prev || reportedUsd < prev.r) return reportedUsd
-    return reportedUsd - prev.r
+      .get(r.sessionId) as { r: number } | undefined
+    if (prev && r.reportedUsd >= prev.r) return { costUsd: r.reportedUsd - prev.r, estimated: false }
+    if (prev || !r.resumed) return { costUsd: r.reportedUsd, estimated: false }
+    const rate = this.tokenRate(r.model)
+    if (r.totalTokens > 0 && rate === null) return { costUsd: r.reportedUsd, estimated: false }
+    return { costUsd: Math.min(r.reportedUsd, r.totalTokens * (rate ?? 0)), estimated: true }
+  }
+
+  /** Recent $/token for a model (else any model) from exactly priced runs, or null with no data. */
+  private tokenRate(model: string | null): number | null {
+    const since = Date.now() - 30 * 24 * 3_600_000
+    const q = this.db.prepare(
+      `SELECT SUM(cost_usd) AS c, SUM(total_tokens) AS t FROM claude_usage
+       WHERE cost_estimated = 0 AND total_tokens > 0 AND started_at >= ? AND (? IS NULL OR model = ?)`,
+    )
+    for (const m of model ? [model, null] : [null]) {
+      const row = q.get(since, m, m) as { c: number | null; t: number | null }
+      if (row.c && row.t) return row.c / row.t
+    }
+    return null
   }
 
   taskClaudeTotals(taskId: string): ClaudeUsageTotals {

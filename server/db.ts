@@ -384,6 +384,9 @@ export const MIGRATIONS: string[] = [
     total_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0,
     reported_cost_usd REAL NOT NULL DEFAULT 0,
+    -- 1 when cost_usd is estimated from tokens: a resumed session's first logged run,
+    -- whose report also carried spend from before Box Yard logged that session.
+    cost_estimated INTEGER NOT NULL DEFAULT 0,
     raw_usage_json TEXT NOT NULL DEFAULT '{}'
   );
   INSERT INTO claude_usage_new
@@ -410,6 +413,34 @@ export const MIGRATIONS: string[] = [
   )
   UPDATE claude_usage SET cost_usd = CASE WHEN steps.p IS NULL OR steps.r < steps.p THEN steps.r ELSE steps.r - steps.p END
   FROM steps WHERE steps.id = claude_usage.id;
+
+  -- A session's first logged run still carries everything the session spent before
+  -- usage was logged, when that run resumed an older session: the Coordinator's
+  -- session, /compact and /context runs, and tasks that had turns before. Charge
+  -- those runs their tokens at the model's rate from the exact rows instead.
+  -- (Captain sessions started after usage logging, so their first runs are exact.)
+  CREATE TEMP TABLE usage_firsts AS
+    SELECT id FROM (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ended_at, started_at, rowid) AS n
+      FROM claude_usage WHERE session_id IS NOT NULL AND reported_cost_usd > 0
+    ) WHERE n = 1;
+  CREATE TEMP TABLE usage_rates AS
+    SELECT COALESCE(model, '') AS model, SUM(cost_usd) / SUM(total_tokens) AS rate
+    FROM claude_usage WHERE total_tokens > 0 AND id NOT IN (SELECT id FROM usage_firsts)
+    GROUP BY COALESCE(model, '') HAVING SUM(cost_usd) > 0;
+  INSERT INTO usage_rates
+    SELECT '*', SUM(cost_usd) / SUM(total_tokens) FROM claude_usage
+    WHERE total_tokens > 0 AND id NOT IN (SELECT id FROM usage_firsts) HAVING SUM(cost_usd) > 0;
+  UPDATE claude_usage SET cost_estimated = 1, cost_usd = MIN(cost_usd, total_tokens * COALESCE(
+      (SELECT rate FROM usage_rates r WHERE r.model = COALESCE(claude_usage.model, '')),
+      (SELECT rate FROM usage_rates r WHERE r.model = '*'), 0))
+  WHERE id IN (SELECT id FROM usage_firsts)
+    AND (run_kind != 'turn'
+      OR (source = 'orchestrator' AND project_id IS NULL)
+      OR (source = 'task' AND (SELECT COUNT(*) FROM task_turns tt WHERE tt.task_id = claude_usage.task_id AND tt.started_at < claude_usage.started_at) >= 2))
+    AND (total_tokens = 0 OR EXISTS (SELECT 1 FROM usage_rates));
+  DROP TABLE usage_firsts;
+  DROP TABLE usage_rates;
   `,
 ]
 

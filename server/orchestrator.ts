@@ -735,6 +735,7 @@ export class Orchestrator {
             durationMs: resultDurationMs,
             usage: resultUsage,
             costUsd: resultCostUsd,
+            resumed: resume,
           })
         }
         // Lets the client speak a one-line summary of the reply (lib/speech.ts).

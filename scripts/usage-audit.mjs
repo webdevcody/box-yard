@@ -57,4 +57,6 @@ for (const [label, from] of [["Today", midnight.getTime()], ["Last 7 days", week
   for (const c of cats) console.log(`  ${c.padEnd(14)}${usd(p.categories[c].costUsd)}${usd(logged[c])}  ${c === "boxes" ? "" : p.categories[c].turns}`)
   console.log(`  ${"total".padEnd(14)}${usd(p.totalCostUsd)}${usd(cats.reduce((a, c) => a + logged[c], 0))}\n`)
 }
+const est = store.db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(reported_cost_usd - cost_usd), 0) AS dropped FROM claude_usage WHERE cost_estimated = 1").get()
+if (est.n) console.log(`${est.n} resumed runs had no earlier report for their session; they were charged their tokens at the model's rate, leaving out ${usd(est.dropped).trim()} spent before logging.`)
 fs.rmSync(tmp, { recursive: true, force: true })
