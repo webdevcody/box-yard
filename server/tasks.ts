@@ -851,7 +851,9 @@ export class TaskManager {
         let name = file.name
         if (used.has(name)) name = `${id}-${name}`
         used.add(name)
-        await this.provider.writeFile(boxId, `${folder}/${name}`, fs.readFileSync(file.path))
+        // Upload, not writeFile: Upstash rejects a base64 write body over ~10 MB,
+        // so any attachment over ~7.5 MB failed with "invalid request body".
+        await this.provider.uploadFile(boxId, file.path, `${folder}/${name}`)
         lines.push(`- ${folder}/${name} (${file.mime}, ${file.size} bytes)`)
       }
       const note = lines.length ? `\n\nAttached files (open images and other files with the Read tool):\n${lines.join("\n")}` : ""
