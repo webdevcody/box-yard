@@ -31,7 +31,7 @@ export function RecentActivity({ onNavigate }: { onNavigate?: () => void }) {
           type="button"
           onClick={() => setCollapsed(!collapsed)}
           aria-expanded={!collapsed}
-          className="-ml-1 flex items-center gap-1 rounded text-[11px] font-semibold tracking-wider text-zinc-500 uppercase hover:text-zinc-300"
+          className="-ml-2 flex min-h-11 items-center gap-1 rounded-lg px-2 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase hover:text-zinc-300 lg:min-h-0 lg:px-1"
         >
           {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           Recent
@@ -49,12 +49,12 @@ export function RecentActivity({ onNavigate }: { onNavigate?: () => void }) {
                 onClick={() => void markRead(qc, { all: true })}
                 title="Mark all read"
                 aria-label="Mark all read"
-                className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                className="grid h-11 w-11 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 lg:h-6 lg:w-6"
               >
                 <CheckCheck className="h-3.5 w-3.5" />
               </button>
             )}
-            <Link href="/?tab=recent" onClick={onNavigate} className="rounded px-1 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            <Link href="/?tab=recent" onClick={onNavigate} className="inline-flex min-h-11 items-center rounded-lg px-2 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 lg:min-h-0 lg:px-1">
               View all
             </Link>
           </span>
@@ -76,7 +76,7 @@ export function RecentActivity({ onNavigate }: { onNavigate?: () => void }) {
                 }}
                 title={[`${n.title} · ${STATUS[n.status].label}`, n.projectName, n.summary].filter(Boolean).join("\n")}
                 className={cx(
-                  "flex items-center gap-2 rounded-md px-2 py-1 text-xs transition hover:bg-zinc-900",
+                  "flex min-h-11 items-center gap-2 rounded-md px-2 py-2 text-xs transition hover:bg-zinc-900 lg:min-h-0 lg:py-1",
                   n.readAt ? "text-zinc-500 hover:text-zinc-300" : "font-semibold text-zinc-100",
                 )}
               >

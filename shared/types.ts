@@ -210,7 +210,7 @@ export interface Health {
   bus: "redis" | "file"
   claude: { available: boolean; version: string | null }
   problems: string[]
-  pool: { maxBoxes: number; slotsPerBox: number; maxAgents: number }
+  pool: { maxBoxes: number; slotsPerBox: number; maxAgents: number; maxResidentPerBox: number; boxIdleDeleteMinutes: number }
   orchestratorBusy: boolean
   /** How schedules are triggered: the server's own timer, or QStash plus the timer. */
   scheduler: "local" | "qstash"
@@ -281,6 +281,15 @@ export const DEFAULT_EFFORT: Effort = "high"
 export const AUTOCOMPACT_MIN_TOKENS = 100_000
 export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
 
+export const WORKER_SIZES = ["small", "medium", "large"] as const
+export type WorkerSize = (typeof WORKER_SIZES)[number]
+
+export const SIZE_DEFAULTS: Record<WorkerSize, { slotsPerBox: number; maxResidentPerBox: number }> = {
+  small: { slotsPerBox: 1, maxResidentPerBox: 3 },
+  medium: { slotsPerBox: 2, maxResidentPerBox: 8 },
+  large: { slotsPerBox: 4, maxResidentPerBox: 18 },
+}
+
 export interface AutoCompact {
   enabled: boolean
   unit: "percent" | "tokens"
@@ -299,12 +308,22 @@ export interface Settings {
   agentRoutingConfig: string
   /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
   agentAutoCompact: AutoCompact
+  /** Upstash Box size used for new worker boxes. */
+  workerSize: WorkerSize
   /** Most worker boxes alive at once. */
   maxBoxes: number
   /** Claude turns that may run at once inside one box. */
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
   maxAgents: number
+  /** Task folders kept in one box before old archived ones are parked. */
+  maxResidentPerBox: number
+  /** Delete a worker box after this many idle minutes. 0 = keep boxes until removed manually. */
+  boxIdleDeleteMinutes: number
+  /** Park archived resting task folders from boxes after this many idle days. 0 = keep folders. */
+  workspaceRetentionDays: number
+  /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
+  archiveRetentionDays: number
 }
 
 /** Agents that can run at once under a set of limits. */

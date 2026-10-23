@@ -20,19 +20,20 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { DEFAULT_EFFORT, isFinalPrState, type Attachment, type BoxInfo, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
+import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxInfo, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
 
 /** Statuses a task can sit in between turns. */
-const RESTING: TaskStatus[] = ["idle", "pr_ready", "done", "failed", "needs_input", "waiting"]
+const RESTING: TaskStatus[] = [...RESTING_STATUSES]
 const PORT_BASE = 4000
 const MAX_INTERRUPTS = 2
 const STALL_MS = 45_000
@@ -108,6 +109,7 @@ export class TaskManager {
   private lastBoxError: { at: number; message: string } | null = null
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
+  private lastRetentionAt = 0
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
   /** Called after every notice, so the orchestrator can wake up and report. */
@@ -375,8 +377,8 @@ export class TaskManager {
 
   /** Pool limits in effect now. Read fresh on every use, so saved changes apply without a restart. */
   limits() {
-    const { maxBoxes, slotsPerBox, maxAgents } = this.settings.get()
-    return { maxBoxes, slotsPerBox, maxAgents }
+    const { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes } = this.settings.get()
+    return { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes }
   }
 
   /** Agents (running turns) across all boxes. */
@@ -498,8 +500,7 @@ export class TaskManager {
       if (box?.status === "ready") {
         if (this.runningOn(box.id) < this.limits().slotsPerBox) return box.id
         // Its box is busy. Move to a free box if the archive is fresh enough.
-        const fresh = row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path)
-        if (!fresh) return null
+        if (!this.hasFreshArchive(row)) return null
         const other = this.pickBox(row.id, box.id)
         if (!other) return null
         const oldBox = box.id
@@ -549,7 +550,7 @@ export class TaskManager {
         this.wantsBox.add(taskId)
         return null
       }
-      if (b.residents < this.c.maxResidentPerBox || this.evictOne(b.id, taskId)) {
+      if (b.residents < this.limits().maxResidentPerBox || this.evictOne(b.id, taskId)) {
         this.wantsBox.delete(taskId)
         return b.id
       }
@@ -590,8 +591,7 @@ export class TaskManager {
           r.id !== forTaskId &&
           !r.current_turn_id &&
           RESTING.includes(r.status) &&
-          r.archive_path &&
-          (r.last_archived_at ?? 0) >= r.last_active_at - 1000,
+          this.hasFreshArchive(r),
       )
       .sort((a, b) => a.last_active_at - b.last_active_at)[0]
     if (!victim) return false
@@ -611,7 +611,7 @@ export class TaskManager {
     const project = projectId ? this.store.getProject(projectId) : null
     try {
       const labels = ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
-      const id = await this.provider.create({ labels })
+      const id = await this.provider.create({ labels, size: this.settings.get().workerSize })
       this.store.removeBox(placeholder)
       this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now() })
       // The new box belongs to the project that asked for it, so its tasks land there.
@@ -857,7 +857,7 @@ export class TaskManager {
       // One bare mirror per repo per box: later tasks of the project clone from
       // local disk. --dissociate copies the objects, so a task folder stays
       // self-contained when it's archived or moved to another box.
-      const mirror = `${root}/.boxyard/repos/${slugify(project.repo.replace(/^https?:\/\/[^/]+\//, ""))}.git`
+      const mirror = `${root}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`
       const git = `GITHUB_TOKEN=${q(token)} GIT_TERMINAL_PROMPT=0 git -c credential.helper=${q(helper)}`
       steps.push(
         `( [ -d ${q(mirror)} ] && ${git} -C ${q(mirror)} fetch -q --prune origin || (rm -rf ${q(mirror)} && mkdir -p ${q(root + "/.boxyard/repos")} && ${git} clone -q --mirror ${q(url)} ${q(mirror)}) ) >/dev/null 2>&1; true`,
@@ -978,6 +978,11 @@ export class TaskManager {
     if (!row) return
     const flags = this.store.turnFlags(row)
     const say = (role: "assistant" | "tool" | "event" | "agent", content: string, meta: Record<string, unknown> | null = null) => {
+      if (role === "assistant") {
+        const parsed = parseNextSteps(content)
+        if (parsed.nextSteps.length) meta = { ...(meta ?? {}), [NEXT_STEPS_META_KEY]: parsed.nextSteps }
+        content = parsed.content
+      }
       const msg = this.store.addTaskMessage(taskId, role, content, meta)
       this.hub.broadcast({ type: "task.message", message: msg })
     }
@@ -1143,7 +1148,7 @@ export class TaskManager {
 
     this.emitTask(row.id)
     this.publishDirectory()
-    void this.archive(row.id).finally(() => this.schedule())
+    void this.archiveAndClean(row.id).finally(() => this.schedule())
     this.schedule()
   }
 
@@ -1180,7 +1185,7 @@ export class TaskManager {
       )
     this.emitTask(row.id)
     this.publishDirectory()
-    void this.archive(row.id).finally(() => this.schedule())
+    void this.archiveAndClean(row.id).finally(() => this.schedule())
     this.schedule()
   }
 
@@ -1231,6 +1236,15 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ archives
 
+  private hasFreshArchive(row: TaskRow) {
+    return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
+  }
+
+  private async archiveAndClean(taskId: string) {
+    await this.archive(taskId)
+    await this.cleanRestingWorkspace(taskId).catch((err) => console.warn(`[box-yard] cleanup ${taskId} failed: ${errorMessage(err)}`))
+  }
+
   /** Copy the task folder (repo, Claude session, event log) to the orchestrator's disk. */
   async archive(taskId: string) {
     if (!this.c.archiveWorkspaces || this.archiving.has(taskId)) return
@@ -1242,7 +1256,7 @@ export class TaskManager {
     try {
       const root = `${this.provider.root(boxId)}/tasks`
       const excludes = [
-        "node_modules", ".next", ".turbo", ".cache", ".venv", "__pycache__", "target",
+        "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
         `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`,
       ]
         .map((e) => `--exclude=${q(e)}`)
@@ -1279,6 +1293,29 @@ export class TaskManager {
     }
   }
 
+  /** Remove generated dependency/build/cache directories that are intentionally excluded from archives. */
+  private async cleanRestingWorkspace(taskId: string) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row?.box_id || row.current_turn_id || !RESTING.includes(row.status) || this.store.hasInputs(row.id) || !this.hasFreshArchive(row)) return
+    const work = `${this.taskDir(row.box_id, row.id)}/work`
+    const names = [
+      "node_modules",
+      ".next",
+      ".turbo",
+      ".cache",
+      ".parcel-cache",
+      ".vite",
+      "dist",
+      "build",
+      "coverage",
+      "target",
+      ".venv",
+      "__pycache__",
+    ]
+    const nameExpr = names.map((n) => `-name ${q(n)}`).join(" -o ")
+    await this.provider.exec(row.box_id, `[ -d ${q(work)} ] && find ${q(work)} -type d \\( ${nameExpr} \\) -prune -exec rm -rf {} + 2>/dev/null || true`)
+  }
+
   private async removeTaskDir(boxId: string, taskId: string) {
     const dir = this.taskDir(boxId, taskId)
     await this.provider.exec(
@@ -1297,12 +1334,84 @@ export class TaskManager {
     await this.archive(taskId)
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
-    if (this.c.archiveWorkspaces && !row.archive_path) return // keep the folder if we have no copy
+    if (this.c.archiveWorkspaces && !this.hasFreshArchive(row)) return // keep the folder if we have no current copy
     const boxId = row.box_id
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] })
     await this.removeTaskDir(boxId, taskId).catch(() => {})
     this.emitTask(taskId)
     this.emitBoxes()
+  }
+
+  private async maintainRestingStorage(now = Date.now()) {
+    await this.parkRetainedWorkspaces(now)
+    await this.pruneArchives(now)
+    await this.pruneUnusedRepoMirrors()
+  }
+
+  private async parkRetainedWorkspaces(now: number) {
+    const days = this.settings.get().workspaceRetentionDays
+    if (days <= 0) return
+    const cutoff = now - days * 24 * 60 * 60_000
+    for (const row of this.store.listTaskRows()) {
+      if (!row.box_id || row.current_turn_id || !RESTING.includes(row.status) || this.store.hasInputs(row.id)) continue
+      if (row.last_active_at > cutoff || !this.hasFreshArchive(row)) continue
+      const boxId = row.box_id
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+      await this.removeTaskDir(boxId, row.id).catch((err) => console.warn(`[box-yard] park ${row.id}: ${errorMessage(err)}`))
+      this.addEvent(row.id, `Workspace parked after ${days} idle ${days === 1 ? "day" : "days"}; it will restore from the archive on the next message.`)
+      this.emitTask(row.id)
+    }
+  }
+
+  private async pruneArchives(now: number) {
+    const days = this.settings.get().archiveRetentionDays
+    if (days <= 0) return
+    const cutoff = now - days * 24 * 60 * 60_000
+    const dir = path.join(this.c.dataDir, "archives")
+    if (!fs.existsSync(dir)) return
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.endsWith(".tgz")) continue
+      const file = path.join(dir, name)
+      const taskId = name.slice(0, -4)
+      const row = this.store.getTaskRow(taskId)
+      const stat = fs.statSync(file)
+      if (stat.mtimeMs > cutoff) continue
+      if (!row) {
+        fs.rmSync(file, { force: true })
+        continue
+      }
+      const longDone = row.status === "done" && !row.current_turn_id && !this.store.hasInputs(row.id) && row.last_active_at <= cutoff
+      if (!longDone) continue
+      fs.rmSync(file, { force: true })
+      if (row.archive_path === file) this.store.updateTask(row.id, { archivePath: null, lastArchivedAt: null }, { touch: false })
+    }
+  }
+
+  private repoMirrorName(repo: string | null) {
+    return repo ? `${slugify(repo.replace(/^https?:\/\/[^/]+\//, ""))}.git` : null
+  }
+
+  private async pruneUnusedRepoMirrors() {
+    for (const box of this.store.listBoxes()) {
+      if (box.status !== "ready") continue
+      const residents = this.store.listTaskRows({ boxId: box.id })
+      // Avoid racing a clone/fetch that may be using a mirror.
+      if (residents.some((r) => r.current_turn_id || r.status === "starting")) continue
+      const keep = new Set<string>()
+      for (const row of residents) {
+        const name = this.repoMirrorName(this.store.getProject(row.project_id)?.repo ?? null)
+        if (name) keep.add(name)
+      }
+      const owner = this.store.getKv(boxOwnerKey(box.id))
+      if (owner) {
+        const name = this.repoMirrorName(this.store.getProject(owner)?.repo ?? null)
+        if (name) keep.add(name)
+      }
+      const repos = `${this.provider.root(box.id)}/.boxyard/repos`
+      const keepList = [...keep].join(" ")
+      const script = `[ -d ${q(repos)} ] || exit 0; for d in ${q(repos)}/*.git; do [ -e "$d" ] || continue; b=$(basename "$d"); case " ${keepList} " in *" $b "*) ;; *) rm -rf "$d";; esac; done`
+      await this.provider.exec(box.id, script).catch((err) => console.warn(`[box-yard] prune mirrors ${box.id}: ${errorMessage(err)}`))
+    }
   }
 
   // ------------------------------------------------------------------ health
@@ -1358,17 +1467,22 @@ export class TaskManager {
     }
 
     // Retire idle boxes when configured to.
-    if (this.c.boxIdleDeleteMinutes > 0) {
+    const idleDelete = this.limits().boxIdleDeleteMinutes
+    if (idleDelete > 0) {
       for (const box of this.store.listBoxes()) {
         if (box.status !== "ready") continue
-        if (now - box.last_used_at < this.c.boxIdleDeleteMinutes * 60_000) continue
+        if (now - box.last_used_at < idleDelete * 60_000) continue
         const residents = this.store.listTaskRows({ boxId: box.id })
         if (residents.some((r) => r.current_turn_id || this.store.hasInputs(r.id))) continue
-        if (residents.some((r) => !r.archive_path)) continue
+        if (residents.some((r) => !this.hasFreshArchive(r))) continue
         console.log(`[box-yard] deleting idle box ${box.id}`)
         await this.loseBox(box.id, "Box retired after being idle; workspaces are archived.", true)
         await this.provider.destroy(box.id).catch(() => {})
       }
+    }
+    if (now - this.lastRetentionAt > 5 * 60_000) {
+      this.lastRetentionAt = now
+      await this.maintainRestingStorage(now)
     }
     this.schedule()
   }
