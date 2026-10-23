@@ -289,7 +289,11 @@ export class Scheduler {
           (previous.summary ? ` Its summary: ${previous.summary}` : ""),
       )
     }
-    lines.push("Do this run's work, then call mark_done. Save anything later runs should know with save_note.")
+    lines.push(
+      "Do this run's work, then call mark_done. Save anything later runs should know with save_note.",
+      'If this run found nothing to do and changed nothing (no commits, pull request, artifact, preview or question for Cody), call mark_done with outcome "noop" and a one-line summary, e.g. "No open PRs, nothing to merge". ' +
+        "Box Yard then files it as a quiet run and doesn't notify anyone. Don't use noop if anything failed or needs Cody.",
+    )
 
     const task = this.tasks.createTask({
       projectId,

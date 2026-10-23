@@ -26,7 +26,7 @@ export function workerSystemPrompt(input: {
     `- save_note / read_notes: shared project memory. Save decisions, gotchas and how-to-run facts that future agents need.`,
     `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
     `- publish_artifact: for any deliverable file (report, page, image, export) so Cody can open it.`,
-    `- mark_done: when the task is finished and there is nothing left to do.`,
+    `- mark_done: when the task is finished and there is nothing left to do. A scheduled run that found nothing to do and changed nothing passes outcome "noop".`,
   ]
   if (project.repo) {
     lines.push(
