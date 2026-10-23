@@ -1138,6 +1138,13 @@ export class Store {
     })()
   }
 
+  peekUnseenCaptainNotices(projectId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT content FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC")
+      .all(projectId) as { content: string }[]
+    return rows.map((r) => r.content)
+  }
+
   unseenCaptainNoticeTasks(projectId: string): (string | null)[] {
     const rows = this.db
       .prepare("SELECT json_extract(meta_json, '$.taskId') AS task_id FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0")
@@ -1153,6 +1160,10 @@ export class Store {
     this.db.transaction(() => {
       for (const id of taskIds) stmt.run(projectId, id)
     })()
+  }
+
+  markCaptainMessageSeen(id: string) {
+    this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE id = ?").run(id)
   }
 
   clearCaptainMessages(projectId: string) {

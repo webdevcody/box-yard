@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2 } from "lucide-react"
+import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, X } from "lucide-react"
 import {
   newClientId,
   useAddNote,
@@ -33,6 +33,7 @@ import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { rememberProjectTab } from "../lib/breadcrumb"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -71,6 +72,9 @@ export function ProjectView({ id }: { id: string }) {
   const [showNew, setShowNew] = useState(false)
   const project = projects.data?.find((p) => p.id === id)
   const tab: Tab = TABS.find((t) => t.key === params.get("tab"))?.key ?? "tasks"
+
+  // The task page breadcrumb returns to this tab.
+  useEffect(() => rememberProjectTab(id, tab), [id, tab])
 
   // A new task dialog left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
@@ -122,7 +126,7 @@ export function ProjectView({ id }: { id: string }) {
       {tab === "captain" && <CaptainTab project={project} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
       {tab === "notes" && <Notes project={project} />}
-      {tab === "files" && <Files files={files} />}
+      {tab === "files" && <Files files={files} tasks={list} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
       {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
@@ -367,29 +371,57 @@ function Notes({ project }: { project: Project }) {
   )
 }
 
-function Files({ files }: { files: Artifact[] }) {
+function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
+  // `?task=<id>` (the task header's "Open in Files tab") shows only that task's files.
+  const [params, setParams] = useSearchParams()
+  const taskId = params.get("task")
+  const files = taskId ? all.filter((a) => a.taskId === taskId) : all
+  const filter = taskId && (
+    <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
+      <span className="inline-flex min-w-0 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 py-0.5 pr-0.5 pl-2 text-zinc-300">
+        <span className="truncate">From {tasks.find((t) => t.id === taskId)?.title ?? taskId}</span>
+        <button
+          type="button"
+          aria-label="Show all files"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 sm:h-5 sm:w-5"
+          onClick={() => setParams((p) => withParam(p, "task", null), { replace: true })}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </span>
+      <Link href={`/tasks/${taskId}`} className="shrink-0 hover:text-zinc-300 hover:underline">
+        Open task
+      </Link>
+    </div>
+  )
   if (files.length === 0)
     return (
-      <Empty icon={<FileText className="h-8 w-8" />} title="No files yet">
-        Reports, pages and exports that agents publish show up here.
-      </Empty>
+      <>
+        {filter}
+        <Empty icon={<FileText className="h-8 w-8" />} title="No files yet">
+          Reports, pages and exports that agents publish show up here.
+        </Empty>
+      </>
     )
   return (
-    <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80" {...PREVIEW_GROUP}>
-      {[...files]
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .map((a) => (
-          <li key={a.id} className="flex min-h-11 flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
-            <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
-            <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
-              {a.title}
-            </ArtifactLink>
-            <span className="ml-auto shrink-0 text-xs text-zinc-500 max-sm:w-full max-sm:pl-7">
-              {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
-            </span>
-          </li>
-        ))}
-    </ul>
+    <div>
+      {filter}
+      <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80" {...PREVIEW_GROUP}>
+        {[...files]
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .map((a) => (
+            <li key={a.id} className="flex min-h-11 flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
+              <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
+              <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
+                {a.title}
+              </ArtifactLink>
+              <span className="ml-auto shrink-0 text-xs text-zinc-500 max-sm:w-full max-sm:pl-7">
+                {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
+              </span>
+            </li>
+          ))}
+      </ul>
+    </div>
   )
 }
 
