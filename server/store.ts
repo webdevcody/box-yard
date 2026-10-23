@@ -83,6 +83,7 @@ export interface TaskRow {
   question: string | null
   summary: string | null
   error: string | null
+  wait_reason: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -212,6 +213,9 @@ export interface BoxRow {
   disk_bytes: number | null
   disk_updated_at: number | null
   usage_source: "actual" | "estimated"
+  disk_free_bytes: number | null
+  disk_total_bytes: number | null
+  disk_checked_at: number | null
 }
 
 /** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
@@ -276,6 +280,7 @@ type TaskPatch = Partial<{
   question: string | null
   summary: string | null
   error: string | null
+  waitReason: string | null
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -311,6 +316,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   question: "question",
   summary: "summary",
   error: "error",
+  waitReason: "wait_reason",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -550,6 +556,7 @@ export class Store {
       summary: row.summary,
       activity: row.summary === null ? this.taskActivity(row.id) : null,
       error: row.error,
+      waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
       turnCount: row.turn_count,
       pendingCount: pending.n,
       lastArchivedAt: row.last_archived_at,
@@ -1639,6 +1646,9 @@ export class Store {
       size: BoxSize
       keepAlive: boolean
       usageSource: "actual" | "estimated"
+      diskFreeBytes: number | null
+      diskTotalBytes: number | null
+      diskCheckedAt: number | null
     }>,
   ) {
     const sets: string[] = []
@@ -1651,6 +1661,9 @@ export class Store {
       size: "size",
       keepAlive: "keep_alive",
       usageSource: "usage_source",
+      diskFreeBytes: "disk_free_bytes",
+      diskTotalBytes: "disk_total_bytes",
+      diskCheckedAt: "disk_checked_at",
     } as const
     for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
       if (v === undefined) continue

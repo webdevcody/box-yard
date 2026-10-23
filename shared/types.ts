@@ -1,6 +1,8 @@
 // Types shared by the API server and the React app.
 import type { TaskOutcome } from "./quiet.js"
+import type { BoxCleanup } from "./disk.js"
 export type { TaskOutcome } from "./quiet.js"
+export type { BoxCleanup } from "./disk.js"
 
 export const TASK_STATUSES = [
   "queued", // waiting for a free box slot
@@ -72,6 +74,8 @@ export interface Task {
   /** Until there is a summary: the latest assistant text or tool call as one line (shared/activity.ts), for cards. */
   activity?: string | null
   error: string | null
+  /** Why a queued task is held back beyond a free slot, e.g. "Waiting for disk cleanup on box-1". */
+  waitReason: string | null
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
@@ -233,6 +237,14 @@ export interface BoxInfo {
   activeMs: number
   uptimeMs: number
   diskBytes: number | null
+  /** Free and total space on the box's work disk (df), null until first checked. */
+  diskFreeBytes: number | null
+  diskTotalBytes: number | null
+  diskCheckedAt: number | null
+  /** Too little free space for a new workspace (Settings → Boxes & limits → Disk). */
+  diskLow: boolean
+  /** The running cleanup, or the last one. */
+  cleanup: BoxCleanup | null
   estimatedCostUsd: number
   usageSource: "actual" | "estimated"
   createdAt: number
@@ -270,6 +282,7 @@ export type UiEvent =
   | { type: "settings"; info: SettingsInfo }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
+  | { type: "box.cleanup"; cleanup: BoxCleanup }
   | { type: "schedule"; schedule: Schedule }
   | { type: "schedule.run"; run: ScheduleRun }
   | { type: "schedule.deleted"; scheduleId: string }
@@ -390,6 +403,10 @@ export interface Settings {
   archiveRetentionDays: number
   /** Never prune the archive of a task touched within this many days (on top of archiveRetentionDays). 0 = no extra protection. */
   archiveKeepTouchedDays: number
+  /** Free space a box needs before a new workspace lands on it, at least. */
+  diskMinFreeMb: number
+  /** ...and at least this many times the repo's last clone size. */
+  diskCloneFactor: number
 }
 
 /** Agents that can run at once under a set of limits. */
