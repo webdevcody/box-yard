@@ -491,12 +491,20 @@ export function useSendChat() {
 export function useSendCaptainMessage(projectId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; content: string }) => api<CaptainMessage>(`/api/projects/${projectId}/captain/messages`, { body: input }),
+    mutationFn: (input: { id: string; content: string; attachments?: Attachment[] }) =>
+      api<CaptainMessage>(`/api/projects/${projectId}/captain/messages`, { body: { ...input, attachments: input.attachments?.map((a) => a.id) } }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.captainMessages(projectId) })
       const undo = snapshot<CaptainMessage[]>(qc, keys.captainMessages(projectId))
       qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) =>
-        upsert(list, { id: input.id, projectId, role: "user", content: input.content, meta: { pending: true }, createdAt: Date.now() }),
+        upsert(list, {
+          id: input.id,
+          projectId,
+          role: "user",
+          content: input.content,
+          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+          createdAt: Date.now(),
+        }),
       )
       return { undo }
     },

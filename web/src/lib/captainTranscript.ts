@@ -145,3 +145,8 @@ export function groupLabel(messages: CaptainMessage[]): string {
   const allTasks = messages.every((m) => typeof m.meta?.taskId === "string")
   return `${messages.length} ${allTasks ? "task " : ""}updates`
 }
+
+/** A compaction file's markdown without its YAML front matter (timestamps and token counts shown elsewhere). */
+export function stripFrontMatter(md: string): string {
+  return md.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "").trimStart()
+}
