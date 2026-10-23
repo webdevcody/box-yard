@@ -77,11 +77,11 @@ export function showCapacityNotice(notice: CapacityNotice | null, dismissed: str
   return Boolean(notice) && !dismissed
 }
 
-/** One sentence describing what dropped, e.g. "1 agent per box (was 2) and 3 resident task folders (was 12)". */
+/** What changed, e.g. "runs 1 agent at a time (was 2) and keeps 3 resident task folders (was 12)". */
 export function capacityNoticeText(n: CapacityNotice): string {
   const parts: string[] = []
-  if (n.slotsPerBox) parts.push(`${n.slotsPerBox.now} ${n.slotsPerBox.now === 1 ? "agent" : "agents"} per box (was ${n.slotsPerBox.was})`)
+  if (n.slotsPerBox) parts.push(`runs ${n.slotsPerBox.now} ${n.slotsPerBox.now === 1 ? "agent" : "agents"} at a time (was ${n.slotsPerBox.was})`)
   if (n.maxResidentPerBox)
-    parts.push(`${n.maxResidentPerBox.now} resident task ${n.maxResidentPerBox.now === 1 ? "folder" : "folders"} per box (was ${n.maxResidentPerBox.was})`)
+    parts.push(`keeps ${n.maxResidentPerBox.now} resident task ${n.maxResidentPerBox.now === 1 ? "folder" : "folders"} (was ${n.maxResidentPerBox.was})`)
   return parts.join(" and ")
 }

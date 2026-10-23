@@ -149,7 +149,7 @@ function CapacityNotice({ onEdit }: { onEdit: () => void }) {
       <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">
-          Each {notice.workerSize} box now runs {capacityNoticeText(notice)}.
+          Each {notice.workerSize} box now {capacityNoticeText(notice)}.
         </div>
         <div className="mt-1 text-sky-200/70">
           Pool limits now default by worker size, so fewer agents share a box and older workspaces are parked sooner. Add boxes, pick a larger size or raise the limits if you

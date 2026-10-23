@@ -38,13 +38,13 @@ describe("capacity notice", () => {
   it("appears for the small-box defaults, which are below the old 2 slots / 12 resident", () => {
     const n = capacityNotice({ workerSize: "small", ...SIZE_DEFAULTS.small })
     expect(n).toMatchObject({ slotsPerBox: { now: 1, was: 2 }, maxResidentPerBox: { now: 3, was: 12 }, workerSize: "small" })
-    expect(capacityNoticeText(n!)).toBe("1 agent per box (was 2) and 3 resident task folders per box (was 12)")
+    expect(capacityNoticeText(n!)).toBe("runs 1 agent at a time (was 2) and keeps 3 resident task folders (was 12)")
   })
 
   it("mentions only the limit that dropped", () => {
     const n = capacityNotice({ workerSize: "medium", ...SIZE_DEFAULTS.medium })
     expect(n?.slotsPerBox).toBeNull()
-    expect(capacityNoticeText(n!)).toBe("8 resident task folders per box (was 12)")
+    expect(capacityNoticeText(n!)).toBe("keeps 8 resident task folders (was 12)")
   })
 
   it("stays hidden at or above the old defaults", () => {
