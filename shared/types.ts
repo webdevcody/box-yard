@@ -311,6 +311,9 @@ export type AgentEffort = Effort | "orchestrator"
 
 export const DEFAULT_MODEL = "claude-opus-5-5"
 export const DEFAULT_EFFORT: Effort = "high"
+/** Captains have their own model/effort settings; like every default they start at Opus 5.5, high effort. */
+export const DEFAULT_CAPTAIN_MODEL = DEFAULT_MODEL
+export const DEFAULT_CAPTAIN_EFFORT: Effort = DEFAULT_EFFORT
 /** The CLI accepts an auto-compact window between these many tokens. */
 export const AUTOCOMPACT_MIN_TOKENS = 100_000
 export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
@@ -352,6 +355,9 @@ export interface Settings {
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */
   orchestratorAutoCompact: AutoCompact
+  /** Model for the per-project Captains, separate from the Coordinator's. */
+  captainModel: string
+  captainEffort: Effort
   agentModel: string
   agentEffort: AgentEffort
   /** YAML routing rules the orchestrator uses to choose per-task/per-turn model and effort. */
@@ -467,7 +473,10 @@ export interface UsageReport {
   projects: UsageProjectTotal[]
   tasks: UsageTaskTotal[]
   boxes: UsageBoxTotal[]
+  /** The Coordinator's own runs (all-time). */
   orchestrator: ClaudeUsageTotals
+  /** Per-project Captain runs (all-time), including older rows logged as orchestrator usage with a project id. */
+  captains: ClaudeUsageTotals
 }
 
 export interface ContextUsage {

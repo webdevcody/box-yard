@@ -408,7 +408,7 @@ class Captain {
     try {
       const s = this.session()
       const before = this.usage().tokens
-      const model = this.settings.get().orchestratorModel
+      const model = this.settings.get().captainModel
       const summary = await this.run(captainSummaryPrompt(this.project), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
@@ -447,7 +447,7 @@ class Captain {
   private claudeArgs(kind: RunKind, sessionId: string, resume: boolean): string[] {
     const st = this.settings.get()
     const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
-    const model = ["--model", st.orchestratorModel]
+    const model = ["--model", st.captainModel]
     if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
     if (kind === "context") return ["-p", ...session, ...model]
     return [
@@ -468,7 +468,7 @@ class Captain {
       ...session,
       ...model,
       "--effort",
-      st.orchestratorEffort,
+      st.captainEffort,
     ]
   }
 
@@ -580,14 +580,14 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
-        // Captain runs count toward the orchestrator bucket and the project's totals.
+        // Captain runs get their own usage line and count toward the project's totals.
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
-            source: "orchestrator",
+            source: "captain",
             runKind: kind,
             projectId: this.project.id,
             sessionId,
-            model: resultModel ?? this.settings.get().orchestratorModel,
+            model: resultModel ?? this.settings.get().captainModel,
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,
