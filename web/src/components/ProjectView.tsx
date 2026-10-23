@@ -25,7 +25,7 @@ import {
   type TaskFilter,
 } from "../lib/projectTasks"
 import { Modal } from "./Modal"
-import { Button, Empty, Field, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
+import { Button, Empty, Field, NewTabLink, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
@@ -165,9 +165,9 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
           {project.repo ? (
             <>
-              <a href={repoUrl(project.repo)} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
+              <NewTabLink href={repoUrl(project.repo)} className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
                 <FolderGit2 className="h-4 w-4 shrink-0" /> <span className="truncate">{project.repo}</span>
-              </a>
+              </NewTabLink>
               <span className="inline-flex items-center gap-1.5" title="Base branch">
                 <GitBranch className="h-4 w-4" /> {project.baseBranch}
               </span>

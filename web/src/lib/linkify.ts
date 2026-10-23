@@ -119,13 +119,26 @@ export function refForHref(href: string, index: EntityIndex): EntityRef | null {
   return index.byId.get(decodeURIComponent(id)) ?? null
 }
 
-/** Where a link should go: "app" for SPA routes, "file" for server-hosted paths, "external" for anything else. */
+/**
+ * Where a link should go: "app" for SPA routes, "file" for server-hosted paths, "external" for anything else.
+ * Absolute links to Box Yard's own origin count as in-app; every other site opens in a new tab (see NewTabLink).
+ */
 export function linkTarget(href: string, origin?: string): { kind: "app" | "file" | "external"; href: string } {
   let path = href
-  if (origin && href.startsWith(origin + "/")) path = href.slice(origin.length)
+  if (origin && sameOrigin(href, origin)) {
+    path = href.slice(origin.length)
+    if (!path.startsWith("/")) path = "/" + path
+  }
   if (!path.startsWith("/") || path.startsWith("//")) return { kind: "external", href }
   if (/^\/(?:artifacts|api|uploads)\//.test(path)) return { kind: "file", href: path }
   return { kind: "app", href: path }
+}
+
+/** `href` is on `origin` itself: "http://yard.test", "http://yard.test/x", "?q" or "#h" after it, not "http://yard.test.evil". */
+function sameOrigin(href: string, origin: string): boolean {
+  if (!href.toLowerCase().startsWith(origin.toLowerCase())) return false
+  const next = href[origin.length]
+  return next === undefined || next === "/" || next === "?" || next === "#"
 }
 
 // No title here: hover hints are read fresh from the cache (status changes often), see refForHref.

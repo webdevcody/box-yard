@@ -5,7 +5,7 @@ import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
+import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 
 /**
@@ -127,15 +127,12 @@ export const TaskCard = memo(function TaskCard({
 /** A compact one-line preview chip ("Preview :4030"); the agent's full label and the URL are in the tooltip. */
 function PreviewChip({ preview }: { preview: PreviewLink }) {
   return (
-    <a
+    <NewTabLink
       href={preview.url}
-      target="_blank"
-      rel="noreferrer"
-      onClick={(e) => e.stopPropagation()}
       title={preview.label && preview.label !== preview.url ? `${preview.label}\n${preview.url}` : preview.url}
       className="inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-md border border-sky-900/60 bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20"
     >
       <Globe className="h-3 w-3 shrink-0" /> Preview :{preview.port}
-    </a>
+    </NewTabLink>
   )
 }

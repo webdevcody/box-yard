@@ -1,7 +1,7 @@
 // One Coordinator-style chat message: user bubbles, markdown replies with next-step chips,
 // tool calls (ToolLine) and notices. Shared by the Coordinator panel and the project Captain tab.
-import { memo, useState, type KeyboardEvent, type MouseEvent } from "react"
-import { Link } from "wouter"
+import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Wrench } from "lucide-react"
 import { AppLink, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
@@ -141,6 +141,39 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
   )
 })
 
+const NOTICE_CLASS = "rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400"
+
+/**
+ * A task notice: clicking it opens the task (Cmd/Ctrl or middle click in a new tab). Not an <a>: the notice's
+ * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks.
+ */
+function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
+  const [, navigate] = useLocation()
+  const href = `/tasks/${taskId}`
+  const open = (e: MouseEvent | KeyboardEvent) => {
+    if ((e.target as HTMLElement).closest("a")) return
+    if ("key" in e) {
+      if (e.key !== "Enter") return
+    } else if (e.button > 1) return
+    e.preventDefault()
+    if ("button" in e && (e.button === 1 || e.metaKey || e.ctrlKey)) window.open(href, "_blank", "noopener")
+    else navigate(href)
+  }
+  return (
+    <div
+      role="link"
+      tabIndex={0}
+      data-href={href}
+      onClick={open}
+      onAuxClick={open}
+      onKeyDown={open}
+      className={cx(NOTICE_CLASS, "cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
+    >
+      {children}
+    </div>
+  )
+}
+
 export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
@@ -168,18 +201,11 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   if (m.role === "tool") return <ToolLine m={m} />
   if (m.role === "notice") {
     const taskId = m.meta?.taskId as string | undefined
-    const body = (
-      <div className="rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400">
-        {/* The whole notice already links to its task; links inside it would nest. */}
-        <Markdown linkify={!taskId}>{m.content}</Markdown>
-      </div>
-    )
+    const body = <Markdown>{m.content}</Markdown>
     return taskId ? (
-      <Link href={`/tasks/${taskId}`} className="block hover:opacity-90">
-        {body}
-      </Link>
+      <NoticeCard taskId={taskId}>{body}</NoticeCard>
     ) : (
-      body
+      <div className={NOTICE_CLASS}>{body}</div>
     )
   }
   if (m.role === "error") {
