@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { Link } from "wouter"
-import { Boxes, ChevronRight, ExternalLink, Globe, Settings } from "lucide-react"
-import { useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
+import { Boxes, ChevronRight, ExternalLink, Globe, Info, Settings, X } from "lucide-react"
+import { useAgentSettings, useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
+import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
 import { bytes, hours, money } from "../lib/usage"
@@ -84,6 +85,8 @@ export function BoxesView() {
         </button>
       </header>
 
+      <CapacityNotice onEdit={() => openSettings("limits")} />
+
       {pool && (
         <div className="grid gap-2 sm:grid-cols-2">
           <Stat label="Boxes" value={list.length} max={pool.maxBoxes} />
@@ -117,6 +120,48 @@ export function BoxesView() {
           </div>
         )}
       </section>
+    </div>
+  )
+}
+
+function readDismissed(): string | null {
+  try {
+    return localStorage.getItem(CAPACITY_NOTICE_KEY)
+  } catch {
+    return null
+  }
+}
+
+/** One-time notice when per-box capacity is below the old defaults (2 agents, 12 resident folders). */
+function CapacityNotice({ onEdit }: { onEdit: () => void }) {
+  const settings = useAgentSettings()
+  const [dismissed, setDismissed] = useState(readDismissed)
+  const notice = settings.data ? capacityNotice(settings.data.settings) : null
+  if (!showCapacityNotice(notice, dismissed)) return null
+  const dismiss = () => {
+    try {
+      localStorage.setItem(CAPACITY_NOTICE_KEY, notice.key)
+    } catch {}
+    setDismissed(notice.key)
+  }
+  return (
+    <div role="status" className="flex gap-3 rounded-xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100" data-testid="capacity-notice">
+      <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-300" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">
+          Each {notice.workerSize} box now runs {capacityNoticeText(notice)}.
+        </div>
+        <div className="mt-1 text-sky-200/70">
+          Pool limits now default by worker size, so fewer agents share a box and older workspaces are parked sooner. Add boxes, pick a larger size or raise the limits if you
+          want the old capacity back.{" "}
+          <button onClick={onEdit} className="text-sky-300 underline-offset-2 hover:underline">
+            Edit limits
+          </button>
+        </div>
+      </div>
+      <button onClick={dismiss} aria-label="Dismiss" title="Dismiss" className="-m-1 h-7 w-7 shrink-0 rounded-md p-1 text-sky-300 hover:bg-sky-500/20">
+        <X className="h-5 w-5" />
+      </button>
     </div>
   )
 }
