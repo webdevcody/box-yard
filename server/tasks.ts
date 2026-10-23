@@ -55,6 +55,11 @@ export interface TaskManagerDeps {
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
 
+/** Who a queued task input is from. `captain:<projectId>` is that project's Captain. */
+export type InputSource = "cody" | "orchestrator" | "system" | `agent:${string}` | `captain:${string}`
+/** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
+const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
+
 /** kv key for the box a project's work goes to first. */
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
@@ -240,6 +245,8 @@ export class TaskManager {
     routingRule?: string | null
     routingReason?: string | null
     attachments?: StoredUpload[]
+    /** Who the attached files are from (a Captain labels them as its own). */
+    source?: InputSource
   }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
@@ -256,7 +263,7 @@ export class TaskManager {
     })
     const files = input.attachments ?? []
     this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
-    if (files.length) this.store.queueInput(task.id, "orchestrator", "These files go with the task:", files.map((f) => f.id))
+    if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
     this.emitTask(task.id)
     this.publishDirectory()
     this.schedule()
@@ -266,7 +273,7 @@ export class TaskManager {
   sendInput(
     taskId: string,
     content: string,
-    source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody",
+    source: InputSource = "cody",
     attachments: StoredUpload[] = [],
     route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
   ): Task {
@@ -274,8 +281,9 @@ export class TaskManager {
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
     this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
-    if (source === "cody" || source === "orchestrator") {
-      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { source, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
+    if (source === "cody" || source === "orchestrator" || source.startsWith("captain:")) {
+      const from = source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
+      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
@@ -698,11 +706,12 @@ export class TaskManager {
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
+      const projectName = (id: string) => this.store.getProject(id)?.name
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followupPrompt(inputs)] : [] })
-        : followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }])
+        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followupPrompt(inputs, projectName)] : [] })
+        : followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName)
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())

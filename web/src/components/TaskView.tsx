@@ -22,6 +22,7 @@ import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, TaskMessage } from "../../../shared/types"
+import { userMessageLabel } from "../../../shared/sender"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -154,7 +155,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       return (
         <div className={cx("rounded-lg border-l-2 border-yard-500 bg-yard-500/5 px-3 py-2", m.meta?.pending ? "opacity-60" : "")}>
           <div className="mb-0.5 text-[11px] font-semibold text-yard-400">
-            {m.meta?.kind === "task_prompt" ? "Task" : m.meta?.source === "orchestrator" ? "Coordinator" : "Cody"}
+            {userMessageLabel(m.meta)}
             {time}
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap text-zinc-200">{m.content}</div>}
