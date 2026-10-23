@@ -15,7 +15,8 @@ import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
 import { AppLink, Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
-import { Composer } from "./Composer"
+import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
 import { PublishedFile } from "./TaskFiles"
 import { AttachmentList } from "./Attachments"
@@ -54,7 +55,8 @@ export function TaskView({ id }: { id: string }) {
   const running = task.status === "working" || task.status === "starting"
 
   return (
-    <div ref={panel} className="relative flex h-full min-w-0 flex-col">
+    // Runs through the page's bottom padding so the composer lines up with the Coordinator panel's.
+    <div ref={panel} className={cx("relative flex min-w-0 flex-col", PAGE_BLEED_BOTTOM)}>
       <TaskHeader task={task} project={project} schedule={schedule} files={files} showTools={showTools} onShowTools={setShowTools} />
 
       {task.status === "needs_input" && task.question && (
@@ -86,7 +88,7 @@ export function TaskView({ id }: { id: string }) {
       />
 
       <Composer
-        className="sticky bottom-0 z-10 mt-3 border-t border-zinc-900 bg-zinc-950/95 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur"
+        className={cx(COMPOSER_FOOTER, "mt-3")}
         onSubmit={submit}
         panelRef={panel}
         placeholder={
