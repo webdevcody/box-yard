@@ -25,6 +25,14 @@ interface Pending {
 let nextKey = 0
 
 /**
+ * The bar a Composer sits in at the bottom of a chat: top border, padding and the safe-area inset. Every chat
+ * (Coordinator, Captain tab, task page) uses it, so their composers line up when shown side by side; add only
+ * horizontal spacing or a top margin to it.
+ */
+export const COMPOSER_FOOTER =
+  "sticky bottom-0 z-10 border-t border-zinc-900 bg-zinc-950/95 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur"
+
+/**
  * The message box shared by the orchestrator chat and task threads: Enter
  * sends, Shift+Enter adds a line, files can be picked, dropped or pasted.
  * `onSubmit` gets the text and the uploaded files; the box then clears itself.
@@ -34,7 +42,7 @@ let nextKey = 0
 export function Composer({
   onSubmit,
   placeholder,
-  className = "sticky bottom-0 z-10 border-t border-zinc-900 bg-zinc-950/95 px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur",
+  className = cx(COMPOSER_FOOTER, "px-3"),
   textareaRef,
   panelRef,
 }: {
