@@ -30,7 +30,7 @@ import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
-import { cleanupSummary, dfCommand, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
+import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
@@ -734,8 +734,10 @@ export class TaskManager {
     if (this.store.getBox(boxId)) {
       const before = this.store.getBox(boxId)
       this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now })
-      // Only a real change is worth a Boxes update (df runs often while placing).
-      if (Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 || before?.disk_total_bytes !== space.totalBytes) this.emitBoxes()
+      // A real change is worth a Boxes update (df runs often while placing), and so is a stale
+      // "measured … ago" on the page.
+      const changed = Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 || before?.disk_total_bytes !== space.totalBytes
+      if (changed || now - (before?.disk_checked_at ?? 0) > 60_000) this.emitBoxes()
     }
     return space
   }
@@ -789,9 +791,9 @@ export class TaskManager {
     const quiet = Date.now() - (this.lowDiskNoticeAt.get(report.boxId) ?? 0) < 60 * 60_000
     if (report.reason !== "manual" && !report.enough && !quiet && this.store.getBox(report.boxId)) {
       this.lowDiskNoticeAt.set(report.boxId, Date.now())
-      const free = report.freeAfter !== null ? `${formatBytes(report.freeAfter)} free` : "free space unknown"
+      const free = diskLine({ freeBytes: report.freeAfter, totalBytes: report.totalBytes, checkedAt: report.finishedAt })
       this.notice(
-        `⚠️ Box ${report.boxId} is low on disk: cleanup ${summary}, and it has ${free}; new workspaces need ${formatBytes(report.targetFreeBytes)}. ` +
+        `⚠️ Box ${report.boxId} is low on disk: cleanup ${summary}, and it has ${free}; new workspaces need ${formatBytes(report.targetFreeBytes)} free. ` +
           `Tasks that can't go elsewhere wait for room. Add a box (raise Max boxes) or free space on it.`,
       )
     }
@@ -1041,7 +1043,7 @@ export class TaskManager {
         this.diskRetried.delete(taskId)
         this.diskHold.delete(taskId)
         const space = await this.probeDisk(boxId, 0)
-        message = `box ${boxId} is out of disk space${space ? ` (${formatBytes(space.freeBytes)} free of ${formatBytes(space.totalBytes)})` : ""}, even after cleaning it up and retrying. Free space on it or add a box, then retry. ${message}`
+        message = `box ${boxId} is out of disk space${space ? ` (${diskLine({ freeBytes: space.freeBytes, totalBytes: space.totalBytes })})` : ""}, even after cleaning it up and retrying. Free space on it or add a box, then retry. ${message}`
       }
       this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       const prev = current.compact_prev_status

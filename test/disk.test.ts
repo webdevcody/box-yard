@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { CLEANUP_STEPS, cleanupSummary, dfCommand, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes } from "../shared/disk.js"
+import { CLEANUP_STEPS, cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, measuredAgo, parseDf, requiredFreeBytes } from "../shared/disk.js"
 import { buildCleanupOrder, parkOrder, staleTaskDir } from "../server/janitor.js"
 import type { TaskRow } from "../server/store.js"
 
@@ -24,6 +24,22 @@ describe("parseDf", () => {
   it("quotes the path", () => {
     expect(dfCommand("/workspace/home")).toBe("df -Pk '/workspace/home' | tail -n 1")
     expect(dfCommand("/a'b")).toContain(`'/a'\\''b'`)
+  })
+})
+
+describe("diskLine", () => {
+  const now = 1_000_000_000
+  it("states df free of total, with how old the reading is", () => {
+    expect(diskLine({ freeBytes: 943 * MB, totalBytes: 5 * GB, checkedAt: now - 12_000 }, now)).toBe("943 MB free of 5.0 GB · measured 12s ago")
+    expect(diskLine({ freeBytes: 943 * MB, totalBytes: 5 * GB }, now)).toBe("943 MB free of 5.0 GB")
+  })
+  it("says when there is no reading yet", () => {
+    expect(diskLine({ freeBytes: null, totalBytes: null, checkedAt: null }, now)).toBe("free space not measured yet")
+  })
+  it("ages in seconds, minutes, then hours", () => {
+    expect(measuredAgo(now - 89_000, now)).toBe("measured 89s ago")
+    expect(measuredAgo(now - 5 * 60_000, now)).toBe("measured 5m ago")
+    expect(measuredAgo(now - 3 * 3600_000, now)).toBe("measured 3h ago")
   })
 })
 
