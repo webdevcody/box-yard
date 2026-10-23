@@ -636,6 +636,15 @@ function CostsPanel({
     />
   )
   const sizeLabel: Record<BoxSize, string> = { small: "Small", medium: "Medium", large: "Large" }
+  // A server older than this UI sends no cost settings and would reject saving them.
+  if (!s.costRates || !s.budget)
+    return (
+      <Panel section="costs">
+        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
+          The server is running an older build without cost settings. Rebuild and restart it to set rates and budgets.
+        </div>
+      </Panel>
+    )
   return (
     <Panel section="costs">
       <Row
