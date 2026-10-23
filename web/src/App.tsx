@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useState } from "react"
 import { PAGE_PADDING } from "./lib/layout"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
-import { Menu, MessageSquare, X } from "lucide-react"
+import { Menu, MessageSquare } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { keys, useMe } from "./lib/queries"
 import { useServerEvents } from "./lib/stream"
@@ -36,6 +36,7 @@ export function App() {
   const sidebarSize = useResizable({ key: "box-yard:sidebar-width", defaultWidth: 256, min: 200, max: 360, edge: "right" })
   const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
   const closeNav = useCallback(() => setNavOpen(false), [])
+  const closeChat = useCallback(() => setChatOpen(false), [])
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })
@@ -88,10 +89,7 @@ export function App() {
         style={{ "--panel-w": `${chatSize.width}px` } as CSSProperties}
       >
         <ResizeHandle {...chatSize.handle} className="xl:block" />
-        <button onClick={() => setChatOpen(false)} className="absolute top-[calc(0.5rem+env(safe-area-inset-top))] right-3 z-10 grid h-11 w-11 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200 xl:hidden" aria-label="Close orchestrator">
-          <X className="h-4 w-4" />
-        </button>
-        <ChatPanel />
+        <ChatPanel onClose={closeChat} />
       </div>
       {!chatOpen && (
         <button
