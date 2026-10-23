@@ -70,14 +70,10 @@ export function PrChip({ task, variant = "chip", className }: { task: PrTask; va
   const s = PR_STYLE[state]
   const Icon = s.icon
   return (
-    <a
+    <NewTabLink
       href={task.prUrl}
-      target="_blank"
-      rel="noreferrer"
       title={prTooltip(task) ?? undefined}
       data-pr-state={state}
-      // Cards are links themselves: open the PR, not the task.
-      onClick={(e) => e.stopPropagation()}
       className={cx(
         "inline-flex shrink-0 items-center gap-1 whitespace-nowrap",
         variant === "chip" ? cx("rounded-md border px-1.5 py-0.5 font-medium transition", s.chip) : cx("hover:underline", s.link),
@@ -85,7 +81,7 @@ export function PrChip({ task, variant = "chip", className }: { task: PrTask; va
       )}
     >
       <Icon className={variant === "chip" ? "h-3 w-3" : "h-3.5 w-3.5"} /> {prLabel(task)}
-    </a>
+    </NewTabLink>
   )
 }
 
@@ -202,8 +198,27 @@ const MARKDOWN_COMPONENTS: Components = {
 }
 
 /**
- * A link that knows the app: in-app paths navigate through the router (Cmd/Ctrl/middle-click still open a tab),
- * previewable files open in the preview modal, other files and sites in a new tab. Hovering an entity link shows its title and current status.
+ * A link to another site (a GitHub PR, a preview, docs): always opens in a new tab without access to this one.
+ * Cards are often clickable themselves, so the click stops here and opens the link, not the card.
+ */
+export function NewTabLink({ onClick, ...rest }: ComponentProps<"a">) {
+  return (
+    <a
+      {...rest}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => {
+        e.stopPropagation()
+        onClick?.(e)
+      }}
+    />
+  )
+}
+
+/**
+ * A link that knows the app: in-app paths (relative or on Box Yard's own origin) navigate through the router
+ * (Cmd/Ctrl/middle-click still open a tab), previewable files open in the preview modal, other files and sites
+ * in a new tab. Clicks never reach a clickable card around the link. Hovering an entity link shows its title and current status.
  */
 export function AppLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
   const [, navigate] = useLocation()
@@ -222,11 +237,13 @@ export function AppLink({ href, title, className, children }: { href: string; ti
     )
   if (target.kind !== "app")
     return (
-      <a href={target.href} title={title} className={className} target="_blank" rel="noopener noreferrer" onMouseEnter={onMouseEnter}>
+      <NewTabLink href={target.href} title={title} className={className}>
         {children}
-      </a>
+      </NewTabLink>
     )
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    // A link inside a clickable card (a notice, a row) goes where it points, not where the card does.
+    e.stopPropagation()
     if (!followAppLink(e, target.href, navigate)) return
     // pushState doesn't fire hashchange; pages that scroll to #id listen for it.
     if (target.href.includes("#")) window.dispatchEvent(new HashChangeEvent("hashchange"))
