@@ -10,7 +10,7 @@ import { ArtifactLink } from "./FileLink"
 import { formatSize } from "./Attachments"
 import { TimeAgo, cx } from "./ui"
 import { useArtifacts } from "../lib/queries"
-import { FILTER_MIN, fileKind, fileType, galleryOf, isImageFile, latestAt, listFiles, seenKey, unseenCount, type TaskFile } from "../lib/taskFiles"
+import { FILTER_MIN, fileKind, fileType, galleryOf, isImageFile, latestAt, listFiles, seenKey, shortTitle, unseenCount, type TaskFile } from "../lib/taskFiles"
 import type { PreviewKind } from "../lib/filePreview"
 import type { Artifact } from "../../../shared/types"
 
@@ -144,7 +144,7 @@ function FilesDrawer({ taskId, projectId, files, seenAt, onClose }: { taskId: st
                     <img src={f.url} alt="" loading="lazy" className="aspect-video w-full bg-zinc-950 object-cover object-top" />
                     <span className="flex items-center gap-1.5 px-2 py-1.5 text-xs">
                       {isNew(f) && <NewDot />}
-                      <span className="min-w-0 flex-1 truncate text-zinc-300 group-hover:text-zinc-100">{f.title}</span>
+                      <span className="min-w-0 flex-1 truncate text-zinc-300 group-hover:text-zinc-100">{shortTitle(f.title, s.label)}</span>
                       <span className="shrink-0 text-[10px] text-zinc-600">
                         <TimeAgo ts={f.createdAt} />
                       </span>
@@ -165,7 +165,7 @@ function FilesDrawer({ taskId, projectId, files, seenAt, onClose }: { taskId: st
                   >
                     <KindIcon kind={fileKind(f)} />
                     {isNew(f) && <NewDot />}
-                    <span className="min-w-0 flex-1 truncate text-zinc-200">{f.title}</span>
+                    <span className="min-w-0 flex-1 truncate text-zinc-200">{shortTitle(f.title, s.label)}</span>
                     <span className="shrink-0 text-xs whitespace-nowrap text-zinc-500">
                       {fileType(f)} · {formatSize(f.size)} · <TimeAgo ts={f.createdAt} />
                     </span>
@@ -208,14 +208,23 @@ export const PublishedFile = memo(function PublishedFile({ artifactId, url, text
   return (
     <ArtifactLink
       artifact={{ projectId: null, taskId: null, ...f }}
-      className="inline-flex max-w-full items-center gap-2 rounded-lg border border-zinc-800/80 bg-zinc-900/60 py-1 pr-2.5 pl-1 text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+      title={`Published ${f.title}`}
+      className="inline-flex max-w-full items-center gap-2 rounded-md border border-zinc-800/80 bg-zinc-900/60 py-0.5 pr-2 pl-0.5 align-middle text-xs text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
     >
-      {image ? <img src={f.url} alt="" loading="lazy" className="h-8 w-12 shrink-0 rounded border border-zinc-800 bg-zinc-950 object-cover object-top" /> : <span className="grid h-8 w-8 shrink-0 place-items-center"><KindIcon kind={fileKind(f)} /></span>}
-      <span className="min-w-0">
-        <span className="block text-[10px] text-zinc-600">Published</span>
-        <span className="block truncate text-zinc-300">{f.title}</span>
-      </span>
-      {f.size > 0 && <span className="shrink-0 text-[10px] text-zinc-600">{fileType(f)} · {formatSize(f.size)}</span>}
+      {image ? (
+        <img src={f.url} alt="" loading="lazy" className="h-6 w-9 shrink-0 rounded-sm border border-zinc-800 bg-zinc-950 object-cover object-top" />
+      ) : (
+        <span className="grid h-6 w-6 shrink-0 place-items-center">
+          <KindIcon kind={fileKind(f)} className="h-3.5 w-3.5" />
+        </span>
+      )}
+      <span className="shrink-0 text-zinc-600">Published</span>
+      <span className="min-w-0 truncate text-zinc-300">{f.title}</span>
+      {f.size > 0 && (
+        <span className="shrink-0 text-[10px] text-zinc-600 max-sm:hidden">
+          {fileType(f)} · {formatSize(f.size)}
+        </span>
+      )}
     </ArtifactLink>
   )
 })

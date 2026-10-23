@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { fileType, galleryOf, latestAt, listFiles, matchesFile, newestFirst, titleStem, unseenCount, type TaskFile } from "../web/src/lib/taskFiles"
+import { fileType, shortTitle, galleryOf, latestAt, listFiles, matchesFile, newestFirst, titleStem, unseenCount, type TaskFile } from "../web/src/lib/taskFiles"
 
 let n = 0
 function file(title: string, filename: string, createdAt: number, mime = ""): TaskFile {
@@ -84,6 +84,13 @@ describe("helpers", () => {
     expect(unseenCount(files, 20)).toBe(1)
     expect(unseenCount(files, latestAt(files))).toBe(0)
     expect(latestAt([])).toBe(0)
+  })
+
+  it("drops the group label from grouped titles", () => {
+    expect(shortTitle("Captain tab after (mobile)", "Captain tab")).toBe("after (mobile)")
+    expect(shortTitle("Captain tab: notes", "Captain tab")).toBe("notes")
+    expect(shortTitle("Captain tab", "Captain tab")).toBe("Captain tab")
+    expect(shortTitle("Perf report", null)).toBe("Perf report")
   })
 
   it("sorts ties stably by id", () => {

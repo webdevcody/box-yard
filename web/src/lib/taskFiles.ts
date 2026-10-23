@@ -96,6 +96,12 @@ function labelFor(files: TaskFile[]): string {
   return (cut > 0 ? title.slice(0, cut) : title).trim().replace(BEFORE_AFTER, "").trim() || title
 }
 
+/** A grouped file's title without its group's label ("Captain tab after (mobile)" → "after (mobile)"). */
+export function shortTitle(title: string, label: string | null): string {
+  if (!label || !title.toLowerCase().startsWith(label.toLowerCase())) return title
+  return title.slice(label.length).replace(/^[\s:—–-]+/, "") || title
+}
+
 /** What the preview gets for a file. */
 export const previewItemOf = (f: TaskFile): PreviewItem => ({ url: f.url, name: f.filename, size: f.size, mime: f.mime, title: f.title })
 
