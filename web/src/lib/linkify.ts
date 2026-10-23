@@ -125,7 +125,10 @@ export function refForHref(href: string, index: EntityIndex): EntityRef | null {
  */
 export function linkTarget(href: string, origin?: string): { kind: "app" | "file" | "external"; href: string } {
   let path = href
-  if (origin && sameOrigin(href, origin)) path = href.slice(origin.length) || "/"
+  if (origin && sameOrigin(href, origin)) {
+    path = href.slice(origin.length)
+    if (!path.startsWith("/")) path = "/" + path
+  }
   if (!path.startsWith("/") || path.startsWith("//")) return { kind: "external", href }
   if (/^\/(?:artifacts|api|uploads)\//.test(path)) return { kind: "file", href: path }
   return { kind: "app", href: path }
