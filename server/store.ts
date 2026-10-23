@@ -208,9 +208,16 @@ export interface BoxRow {
   usage_source: "actual" | "estimated"
 }
 
+/** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
+export type ClaudeUsageSource = "task" | "orchestrator" | "captain"
+
+/** SQL filters for the Coordinator and Captain usage lines, so older Captain rows still land on the Captain line. */
+export const COORDINATOR_USAGE_WHERE = "WHERE source = 'orchestrator' AND project_id IS NULL"
+export const CAPTAIN_USAGE_WHERE = "WHERE source = 'captain' OR (source = 'orchestrator' AND project_id IS NOT NULL)"
+
 export interface ClaudeUsageRow {
   id: string
-  source: "task" | "orchestrator"
+  source: ClaudeUsageSource
   run_kind: string
   task_id: string | null
   project_id: string | null
@@ -1231,7 +1238,7 @@ export class Store {
   // ---------- usage and costs ----------
 
   recordClaudeUsage(input: {
-    source: "task" | "orchestrator"
+    source: ClaudeUsageSource
     runKind: string
     taskId?: string | null
     projectId?: string | null
@@ -1344,7 +1351,8 @@ export class Store {
     const projects = this.usageProjects()
     const tasks = this.usageTasks()
     const boxes = this.listBoxes().map((b) => this.boxUsageTotal(b, settings.costRates, now))
-    const orchestrator = this.claudeTotals("WHERE source = 'orchestrator'")
+    const orchestrator = this.claudeTotals(COORDINATOR_USAGE_WHERE)
+    const captains = this.claudeTotals(CAPTAIN_USAGE_WHERE)
     return {
       generatedAt: now,
       rates: settings.costRates,
@@ -1354,6 +1362,7 @@ export class Store {
       tasks,
       boxes,
       orchestrator,
+      captains,
     }
   }
 

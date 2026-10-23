@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react"
 import { Link, useSearchParams } from "wouter"
-import { Activity, Boxes, CheckCircle2, ChevronRight, History, Inbox as InboxIcon, Layers, Search } from "lucide-react"
+import { Activity, Boxes, CheckCircle2, History, Inbox as InboxIcon, Layers, Search } from "lucide-react"
 import { useHealth, useProjects, useTasks } from "../lib/queries"
 import { parseSort } from "../lib/projectTasks"
 import {
@@ -10,15 +10,13 @@ import {
   inYardView,
   olderFinishedCount,
   parseYardTab,
-  recentlyFinished,
   yardCompare,
   yardCounts,
   type YardTab,
 } from "../lib/yardTasks"
-import { Empty, STATUS, Select, TimeAgo, cx } from "./ui"
+import { Empty, STATUS, Select, cx } from "./ui"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, isTyping, useUrlQuery, withParam } from "./TaskFilters"
-import type { Task } from "../../../shared/types"
 
 const TAB_ICONS: Record<YardTab, typeof Activity> = { active: Activity, needs_you: InboxIcon, recent: History, all: Layers }
 
@@ -63,7 +61,6 @@ export function YardView() {
     resetKey: `${tab}|${projectId}|${older}|${tab === "all" ? `${sort}|${query}` : ""}`,
   })
   const shown = stable.entries
-  const strip = useMemo(() => (tab === "active" ? recentlyFinished(scoped) : []), [scoped, tab])
   const olderCount = useMemo(() => (tab === "recent" ? olderFinishedCount(scoped, now) : 0), [scoped, tab, now])
   /** Tasks per project in the current tab, for the project picker. */
   const perProject = useMemo(() => {
@@ -153,27 +150,12 @@ export function YardView() {
             </div>
           )}
 
-          {tab === "active" && (
-            <>
-              {strip.length > 0 && <RecentStrip tasks={strip} names={names} href={tabHref(params, "recent")} />}
-              {shown.length ? (
-                <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
-              ) : (
-                <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
-                  No agents are working right now. Ask the Coordinator for something new
-                  {counts.needs_you > 0 && (
-                    <>
-                      , or{" "}
-                      <Link href={tabHref(params, "needs_you")} className="text-yard-400 hover:text-yard-300">
-                        see the {counts.needs_you} {counts.needs_you === 1 ? "task" : "tasks"} waiting on you
-                      </Link>
-                    </>
-                  )}
-                  .
-                </Empty>
-              )}
-            </>
-          )}
+          {tab === "active" &&
+            (shown.length ? (
+              <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
+            ) : (
+              <ActiveEmpty needsYou={counts.needs_you} needsYouHref={tabHref(params, "needs_you")} recentHref={tabHref(params, "recent")} />
+            ))}
 
           {tab === "needs_you" &&
             (shown.length ? (
@@ -226,37 +208,25 @@ export function YardView() {
   )
 }
 
-/** A compact row of the last few finished tasks, so the Active tab also answers "what just finished?". */
-function RecentStrip({ tasks, names, href }: { tasks: Task[]; names: Map<string, string>; href: string }) {
+/** The Active tab with no agents working: point at what's waiting and what just finished. */
+export function ActiveEmpty({ needsYou, needsYouHref, recentHref }: { needsYou: number; needsYouHref: string; recentHref: string }) {
   return (
-    <section aria-label="Recently finished">
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-xs font-semibold tracking-wide text-zinc-500 uppercase">Recently finished</h2>
-        <Link href={href} className="inline-flex items-center gap-0.5 text-xs text-zinc-500 hover:text-zinc-200">
-          See recent <ChevronRight className="h-3.5 w-3.5" />
+    <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
+      No agents are working right now. Ask the Coordinator for something new
+      {needsYou > 0 && (
+        <>
+          , or{" "}
+          <Link href={needsYouHref} className="text-yard-400 hover:text-yard-300">
+            see the {needsYou} {needsYou === 1 ? "task" : "tasks"} waiting on you
+          </Link>
+        </>
+      )}
+      .
+      <div className="mt-3">
+        <Link href={recentHref} className="text-yard-400 hover:text-yard-300">
+          See recently finished →
         </Link>
       </div>
-      <div className="scroll-thin -mx-1 grid auto-cols-[minmax(14rem,1fr)] grid-flow-col gap-2 overflow-x-auto px-1 pb-1 sm:auto-cols-[minmax(10rem,1fr)]">
-        {tasks.map((t) => (
-          <Link
-            key={t.id}
-            href={`/tasks/${t.id}`}
-            title={`${t.title} · ${STATUS[t.status].label}`}
-            className="block min-w-0 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-2 transition hover:border-zinc-700 hover:bg-zinc-900"
-          >
-            <div className="flex items-center gap-2">
-              <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", STATUS[t.status].dot)} />
-              <span className="truncate text-sm text-zinc-200">{t.title}</span>
-            </div>
-            <div className="mt-0.5 flex gap-2 pl-3.5 text-xs text-zinc-500">
-              <span className="min-w-0 flex-1 truncate">{names.get(t.projectId)}</span>
-              <span className="shrink-0">
-                {STATUS[t.status].label} · <TimeAgo ts={t.updatedAt} />
-              </span>
-            </div>
-          </Link>
-        ))}
-      </div>
-    </section>
+    </Empty>
   )
 }

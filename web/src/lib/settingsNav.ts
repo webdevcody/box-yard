@@ -15,8 +15,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
     label: "Coordinator",
-    description: "The model behind the chat that runs the yard, and when it compacts its context.",
-    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact"],
+    description: "The model behind the chat that runs the yard, the per-project Captains, and when they compact their context.",
+    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort"],
   },
   {
     key: "agents",
@@ -74,6 +74,8 @@ export function stepSection(current: SettingsSection, delta: number): SettingsSe
 /** Env vars that can supply a setting, shown next to "from env". */
 export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   orchestratorModel: "ORCHESTRATOR_MODEL",
+  captainModel: "CAPTAIN_MODEL",
+  captainEffort: "CAPTAIN_EFFORT",
   agentModel: "WORKER_MODEL",
   workerSize: "WORKER_SIZE",
   maxBoxes: "BOX_POOL_MAX",

@@ -59,11 +59,6 @@ export function olderFinishedCount(tasks: Task[], now: number): number {
 
 const newestFirst = (a: Task, b: Task) => b.updatedAt - a.updatedAt
 
-/** The last few finished tasks, newest first, for the strip on top of the Active tab. */
-export function recentlyFinished(tasks: Task[], limit = 5): Task[] {
-  return tasks.filter(isFinished).sort(newestFirst).slice(0, limit)
-}
-
 export interface YardOptions {
   tab: YardTab
   now: number

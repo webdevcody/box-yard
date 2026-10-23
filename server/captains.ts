@@ -12,6 +12,9 @@ import { routingInstructions } from "./routing.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
+import { attachmentNote } from "./orchestrator.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
+import { captainSourceOf } from "../shared/captain.js"
 import {
   SUMMARY_PROMPT,
   captainCompactionsDir,
@@ -25,7 +28,7 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
-import type { CaptainCompaction, CaptainMessage, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
+import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 const NO_UPDATE = "(no update)"
@@ -47,6 +50,21 @@ const usageKey = (projectId: string) => `captain_usage:${projectId}`
 function captainSummaryPrompt(project: Project) {
   return SUMMARY_PROMPT.replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
 }
+
+export interface CaptainSendOptions {
+  /** Client-chosen message id (the Captain tab sends one for optimistic updates). */
+  id?: string
+  attachments?: Attachment[]
+  /** Who sent it. Stored as meta.source so the transcript can label it; defaults to the Coordinator. */
+  source?: CaptainSource
+  /** The Coordinator tool that sent it (send_to_captain or ask_captain). */
+  tool?: string
+}
+
+const SOURCE_LABEL: Record<CaptainSource, string> = { cody: "From Cody", coordinator: "From the Coordinator", schedule: "From a schedule" }
+
+/** Up to this much of a Captain's reply is kept on the Coordinator's tool line. */
+const TOOL_REPLY_MAX = 20_000
 
 function briefTask(t: Task) {
   return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}`
@@ -111,14 +129,17 @@ export class CaptainManager {
     return this.get(projectId).state()
   }
 
-  send(projectRef: string, content: string, id?: string) {
-    return this.find(projectRef).send(content, id)
+  send(projectRef: string, content: string, opts: CaptainSendOptions = {}) {
+    return this.find(projectRef).send(content, opts)
   }
 
   async ask(projectRef: string, content: string, timeoutSeconds = 120) {
     const captain = this.find(projectRef)
-    captain.send(content)
-    return this.wait(captain.projectId, timeoutSeconds)
+    const sent = captain.send(content, { source: "coordinator", tool: "ask_captain" })
+    const result = await this.wait(captain.projectId, timeoutSeconds)
+    // Only what the Captain said after this question, not an older reply.
+    const after = result.messages.filter((m) => m.createdAt >= sent.createdAt && m.id !== sent.id && (m.role === "assistant" || m.role === "error"))
+    return { ...result, messageId: sent.id, reply: after.length ? after.map((m) => m.content).join("\n\n").slice(0, TOOL_REPLY_MAX) : null }
   }
 
   async wait(projectRef: string, timeoutSeconds = 120) {
@@ -128,7 +149,7 @@ export class CaptainManager {
     while (Date.now() < deadline && captain.active) await new Promise((r) => setTimeout(r, 500))
     const messages = this.store.listCaptainMessages(captain.projectId, 30)
     const last = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "error")
-    return { allFinished: !captain.active, state: captain.state(), lastReply: last?.content ?? null, messages: messages.slice(-8) }
+    return { projectId: captain.projectId, allFinished: !captain.active, state: captain.state(), lastReply: last?.content ?? null, messages: messages.slice(-8) }
   }
 
   requestCompact(projectId: string) {
@@ -219,8 +240,9 @@ class Captain {
     fs.writeFileSync(this.mcpConfigPath, this.mcpConfig, { mode: 0o600 })
   }
 
-  send(content: string, id?: string): CaptainMessage {
-    const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), null, id)
+  send(content: string, { id, attachments = [], source = "coordinator", tool }: CaptainSendOptions = {}): CaptainMessage {
+    const meta = { source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}) }
+    const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), meta, id)
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
     this.autoTurns = 0
@@ -338,7 +360,7 @@ class Captain {
     return this.store
       .listCaptainMessages(this.project.id, 200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content)
+      .map((m) => `[${SOURCE_LABEL[captainSourceOf(m)]}]\n${m.content}${attachmentNote(m.meta?.attachments)}`)
       .filter((text) => text.trim())
   }
 
@@ -454,7 +476,7 @@ class Captain {
     try {
       const s = this.session()
       const before = this.usage().tokens
-      const model = this.settings.get().orchestratorModel
+      const model = this.settings.get().captainModel
       const summary = await this.run(captainSummaryPrompt(this.project), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
@@ -494,7 +516,7 @@ class Captain {
   private claudeArgs(kind: RunKind, sessionId: string, resume: boolean): string[] {
     const st = this.settings.get()
     const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
-    const model = ["--model", st.orchestratorModel]
+    const model = ["--model", st.captainModel]
     if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
     if (kind === "context") return ["-p", ...session, ...model]
     return [
@@ -515,7 +537,7 @@ class Captain {
       ...session,
       ...model,
       "--effort",
-      st.orchestratorEffort,
+      st.captainEffort,
     ]
   }
 
@@ -572,15 +594,20 @@ class Captain {
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
           const tokens = msg.message.model === "<synthetic>" || kind !== "turn" ? null : contextTokens(msg.message.usage)
           if (tokens) this.setUsage(tokens)
-          const text = msg.message.content
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("")
-            .trim()
+          // The hidden next-step block becomes chips under the reply; reports upward don't carry it.
+          const parsed = parseNextSteps(
+            msg.message.content
+              .filter((b: any) => b.type === "text")
+              .map((b: any) => b.text)
+              .join("")
+              .trim(),
+          )
+          const text = parsed.content.trim()
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
           if (text && text !== NO_UPDATE) {
-            const m = this.store.addCaptainMessage(this.project.id, "assistant", text)
+            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
+            const m = this.store.addCaptainMessage(this.project.id, "assistant", text, meta)
             this.hub.broadcast({ type: "captain.message", message: m })
           }
           for (const b of msg.message.content) {
@@ -622,14 +649,14 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
-        // Captain runs count toward the orchestrator bucket and the project's totals.
+        // Captain runs get their own usage line and count toward the project's totals.
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
-            source: "orchestrator",
+            source: "captain",
             runKind: kind,
             projectId: this.project.id,
             sessionId,
-            model: resultModel ?? this.settings.get().orchestratorModel,
+            model: resultModel ?? this.settings.get().captainModel,
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,

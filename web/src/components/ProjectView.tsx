@@ -1,20 +1,16 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2 } from "lucide-react"
+import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, X } from "lucide-react"
 import {
   newClientId,
   useAddNote,
   useArtifacts,
   useBoxes,
-  useCaptainCompactions,
-  useCaptainMessages,
   useCaptainState,
-  useCompactCaptain,
   useCreateTask,
   useDeleteProject,
   useProjects,
   useSchedules,
-  useSendCaptainMessage,
   useTasks,
   useUpdateProject,
 } from "../lib/queries"
@@ -34,8 +30,10 @@ import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { SearchBox, SortSelect, TabBar, useSetParam, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
-import type { Artifact, BoxInfo, CaptainMessage, Project, Task, TaskStatus } from "../../../shared/types"
+import { CaptainTab } from "./CaptainTab"
+import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { rememberProjectTab } from "../lib/breadcrumb"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -75,6 +73,9 @@ export function ProjectView({ id }: { id: string }) {
   const project = projects.data?.find((p) => p.id === id)
   const tab: Tab = TABS.find((t) => t.key === params.get("tab"))?.key ?? "tasks"
 
+  // The task page breadcrumb returns to this tab.
+  useEffect(() => rememberProjectTab(id, tab), [id, tab])
+
   // A new task dialog left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
 
@@ -101,7 +102,8 @@ export function ProjectView({ id }: { id: string }) {
   const counts: Partial<Record<Tab, number>> = { tasks: openCount, schedules: scheduleCount, notes: project.notes.length, files: files.length }
 
   return (
-    <div className="space-y-5">
+    // The Captain chat fills the rest of the page; other tabs flow and scroll with it.
+    <div className={cx("space-y-5", tab === "captain" && "flex h-full flex-col")}>
       <ProjectHeader
         project={project}
         tasks={list}
@@ -124,7 +126,7 @@ export function ProjectView({ id }: { id: string }) {
       {tab === "captain" && <CaptainTab project={project} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
       {tab === "notes" && <Notes project={project} />}
-      {tab === "files" && <Files files={files} />}
+      {tab === "files" && <Files files={files} tasks={list} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
       {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
@@ -295,133 +297,6 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
   )
 }
 
-function CaptainTab({ project }: { project: Project }) {
-  const state = useCaptainState(project.id)
-  const messages = useCaptainMessages(project.id)
-  const compactions = useCaptainCompactions(project.id)
-  const send = useSendCaptainMessage(project.id)
-  const compact = useCompactCaptain(project.id)
-  const [text, setText] = useState("")
-  const submit = () => {
-    const content = text.trim()
-    if (!content) return
-    send.mutate({ id: newClientId("chat"), content })
-    setText("")
-  }
-  const transcript = messages.data ?? []
-  const busy = Boolean(state.data?.busy)
-
-  return (
-    <section className="grid gap-4 pb-6 lg:grid-cols-[minmax(0,1fr)_18rem]">
-      <div className="min-w-0 space-y-3">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <div>
-              <h2 className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-                <Bot className="h-4 w-4 text-yard-300" /> Project Captain
-              </h2>
-              <p className="mt-1 text-xs text-zinc-500">Persistent project session for routing tasks, notes and follow-ups.</p>
-            </div>
-            <div className="ml-auto flex items-center gap-2">
-              <span className={cx("rounded-full px-2 py-0.5 text-xs", busy ? "bg-sky-500/15 text-sky-300" : "bg-zinc-800 text-zinc-400")}>{busy ? "Working" : "Idle"}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                disabled={!state.data || state.data.compacting || state.data.compactQueued}
-                onClick={() => compact.mutate()}
-              >
-                Compact
-              </Button>
-            </div>
-          </div>
-          {state.data?.error && <p className="mt-3 rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-xs text-red-200">{state.data.error}</p>}
-        </div>
-
-        <div className="rounded-xl border border-zinc-800 bg-zinc-950/30">
-          <div className="border-b border-zinc-900 px-4 py-2 text-xs font-medium text-zinc-500">Transcript</div>
-          {messages.isLoading ? null : transcript.length === 0 ? (
-            <Empty icon={<Bot className="h-8 w-8" />} title="No Captain history yet">
-              Message the Captain or ask the Coordinator to route project work here.
-            </Empty>
-          ) : (
-            <ol className="max-h-[60vh] space-y-3 overflow-y-auto p-3">
-              {transcript.map((m) => (
-                <CaptainBubble key={m.id} message={m} />
-              ))}
-            </ol>
-          )}
-          <form
-            className="border-t border-zinc-900 p-3"
-            onSubmit={(e) => {
-              e.preventDefault()
-              submit()
-            }}
-          >
-            <textarea
-              className={cx(inputClass, "min-h-20 resize-y")}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={`Message ${project.name}'s Captain directly`}
-            />
-            <div className="mt-2 flex justify-end">
-              <Button type="submit" variant="primary" disabled={!text.trim() || send.isPending}>
-                Send to Captain
-              </Button>
-            </div>
-          </form>
-        </div>
-      </div>
-
-      <aside className="space-y-3">
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
-          <h3 className="text-sm font-semibold text-zinc-100">Compactions</h3>
-          <p className="mt-1 text-xs text-zinc-500">Captain context summaries are separate from task compactions.</p>
-          {(compactions.data ?? []).length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-500">None yet.</p>
-          ) : (
-            <ul className="mt-3 space-y-2">
-              {[...(compactions.data ?? [])].reverse().map((c) => (
-                <li key={c.file} className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-2 text-xs">
-                  <div className="flex items-center gap-2 text-zinc-400">
-                    <TimeAgo ts={c.at} />
-                    <span className="ml-auto rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-500">{c.trigger}</span>
-                  </div>
-                  <details className="mt-2">
-                    <summary className="cursor-pointer text-yard-400 hover:text-yard-300">View summary</summary>
-                    <pre className="scroll-thin mt-2 max-h-64 overflow-auto whitespace-pre-wrap rounded bg-black/30 p-2 text-[11px] text-zinc-300">{c.content}</pre>
-                  </details>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      </aside>
-    </section>
-  )
-}
-
-function CaptainBubble({ message }: { message: CaptainMessage }) {
-  const tone =
-    message.role === "assistant"
-      ? "border-yard-500/30 bg-yard-500/10 text-zinc-100"
-      : message.role === "user"
-      ? "border-zinc-700 bg-zinc-900 text-zinc-100"
-      : message.role === "error"
-      ? "border-red-900/60 bg-red-950/30 text-red-200"
-      : "border-zinc-800 bg-zinc-950/40 text-zinc-300"
-  return (
-    <li className={cx("rounded-xl border px-3 py-2", tone)}>
-      <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
-        <span>{message.role === "assistant" ? "captain" : message.role}</span>
-        <span className="ml-auto normal-case tracking-normal">
-          <TimeAgo ts={message.createdAt} />
-        </span>
-      </div>
-      <p className="whitespace-pre-wrap break-words text-sm">{message.content}</p>
-    </li>
-  )
-}
-
 function Notes({ project }: { project: Project }) {
   const add = useAddNote()
   const [text, setText] = useState("")
@@ -496,29 +371,57 @@ function Notes({ project }: { project: Project }) {
   )
 }
 
-function Files({ files }: { files: Artifact[] }) {
+function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
+  // `?task=<id>` (the task header's "Open in Files tab") shows only that task's files.
+  const [params, setParams] = useSearchParams()
+  const taskId = params.get("task")
+  const files = taskId ? all.filter((a) => a.taskId === taskId) : all
+  const filter = taskId && (
+    <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
+      <span className="inline-flex min-w-0 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 py-0.5 pr-0.5 pl-2 text-zinc-300">
+        <span className="truncate">From {tasks.find((t) => t.id === taskId)?.title ?? taskId}</span>
+        <button
+          type="button"
+          aria-label="Show all files"
+          className="grid h-11 w-11 shrink-0 place-items-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 sm:h-5 sm:w-5"
+          onClick={() => setParams((p) => withParam(p, "task", null), { replace: true })}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </span>
+      <Link href={`/tasks/${taskId}`} className="shrink-0 hover:text-zinc-300 hover:underline">
+        Open task
+      </Link>
+    </div>
+  )
   if (files.length === 0)
     return (
-      <Empty icon={<FileText className="h-8 w-8" />} title="No files yet">
-        Reports, pages and exports that agents publish show up here.
-      </Empty>
+      <>
+        {filter}
+        <Empty icon={<FileText className="h-8 w-8" />} title="No files yet">
+          Reports, pages and exports that agents publish show up here.
+        </Empty>
+      </>
     )
   return (
-    <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80" {...PREVIEW_GROUP}>
-      {[...files]
-        .sort((a, b) => b.createdAt - a.createdAt)
-        .map((a) => (
-          <li key={a.id} className="flex min-h-11 flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
-            <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
-            <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
-              {a.title}
-            </ArtifactLink>
-            <span className="ml-auto shrink-0 text-xs text-zinc-500 max-sm:w-full max-sm:pl-7">
-              {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
-            </span>
-          </li>
-        ))}
-    </ul>
+    <div>
+      {filter}
+      <ul className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80" {...PREVIEW_GROUP}>
+        {[...files]
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .map((a) => (
+            <li key={a.id} className="flex min-h-11 flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
+              <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
+              <ArtifactLink artifact={a} className="min-w-0 truncate text-zinc-200 hover:text-yard-400">
+                {a.title}
+              </ArtifactLink>
+              <span className="ml-auto shrink-0 text-xs text-zinc-500 max-sm:w-full max-sm:pl-7">
+                {(a.size / 1024).toFixed(1)} KB · <TimeAgo ts={a.createdAt} />
+              </span>
+            </li>
+          ))}
+      </ul>
+    </div>
   )
 }
 

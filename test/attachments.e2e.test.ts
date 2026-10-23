@@ -4,7 +4,7 @@ import path from "node:path"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
-import type { Attachment, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
+import type { Attachment, CaptainMessage, ChatMessage, Project, Task, TaskMessage } from "../shared/types.js"
 import { freePort, testConfig, waitFor } from "./helpers.js"
 
 interface Running {
@@ -129,6 +129,18 @@ describe("attachments in messages", () => {
     const [sent] = (msg.meta?.attachments ?? []) as Attachment[]
     expect(sent!.path).toBe(path.join(r.config.dataDir, "uploads", file.id, "bug.png"))
     expect(fs.readFileSync(sent!.path!).equals(binary)).toBe(true)
+  })
+
+  it("keeps attachments on direct Captain messages", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const file = (await (await upload(r, "spec.png", binary)).json()) as Attachment
+    const msg = await call<CaptainMessage>(r, "POST", `/api/projects/${p.id}/captain/messages`, { id: "cap_attach0001", content: "", attachments: [file.id] })
+    const [sent] = (msg.meta?.attachments ?? []) as Attachment[]
+    expect(sent!.path).toBe(path.join(r.config.dataDir, "uploads", file.id, "spec.png"))
+    await expect(call(r, "POST", `/api/projects/${p.id}/captain/messages`, { id: "cap_attach0002", content: "" })).rejects.toThrow(/empty/)
+    // The Captain answers in the background; let it finish before the store closes.
+    await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy, "Captain idle")
   })
 
   it("writes binary attachments into the task's box folder and names them in the prompt", async () => {

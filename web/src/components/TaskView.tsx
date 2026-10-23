@@ -17,6 +17,7 @@ import { AppLink, Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { Composer } from "./Composer"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
+import { PublishedFile } from "./TaskFiles"
 import { AttachmentList } from "./Attachments"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
@@ -43,13 +44,14 @@ export function TaskView({ id }: { id: string }) {
     (content: string) => sendChat.mutate({ id: newClientId("chat"), content, attachments: [] }),
     [sendChat.mutate],
   )
+  // Memoized so the header's files chip and drawer only recompute when this task's files change.
+  const files = useMemo(() => (artifacts.data ?? []).filter((a) => a.taskId === id), [artifacts.data, id])
   const selectionSource: SelectionTaskSource | null = project && task ? { kind: "task", project: projectContext(project)!, task: taskContext(task)! } : null
 
   if (tasks.isLoading) return null
   if (!task) return <Empty title="Task not found">It may have been deleted.</Empty>
 
   const running = task.status === "working" || task.status === "starting"
-  const files = (artifacts.data ?? []).filter((a) => a.taskId === id)
 
   return (
     <div ref={panel} className="relative flex h-full min-w-0 flex-col">
@@ -195,6 +197,13 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       )
     default: {
       const url = typeof m.meta?.url === "string" ? m.meta.url : null
+      if (url && m.meta?.kind === "artifact")
+        return (
+          <div className="pl-6">
+            <PublishedFile artifactId={typeof m.meta.artifactId === "string" ? m.meta.artifactId : undefined} url={url} text={m.content} />
+            {time}
+          </div>
+        )
       return (
         <div className="pl-6 text-xs text-zinc-500">
           {url ? (

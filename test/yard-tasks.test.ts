@@ -4,7 +4,6 @@ import {
   inYardTab,
   olderFinishedCount,
   parseYardTab,
-  recentlyFinished,
   yardCounts,
   yardTasks,
   type YardTab,
@@ -124,12 +123,6 @@ describe("yard tabs", () => {
     expect(yardTasks([a, b], { tab: "all", now: NOW, query: "dark", projectName })).toEqual([a])
     expect(yardTasks([a, b], { tab: "all", now: NOW, query: "survive login", projectName })).toEqual([b])
     expect(yardTasks([a, b], { tab: "all", now: NOW, query: "", sort: "attention", projectName })).toEqual([b, a])
-  })
-
-  it("strips the last five finished tasks, newest first, regardless of age", () => {
-    const finished = Array.from({ length: 7 }, (_, i) => task("done", { updatedAt: NOW - i * 10 * HOUR }))
-    const strip = recentlyFinished([task("working", { updatedAt: NOW }), ...finished.reverse()])
-    expect(strip.map((t) => t.updatedAt)).toEqual([0, 1, 2, 3, 4].map((i) => NOW - i * 10 * HOUR))
   })
 
   it("falls back to Active for unknown URL values", () => {

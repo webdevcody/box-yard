@@ -5,7 +5,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation } from "wouter"
 import {
   AlarmClock,
-  ArrowLeft,
+  ChevronRight,
   Bot,
   Box,
   Check,
@@ -13,7 +13,6 @@ import {
   CircleStop,
   Copy,
   ExternalLink,
-  FileText,
   GitBranch,
   Globe,
   Hash,
@@ -30,11 +29,12 @@ import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
 import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
-import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
+import { FilesChip } from "./TaskFiles"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 
 /** Above this much context used, a "Compact" nudge shows next to the status. */
 const COMPACT_NUDGE_PCT = 60
@@ -74,10 +74,10 @@ export function TaskHeader({
   const primary = primaryAction(task.status)
   const pct = contextPct(task.contextTokens, task.contextWindow)
   const canCompact = task.turnCount > 0 && task.status !== "failed"
-  const backHref = project ? `/projects/${project.id}` : "/"
 
   return (
     <header className="mb-4 space-y-1">
+      <Breadcrumb task={task} project={project} />
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           <h1 className="line-clamp-2 min-w-0 text-lg leading-snug font-semibold tracking-tight break-words text-zinc-50 sm:line-clamp-none sm:truncate" title={task.title}>
@@ -107,9 +107,6 @@ export function TaskHeader({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-        <Link href={backHref} className="inline-flex min-h-11 max-w-48 items-center gap-1 rounded-lg pr-2 hover:text-zinc-300 sm:min-h-0">
-          <ArrowLeft className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{project?.name ?? "Back"}</span>
-        </Link>
         <span>
           Active <TimeAgo ts={task.updatedAt} />
         </span>
@@ -123,15 +120,7 @@ export function TaskHeader({
         {task.previews.map((p) => (
           <PreviewChip key={p.port} preview={p} />
         ))}
-        {files.length > 0 && (
-          <span className="contents" {...PREVIEW_GROUP}>
-            {files.map((a) => (
-              <ArtifactLink key={a.id} artifact={a} className="inline-flex min-h-11 max-w-60 items-center gap-1 rounded-lg pr-2 text-yard-400 hover:underline sm:min-h-0">
-                <FileText className="h-3.5 w-3.5 shrink-0" /> <span className="truncate">{a.title}</span>
-              </ArtifactLink>
-            ))}
-          </span>
-        )}
+        <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
         {task.compacting || task.compactPending ? (
           <span className="inline-flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
@@ -155,6 +144,52 @@ export function TaskHeader({
   )
 }
 
+/** "box-yard › task_…" above the title: the project (on the tab used last) and the task id, which copies on click. */
+function Breadcrumb({ task, project }: { task: Task; project: Project | undefined }) {
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const t = setTimeout(() => setCopied(false), 1500)
+    return () => clearTimeout(t)
+  }, [copied])
+  const crumb = "rounded focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none"
+  return (
+    <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-xs text-zinc-500">
+      {project ? (
+        <Link href={projectCrumbHref(project.id, lastProjectTab(project.id))} className={cx(crumb, "min-w-0 truncate py-1 hover:text-zinc-300 hover:underline sm:py-0")}>
+          {project.name}
+        </Link>
+      ) : (
+        <Link href="/" className={cx(crumb, "shrink-0 py-1 hover:text-zinc-300 hover:underline sm:py-0")}>
+          Yard
+        </Link>
+      )}
+      <ChevronRight className="h-3 w-3 shrink-0 text-zinc-700" aria-hidden />
+      <span className="relative shrink-0">
+        <Link
+          href={`/tasks/${task.id}`}
+          aria-current="page"
+          title={`${task.title}\nClick to copy the id`}
+          className={cx(crumb, "py-1 font-mono text-[11px] text-zinc-400 hover:text-zinc-200 sm:py-0")}
+          onClick={async (e) => {
+            // Plain clicks copy; Cmd/Ctrl and middle clicks keep the link and open the task in a new tab.
+            const result = await copyIdOnClick(e, task.id)
+            if (result === "copied") setCopied(true)
+            else if (result === "failed") toast.error("Couldn't copy", "The browser blocked clipboard access.")
+          }}
+        >
+          {task.id}
+        </Link>
+        {copied && (
+          <span role="status" className="absolute top-full left-1/2 z-20 mt-1 -translate-x-1/2 rounded-md border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] whitespace-nowrap text-zinc-200 shadow-lg">
+            <Check className="mr-0.5 inline h-3 w-3 text-emerald-400" /> Copied
+          </span>
+        )}
+      </span>
+    </nav>
+  )
+}
+
 /** A preview the agent registered (report_preview) or Cody opened: opens in a new tab. */
 function PreviewChip({ preview }: { preview: PreviewLink }) {
   return (
@@ -171,7 +206,7 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
 }
 
 /** Closes on Escape (focus goes back to the trigger) and on a click outside. */
-function usePopover() {
+export function usePopover() {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -195,8 +230,8 @@ function usePopover() {
   return { open, setOpen, root, trigger }
 }
 
-const itemBase = "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm focus-visible:outline-none sm:min-h-0 sm:py-1.5"
-const item = cx(itemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus-visible:bg-zinc-800")
+export const menuItemBase = "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm focus-visible:outline-none sm:min-h-0 sm:py-1.5"
+export const menuItem = cx(menuItemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus-visible:bg-zinc-800")
 
 function TaskMenu({
   task,
@@ -298,7 +333,7 @@ function TaskMenu({
           </div>
 
           <div className="border-t border-zinc-800/80 pt-1.5">
-            <button type="button" role="switch" aria-checked={showTools} className={item} onClick={() => onShowTools(!showTools)}>
+            <button type="button" role="switch" aria-checked={showTools} className={menuItem} onClick={() => onShowTools(!showTools)}>
               <Wrench className="h-3.5 w-3.5 text-zinc-500" />
               <span className="flex-1">Show tool calls</span>
               <span className={cx("relative h-4 w-7 rounded-full transition", showTools ? "bg-yard-500" : "bg-zinc-700")} aria-hidden>
@@ -308,14 +343,14 @@ function TaskMenu({
             {portOpen ? (
               <OpenPortForm taskId={task.id} onDone={() => setOpen(false)} />
             ) : (
-              <button type="button" className={item} onClick={() => setPortOpen(true)}>
+              <button type="button" className={menuItem} onClick={() => setPortOpen(true)}>
                 <Plug className="h-3.5 w-3.5 text-zinc-500" /> Open a port…
               </button>
             )}
             {primary !== "done" && task.status !== "done" && (
               <button
                 type="button"
-                className={item}
+                className={menuItem}
                 onClick={() => {
                   close.mutate(task.id)
                   setOpen(false)
@@ -329,7 +364,7 @@ function TaskMenu({
           <div className="mt-1.5 border-t border-zinc-800/80 pt-1.5">
             <button
               type="button"
-              className={cx(itemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10")}
+              className={cx(menuItemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10")}
               onClick={async () => {
                 setOpen(false)
                 if (!(await confirmDialog({ title: "Delete task?", body: "Delete this task, its workspace and its archive?", confirmLabel: "Delete task", danger: true }))) return
