@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Box Yard worker runner. Copied into every worker box and run there with plain
-// Node (no npm install). It has two modes:
+// Node (no npm install). It has three modes:
 //
-//   node box-runner.mjs turn <taskDir>   run one headless Claude turn for a task
-//   node box-runner.mjs mcp  <taskDir>   stdio MCP server Claude uses to talk back
+//   node box-runner.mjs turn  <taskDir>  run one headless Claude turn for a task
+//   node box-runner.mjs mcp   <taskDir>  stdio MCP server Claude uses to talk back
+//   node box-runner.mjs clean <taskDir>  delete regenerable dirs from a resting work/
 //
 // Every event goes into <taskDir>/events.jsonl, and also into an Upstash Redis
 // stream when task.json has Redis credentials. Each event has a `seq` number so
@@ -26,12 +27,12 @@ const RUNNER_VERSION = "1"
 const [, , mode, taskDirArg] = process.argv
 
 if (!mode || !taskDirArg) {
-  console.error("usage: box-runner.mjs <turn|mcp> <taskDir>")
+  console.error("usage: box-runner.mjs <turn|mcp|clean> <taskDir>")
   process.exit(2)
 }
 
 const taskDir = path.resolve(taskDirArg)
-const task = readJson(path.join(taskDir, "task.json"))
+const task = mode === "clean" ? {} : readJson(path.join(taskDir, "task.json"))
 
 function readJson(file, fallback) {
   try {
@@ -659,6 +660,73 @@ function serveMcp() {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace cleanup. Runs between turns to free disk on resting tasks. It must
+// never destroy source: inside a git repo it only deletes directories git
+// reports as ignored *and* untracked, and only when their name is on the list.
+// Outside any repo it can't tell source from output, so it only deletes the
+// few names that are always generated (a committed `build/` or `dist/` is real
+// source in plenty of repos; a `node_modules/` never is).
+
+const CLEAN_IN_REPO = new Set([
+  "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", "target", ".venv", "__pycache__",
+])
+const CLEAN_OUTSIDE_REPO = new Set(["node_modules", "__pycache__"])
+const CLEAN_MAX_DEPTH = 6
+
+function gitOut(cwd, args) {
+  return new Promise((resolve) => {
+    execFile("git", args, { cwd, maxBuffer: 64 << 20 }, (err, stdout) => resolve(err ? null : String(stdout)))
+  })
+}
+
+async function cleanRepo(repo, removed) {
+  // --directory collapses a fully untracked dir into one "dir/" entry, so a
+  // dir that holds any tracked file is never listed as a whole.
+  const out = await gitOut(repo, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"])
+  if (out === null) return // git missing or broken repo: leave it alone
+  for (const entry of out.split("\0")) {
+    if (!entry.endsWith("/")) continue
+    const rel = entry.slice(0, -1)
+    if (!CLEAN_IN_REPO.has(path.basename(rel))) continue
+    // Belt and braces: re-check that git tracks nothing under it.
+    const tracked = await gitOut(repo, ["ls-files", "-z", "--", rel])
+    if (tracked !== "") continue
+    const abs = path.join(repo, rel)
+    if (!fs.lstatSync(abs, { throwIfNoEntry: false })?.isDirectory()) continue
+    fs.rmSync(abs, { recursive: true, force: true })
+    removed.push(abs)
+  }
+}
+
+async function cleanDir(dir, depth, removed) {
+  if (fs.existsSync(path.join(dir, ".git"))) return cleanRepo(dir, removed)
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue // skips symlinks too
+    const abs = path.join(dir, e.name)
+    if (CLEAN_OUTSIDE_REPO.has(e.name)) {
+      fs.rmSync(abs, { recursive: true, force: true })
+      removed.push(abs)
+    } else if (depth < CLEAN_MAX_DEPTH) {
+      await cleanDir(abs, depth + 1, removed)
+    }
+  }
+}
+
+async function cleanWorkspace() {
+  const work = path.join(taskDir, "work")
+  if (!fs.existsSync(work)) return
+  const removed = []
+  await cleanDir(work, 0, removed)
+  for (const p of removed) console.log(path.relative(work, p))
+}
+
+// ---------------------------------------------------------------------------
 
 if (mode === "turn") {
   runTurn().then(
@@ -672,6 +740,14 @@ if (mode === "turn") {
   )
 } else if (mode === "mcp") {
   serveMcp()
+} else if (mode === "clean") {
+  cleanWorkspace().then(
+    () => process.exit(0),
+    (err) => {
+      console.error(`clean failed: ${err?.stack ?? err}`)
+      process.exit(1)
+    },
+  )
 } else {
   console.error(`unknown mode ${mode}`)
   process.exit(2)
