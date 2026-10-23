@@ -125,7 +125,7 @@ export function StickyScroll({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} onScroll={onScroll} className={cx("scroll-thin min-h-0 flex-1 overflow-y-auto", className)}>
+      <div ref={scroller} onScroll={onScroll} className={cx("scroll-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto", className)}>
         <div ref={content} className={contentClassName}>
           {hidden > 0 && (
             <button
