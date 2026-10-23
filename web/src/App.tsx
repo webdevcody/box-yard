@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useState } from "react"
+import { PAGE_PADDING } from "./lib/layout"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
 import { Menu, MessageSquare, X } from "lucide-react"
@@ -70,7 +71,7 @@ export function App() {
           </button>
         </div>
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto h-full max-w-6xl px-4 py-4 sm:px-6 sm:py-6">
+          <div className={`mx-auto h-full max-w-6xl ${PAGE_PADDING}`}>
             <Routes />
           </div>
         </div>

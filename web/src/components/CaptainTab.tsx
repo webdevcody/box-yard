@@ -104,7 +104,8 @@ export function CaptainTab({ project }: { project: Project }) {
     <section
       ref={panel}
       data-testid="captain-chat"
-      className="relative flex min-h-[32rem] flex-1 flex-col overflow-hidden rounded-xl border border-zinc-900 bg-zinc-950"
+      // Open at the bottom: the shared Composer's own border-t and bottom padding end the card, as in ChatPanel.
+      className="relative flex min-h-[32rem] flex-1 flex-col overflow-hidden rounded-t-xl border border-b-0 border-zinc-900 bg-zinc-950"
     >
       <CaptainHeader projectId={project.id} state={state.data} lastActive={lastActive} />
       {state.data?.error && (

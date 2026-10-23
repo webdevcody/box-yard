@@ -33,6 +33,7 @@ import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
+import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
 
 const TABS = [
@@ -102,8 +103,9 @@ export function ProjectView({ id }: { id: string }) {
   const counts: Partial<Record<Tab, number>> = { tasks: openCount, schedules: scheduleCount, notes: project.notes.length, files: files.length }
 
   return (
-    // The Captain chat fills the rest of the page; other tabs flow and scroll with it.
-    <div className={cx("space-y-5", tab === "captain" && "flex h-full flex-col")}>
+    // The Captain chat fills the rest of the page down to the window bottom (its Composer lines up with the
+    // Coordinator's); other tabs flow and scroll with it.
+    <div className={cx("space-y-5", tab === "captain" && cx("flex flex-col", PAGE_BLEED_BOTTOM))}>
       <ProjectHeader
         project={project}
         tasks={list}
