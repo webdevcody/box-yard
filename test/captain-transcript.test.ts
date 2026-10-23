@@ -1,0 +1,99 @@
+import { describe, expect, it } from "vitest"
+import { captainRows, groupLabel, linkLabel, parseNotice, plainText, segments } from "../web/src/lib/captainTranscript"
+import type { CaptainMessage } from "../shared/types"
+
+let n = 0
+const msg = (role: CaptainMessage["role"], content = "x", meta: Record<string, unknown> | null = null): CaptainMessage => ({
+  id: `cap_test${String(n++).padStart(4, "0")}`,
+  projectId: "prj_demo01",
+  role,
+  content,
+  meta,
+  createdAt: n,
+})
+
+describe("parseNotice", () => {
+  it("reads a done notice into kind, title and the plain summary", () => {
+    const p = parseNotice("✅ **Brief the orchestrator** is done: Briefed on PRs **#35–#42**. Published /artifacts/art_8a9ea54f72fd/briefing.md. Main is green.", {
+      taskId: "task_abc123",
+    })
+    expect(p.kind).toBe("done")
+    expect(p.title).toBe("Brief the orchestrator")
+    expect(p.summary).toEqual([
+      { text: "Briefed on PRs #35–#42. Published " },
+      { href: "/artifacts/art_8a9ea54f72fd/briefing.md", label: "briefing.md" },
+      { text: ". Main is green." },
+    ])
+  })
+
+  it("keeps the artifact title and links the file", () => {
+    const p = parseNotice("📎 **Brief** published Recent PRs: briefing: https://yard.example.com/artifacts/art_1/b.md")
+    expect(p.kind).toBe("artifact")
+    expect(p.summary).toEqual([{ text: "Recent PRs: briefing " }, { href: "https://yard.example.com/artifacts/art_1/b.md", label: "b.md" }])
+  })
+
+  it("shows a PR notice as 'opened PR #N'", () => {
+    const p = parseNotice("🔀 **Inbox** opened a pull request: https://github.com/o/r/pull/16")
+    expect(p.kind).toBe("pr")
+    expect(p.summary).toEqual([{ text: "opened " }, { href: "https://github.com/o/r/pull/16", label: "PR #16" }])
+  })
+
+  it("maps every notice emoji, including the ones with a variation selector", () => {
+    expect(parseNotice("❌ **A** failed: boom").kind).toBe("failed")
+    expect(parseNotice("🙋 **A** needs you: which one?").kind).toBe("needs_input")
+    expect(parseNotice("💬 **A** says: hi").summary).toEqual([{ text: "hi" }])
+    expect(parseNotice("💬 **A** finished its turn: did it").summary).toEqual([{ text: "did it" }])
+    expect(parseNotice("⚠️ Box create failed. Retrying in a minute.").kind).toBe("warning")
+    expect(parseNotice("⚠️ Box create failed. Retrying in a minute.").title).toBeNull()
+  })
+
+  it("drops an empty status detail instead of showing a dangling colon", () => {
+    expect(parseNotice("✅ **A** is done: ").summary).toEqual([{ text: "is done" }])
+  })
+
+  it("reads compaction notices without the server-local file path", () => {
+    const p = parseNotice("Context compacted from 142k to 18k tokens (button). Summary saved to /data/x.md.", { kind: "compaction" })
+    expect(p.kind).toBe("compaction")
+    expect(p.summary).toEqual([{ text: "Context compacted from 142k to 18k tokens (button)." }])
+  })
+})
+
+describe("plainText and links", () => {
+  it("strips markdown to one line", () => {
+    expect(plainText("**bold** and [title](/tasks/task_1)\n`code`")).toBe("bold and title code")
+  })
+  it("labels links", () => {
+    expect(linkLabel("/artifacts/art_1/my%20file.md")).toBe("my file.md")
+    expect(linkLabel("https://example.com/docs")).toBe("example.com/docs")
+  })
+  it("trims sentence punctuation off URLs", () => {
+    expect(segments("see https://x.dev/a.")).toEqual([{ text: "see " }, { href: "https://x.dev/a", label: "x.dev/a" }, { text: "." }])
+  })
+})
+
+describe("captainRows", () => {
+  it("groups runs of two or more notices and keeps single ones as rows", () => {
+    const u = msg("user")
+    const a = msg("notice", "a", { taskId: "task_1" })
+    const b = msg("notice", "b", { taskId: "task_2" })
+    const r = msg("assistant")
+    const c = msg("notice", "c", { taskId: "task_1" })
+    const t = msg("tool")
+    const rows = captainRows([u, a, b, r, c, t])
+    expect(rows.map((row) => row.type)).toEqual(["message", "notices", "message", "notice", "message"])
+    expect(rows[1]).toMatchObject({ id: a.id, messages: [a, b] })
+  })
+
+  it("keeps a group's id stable as notices append to it", () => {
+    const a = msg("notice")
+    const b = msg("notice")
+    const first = captainRows([a, b])
+    const later = captainRows([a, b, msg("notice")])
+    expect(later[0]!.id).toBe(first[0]!.id)
+  })
+
+  it("labels groups by whether they're all task updates", () => {
+    expect(groupLabel([msg("notice", "", { taskId: "t" }), msg("notice", "", { taskId: "u" })])).toBe("2 task updates")
+    expect(groupLabel([msg("notice", "", { taskId: "t" }), msg("notice", "", { kind: "compaction" })])).toBe("2 updates")
+  })
+})
