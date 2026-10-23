@@ -1,4 +1,6 @@
 // Types shared by the API server and the React app.
+import type { TaskOutcome } from "./quiet.js"
+export type { TaskOutcome } from "./quiet.js"
 
 export const TASK_STATUSES = [
   "queued", // waiting for a free box slot
@@ -76,6 +78,8 @@ export interface Task {
   lastArchivedAt: number | null
   /** Set when a schedule started this task. */
   scheduleId: string | null
+  /** "noop" when the agent reported a run that found nothing to do and the server accepted it (shared/quiet.ts). */
+  outcome: TaskOutcome | null
   /** Tokens in the Claude session's context after its last turn; null until the first turn ends. */
   contextTokens: number | null
   contextWindow: number | null

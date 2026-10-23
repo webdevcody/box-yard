@@ -268,6 +268,7 @@ export function useCreateTask() {
           pendingCount: 0,
           lastArchivedAt: null,
           scheduleId: null,
+          outcome: null,
           contextTokens: null,
           contextWindow: null,
           compactPending: false,

@@ -28,6 +28,7 @@ import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
+import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -1101,9 +1102,11 @@ export class TaskManager {
         }
         return
       }
-      case "done":
-        this.store.updateTask(taskId, { turnFlags: { ...flags, done: String(ev.summary ?? "Done.") } })
+      case "done": {
+        const noop = ev.outcome === "noop" ? { commits: typeof ev.commits === "number" ? ev.commits : null } : undefined
+        this.store.updateTask(taskId, { turnFlags: { ...flags, done: String(ev.summary ?? "Done."), noop } })
         return
+      }
       case "turn_end": {
         // The agent may have merged or closed its PR during the turn; ask GitHub.
         const pr = row.pr_url && row.current_turn_id ? await this.prs.check(taskId) : null
@@ -1151,6 +1154,8 @@ export class TaskManager {
     else status = "idle"
 
     const result = typeof ev.result === "string" ? ev.result : null
+    const noopIgnored = flags.noop && !stopped ? noopBlockers(this.runEvidence(row, flags, status)) : []
+    const outcome = flags.noop && !stopped && !noopIgnored.length ? "noop" : null
     this.recordTaskClaudeUsage(row, ev)
     if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: typeof ev.costUsd === "number" ? ev.costUsd : null, error })
     this.store.updateTask(row.id, {
@@ -1163,6 +1168,7 @@ export class TaskManager {
       lastActiveAt: Date.now(),
       question: status === "needs_input" ? (flags.asked ?? null) : null,
       turnFlags: { interrupts: 0 },
+      outcome,
     }, { quiet: stopped })
     if (row.box_id) this.store.touchBox(row.box_id)
 
@@ -1172,7 +1178,13 @@ export class TaskManager {
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
     const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
     const more = this.store.hasInputs(row.id) ? " (more messages are queued for it)" : ""
-    if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
+    if (noopIgnored.length) this.addEvent(row.id, `The agent marked this run a no-op, but it isn't quiet: ${noopIgnored.join(", ")}.`)
+    const finished = this.store.getTask(row.id)
+    if (finished && isQuietRun(finished)) {
+      // Nothing happened: no notice for the Captain or Coordinator, and the run's start notice is dropped too.
+      this.addEvent(row.id, "Quiet run: the agent found nothing to do and changed nothing, so it's hidden from Recent and notifications.", { kind: "quiet" })
+      this.store.dropTaskNotices(row.id)
+    } else if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
     else if (status === "done") this.notice(`✅ **${row.title}** is done: ${gist}`, { taskId: row.id })
     else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${preview(error ?? "", 300, "call get_task for the full error")}`, { taskId: row.id })
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
@@ -1183,6 +1195,20 @@ export class TaskManager {
     this.publishDirectory()
     void this.archiveAndClean(row.id).finally(() => this.schedule())
     this.schedule()
+  }
+
+  /** What a run did, to check the agent's noop mark against (shared/quiet.ts). */
+  private runEvidence(row: TaskRow, flags: TurnFlags, status: TaskStatus): RunEvidence {
+    return {
+      scheduleId: row.schedule_id,
+      status,
+      prUrl: row.pr_url,
+      sawPr: flags.sawPr,
+      previews: this.store.taskFromRow(row).previews.length,
+      artifacts: this.store.listArtifacts({ taskId: row.id }).length,
+      asked: Boolean(flags.asked) || this.store.taskEverAsked(row.id),
+      commits: flags.noop?.commits ?? null,
+    }
   }
 
   /** The end of a /compact turn: back to the status before it, with the new usage. Never fails the task. */
@@ -1699,9 +1725,9 @@ export class TaskManager {
     return url.startsWith("/") && this.c.publicUrl ? `${this.c.publicUrl.replace(/\/$/, "")}${url}` : url
   }
 
-  private addEvent(taskId: string, content: string) {
+  private addEvent(taskId: string, content: string, meta: Record<string, unknown> | null = null) {
     if (!this.store.getTaskRow(taskId)) return
-    const msg = this.store.addTaskMessage(taskId, "event", content)
+    const msg = this.store.addTaskMessage(taskId, "event", content, meta)
     this.hub.broadcast({ type: "task.message", message: msg })
   }
 

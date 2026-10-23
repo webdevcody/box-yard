@@ -359,6 +359,10 @@ const MIGRATIONS: string[] = [
   CREATE INDEX captain_messages_project ON captain_messages(project_id, created_at);
   CREATE INDEX captain_messages_unseen ON captain_messages(project_id, seen_by_captain);
   `,
+  `
+  -- What the agent reported about a run: 'noop' for a schedule run that found nothing to do (shared/quiet.ts).
+  ALTER TABLE tasks ADD COLUMN outcome TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
