@@ -9,6 +9,8 @@ import type { ExecResult } from "../server/providers/types.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { BoxCleanup, BoxInfo, Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
+import { diskLine } from "../shared/disk.js"
+import { diskMeter } from "../web/src/lib/diskCleanup.js"
 
 // Low disk: a box without room for a new workspace is skipped (and cleaned up in
 // the background), a setup that runs out of space is cleaned up and retried once,
@@ -161,6 +163,12 @@ describe("low-disk placement", () => {
     expect(info.diskTotalBytes).toBeGreaterThan(0)
     expect(info.diskLow).toBe(true)
     expect(info.cleanup?.boxId).toBe(low)
+    expect(info.diskCheckedAt).toBeGreaterThan(0)
+    // The Boxes page, pool_status and the notice state the same df reading the same way.
+    const stated = diskLine({ freeBytes: info.diskFreeBytes, totalBytes: info.diskTotalBytes })
+    expect(diskMeter(info)!.label).toBe(stated)
+    const notice = await waitFor(() => r.yard.store.listChat().find((m) => m.role === "notice" && m.content.includes(`Box ${low} is low on disk`)), "the low-disk notice")
+    expect(notice.content).toContain(`it has ${stated} · measured`)
   })
 
   it("puts a task on another existing box with room before waiting", async () => {

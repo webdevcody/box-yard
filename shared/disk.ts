@@ -93,6 +93,24 @@ export function formatBytes(n: number | null | undefined): string {
   return `${Math.round(n)} B`
 }
 
+/** "measured 12s ago", "measured 3m ago": how old a df reading is. */
+export function measuredAgo(at: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - at) / 1000))
+  if (s < 90) return `measured ${s}s ago`
+  if (s < 90 * 60) return `measured ${Math.round(s / 60)}m ago`
+  return `measured ${Math.round(s / 3600)}h ago`
+}
+
+/**
+ * The one way Box Yard states a box's disk, from df on its work disk (/workspace on Upstash):
+ * "943 MB free of 5.0 GB · measured 12s ago". The Boxes page, pool_status and notices all use it.
+ */
+export function diskLine(d: { freeBytes: number | null; totalBytes: number | null; checkedAt?: number | null }, now = Date.now()): string {
+  if (d.freeBytes === null || d.totalBytes === null) return "free space not measured yet"
+  const line = `${formatBytes(d.freeBytes)} free of ${formatBytes(d.totalBytes)}`
+  return d.checkedAt ? `${line} · ${measuredAgo(d.checkedAt, now)}` : line
+}
+
 /** "freed 1.2 GB (caches 800 MB, builds 400 MB)" or "freed nothing". */
 export function cleanupSummary(c: Pick<BoxCleanup, "freedBytes" | "steps">): string {
   const parts = c.steps.filter((s) => s.freedBytes >= 1024 * 1024).map((s) => `${s.key} ${formatBytes(s.freedBytes)}`)
