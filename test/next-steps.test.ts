@@ -13,6 +13,43 @@ describe("next-step parsing", () => {
     const parsed = parseNextSteps("Done.\n```boxyard-next-steps\n- Follow up\n- Ask for screenshots\n```")
     expect(parsed).toEqual({ content: "Done.", nextSteps: ["Follow up", "Ask for screenshots"] })
   })
+
+  it("keeps a mid-reply mention of the marker and still reads the real block at the end", () => {
+    const body = "The parser looks for `<!-- boxyard-next-steps` at the end.\n<!-- boxyard-next-steps is the marker -->\nMore text after it."
+    const parsed = parseNextSteps(`${body}\n\n<!-- boxyard-next-steps\n["Fix it","Test it"]\n-->\n  \n`)
+    expect(parsed).toEqual({ content: body, nextSteps: ["Fix it", "Test it"] })
+  })
+
+  it("leaves a reply untouched when it mentions the marker but has no real block", () => {
+    const text = "Replies end with a `<!-- boxyard-next-steps [...] -->` comment.\n\nHere is the rest of the briefing, which must survive."
+    expect(parseNextSteps(text)).toEqual({ content: text, nextSteps: [] })
+    const tail = "Example:\n<!-- boxyard-next-steps\n[\"a\"]\n-->\nAnd the reply keeps going."
+    expect(parseNextSteps(tail)).toEqual({ content: tail, nextSteps: [] })
+  })
+
+  it("only counts the last of several blocks", () => {
+    const parsed = parseNextSteps(`Intro.\n<!-- boxyard-next-steps\n["Old"]\n-->\nMiddle.\n<!-- boxyard-next-steps\n["New one","New two"]\n-->`)
+    expect(parsed).toEqual({ content: `Intro.\n<!-- boxyard-next-steps\n["Old"]\n-->\nMiddle.`, nextSteps: ["New one", "New two"] })
+  })
+
+  it("does not treat a marker mention inside the final line as a block", () => {
+    const text = "Done. See <!-- boxyard-next-steps [\"x\"] -->"
+    expect(parseNextSteps(text)).toEqual({ content: text, nextSteps: [] })
+  })
+
+  it("strips a malformed JSON block without inventing suggestions", () => {
+    const parsed = parseNextSteps(`Done.\n\n<!-- boxyard-next-steps\n["Review it", "Run tests"\n-->`)
+    expect(parsed).toEqual({ content: "Done.", nextSteps: [] })
+  })
+
+  it("returns the reply as-is when there is no block", () => {
+    expect(parseNextSteps("Just a normal reply.\n")).toEqual({ content: "Just a normal reply.\n", nextSteps: [] })
+    expect(parseNextSteps("")).toEqual({ content: "", nextSteps: [] })
+  })
+
+  it("accepts a single-line block on its own line", () => {
+    expect(parseNextSteps(`Done.\n<!-- boxyard-next-steps ["A","B"] -->`)).toEqual({ content: "Done.", nextSteps: ["A", "B"] })
+  })
 })
 
 describe("selection task prompt", () => {
