@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Box Yard">
+  <defs>
+    <filter id="amber-glow" x="-60%" y="-60%" width="220%" height="220%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="0" stdDeviation="18" flood-color="#fbbf24" flood-opacity="0.65"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="#09090b"/>
+  <g transform="translate(96 96) scale(5)">
+    <g fill="#27272a" stroke="#3f3f46" stroke-width="1">
+      <rect x="4" y="4" width="16" height="16" rx="4"/>
+      <rect x="24" y="4" width="16" height="16" rx="4"/>
+      <rect x="24" y="24" width="16" height="16" rx="4"/>
+      <rect x="44" y="24" width="16" height="16" rx="4"/>
+      <rect x="4" y="44" width="16" height="16" rx="4"/>
+      <rect x="44" y="44" width="16" height="16" rx="4"/>
+    </g>
+    <g filter="url(#amber-glow)">
+      <rect x="44" y="4" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+      <rect x="4" y="24" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+      <rect x="24" y="44" width="16" height="16" rx="4" fill="#f59e0b" stroke="#fbbf24" stroke-width="1"/>
+    </g>
+  </g>
+</svg>

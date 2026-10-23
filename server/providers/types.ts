@@ -1,3 +1,5 @@
+import type { WorkerSize } from "../../shared/types.js"
+
 export interface ExecResult {
   exitCode: number
   stdout: string
@@ -30,7 +32,7 @@ export interface BoxProvider {
   /** Folder inside a box that holds `.boxyard/` and `tasks/`. */
   root(boxId: string): string
   /** Create a worker box with Claude Code and git ready. Returns its id. */
-  create(opts: { labels: string[] }): Promise<string>
+  create(opts: { labels: string[]; size?: WorkerSize }): Promise<string>
   health(boxId: string): Promise<BoxHealth>
   /** Wake a paused box. No-op when it is already running. */
   wake(boxId: string): Promise<void>

@@ -8,9 +8,11 @@ const base: Settings = {
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
   agentModel: "claude-opus-5-5",
   agentEffort: "orchestrator",
+  agentRoutingConfig: "",
   agentAutoCompact: { enabled: false, unit: "tokens", value: 800_000 },
+  workerSize: "small",
   maxBoxes: 5,
-  slotsPerBox: 2,
+  slotsPerBox: 1,
   maxAgents: 0,
   costRates: {
     boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
@@ -18,6 +20,10 @@ const base: Settings = {
     boxStorageGbMonthUsd: 0.1,
   },
   budget: { dailyUsd: 0, monthlyUsd: 0 },
+  maxResidentPerBox: 3,
+  boxIdleDeleteMinutes: 0,
+  workspaceRetentionDays: 7,
+  archiveRetentionDays: 7,
 }
 
 describe("settings nav", () => {
@@ -43,9 +49,10 @@ describe("settings nav", () => {
     expect([...changedSections(changedKeys(draft, base))].sort()).toEqual(["agents", "limits"])
   })
 
-  it("sends pool limits only when they were edited", () => {
+  it("sends box limits only when they were edited", () => {
     const untouched = savePatch(base, base)
     expect(untouched).not.toHaveProperty("maxBoxes")
+    expect(untouched).not.toHaveProperty("workspaceRetentionDays")
     expect(untouched).toHaveProperty("orchestratorModel", "claude-opus-5-5")
     expect(savePatch({ ...base, slotsPerBox: 3 }, base)).toMatchObject({ slotsPerBox: 3 })
   })

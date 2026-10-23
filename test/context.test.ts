@@ -49,6 +49,7 @@ describe("settings", () => {
     expect(s.settings.orchestratorEffort).toBe("high")
     expect(s.settings.agentModel).toBe("claude-opus-5-5")
     expect(s.settings.agentEffort).toBe("high")
+    expect(s.settings.agentRoutingConfig).toBe("")
     expect(s.sources.agentModel).toBe("default")
   })
   it("env vars override the defaults, and values saved in the UI win over env vars", () => {
@@ -66,6 +67,12 @@ describe("settings", () => {
     expect(new SettingsStore(store, { orchestratorModel: "", workerModel: "" }).get().agentModel).toBe("ui-model")
     settings.reset()
     expect(settings.info().settings.agentModel).toBe("env-worker")
+  })
+  it("saves routing YAML as a free-text setting", () => {
+    const settings = new SettingsStore(memStore(), { orchestratorModel: "", workerModel: "" })
+    const info = settings.update({ agentRoutingConfig: "fallback:\n  model: claude-sonnet-5-5\n  effort: medium\n" })
+    expect(info.settings.agentRoutingConfig).toContain("fallback")
+    expect(info.sources.agentRoutingConfig).toBe("ui")
   })
   it("rejects bad values", () => {
     const settings = new SettingsStore(memStore(), { orchestratorModel: "", workerModel: "" })
@@ -93,13 +100,29 @@ describe("compaction log", () => {
     const dir = path.join(tmpDir(), "orchestrator", "compactions")
     const meta = { at: Date.UTC(2026, 9, 22, 18, 40, 5), sessionId: "sess-1", model: "claude-opus-5-5", trigger: "auto" as const, tokensBefore: 412_000 }
     const summary = "## Decisions and preferences\n- short replies\n\n## Projects and repos\n- x\n\n## Ongoing work\n- none\n\n## Open threads and next steps\n- none"
-    const file = writeCompaction(dir, meta, summary)
+    const task = {
+      taskId: "task_abc123",
+      title: "Fix bug",
+      status: "done" as const,
+      projectId: "prj_abc123",
+      projectName: "demo",
+      branch: "fix/bug",
+      prUrl: "https://github.com/acme/demo/pull/1",
+      sessionId: "task-session",
+      summary: "Fixed the bug and opened a PR.",
+      lastActiveAt: meta.at - 1000,
+    }
+    const first = writeCompaction(dir, meta, summary, [task])
+    const file = first.markdownFile
     expect(path.basename(file)).toBe("2026-10-22T18-40-05Z.md")
+    expect(path.basename(first.jsonFile)).toBe("2026-10-22T18-40-05Z.json")
+    expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tasks[0].taskId).toBe("task_abc123")
     const second = writeCompaction(dir, meta, summary)
-    expect(path.basename(second)).toBe("2026-10-22T18-40-05Z-2.md")
+    expect(path.basename(second.markdownFile)).toBe("2026-10-22T18-40-05Z-2.md")
     finishCompaction(file, 38_000)
     const text = fs.readFileSync(file, "utf8")
-    expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\n---/)
+    expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\ntask_ids: task_abc123\n---/)
+    expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tokensAfter).toBe(38_000)
     for (const h of ["## Decisions and preferences", "## Projects and repos", "## Ongoing work", "## Open threads and next steps"]) expect(text).toContain(h)
     expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05Z-2.md", "2026-10-22T18-40-05Z.md"].sort())
     expect(fs.readdirSync(dir).some((f) => f.endsWith(".tmp"))).toBe(false)

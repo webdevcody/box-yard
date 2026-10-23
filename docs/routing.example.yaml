@@ -1,0 +1,49 @@
+# Copy this to <data-dir>/routing.yaml, or paste it into Settings -> Box agents -> Routing YAML.
+# The orchestrator reads these rules when it calls create_task or send_to_task.
+
+fallback:
+  model: claude-opus-5-5
+  effort: high
+  reason: Use the safest route when no specific rule matches.
+
+defaults:
+  model: claude-sonnet-5-5
+  effort: medium
+  reason: Most coding work should start on Sonnet at medium effort.
+
+projects:
+  box-yard:
+    model: claude-sonnet-5-5
+    effort: high
+    reason: This project is TypeScript with server, worker and UI paths.
+
+rules:
+  - name: docs-small-fixes
+    when:
+      - documentation
+      - README updates
+      - typos
+      - small, localized fixes
+    model: claude-haiku-5-5
+    effort: low
+    reason: Low-risk edits with a narrow blast radius.
+
+  - name: ui
+    when:
+      - React UI changes
+      - CSS and layout
+      - interaction polish
+    model: claude-sonnet-5-5
+    effort: medium
+    reason: UI work benefits from stronger code generation and visual reasoning.
+
+  - name: architecture-migrations-debugging
+    when:
+      - database migrations
+      - architecture changes
+      - hard debugging
+      - flaky tests
+      - multi-system refactors
+    model: claude-opus-5-5
+    effort: high
+    reason: High-risk work needs the strongest route.

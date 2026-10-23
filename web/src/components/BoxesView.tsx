@@ -72,14 +72,14 @@ export function BoxesView() {
 
   return (
     <div className="space-y-6">
-      <header className="flex items-start justify-between gap-3">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
           <p className="mt-1 text-sm text-zinc-500">
             Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
           </p>
         </div>
-        <button onClick={() => openSettings("limits")} className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm text-sky-400 hover:underline">
+        <button onClick={() => openSettings("limits")} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg text-sm text-sky-400 hover:underline sm:min-h-0">
           <Settings className="h-3.5 w-3.5" /> Edit limits
         </button>
       </header>
@@ -123,7 +123,7 @@ export function BoxesView() {
 
 function TaskRow({ task, projectName, muted }: { task: Task; projectName: string; muted?: boolean }) {
   return (
-    <Link href={`/tasks/${task.id}`} className="group flex items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
+    <Link href={`/tasks/${task.id}`} className="group flex min-h-11 items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
       <div className="min-w-0 flex-1 sm:flex sm:items-baseline sm:gap-3">
         <div className={cx("truncate", muted ? "text-zinc-400" : "text-zinc-100")} title={task.title}>
           {task.title}
@@ -223,7 +223,7 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
             <button
               onClick={() => setShowFinished((v) => !v)}
               aria-expanded={showFinished}
-              className="flex w-full items-center gap-1.5 border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-1.5 text-xs text-zinc-500 hover:text-zinc-300"
+            className="flex min-h-11 w-full items-center gap-1.5 border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-500 hover:text-zinc-300 sm:min-h-0 sm:py-1.5"
             >
               <ChevronRight className={cx("h-3.5 w-3.5 transition", showFinished && "rotate-90")} />
               {finished.length} finished
@@ -248,7 +248,7 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
               target="_blank"
               rel="noreferrer"
               title={p.taskTitle}
-              className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300"
+              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300 sm:min-h-0"
             >
               <Globe className="h-3.5 w-3.5" /> {p.label}
               <ExternalLink className="h-3 w-3" />

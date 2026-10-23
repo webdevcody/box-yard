@@ -6,11 +6,12 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import type { Attachment, ChatMessage, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
+import type { Attachment, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
+import { preview } from "./replies.js"
 import {
   SUMMARY_PROMPT,
   cleanSummary,
@@ -21,6 +22,8 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
+import { routingInstructions } from "./routing.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -265,6 +268,70 @@ export class Orchestrator {
     }
   }
 
+  private taskMentionIds(since: number): Set<string> {
+    const ids = new Set<string>()
+    const visit = (value: unknown) => {
+      if (typeof value === "string") {
+        if (/^task_[A-Za-z0-9-]{6,40}$/.test(value)) ids.add(value)
+        for (const m of value.matchAll(/\btask_[A-Za-z0-9-]{6,40}\b/g)) ids.add(m[0])
+      } else if (Array.isArray(value)) {
+        for (const v of value) visit(v)
+      } else if (value && typeof value === "object") {
+        for (const v of Object.values(value)) visit(v)
+      }
+    }
+    for (const m of this.store.listChatSince(since)) {
+      visit(m.content)
+      visit(m.meta)
+    }
+    return ids
+  }
+
+  private taskSnapshotSummary(task: Task, since: number): string {
+    const messages = this.store.listTaskMessages(task.id, 80)
+    const recent = messages
+      .filter((m) => m.createdAt > since && (m.role === "assistant" || m.role === "event" || m.role === "agent"))
+      .slice(-4)
+      .map((m) => `[${m.role}] ${m.content.replace(/\s+/g, " ").trim()}`)
+      .filter(Boolean)
+    const latest = recent.length ? recent.join("\n") : this.latestTaskContext(messages)
+    const parts = [
+      task.summary ? `Outcome: ${task.summary}` : "",
+      latest ? `Recent context: ${latest}` : "",
+      task.question ? `Question: ${task.question}` : "",
+      task.error ? `Error: ${task.error}` : "",
+    ].filter(Boolean)
+    return preview(parts.join("\n"), 1200, "open the task transcript for more")
+  }
+
+  private latestTaskContext(messages: TaskMessage[]): string {
+    const m = [...messages].reverse().find((x) => x.role === "assistant" || x.role === "event" || x.role === "agent")
+    return m ? preview(m.content, 700, "open the task transcript for more") : ""
+  }
+
+  /** Tasks active or mentioned since the previous recorded compaction. */
+  private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
+    const previous = this.store.listOrchestratorCompactions({ limit: 1 })[0]?.at ?? lastCompaction(this.compactionsDir)?.at ?? 0
+    const mentioned = this.taskMentionIds(previous)
+    const activeStatuses = new Set(["queued", "starting", "working", "needs_input", "waiting", "idle", "pr_ready", "failed"])
+    const tasks = this.store
+      .listTasks()
+      .filter((t) => t.updatedAt > previous || mentioned.has(t.id) || activeStatuses.has(t.status))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+    return tasks.map((t) => ({
+      taskId: t.id,
+      title: t.title,
+      status: t.status,
+      projectId: t.projectId,
+      projectName: this.store.getProject(t.projectId)?.name ?? t.projectId,
+      branch: t.branch,
+      prUrl: t.prUrl,
+      sessionId: t.sessionId,
+      summary: this.taskSnapshotSummary(t, previous),
+      lastActiveAt: t.updatedAt,
+    }))
+  }
+
   /**
    * Write the durable summary first, then /compact. If the summary can't be
    * produced the session is left alone (and the error shown), so every
@@ -285,7 +352,21 @@ export class Orchestrator {
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
       }
-      const file = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before }, text)
+      const meta = { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before }
+      const taskSnapshots = this.compactionTaskSnapshots()
+      const files = writeCompaction(this.compactionsDir, meta, text, taskSnapshots)
+      this.store.addOrchestratorCompaction({
+        id: files.id,
+        at: meta.at,
+        sessionId: meta.sessionId,
+        model: meta.model,
+        trigger: meta.trigger,
+        tokensBefore: meta.tokensBefore,
+        markdownPath: files.markdownFile,
+        jsonPath: files.jsonFile,
+        markdown: files.markdown,
+        tasks: taskSnapshots,
+      })
       const compact = await this.run("/compact", s.id, true, "compact")
       if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
       // /compact keeps the session id; if a CLI version ever changed it, follow it.
@@ -297,10 +378,11 @@ export class Orchestrator {
       const report = await this.run("/context", id, true, "context")
       const after = report.ok ? parseContextReport(report.raw) : null
       this.setUsage(after?.tokens ?? null, after?.window)
-      finishCompaction(file, after?.tokens ?? null)
+      finishCompaction(files.markdownFile, after?.tokens ?? null)
+      this.store.finishOrchestratorCompaction(files.id, after?.tokens ?? null, fs.readFileSync(files.markdownFile, "utf8"))
       const note = this.store.addChat(
         "notice",
-        `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after.tokens)} tokens` : ""} (${trigger === "auto" ? "automatic" : "button"}). Summary saved to ${file}.`,
+        `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after.tokens)} tokens` : ""} (${trigger === "auto" ? "automatic" : "button"}). Summary saved to ${files.markdownFile}.`,
         { kind: "compaction" },
       )
       // Informational only: the orchestrator doesn't need to see this one.
@@ -481,7 +563,7 @@ export class Orchestrator {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${ORCHESTRATOR_PROMPT}\n${compactionsPrompt(this.compactionsDir)}`,
+      `${ORCHESTRATOR_PROMPT}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
       ...session,
       ...model,
       "--effort",
@@ -565,7 +647,9 @@ export class Orchestrator {
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
           if (text && text !== NO_UPDATE) {
-            const m = this.store.addChat("assistant", text)
+            const parsed = parseNextSteps(text)
+            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
+            const m = this.store.addChat("assistant", parsed.content, meta)
             this.hub.broadcast({ type: "chat.message", message: m })
             reply = m
           } else if (text === NO_UPDATE) reply = null

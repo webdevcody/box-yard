@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer } from "../server/mcp.js"
 import type { Config } from "../server/config.js"
-import type { ChatMessage, OrchestratorState, Project, SettingsInfo, Task, TaskMessage } from "../shared/types.js"
+import type { ChatMessage, OrchestratorCompactionRecord, OrchestratorState, Project, SettingsInfo, Task, TaskCompactionRecord, TaskMessage } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Context usage, compaction (tasks and the orchestrator), the compaction log,
@@ -73,6 +73,22 @@ const say = async (r: Running, content: string, nth = 1) => {
   await call(r, "POST", "/api/chat", { content })
   await waitFor(async () => (await chat(r)).filter((m) => m.role === "assistant").length >= nth && !r.yard.orchestrator.busy, "orchestrator reply")
 }
+const connectMcp = async (r: Running) => {
+  const server = buildMcpServer({
+    store: r.yard.store,
+    tasks: r.yard.tasks,
+    hub: r.yard.hub,
+    artifacts: null as never,
+    uploads: { resolveAll: () => [] },
+    scheduler: r.yard.scheduler,
+    settings: r.yard.settings,
+    publicUrl: () => "",
+  } as never)
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  const client = new Client({ name: "t", version: "0" })
+  await Promise.all([server.connect(a), client.connect(b)])
+  return client
+}
 
 describe("task context usage and compaction", () => {
   it("shows usage after a turn, compacts on demand, and keeps the status and session", async () => {
@@ -102,6 +118,10 @@ describe("task context usage and compaction", () => {
     expect(after.turnCount).toBe(done.turnCount) // and isn't counted as a turn
     const events = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
     expect(events.some((m) => /Context compacted from/.test(m.content))).toBe(true)
+    const summaries = await call<TaskCompactionRecord[]>(r, "GET", `/api/task-compactions?taskId=${t.id}`)
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({ taskId: t.id, sessionId: done.sessionId, statusAfter: "done" })
+    expect(summaries[0]!.summary).toMatch(/mock agent wrote|Turn 1 finished/)
     const compact = lines().find((l) => l.prompt === "/compact")!
     expect(compact.args).toContain("--resume")
   })
@@ -147,7 +167,7 @@ describe("settings reach the CLI", () => {
     expect(argOf(turn.args, "--autocompact")).toBe("500000") // 50% of the assumed 1m window on a first turn
   })
 
-  it("lets the orchestrator decide effort per task and per message, and hides the param otherwise", async () => {
+  it("routes model and effort per task and per message, and records each turn", async () => {
     const lines = logFile()
     const r = await start()
     const connect = async () => {
@@ -163,35 +183,46 @@ describe("settings reach the CLI", () => {
       const tools = (await (await connect()).listTools()).tools
       return tools.find((t) => t.name === name)!
     }
-    // fixed mode: no effort param
-    expect(Object.keys((await schema("create_task")).inputSchema.properties ?? {})).not.toContain("effort")
-    expect(Object.keys((await schema("send_to_task")).inputSchema.properties ?? {})).not.toContain("effort")
-
-    await call(r, "PUT", "/api/agent-settings", { agentEffort: "orchestrator" })
     const create = await schema("create_task")
+    expect(Object.keys(create.inputSchema.properties ?? {})).toContain("model")
     expect(Object.keys(create.inputSchema.properties ?? {})).toContain("effort")
+    expect(Object.keys(create.inputSchema.properties ?? {})).toContain("routing_rule")
     expect(JSON.stringify(create.inputSchema.properties)).toMatch(/one-command chores/)
     expect(JSON.stringify(create.inputSchema.properties)).toMatch(/real coding/)
 
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const client = await connect()
-    const out = (await client.callTool({ name: "create_task", arguments: { project: p.name, title: "Chore", prompt: "run ls", effort: "low" } })) as { content: { text: string }[] }
+    const out = (await client.callTool({
+      name: "create_task",
+      arguments: { project: p.name, title: "Chore", prompt: "run ls", model: "claude-haiku-5-5", effort: "low", routing_rule: "docs-small-fixes", routing_reason: "Small chore." },
+    })) as { content: { text: string }[] }
     const id = JSON.parse(out.content[0]!.text).id as string
     await untilQuiet(r, id)
-    expect((await getTask(r, id)).effort).toBe("low")
-    expect(argOf(lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Chore"))!.args, "--effort")).toBe("low")
+    expect(await getTask(r, id)).toMatchObject({ model: "claude-haiku-5-5", effort: "low", routingRule: "docs-small-fixes", routingReason: "Small chore." })
+    const first = lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Chore"))!
+    expect(argOf(first.args, "--model")).toBe("claude-haiku-5-5")
+    expect(argOf(first.args, "--effort")).toBe("low")
 
-    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "now implement the feature [slow]", effort: "high" } })
+    await client.callTool({
+      name: "send_to_task",
+      arguments: { task: id, message: "now implement the feature [slow]", model: "claude-opus-5-5", effort: "high", routing_rule: "architecture-migrations-debugging", routing_reason: "Escalating after scope grew." },
+    })
     await untilQuiet(r, id)
-    expect((await getTask(r, id)).effort).toBe("high")
+    expect(await getTask(r, id)).toMatchObject({ model: "claude-opus-5-5", effort: "high", routingRule: "architecture-migrations-debugging" })
     const follow = lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from"))
+    expect(argOf(follow.at(-1)!.args, "--model")).toBe("claude-opus-5-5")
     expect(argOf(follow.at(-1)!.args, "--effort")).toBe("high")
+    expect(r.yard.store.listTaskTurns(id).map((t) => ({ model: t.model, effort: t.effort, rule: t.routing_rule, status: t.status }))).toEqual([
+      { model: "claude-haiku-5-5", effort: "low", rule: "docs-small-fixes", status: "done" },
+      { model: "claude-opus-5-5", effort: "high", rule: "architecture-migrations-debugging", status: "done" },
+    ])
 
-    // back to a fixed level: the effort the orchestrator picked is ignored
-    await call(r, "PUT", "/api/agent-settings", { agentEffort: "medium" })
-    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "again", effort: "max" } })
+    await client.callTool({ name: "set_task_model", arguments: { task: id, model: "claude-sonnet-5-5", effort: "medium", routing_rule: "ui", routing_reason: "Follow-up is UI-sized." } })
+    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "again" } })
     await untilQuiet(r, id)
-    expect(argOf(lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from")).at(-1)!.args, "--effort")).toBe("medium")
+    const last = lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from")).at(-1)!
+    expect(argOf(last.args, "--model")).toBe("claude-sonnet-5-5")
+    expect(argOf(last.args, "--effort")).toBe("medium")
   })
 })
 
@@ -217,6 +248,9 @@ describe("orchestrator usage, compaction and the durable log", () => {
   it("writes the summary file first, then compacts, and records before/after", async () => {
     const lines = logFile()
     const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Linked context", prompt: "write a haiku" })
+    await untilQuiet(r, t.id)
     await say(r, "status")
     const before = (await call<OrchestratorState>(r, "GET", "/api/orchestrator")).usage.tokens!
     await call(r, "POST", "/api/orchestrator/compact")
@@ -227,8 +261,23 @@ describe("orchestrator usage, compaction and the durable log", () => {
     expect(text).toMatch(/trigger: button/)
     expect(text).toMatch(new RegExp(`tokens_before: ${before}\\b`))
     expect(text).toMatch(/tokens_after: 2000\b/)
+    expect(text).toContain(t.id)
     expect(text).toContain("## Decisions and preferences")
     expect(text).toContain("## Open threads and next steps")
+    const apiList = await call<OrchestratorCompactionRecord[]>(r, "GET", "/api/compactions")
+    expect(apiList[0]).toMatchObject({ id: name!.replace(/\.md$/, ""), taskCount: 1 })
+    expect(apiList[0]!.tasks[0]).toMatchObject({ taskId: t.id, title: "Linked context", projectName: "demo", sessionId: t.sessionId })
+    const apiDetail = await call<OrchestratorCompactionRecord>(r, "GET", `/api/compactions/${apiList[0]!.id}`)
+    expect(apiDetail.markdown).toContain("## Decisions and preferences")
+    expect(JSON.parse(fs.readFileSync(path.join(r.yard.orchestrator.compactionsDir, name!.replace(/\.md$/, ".json")), "utf8")).tasks[0].taskId).toBe(t.id)
+
+    const client = await connectMcp(r)
+    const listed = (await client.callTool({ name: "list_compactions", arguments: { task: t.id } })) as { content: { text: string }[] }
+    expect(JSON.parse(listed.content[0]!.text)[0].id).toBe(apiList[0]!.id)
+    const found = (await client.callTool({ name: "find_compactions_by_task", arguments: { task: t.id } })) as { content: { text: string }[] }
+    expect(JSON.parse(found.content[0]!.text).orchestratorCompactions[0].id).toBe(apiList[0]!.id)
+    const read = (await client.callTool({ name: "read_compaction", arguments: { compaction: apiList[0]!.id } })) as { content: { text: string }[] }
+    expect(JSON.parse(read.content[0]!.text).markdown).toContain("## Open threads and next steps")
     const order = lines().map((l) => l.prompt)
     const si = order.findIndex((x) => x.includes("Your context is about to be compacted"))
     const ci = order.findIndex((x) => x === "/compact")

@@ -13,7 +13,9 @@ import type {
   ChatRole,
   ClaudeUsageTotals,
   CostRates,
+  CompactionTaskSnapshot,
   Effort,
+  OrchestratorCompactionRecord,
   PrState,
   PreviewLink,
   Project,
@@ -24,6 +26,7 @@ import type {
   ScheduleRunStatus,
   ScheduleTarget,
   Task,
+  TaskCompactionRecord,
   TaskMessage,
   TaskMessageRole,
   TaskStatus,
@@ -90,7 +93,25 @@ export interface TaskRow {
   compact_pending: number
   compacting: number
   compact_prev_status: TaskStatus | null
+  model: string | null
   effort: Effort | null
+  routing_rule: string | null
+  routing_reason: string | null
+}
+
+export interface TaskTurnRow {
+  id: string
+  task_id: string
+  turn_index: number
+  model: string | null
+  effort: Effort | null
+  routing_rule: string | null
+  routing_reason: string | null
+  status: string
+  started_at: number
+  finished_at: number | null
+  cost_usd: number | null
+  error: string | null
 }
 
 interface ScheduleRunRow {
@@ -249,7 +270,10 @@ type TaskPatch = Partial<{
   compactPending: boolean
   compacting: boolean
   compactPrevStatus: TaskStatus | null
+  model: string | null
   effort: Effort | null
+  routingRule: string | null
+  routingReason: string | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -280,7 +304,10 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   compactPending: "compact_pending",
   compacting: "compacting",
   compactPrevStatus: "compact_prev_status",
+  model: "model",
   effort: "effort",
+  routingRule: "routing_rule",
+  routingReason: "routing_reason",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -296,6 +323,51 @@ interface NotificationRow {
   summary: string | null
   created_at: number
   read_at: number | null
+}
+
+interface OrchestratorCompactionRow {
+  id: string
+  at: number
+  session_id: string
+  model: string
+  trigger: "button" | "auto"
+  tokens_before: number | null
+  tokens_after: number | null
+  markdown_path: string
+  json_path: string
+  markdown: string
+  created_at: number
+  task_count?: number
+}
+
+interface OrchestratorCompactionTaskRow {
+  compaction_id: string
+  task_id: string
+  title: string
+  status: TaskStatus
+  project_id: string
+  project_name: string
+  branch: string | null
+  pr_url: string | null
+  session_id: string
+  summary: string
+  last_active_at: number
+}
+
+interface TaskCompactionRow {
+  id: string
+  task_id: string
+  session_id: string
+  at: number
+  status_before: TaskStatus | null
+  status_after: TaskStatus | null
+  tokens_before: number | null
+  tokens_after: number | null
+  summary: string
+  archive_path: string | null
+  archive_available: number
+  archive_note: string | null
+  created_at: number
 }
 
 const oneLine = (text: string | null | undefined, max = 200) => {
@@ -466,9 +538,12 @@ export class Store {
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
+      model: row.model ?? null,
       effort: row.effort ?? null,
       claudeCostUsd: usage.costUsd,
       claudeTokens: usage.totalTokens,
+      routingRule: row.routing_rule ?? null,
+      routingReason: row.routing_reason ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -534,14 +609,17 @@ export class Store {
     env?: Record<string, string>
     branch?: string | null
     scheduleId?: string | null
+    model?: string | null
     effort?: Effort | null
+    routingRule?: string | null
+    routingReason?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, effort, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -552,12 +630,49 @@ export class Store {
         input.branch ?? null,
         JSON.stringify(input.env ?? {}),
         input.scheduleId ?? null,
+        input.model ?? null,
         input.effort ?? null,
+        input.routingRule ?? null,
+        input.routingReason ?? null,
         now,
         now,
         now,
       )
     return this.getTask(id)!
+  }
+
+  startTaskTurn(input: {
+    id: string
+    taskId: string
+    turnIndex: number
+    model: string | null
+    effort: Effort | null
+    routingRule: string | null
+    routingReason: string | null
+    status?: string
+  }) {
+    this.db
+      .prepare(
+        `INSERT INTO task_turns (id, task_id, turn_index, model, effort, routing_rule, routing_reason, status, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           model = excluded.model,
+           effort = excluded.effort,
+           routing_rule = excluded.routing_rule,
+           routing_reason = excluded.routing_reason,
+           status = excluded.status`,
+      )
+      .run(input.id, input.taskId, input.turnIndex, input.model, input.effort, input.routingRule, input.routingReason, input.status ?? "started", Date.now())
+  }
+
+  finishTaskTurn(id: string, patch: { status: string; costUsd?: number | null; error?: string | null }) {
+    this.db
+      .prepare("UPDATE task_turns SET status = ?, finished_at = ?, cost_usd = ?, error = ? WHERE id = ?")
+      .run(patch.status, Date.now(), patch.costUsd ?? null, patch.error ?? null, id)
+  }
+
+  listTaskTurns(taskId: string): TaskTurnRow[] {
+    return this.db.prepare("SELECT * FROM task_turns WHERE task_id = ? ORDER BY started_at ASC").all(taskId) as TaskTurnRow[]
   }
 
   taskEnv(id: string): Record<string, string> {
@@ -603,6 +718,218 @@ export class Store {
 
   deleteTask(id: string) {
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id)
+  }
+
+  // ---------- compaction history ----------
+
+  private compactionTaskFromRow(r: OrchestratorCompactionTaskRow): CompactionTaskSnapshot {
+    return {
+      taskId: r.task_id,
+      title: r.title,
+      status: r.status,
+      projectId: r.project_id,
+      projectName: r.project_name,
+      branch: r.branch,
+      prUrl: r.pr_url,
+      sessionId: r.session_id,
+      summary: r.summary,
+      lastActiveAt: r.last_active_at,
+    }
+  }
+
+  private taskRowsForCompaction(id: string): CompactionTaskSnapshot[] {
+    const rows = this.db
+      .prepare("SELECT * FROM orchestrator_compaction_tasks WHERE compaction_id = ? ORDER BY last_active_at DESC, task_id ASC")
+      .all(id) as OrchestratorCompactionTaskRow[]
+    return rows.map((r) => this.compactionTaskFromRow(r))
+  }
+
+  private orchestratorCompactionFromRow(row: OrchestratorCompactionRow, includeMarkdown = false, includeTasks = true): OrchestratorCompactionRecord {
+    const tasks = includeTasks ? this.taskRowsForCompaction(row.id) : []
+    return {
+      id: row.id,
+      at: row.at,
+      sessionId: row.session_id,
+      model: row.model,
+      trigger: row.trigger,
+      tokensBefore: row.tokens_before,
+      tokensAfter: row.tokens_after,
+      file: row.markdown_path,
+      jsonFile: row.json_path,
+      taskCount: row.task_count ?? tasks.length,
+      tasks,
+      ...(includeMarkdown ? { markdown: row.markdown } : {}),
+    }
+  }
+
+  addOrchestratorCompaction(input: {
+    id: string
+    at: number
+    sessionId: string
+    model: string
+    trigger: "button" | "auto"
+    tokensBefore: number | null
+    tokensAfter?: number | null
+    markdownPath: string
+    jsonPath: string
+    markdown: string
+    tasks: CompactionTaskSnapshot[]
+  }): OrchestratorCompactionRecord {
+    const now = Date.now()
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO orchestrator_compactions
+           (id, at, session_id, model, trigger, tokens_before, tokens_after, markdown_path, json_path, markdown, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(input.id, input.at, input.sessionId, input.model, input.trigger, input.tokensBefore, input.tokensAfter ?? null, input.markdownPath, input.jsonPath, input.markdown, now)
+      this.db.prepare("DELETE FROM orchestrator_compaction_tasks WHERE compaction_id = ?").run(input.id)
+      const stmt = this.db.prepare(
+        `INSERT INTO orchestrator_compaction_tasks
+         (compaction_id, task_id, title, status, project_id, project_name, branch, pr_url, session_id, summary, last_active_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      for (const t of input.tasks) {
+        stmt.run(input.id, t.taskId, t.title, t.status, t.projectId, t.projectName, t.branch, t.prUrl, t.sessionId, t.summary, t.lastActiveAt)
+      }
+    })()
+    return this.getOrchestratorCompaction(input.id, true)!
+  }
+
+  finishOrchestratorCompaction(id: string, tokensAfter: number | null, markdown?: string) {
+    const sets = ["tokens_after = ?"]
+    const args: unknown[] = [tokensAfter]
+    if (markdown !== undefined) {
+      sets.push("markdown = ?")
+      args.push(markdown)
+    }
+    args.push(id)
+    this.db.prepare(`UPDATE orchestrator_compactions SET ${sets.join(", ")} WHERE id = ?`).run(...args)
+  }
+
+  listOrchestratorCompactions(filter: { taskId?: string; limit?: number } = {}): OrchestratorCompactionRecord[] {
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200)
+    const rows = filter.taskId
+      ? (this.db
+          .prepare(
+            `SELECT c.*, (SELECT COUNT(*) FROM orchestrator_compaction_tasks ct WHERE ct.compaction_id = c.id) AS task_count
+             FROM orchestrator_compactions c
+             JOIN orchestrator_compaction_tasks ct ON ct.compaction_id = c.id
+             WHERE ct.task_id = ?
+             ORDER BY c.at DESC
+             LIMIT ?`,
+          )
+          .all(filter.taskId, limit) as OrchestratorCompactionRow[])
+      : (this.db
+          .prepare(
+            `SELECT c.*, (SELECT COUNT(*) FROM orchestrator_compaction_tasks ct WHERE ct.compaction_id = c.id) AS task_count
+             FROM orchestrator_compactions c
+             ORDER BY c.at DESC
+             LIMIT ?`,
+          )
+          .all(limit) as OrchestratorCompactionRow[])
+    return rows.map((r) => this.orchestratorCompactionFromRow(r, false, true))
+  }
+
+  getOrchestratorCompaction(id: string, includeMarkdown = true): OrchestratorCompactionRecord | null {
+    const row = this.db.prepare("SELECT * FROM orchestrator_compactions WHERE id = ?").get(id) as OrchestratorCompactionRow | undefined
+    return row ? this.orchestratorCompactionFromRow(row, includeMarkdown, true) : null
+  }
+
+  private taskCompactionFromRow(r: TaskCompactionRow): TaskCompactionRecord {
+    return {
+      id: r.id,
+      taskId: r.task_id,
+      sessionId: r.session_id,
+      at: r.at,
+      statusBefore: r.status_before,
+      statusAfter: r.status_after,
+      tokensBefore: r.tokens_before,
+      tokensAfter: r.tokens_after,
+      summary: r.summary,
+      archivePath: r.archive_path,
+      archiveAvailable: Boolean(r.archive_available),
+      archiveNote: r.archive_note,
+    }
+  }
+
+  addTaskCompaction(input: {
+    taskId: string
+    sessionId: string
+    at: number
+    statusBefore: TaskStatus | null
+    statusAfter: TaskStatus | null
+    tokensBefore: number | null
+    tokensAfter: number | null
+    summary: string
+    archivePath: string | null
+    archiveAvailable: boolean
+    archiveNote?: string | null
+  }): TaskCompactionRecord {
+    const id = newId("tc")
+    this.db
+      .prepare(
+        `INSERT INTO task_compactions
+         (id, task_id, session_id, at, status_before, status_after, tokens_before, tokens_after, summary, archive_path, archive_available, archive_note, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.taskId,
+        input.sessionId,
+        input.at,
+        input.statusBefore,
+        input.statusAfter,
+        input.tokensBefore,
+        input.tokensAfter,
+        input.summary,
+        input.archivePath,
+        input.archiveAvailable ? 1 : 0,
+        input.archiveNote ?? null,
+        Date.now(),
+      )
+    return this.getTaskCompaction(id)!
+  }
+
+  listTaskCompactions(filter: { taskId?: string; sessionId?: string; limit?: number } = {}): TaskCompactionRecord[] {
+    const where: string[] = []
+    const args: unknown[] = []
+    if (filter.taskId) {
+      where.push("task_id = ?")
+      args.push(filter.taskId)
+    }
+    if (filter.sessionId) {
+      where.push("session_id = ?")
+      args.push(filter.sessionId)
+    }
+    args.push(Math.min(Math.max(filter.limit ?? 50, 1), 200))
+    const rows = this.db
+      .prepare(`SELECT * FROM task_compactions ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY at DESC LIMIT ?`)
+      .all(...args) as TaskCompactionRow[]
+    return rows.map((r) => this.taskCompactionFromRow(r))
+  }
+
+  getTaskCompaction(id: string): TaskCompactionRecord | null {
+    const row = this.db.prepare("SELECT * FROM task_compactions WHERE id = ?").get(id) as TaskCompactionRow | undefined
+    return row ? this.taskCompactionFromRow(row) : null
+  }
+
+  updateTaskCompactionArchive(id: string, archivePath: string | null, archiveAvailable: boolean, archiveNote: string | null = null) {
+    this.db
+      .prepare("UPDATE task_compactions SET archive_path = ?, archive_available = ?, archive_note = ? WHERE id = ?")
+      .run(archivePath, archiveAvailable ? 1 : 0, archiveNote, id)
+  }
+
+  noteTaskArchiveUnavailable(taskId: string, archivePath: string | null, note: string, at = Date.now()) {
+    this.db
+      .prepare(
+        `UPDATE task_compactions
+         SET archive_available = 0,
+             archive_note = CASE WHEN archive_note IS NULL OR archive_note = '' THEN ? ELSE archive_note || '; ' || ? END
+         WHERE task_id = ? AND (? IS NULL OR archive_path = ?) AND (archive_available = 1 OR archive_note IS NULL)`,
+      )
+      .run(`${new Date(at).toISOString()}: ${note}`, `${new Date(at).toISOString()}: ${note}`, taskId, archivePath, archivePath)
   }
 
   // pending inputs: messages for a task that wait for its next turn
@@ -702,6 +1029,19 @@ export class Store {
         `SELECT * FROM (SELECT *, rowid AS rid FROM chat_messages ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC`,
       )
       .all(limit) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({
+      id: r.id,
+      role: r.role,
+      content: r.content,
+      meta: json(r.meta_json, null),
+      createdAt: r.created_at,
+    }))
+  }
+
+  listChatSince(since: number): ChatMessage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM chat_messages WHERE created_at > ? ORDER BY created_at ASC, rowid ASC")
+      .all(since) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
     return rows.map((r) => ({
       id: r.id,
       role: r.role,

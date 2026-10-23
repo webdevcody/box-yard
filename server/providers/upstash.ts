@@ -1,6 +1,7 @@
 import { Box } from "@upstash/box"
 import fs from "node:fs"
 import type { Config } from "../config.js"
+import type { WorkerSize } from "../../shared/types.js"
 import { retry } from "../util/retry.js"
 import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
 
@@ -41,7 +42,7 @@ export class UpstashProvider implements BoxProvider {
     return box
   }
 
-  async create({ labels }: { labels: string[] }): Promise<string> {
+  async create({ labels, size }: { labels: string[]; size?: WorkerSize }): Promise<string> {
     const env: Record<string, string> = { DISABLE_AUTOUPDATER: "1", IS_SANDBOX: "1" }
     if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
     if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
@@ -49,7 +50,7 @@ export class UpstashProvider implements BoxProvider {
     const opts = {
       apiKey: this.c.upstashBoxApiKey,
       runtime: this.c.workerRuntime as "node",
-      size: this.c.workerSize,
+      size: size ?? this.c.workerSize,
       labels: labels.map((l) => l.replace(/[^\w.:-]/g, "-").slice(0, 20)).slice(0, 5),
       env,
       git: this.c.githubToken

@@ -1,6 +1,7 @@
 import path from "node:path"
 import fs from "node:fs"
 import { fileURLToPath } from "node:url"
+import { SIZE_DEFAULTS, WORKER_SIZES, type WorkerSize } from "../shared/types.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
 function loadDotEnv(file: string) {
@@ -28,7 +29,14 @@ function int(name: string, fallback: number) {
   return Number.isFinite(n) ? n : fallback
 }
 
+function workerSize(name: string, fallback: WorkerSize): WorkerSize {
+  const v = process.env[name]
+  return v && (WORKER_SIZES as readonly string[]).includes(v) ? (v as WorkerSize) : fallback
+}
+
 const env = process.env
+const size = workerSize("WORKER_SIZE", "small")
+const sizeDefaults = SIZE_DEFAULTS[size]
 
 /** Mock mode: a fake `claude` drives everything, so no keys are needed. */
 const mock = env.BOXYARD_MOCK === "1"
@@ -50,7 +58,7 @@ export const config = {
   upstashBoxApiKey: env.UPSTASH_BOX_API_KEY ?? "",
   workerSnapshotId: env.WORKER_SNAPSHOT_ID ?? "",
   workerRuntime: env.WORKER_RUNTIME ?? "node",
-  workerSize: (env.WORKER_SIZE ?? "small") as "small" | "medium" | "large",
+  workerSize: size,
 
   /** Largest file Cody can attach to a message, in MB. */
   maxUploadMb: int("BOXYARD_MAX_UPLOAD_MB", 20),
@@ -60,11 +68,15 @@ export const config = {
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
   /** Claude turns that may run at the same time inside one box. */
-  slotsPerBox: int("BOX_SLOTS", 2),
+  slotsPerBox: int("BOX_SLOTS", sizeDefaults.slotsPerBox),
   /** Task folders kept in one box before old, finished ones are evicted. */
-  maxResidentPerBox: int("BOX_MAX_RESIDENT", 12),
+  maxResidentPerBox: int("BOX_MAX_RESIDENT", sizeDefaults.maxResidentPerBox),
   /** Delete a worker box after this many minutes with no running turn. 0 = never. */
   boxIdleDeleteMinutes: int("BOX_IDLE_DELETE_MINUTES", 0),
+  /** Park archived resting task folders from boxes after this many idle days. 0 = keep folders. */
+  workspaceRetentionDays: int("BOXYARD_WORKSPACE_RETENTION_DAYS", 7),
+  /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
+  archiveRetentionDays: int("BOXYARD_ARCHIVE_RETENTION_DAYS", 7),
 
   redisUrl: env.UPSTASH_REDIS_REST_URL ?? "",
   redisToken: env.UPSTASH_REDIS_REST_TOKEN ?? "",
