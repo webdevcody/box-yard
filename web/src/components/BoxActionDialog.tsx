@@ -81,7 +81,8 @@ export function BoxActionDialog({ box, action, onClose, onDone }: { box: BoxInfo
       title={
         <span className="flex min-w-0 items-center gap-2">
           <Icon className={cx("h-4 w-4 shrink-0", action === "delete" ? "text-red-400" : "text-amber-300")} />
-          {copy.title} <span className="truncate font-mono">{box.id}</span>?
+          <span className="shrink-0">{copy.title}</span>
+          <span className="truncate font-mono">{box.id}?</span>
         </span>
       }
       description={`${box.provider} · ${box.size}`}
@@ -92,7 +93,7 @@ export function BoxActionDialog({ box, action, onClose, onDone }: { box: BoxInfo
           </Button>
           <Button
             type="submit"
-            variant={action === "delete" || stopStep ? "danger" : "primary"}
+            variant={action === "delete" || stopStep ? "danger" : running > 0 ? "subtle" : "primary"}
             disabled={!canGo}
             loading={mutation.isPending}
             title={busy ?? (!nameOk ? "Type the box name to confirm" : undefined)}

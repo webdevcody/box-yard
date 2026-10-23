@@ -215,7 +215,7 @@ describe("Clear box and Delete box", () => {
     render()
     await menuItem("idle-box", "Clear box…")
     const d = dialog()!
-    expect(d.textContent).toContain("Clear box idle-box?")
+    expect(d.textContent).toContain("Clear boxidle-box?")
     expect(d.querySelector("[data-testid=box-contents]")!.textContent).toContain("4.5 GB of disk in use")
     expect(d.querySelector("[data-testid=agents-running]")).toBeNull()
     expect(confirmButton().textContent).toBe("Clear box")
@@ -248,7 +248,7 @@ describe("Clear box and Delete box", () => {
   it("deletes only after the box name is typed, and shows the server's refusal", async () => {
     render()
     await menuItem("idle-box", "Delete box…")
-    expect(dialog()!.textContent).toContain("Delete box idle-box?")
+    expect(dialog()!.textContent).toContain("Delete boxidle-box?")
     expect(confirmButton().disabled).toBe(true)
     const input = dialog()!.querySelector<HTMLInputElement>("input[aria-label='Box name']")!
     await act(async () => {
