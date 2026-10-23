@@ -26,7 +26,7 @@ export function taskContext(task: Task | null | undefined): SelectionTaskContext
   return task ? { id: task.id, title: task.title, branch: task.branch, prUrl: task.prUrl } : null
 }
 
-export function buildSelectionTaskPrompt(input: { source: SelectionTaskSource; selectedText: string; instructions: string }): string {
+export function buildSelectionTaskPrompt(input: { source: SelectionTaskSource; selectedText: string; instructions: string; ownerName?: string }): string {
   const selected = truncate(input.selectedText.trim(), MAX_SELECTED_CHARS)
   const lines = [
     "Start a new task from this selected Box Yard output. Route it through your normal Box Yard placement rules: create a new task in the relevant project unless an existing task is clearly the better place to continue.",
@@ -38,7 +38,7 @@ export function buildSelectionTaskPrompt(input: { source: SelectionTaskSource; s
     quote(selected),
   ]
   const instructions = input.instructions.trim()
-  if (instructions) lines.push("", "## Cody's additional instructions", instructions)
+  if (instructions) lines.push("", `## ${input.ownerName ?? "Cody"}'s additional instructions`, instructions)
   return lines.join("\n")
 }
 
