@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
+import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -57,6 +58,8 @@ export interface TurnFlags {
   done?: string
   waitingOn?: string[]
   sawPr?: boolean
+  /** The agent marked the run a no-op (mark_done outcome "noop"), with its commit count if it could tell. */
+  noop?: { commits: number | null }
   /** How many times in a row a turn died and was retried. */
   interrupts?: number
 }
@@ -75,6 +78,7 @@ export interface TaskRow {
   pr_state: PrState | null
   pr_merged_at: number | null
   pr_merged_by: string | null
+  outcome: TaskOutcome | null
   previews_json: string
   question: string | null
   summary: string | null
@@ -267,6 +271,7 @@ type TaskPatch = Partial<{
   prState: PrState | null
   prMergedAt: number | null
   prMergedBy: string | null
+  outcome: TaskOutcome | null
   previews: PreviewLink[]
   question: string | null
   summary: string | null
@@ -301,6 +306,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   prState: "pr_state",
   prMergedAt: "pr_merged_at",
   prMergedBy: "pr_merged_by",
+  outcome: "outcome",
   previews: "previews_json",
   question: "question",
   summary: "summary",
@@ -548,6 +554,7 @@ export class Store {
       pendingCount: pending.n,
       lastArchivedAt: row.last_archived_at,
       scheduleId: row.schedule_id ?? null,
+      outcome: parseOutcome(row.outcome),
       contextTokens: row.context_tokens ?? null,
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
@@ -726,7 +733,7 @@ export class Store {
     const res = this.db.prepare(`UPDATE tasks SET ${sets.join(", ")} WHERE id = ?`).run(...args)
     if (res.changes === 0) throw new NotFoundError(`Task ${id} not found`)
     const task = this.getTask(id)!
-    if (before && !before.compacting && shouldNotify(before.status, task.status)) this.addNotification(task)
+    if (before && !before.compacting && shouldNotify(before.status, task.status) && !isQuietRun(task)) this.addNotification(task)
     return task
   }
 
@@ -1166,6 +1173,22 @@ export class Store {
     this.db.transaction(() => {
       for (const id of taskIds) stmt.run(projectId, id)
     })()
+  }
+
+  /**
+   * A quiet run's notices (like "Schedule … started a run") are never forwarded: mark every unseen one about
+   * the task as seen, for its Captain and for the Coordinator, so neither wakes up or reads them later.
+   */
+  dropTaskNotices(taskId: string) {
+    this.db.transaction(() => {
+      this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE seen_by_captain = 0 AND role = 'notice' AND json_extract(meta_json, '$.taskId') = ?").run(taskId)
+      this.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE seen_by_orchestrator = 0 AND role = 'notice' AND json_extract(meta_json, '$.taskId') = ?").run(taskId)
+    })()
+  }
+
+  /** Whether the task's agent ever asked Cody something (the "Asked Cody" events). */
+  taskEverAsked(taskId: string): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM task_messages WHERE task_id = ? AND role = 'event' AND json_extract(meta_json, '$.kind') = 'question' LIMIT 1").get(taskId))
   }
 
   markCaptainMessageSeen(id: string) {

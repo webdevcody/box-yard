@@ -4,6 +4,7 @@
 // archives the workspace and can't be taken back. Undo keeps the previous status.
 import { useSyncExternalStore } from "react"
 import type { Task, TaskStatus } from "../../../shared/types"
+import { isQuietRun } from "../../../shared/quiet"
 
 export const INBOX_STATUSES: readonly TaskStatus[] = ["needs_input", "pr_ready", "failed"]
 export const UNDO_MS = 5000
@@ -25,7 +26,7 @@ function release(taskId: string) {
 
 /** In the inbox: needs Cody, and not marked done (even if the close hasn't been sent yet). */
 export function inInbox(task: Task, closing: ReadonlySet<string> = pending): boolean {
-  return INBOX_STATUSES.includes(task.status) && !closing.has(task.id)
+  return INBOX_STATUSES.includes(task.status) && !isQuietRun(task) && !closing.has(task.id)
 }
 
 /** Hide the task from the inbox now and run `commit` after `delay` unless undone. Returns false if already pending. */

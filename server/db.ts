@@ -442,6 +442,10 @@ export const MIGRATIONS: string[] = [
   DROP TABLE usage_firsts;
   DROP TABLE usage_rates;
   `,
+  `
+  -- What the agent reported about a run: 'noop' for a schedule run that found nothing to do (shared/quiet.ts).
+  ALTER TABLE tasks ADD COLUMN outcome TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

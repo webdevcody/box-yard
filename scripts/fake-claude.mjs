@@ -15,8 +15,9 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 // Worker prompts understand these markers anywhere in the text:
-//   [ask] [fail] [slow] [preview] [artifact] [agent:<taskId>] [note]
+//   [ask] [fail] [slow] [preview] [artifact] [agent:<taskId>] [note] [noop]
 // With no marker the worker writes a file, publishes it, and marks itself done.
+// [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
 
 import fs from "node:fs"
 import os from "node:os"
@@ -227,7 +228,10 @@ async function orchestrator(mcp, prompt) {
 async function worker(mcp, prompt) {
   const cwd = process.cwd()
   if (/\[slow\]/i.test(prompt)) await sleep(3000)
+  const noop = /\[noop\]/i.test(prompt)
+  const markNoop = () => useTool(mcp, "mark_done", { summary: "Nothing to do this run.", outcome: "noop" })
   if (/\[fail\]/i.test(prompt)) {
+    if (noop) await markNoop()
     console.error("fake failure requested by [fail]")
     process.exit(3)
   }
@@ -236,6 +240,7 @@ async function worker(mcp, prompt) {
 
   if (/\[ask\]/i.test(prompt) && !session.turns.length) {
     await useTool(mcp, "ask_user", { question: "Which color should the button be: blue or green?" })
+    if (noop) await markNoop()
     return "I asked Cody which color to use."
   }
   const agent = prompt.match(/\[agent:([\w-]+)\]/i)
@@ -253,7 +258,8 @@ async function worker(mcp, prompt) {
   const file = path.join(cwd, "box-yard-demo.md")
   fs.writeFileSync(file, `# Mock result\n\nPrompt:\n\n${prompt.slice(0, 2000)}\n`)
   if (/\[artifact\]/i.test(prompt)) await useTool(mcp, "publish_artifact", { path: "box-yard-demo.md", title: "Mock report" })
-  if (!/\[(ask|preview)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
+  if (noop) await markNoop()
+  else if (!/\[(ask|preview)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
     await useTool(mcp, "mark_done", { summary: "The mock agent wrote box-yard-demo.md." })
   }
   const reply = "Done for now. I wrote box-yard-demo.md."

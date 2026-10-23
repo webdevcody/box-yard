@@ -73,7 +73,8 @@ describe("usage migration", () => {
   it("turns logged running totals into per-run costs, keeps legacy Captain rows as Captain spend, and survives deletes", () => {
     const db = new Database(":memory:")
     db.pragma("foreign_keys = ON")
-    migrate(db, MIGRATIONS.length - 1)
+    // Stop just before the usage reconcile migration, wherever later migrations put it.
+    migrate(db, MIGRATIONS.findIndex((m) => m.includes("claude_usage_new")))
     const store = new Store(db)
     const p = store.createProject({ name: "demo" })
     const task = store.createTask({ projectId: p.id, title: "t", prompt: "t" })

@@ -17,7 +17,9 @@ import {
 import { useScrollToHash } from "../lib/hash"
 import { revealChatMessage } from "../lib/reveal"
 import { describeCron, isValidTimeZone, nextRuns, parseCron } from "../../../shared/cron"
-import { Button, Empty, Field, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { Button, Empty, Field, QuietPill, Select, StatusBadge, TimeAgo, cx, inputClass } from "./ui"
+import { QuietSwitch } from "./TaskFilters"
+import { isQuietRun, withoutQuiet } from "../../../shared/quiet"
 import { Modal } from "./Modal"
 import { badgeStatus } from "../lib/prState"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task } from "../../../shared/types"
@@ -163,6 +165,8 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
   const remove = useDeleteSchedule()
   const run = useRunSchedule()
   const [open, setOpen] = useState(false)
+  // A schedule's history is where quiet runs belong, so they show here by default.
+  const [showQuiet, setShowQuiet] = useState(true)
   const allRuns = useScheduleRuns()
   const orchestrator = s.target === "orchestrator"
   const runs = (tasks.data ?? []).filter((t) => t.scheduleId === s.id).sort((a, b) => b.createdAt - a.createdAt)
@@ -242,7 +246,7 @@ function ScheduleCard({ schedule: s }: { schedule: Schedule }) {
           <div className="text-xs text-zinc-500">
             Missed runs: {s.catchUp === "once" ? "catch up once" : "skip"} · Overlap: {s.allowOverlap ? "allowed" : orchestrator ? "skip if the last prompt is still queued or running" : "skip if the last run is still going"}
           </div>
-          {orchestrator ? <ChatRunList runs={chatRuns} /> : <RunList runs={runs} />}
+          {orchestrator ? <ChatRunList runs={chatRuns} /> : <RunList runs={runs} showQuiet={showQuiet} onShowQuiet={setShowQuiet} />}
         </div>
       )}
     </div>
@@ -308,22 +312,32 @@ function LiveTail({ task }: { task: Task }) {
   )
 }
 
-function RunList({ runs }: { runs: Task[] }) {
+function RunList({ runs, showQuiet, onShowQuiet }: { runs: Task[]; showQuiet: boolean; onShowQuiet: (show: boolean) => void }) {
   if (!runs.length) return <p className="text-xs text-zinc-500">No runs yet.</p>
+  const quiet = runs.filter(isQuietRun).length
+  const shown = withoutQuiet(runs, showQuiet)
   return (
-    <ul className="divide-y divide-zinc-900 rounded-lg border border-zinc-800/80">
-      {runs.slice(0, 15).map((t) => (
-        <li key={t.id}>
-          <Link href={`/tasks/${t.id}`} className="flex min-h-11 items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
-            <span className="min-w-0 flex-1 truncate text-zinc-200">{t.summary ?? t.title}</span>
-            <StatusBadge status={badgeStatus(t)} />
-            <span className="w-16 shrink-0 text-right text-xs text-zinc-500">
-              <TimeAgo ts={t.createdAt} />
-            </span>
-          </Link>
-        </li>
-      ))}
-    </ul>
+    <div className="space-y-2">
+      {quiet > 0 && <QuietSwitch checked={showQuiet} onChange={onShowQuiet} count={quiet} />}
+      {shown.length ? (
+        <ul className="divide-y divide-zinc-900 rounded-lg border border-zinc-800/80">
+          {shown.slice(0, 15).map((t) => (
+            <li key={t.id} className={cx(isQuietRun(t) && "opacity-60 hover:opacity-100")}>
+              <Link href={`/tasks/${t.id}`} className="flex min-h-11 items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
+                <span className="min-w-0 flex-1 truncate text-zinc-200">{t.summary ?? t.title}</span>
+                {isQuietRun(t) && <QuietPill />}
+                <StatusBadge status={badgeStatus(t)} />
+                <span className="w-16 shrink-0 text-right text-xs text-zinc-500">
+                  <TimeAgo ts={t.createdAt} />
+                </span>
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-xs text-zinc-500">Only quiet runs so far.</p>
+      )}
+    </div>
   )
 }
 

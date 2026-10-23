@@ -456,8 +456,16 @@ const TOOLS = [
   },
   {
     name: "mark_done",
-    description: "Mark the task finished, with a short summary of the outcome. Use when no PR is needed or after the PR is up and nothing is left.",
-    inputSchema: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] },
+    description:
+      'Mark the task finished, with a short summary of the outcome. Use when no PR is needed or after the PR is up and nothing is left. For a scheduled run that found nothing to do and changed nothing (no commits, PR, artifact, preview or question), pass outcome "noop" so Box Yard files it as a quiet run instead of notifying Cody.',
+    inputSchema: {
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+        outcome: { type: "string", enum: ["noop"], description: 'Only "noop": this run found nothing to do and changed nothing.' },
+      },
+      required: ["summary"],
+    },
   },
 ]
 
@@ -553,12 +561,28 @@ async function callTool(name, args = {}) {
       return text(`Published ${filename}. Box Yard will host it at ${url} (live within a few seconds). Share that link.`)
     }
     case "mark_done": {
-      await emit({ t: "done", summary: String(args.summary ?? "").trim() || "Done." })
-      return text("Marked done. End your turn.")
+      const summary = String(args.summary ?? "").trim() || "Done."
+      if (args.outcome === undefined || args.outcome === null || args.outcome === "") {
+        await emit({ t: "done", summary })
+        return text("Marked done. End your turn.")
+      }
+      if (args.outcome !== "noop") return text('outcome must be "noop" (or left out)', true)
+      // Box Yard checks the noop mark against what the run did; commits are only visible from here.
+      await emit({ t: "done", summary, outcome: "noop", commits: await unpushedWork() })
+      return text("Marked done as a no-op run. Box Yard hides it unless the run changed something. End your turn.")
     }
     default:
       return text(`Unknown tool ${name}`, true)
   }
+}
+
+/** Commits on any local branch that aren't on origin's base branch, or null outside a git repo. */
+async function unpushedWork() {
+  const base = task.baseBranch || "main"
+  const res = await sh("git", ["rev-list", "--count", "--branches", "--not", `refs/remotes/origin/${base}`])
+  if (res.code !== 0) return null
+  const n = Number(res.stdout.trim())
+  return Number.isFinite(n) ? n : null
 }
 
 async function createPullRequest(args) {

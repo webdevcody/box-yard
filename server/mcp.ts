@@ -11,6 +11,7 @@ import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import type { CaptainManager } from "./captains.js"
 import { describeCron } from "../shared/cron.js"
+import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
 import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
@@ -138,6 +139,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     title: t.title,
     project: store.getProject(t.projectId)?.name ?? t.projectId,
     status: t.status,
+    quiet: isQuietRun(t) || undefined,
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
     prState: t.prUrl ? (t.prState ?? undefined) : undefined,
@@ -591,9 +593,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_inbox",
-    { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures." },
+    { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures. Quiet schedule runs (no-ops) never show here." },
     safe(async () =>
-      ok(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] }).map(brief)),
+      ok(withoutQuiet(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] })).map(brief)),
     ),
   )
 
@@ -810,8 +812,21 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_schedule_runs",
-    { description: "Past runs of a schedule, newest first: tasks for a project schedule; for a Coordinator schedule, the injected chat messages with their status (queued, running, done, failed).", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
-    safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(schedule(a.schedule).id, a.limit ?? 10).map(anyRunView))),
+    {
+      description:
+        "Past runs of a schedule, newest first: tasks for a project schedule; for a Coordinator schedule, the injected chat messages with their status (queued, running, done, failed). " +
+        "Quiet runs (the agent found nothing to do and changed nothing) are included and marked quiet: true; pass include_quiet: false to leave them out.",
+      inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional(), include_quiet: z.boolean().optional() },
+    },
+    safe(async (a: { schedule: string; limit?: number; include_quiet?: boolean }) =>
+      ok(
+        scheduler
+          .runs(schedule(a.schedule).id, a.include_quiet === false ? 100 : (a.limit ?? 10))
+          .filter((r) => a.include_quiet !== false || !("outcome" in r && isQuietRun(r)))
+          .slice(0, a.limit ?? 10)
+          .map(anyRunView),
+      ),
+    ),
   )
 
   server.registerTool(

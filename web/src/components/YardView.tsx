@@ -10,13 +10,15 @@ import {
   inYardView,
   olderFinishedCount,
   parseYardTab,
+  quietCount,
+  shownInYard,
   yardCompare,
   yardCounts,
   type YardTab,
 } from "../lib/yardTasks"
 import { Empty, STATUS, Select, cx } from "./ui"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
-import { SearchBox, SortSelect, TabBar, isTyping, useUrlQuery, withParam } from "./TaskFilters"
+import { QuietToggle, SearchBox, SortSelect, TabBar, isTyping, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 
 const TAB_ICONS: Record<YardTab, typeof Activity> = { active: Activity, needs_you: InboxIcon, recent: History, all: Layers }
 
@@ -42,6 +44,7 @@ export function YardView() {
   const health = useHealth()
   const [params, setParams] = useSearchParams()
   const [query, onQuery] = useUrlQuery()
+  const [showQuiet] = useShowQuiet()
   const now = useNow()
 
   const tab = parseYardTab(params.get("tab"))
@@ -53,21 +56,22 @@ export function YardView() {
 
   const all = tasks.data
   const scoped = useMemo(() => (all ?? []).filter((t) => !projectId || t.projectId === projectId), [all, projectId])
-  const counts = useMemo(() => yardCounts(scoped, now), [scoped, now])
+  const counts = useMemo(() => yardCounts(scoped, now, showQuiet), [scoped, now, showQuiet])
+  const quiet = useMemo(() => quietCount(scoped, tab, now, older), [scoped, tab, now, older])
   // Sorted once per tab, filter and search, then held still while agents update.
   const stable = useStableTasks(scoped, {
     compare: yardCompare({ tab, sort }),
-    include: (t) => inYardView(t, { tab, now, older, query, projectName: projectNameOf }),
-    resetKey: `${tab}|${projectId}|${older}|${tab === "all" ? `${sort}|${query}` : ""}`,
+    include: (t) => inYardView(t, { tab, now, older, query, projectName: projectNameOf, showQuiet }),
+    resetKey: `${tab}|${projectId}|${older}|${showQuiet}|${tab === "all" ? `${sort}|${query}` : ""}`,
   })
   const shown = stable.entries
-  const olderCount = useMemo(() => (tab === "recent" ? olderFinishedCount(scoped, now) : 0), [scoped, tab, now])
+  const olderCount = useMemo(() => (tab === "recent" ? olderFinishedCount(scoped, now, showQuiet) : 0), [scoped, tab, now, showQuiet])
   /** Tasks per project in the current tab, for the project picker. */
   const perProject = useMemo(() => {
     const m = new Map<string, number>()
-    for (const t of all ?? []) if (inYardTab(t, tab, now, older)) m.set(t.projectId, (m.get(t.projectId) ?? 0) + 1)
+    for (const t of all ?? []) if (shownInYard(t, showQuiet) && inYardTab(t, tab, now, older)) m.set(t.projectId, (m.get(t.projectId) ?? 0) + 1)
     return m
-  }, [all, tab, now, older])
+  }, [all, tab, now, older, showQuiet])
 
   // 1-4 switch tabs, unless you're typing somewhere.
   useEffect(() => {
@@ -99,6 +103,7 @@ export function YardView() {
             {health.data ? `${health.data.provider} boxes, ${health.data.bus === "redis" ? "Redis bus" : "file bus"}` : ""}
           </p>
         </div>
+        {list.length > 0 && (quiet > 0 || showQuiet) && <QuietToggle count={quiet} className="w-full sm:w-auto" />}
         {list.length > 0 && (
           <Select
             className={cx("w-full shrink-0 text-zinc-300 sm:w-56", projectId && "border-yard-500/40 text-zinc-100")}
