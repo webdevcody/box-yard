@@ -25,6 +25,8 @@ const base: Settings = {
   workspaceRetentionDays: 7,
   archiveRetentionDays: 7,
   archiveKeepTouchedDays: 30,
+  diskMinFreeMb: 1024,
+  diskCloneFactor: 2,
 }
 
 describe("settings nav", () => {

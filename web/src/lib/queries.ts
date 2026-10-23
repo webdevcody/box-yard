@@ -3,7 +3,9 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClie
 import { api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
+import { withCleanup } from "./diskCleanup"
 import type {
+  BoxCleanup,
   AppNotification,
   Artifact,
   Attachment,
@@ -466,6 +468,16 @@ export function useRunSchedule() {
       if ("dueAt" in run) qc.setQueryData<ScheduleRun[]>(keys.scheduleRuns, (list) => upsert(list, run, true))
       else qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, run))
     },
+  })
+}
+
+/** Clean up a box's disk now (graduated, safe steps). The result arrives as SSE box.cleanup. */
+export function useCleanBox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (boxId: string) => api<BoxCleanup>(`/api/boxes/${boxId}/cleanup`, { method: "POST" }),
+    onError: fail("Couldn't start the cleanup"),
+    onSuccess: (cleanup) => qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, cleanup)),
   })
 }
 

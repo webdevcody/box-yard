@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react"
 import { Link } from "wouter"
-import { Boxes, ChevronRight, ExternalLink, Globe, Info, Settings, X } from "lucide-react"
-import { useAgentSettings, useBoxes, useHealth, useProjects, useTasks } from "../lib/queries"
+import { AlertTriangle, Boxes, ChevronRight, ExternalLink, Globe, HardDrive, Info, Settings, Sparkles, X } from "lucide-react"
+import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
 import { bytes, hours, money } from "../lib/usage"
-import { Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
+import { cleanupLine, diskMeter } from "../lib/diskCleanup"
+import { formatBytes } from "../../../shared/disk"
+import { Button, Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
-import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
+import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -38,8 +40,14 @@ function Stat({ label, value, max }: { label: string; value: number; max: number
 }
 
 /** A thin bar; segmented when there are few enough slots to count at a glance. */
-function Meter({ used, total, className }: { used: number; total: number; className?: string }) {
+function Meter({ used, total, className, warn, label }: { used: number; total: number; className?: string; warn?: boolean; label?: string }) {
   const cells = Math.max(total, used)
+  if (warn !== undefined)
+    return (
+      <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={total} aria-valuenow={used} className={cx("h-1.5 overflow-hidden rounded-sm bg-zinc-700", className)}>
+        <div className={cx("h-full", warn ? "bg-amber-400" : "bg-yard-500")} style={{ width: `${total ? Math.min(100, (used / total) * 100) : 0}%` }} />
+      </div>
+    )
   if (cells > 0 && cells <= 6)
     return (
       <div className={cx("flex gap-0.5", className)}>
@@ -115,7 +123,7 @@ export function BoxesView() {
         ) : (
           <div className="divide-y divide-zinc-800/80 rounded-xl border border-zinc-800/80 bg-zinc-900/40">
             {queued.map((t) => (
-              <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} />
+              <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} note={t.waitReason} />
             ))}
           </div>
         )}
@@ -166,14 +174,22 @@ function CapacityNotice({ onEdit }: { onEdit: () => void }) {
   )
 }
 
-function TaskRow({ task, projectName, muted }: { task: Task; projectName: string; muted?: boolean }) {
+function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: string; muted?: boolean; note?: string | null }) {
   return (
     <Link href={`/tasks/${task.id}`} className="group flex min-h-11 items-center gap-3 px-3 py-2 text-sm hover:bg-zinc-900">
-      <div className="min-w-0 flex-1 sm:flex sm:items-baseline sm:gap-3">
-        <div className={cx("truncate", muted ? "text-zinc-400" : "text-zinc-100")} title={task.title}>
-          {task.title}
+      <div className="min-w-0 flex-1">
+        <div className="sm:flex sm:items-baseline sm:gap-3">
+          <div className={cx("truncate", muted ? "text-zinc-400" : "text-zinc-100")} title={task.title}>
+            {task.title}
+          </div>
+          <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
         </div>
-        <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
+        {note && (
+          <div className="mt-0.5 flex items-center gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
+            <HardDrive className="h-3 w-3 shrink-0" />
+            <span className="truncate">{note}</span>
+          </div>
+        )}
       </div>
       <PrChip task={task} variant="link" className="hidden text-xs sm:inline-flex" />
       <StatusBadge status={badgeStatus(task)} />
@@ -244,14 +260,21 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
         <span title="Estimated active CPU time tracked by Box Yard">
           active {hours(box.activeMs)}
         </span>
-        <span title="Current disk use, including task folders and local snapshots when visible">
-          disk {bytes(box.diskBytes)}
-        </span>
+        <DiskUse box={box} />
         <span title={box.usageSource === "actual" ? "Provider usage data was available." : "Estimated from Box Yard runtime and disk probes."}>
           {money(box.estimatedCostUsd)} {box.usageSource}
         </span>
         {box.keepAlive && <span className="text-yard-300">keep-alive</span>}
+        {box.status === "ready" && <CleanUpButton box={box} />}
       </div>
+
+      {box.diskLow && box.status === "ready" && (
+        <div role="status" className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-300" />
+          <span>Low on disk. New tasks go to other boxes while it cleans up; they wait here only when no other box has room.</span>
+        </div>
+      )}
+      {box.cleanup && <CleanupReport cleanup={box.cleanup} />}
 
       <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/80">
         {active.length === 0 ? (
@@ -300,6 +323,79 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
             </a>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+/** Free and total space on the box's work disk, from its last df. */
+function DiskUse({ box }: { box: BoxInfo }) {
+  const disk = diskMeter(box)
+  if (!disk)
+    return (
+      <span title="Current disk use, including task folders and local snapshots when visible">
+        disk {bytes(box.diskBytes)}
+      </span>
+    )
+  const checked = box.diskCheckedAt ? ` Checked ${timeAgo(box.diskCheckedAt)}.` : ""
+  return (
+    <span className={cx("flex items-center gap-2 whitespace-nowrap", disk.low && "font-medium text-amber-300")} title={`${formatBytes(disk.used)} used.${checked}`} data-testid="disk-use">
+      <HardDrive className="h-3.5 w-3.5" />
+      {disk.label}
+      <Meter used={disk.used} total={disk.total} warn={disk.low} label="Disk used" className="w-16" />
+    </span>
+  )
+}
+
+function CleanUpButton({ box }: { box: BoxInfo }) {
+  const clean = useCleanBox()
+  const running = box.cleanup?.status === "running"
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      loading={running || clean.isPending}
+      onClick={() => clean.mutate(box.id)}
+      className="-my-1 ml-auto"
+      title="Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."
+    >
+      {!running && !clean.isPending && <Sparkles className="h-3.5 w-3.5" />}
+      {running ? "Cleaning up…" : "Clean up now"}
+    </Button>
+  )
+}
+
+/** The running cleanup, or the last one, with what each step freed. */
+function CleanupReport({ cleanup }: { cleanup: BoxCleanup }) {
+  const [open, setOpen] = useState(false)
+  const ran = cleanup.steps.filter((s) => s.freedBytes > 0 || s.removed.length > 0 || (s.skipped && s.skipped !== "enough room already"))
+  const when = cleanup.status === "running" ? null : timeAgo(cleanup.finishedAt ?? cleanup.startedAt)
+  const tone = cleanup.status === "failed" || (cleanup.status === "done" && cleanup.targetFreeBytes !== null && !cleanup.enough) ? "text-amber-300" : cleanup.status === "running" ? "text-sky-300" : "text-zinc-400"
+  return (
+    <div className="mt-2 rounded-lg border border-zinc-800/70 bg-zinc-950/30 text-xs" data-testid="cleanup-report">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={!ran.length}
+        className="flex min-h-11 w-full items-center gap-1.5 px-3 py-2 text-left disabled:cursor-default sm:min-h-0"
+      >
+        {ran.length > 0 ? <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-500 transition", open && "rotate-90")} /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+        <span className={cx("min-w-0 flex-1", tone)}>{cleanupLine(cleanup)}</span>
+        {when && <span className="shrink-0 text-zinc-600">{when}</span>}
+      </button>
+      {open && ran.length > 0 && (
+        <ol className="space-y-1 border-t border-zinc-800/70 px-3 py-2">
+          {ran.map((s) => (
+            <li key={s.key} className="flex gap-3">
+              <span className="w-16 shrink-0 text-right text-zinc-300 tabular-nums">{formatBytes(s.freedBytes)}</span>
+              <span className="min-w-0 flex-1 text-zinc-400">
+                {s.label}
+                {s.skipped && <span className="text-zinc-600"> · {s.skipped}</span>}
+                {s.removed.length > 0 && <span className="block truncate text-zinc-600" title={s.removed.join("\n")}>{s.removed.join(", ")}</span>}
+              </span>
+            </li>
+          ))}
+        </ol>
       )}
     </div>
   )

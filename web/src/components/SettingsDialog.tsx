@@ -476,7 +476,7 @@ function LimitsPanel({
 }) {
   const health = useHealth()
   const int =
-    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays") =>
+    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -547,6 +547,31 @@ function LimitsPanel({
         hint={hint("archiveKeepTouchedDays")}
       >
         <input id={fid("akt")} type="number" min={0} max={3650} className={inputClass} value={s.archiveKeepTouchedDays} onChange={int("archiveKeepTouchedDays")} />
+      </Row>
+      <Row
+        id={fid("dmf")}
+        label="Disk headroom (MB)"
+        help="A new workspace only lands on a box with at least this much free disk. A box below it is cleaned up in the background while tasks go to another box."
+        hint={hint("diskMinFreeMb")}
+      >
+        <input id={fid("dmf")} type="number" min={0} max={1_000_000} step={128} className={inputClass} value={s.diskMinFreeMb} onChange={int("diskMinFreeMb")} />
+      </Row>
+      <Row
+        id={fid("dcf")}
+        label="Clone size factor"
+        help="...and at least this many times the repo's last clone size, for big repos (the clone plus the box's shared mirror of it)."
+        hint={hint("diskCloneFactor")}
+      >
+        <input
+          id={fid("dcf")}
+          type="number"
+          min={1}
+          max={20}
+          step={0.5}
+          className={inputClass}
+          value={s.diskCloneFactor}
+          onChange={(e) => set("diskCloneFactor", Number(e.target.value))}
+        />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>

@@ -3,8 +3,9 @@ import { notifyManager, useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
+import { announceCleanup, withCleanup } from "./diskCleanup"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
-import type { AppNotification, Artifact, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
+import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -157,6 +158,10 @@ export function useServerEvents(enabled: boolean): Connection {
         case "boxes":
           qc.setQueryData(keys.boxes, ev.boxes)
           void qc.invalidateQueries({ queryKey: keys.usage })
+          break
+        case "box.cleanup":
+          qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, ev.cleanup))
+          announceCleanup(ev.cleanup)
           break
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))
