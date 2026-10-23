@@ -111,7 +111,7 @@ export function CaptainTab({ project }: { project: Project }) {
       {state.data?.error && (
         <div className="flex gap-2 border-b border-red-900/50 bg-red-950/30 px-4 py-2 text-xs text-red-300">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0">{state.data.error}</span>
+          <span className="min-w-0 wrap-anywhere">{state.data.error}</span>
         </div>
       )}
 
@@ -200,7 +200,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
       <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
         <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
           <Icon className="h-3 w-3" /> {s.label}
-          {tool && <span className="font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
+          {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
           <span className="ml-auto pl-2 font-normal tracking-normal normal-case text-zinc-500">
             <TimeAgo ts={m.createdAt} />
           </span>
@@ -240,7 +240,7 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       {...PREVIEW_GROUP}
     >
       <Icon className={cx("h-3.5 w-3.5 shrink-0", full && "mt-px", className)} aria-label={label} />
-      <div className={cx("min-w-0 flex-1", full ? "whitespace-normal break-words" : "truncate")}>
+      <div className={cx("min-w-0 flex-1", full ? "whitespace-normal wrap-anywhere" : "truncate")}>
         {n.title &&
           (taskId ? (
             <AppLink href={`/tasks/${taskId}`} className="font-medium text-zinc-200 hover:underline">

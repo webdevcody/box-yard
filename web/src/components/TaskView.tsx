@@ -67,7 +67,7 @@ export function TaskView({ id }: { id: string }) {
         </div>
       )}
       {task.status === "failed" && task.error && (
-        <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap text-red-200">{task.error}</div>
+        <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap wrap-anywhere text-red-200">{task.error}</div>
       )}
 
       <TaskThread
@@ -160,7 +160,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
             {userMessageLabel(m.meta)}
             {time}
           </div>
-          {m.content && <div className="text-sm whitespace-pre-wrap text-zinc-200">{m.content}</div>}
+          {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}
           <AttachmentList files={m.meta?.attachments} />
         </div>
       )
@@ -191,7 +191,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
                 From {String(m.meta.fromTitle ?? m.meta.from)}
               </Link>
             )}
-            <div className="whitespace-pre-wrap">{m.content}</div>
+            <div className="whitespace-pre-wrap wrap-anywhere">{m.content}</div>
           </div>
         </div>
       )
@@ -205,7 +205,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           </div>
         )
       return (
-        <div className="pl-6 text-xs text-zinc-500">
+        <div className="pl-6 text-xs wrap-anywhere text-zinc-500">
           {url ? (
             <AppLink href={url} className="hover:text-zinc-300 hover:underline">
               {m.content}

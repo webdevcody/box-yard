@@ -187,7 +187,7 @@ export const Markdown = memo(function Markdown({ children, linkify = true, live 
   const index = useEntityIndex()
   const parser = linkify ? index : null
   return (
-    <div className="prose-chat break-words" {...PREVIEW_GROUP}>
+    <div className="prose-chat wrap-anywhere" {...PREVIEW_GROUP}>
       {live ? renderMarkdown({ children, remarkPlugins: parserFor(parser).plugins, components: MARKDOWN_COMPONENTS }) : parsedMarkdown(children, parser)}
     </div>
   )

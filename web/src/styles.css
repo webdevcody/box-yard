@@ -105,6 +105,8 @@ body {
 .prose-chat th,
 .prose-chat td {
   @apply border border-zinc-800 px-2 py-1;
+  /* Keep words whole in cells: a wide table scrolls inside itself (above), not the chat. */
+  overflow-wrap: break-word;
 }
 
 .prose-chat img,
