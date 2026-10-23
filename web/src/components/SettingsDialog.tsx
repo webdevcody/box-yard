@@ -19,7 +19,7 @@ import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
-import { Button, Select, cx, inputClass } from "./ui"
+import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -557,9 +557,9 @@ function LimitsPanel({
         {upstash && (
           <p className={cx(s.maxBoxes > UPSTASH_FREE_CONCURRENT_BOXES && "text-amber-300")}>
             Free plan: up to {UPSTASH_FREE_CONCURRENT_BOXES} concurrent boxes (
-            <a className="text-sky-400 hover:underline" href="https://upstash.com/pricing/box" target="_blank" rel="noreferrer">
+            <NewTabLink className="text-sky-400 hover:underline" href="https://upstash.com/pricing/box">
               Upstash Box pricing
-            </a>
+            </NewTabLink>
             ).
           </p>
         )}
@@ -753,9 +753,9 @@ function AboutPanel() {
         <AboutRow label="Version">
           <span className="font-mono">{__APP_VERSION__}</span>
           {__APP_COMMIT__ && (
-            <a className={cx(link, "ml-2 font-mono")} href={`https://github.com/webdevcody/box-yard/commit/${__APP_COMMIT__}`} target="_blank" rel="noreferrer">
+            <NewTabLink className={cx(link, "ml-2 font-mono")} href={`https://github.com/webdevcody/box-yard/commit/${__APP_COMMIT__}`}>
               {__APP_COMMIT__}
-            </a>
+            </NewTabLink>
           )}
         </AboutRow>
         <AboutRow label="Box provider">
@@ -769,15 +769,15 @@ function AboutPanel() {
         <AboutRow label="Max upload">{server.data ? `${server.data.maxUploadMb} MB` : "…"}</AboutRow>
         <AboutRow label="Links">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <a className={link} href="https://github.com/webdevcody/box-yard" target="_blank" rel="noreferrer">
+            <NewTabLink className={link} href="https://github.com/webdevcody/box-yard">
               GitHub <ExternalLink className="h-3 w-3" />
-            </a>
-            <a className={link} href="https://upstash.com/docs/box" target="_blank" rel="noreferrer">
+            </NewTabLink>
+            <NewTabLink className={link} href="https://upstash.com/docs/box">
               Upstash Box docs <ExternalLink className="h-3 w-3" />
-            </a>
-            <a className={link} href="https://console.upstash.com" target="_blank" rel="noreferrer">
+            </NewTabLink>
+            <NewTabLink className={link} href="https://console.upstash.com">
               Upstash console <ExternalLink className="h-3 w-3" />
-            </a>
+            </NewTabLink>
           </div>
         </AboutRow>
       </dl>

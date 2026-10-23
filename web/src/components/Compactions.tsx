@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Link } from "wouter"
 import { Archive, FileJson, FileText, GitBranch } from "lucide-react"
 import { useCompaction, useCompactions } from "../lib/queries"
-import { Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
+import { Empty, Markdown, NewTabLink, StatusBadge, TimeAgo, cx } from "./ui"
 
 function shortDate(ts: number) {
   return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
@@ -111,9 +111,9 @@ export function CompactionsView() {
                         </span>
                       )}
                       {t.prUrl && (
-                        <a href={t.prUrl} target="_blank" rel="noreferrer" className="text-emerald-400 hover:underline">
+                        <NewTabLink href={t.prUrl} className="text-emerald-400 hover:underline">
                           PR
-                        </a>
+                        </NewTabLink>
                       )}
                     </div>
                     {t.summary && <div className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{t.summary}</div>}

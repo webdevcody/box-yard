@@ -6,7 +6,7 @@ import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNo
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
 import { bytes, hours, money } from "../lib/usage"
-import { Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
+import { Empty, NewTabLink, PrChip, StatusBadge, cx, timeAgo } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxInfo, type Task } from "../../../shared/types"
@@ -287,17 +287,15 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
       {previews.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1.5 text-xs">
           {previews.map((p) => (
-            <a
+            <NewTabLink
               key={`${p.port}-${p.url}`}
               href={p.url}
-              target="_blank"
-              rel="noreferrer"
               title={p.taskTitle}
               className="inline-flex min-h-11 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300 sm:min-h-0"
             >
               <Globe className="h-3.5 w-3.5" /> {p.label}
               <ExternalLink className="h-3 w-3" />
-            </a>
+            </NewTabLink>
           ))}
         </div>
       )}
