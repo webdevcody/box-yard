@@ -64,7 +64,7 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
         className="-mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
       >
         <Wrench className="h-3 w-3 shrink-0" />
-        <span className="font-mono">{m.content}</span>
+        <span className="min-w-0 truncate font-mono">{m.content}</span>
         <span className="shrink-0 text-zinc-600">·</span>
         {v.href ? (
           <AppLink href={v.href} className="shrink-0 text-zinc-400 hover:text-zinc-200 hover:underline">
@@ -118,7 +118,7 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 pl-1 text-xs text-zinc-500">
       <Wrench className="h-3 w-3 shrink-0" />
-      <span className="font-mono">{m.content}</span>
+      <span className="min-w-0 truncate font-mono">{m.content}</span>
       {mentions.length > 0 && (
         <span className="truncate text-zinc-600">
           ·{" "}
@@ -146,7 +146,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
       <div id={`chat-${m.id}`} className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-100">
+        <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
           <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-sky-300 uppercase">
             <AlarmClock className="h-3 w-3" /> Scheduled
           </div>
@@ -158,7 +158,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   if (m.role === "user") {
     return (
       <div id={`chat-${m.id}`} className="flex justify-end">
-        <div className={cx("max-w-[85%] rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
+        <div className={cx("max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
           {m.content}
           <AttachmentList files={m.meta?.attachments} />
         </div>
@@ -186,7 +186,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
     return (
       <div className="flex gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-        <div className="min-w-0 whitespace-pre-wrap">{m.content}</div>
+        <div className="min-w-0 whitespace-pre-wrap wrap-anywhere">{m.content}</div>
       </div>
     )
   }
