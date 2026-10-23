@@ -7,7 +7,7 @@ export type DB = Database.Database
 /**
  * Migrations run in order, once each. Never edit a shipped migration; add a new one.
  */
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   `
   CREATE TABLE projects (
     id TEXT PRIMARY KEY,
@@ -359,6 +359,89 @@ const MIGRATIONS: string[] = [
   CREATE INDEX captain_messages_project ON captain_messages(project_id, created_at);
   CREATE INDEX captain_messages_unseen ON captain_messages(project_id, seen_by_captain);
   `,
+  `
+  -- The CLI's total_cost_usd is the session's running total: a resumed session starts
+  -- from what its transcript saved, so summing it per run counted every earlier turn
+  -- again. Keep what the CLI reported in reported_cost_usd and make cost_usd the
+  -- run's own share (the step from the session's previous report).
+  -- Spend also outlives its task or project now (ON DELETE SET NULL, not CASCADE).
+  CREATE TABLE claude_usage_new (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    run_kind TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    turn_id TEXT,
+    session_id TEXT,
+    model TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    reported_cost_usd REAL NOT NULL DEFAULT 0,
+    -- 1 when cost_usd is estimated from tokens: a resumed session's first logged run,
+    -- whose report also carried spend from before Box Yard logged that session.
+    cost_estimated INTEGER NOT NULL DEFAULT 0,
+    raw_usage_json TEXT NOT NULL DEFAULT '{}'
+  );
+  INSERT INTO claude_usage_new
+    (id, source, run_kind, task_id, project_id, turn_id, session_id, model, started_at, ended_at, duration_ms,
+     input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, reported_cost_usd, raw_usage_json)
+    SELECT id, source, run_kind, task_id, project_id, turn_id, session_id, model, started_at, ended_at, duration_ms,
+     input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, cost_usd, raw_usage_json
+    FROM claude_usage ORDER BY ended_at, rowid;
+  DROP TABLE claude_usage;
+  ALTER TABLE claude_usage_new RENAME TO claude_usage;
+  CREATE INDEX claude_usage_task ON claude_usage(task_id, started_at);
+  CREATE INDEX claude_usage_project ON claude_usage(project_id, started_at);
+  CREATE INDEX claude_usage_started ON claude_usage(started_at);
+  CREATE INDEX claude_usage_session ON claude_usage(session_id, ended_at);
+
+  -- Older Captain rows were logged as orchestrator rows with a project id. Name them
+  -- as Captain rows so they stay Captain spend if their project is deleted.
+  UPDATE claude_usage SET source = 'captain' WHERE source = 'orchestrator' AND project_id IS NOT NULL;
+
+  WITH steps AS (
+    SELECT id, reported_cost_usd AS r,
+      LAG(reported_cost_usd) OVER (PARTITION BY session_id ORDER BY ended_at, started_at, rowid) AS p
+    FROM claude_usage WHERE session_id IS NOT NULL AND reported_cost_usd > 0
+  )
+  UPDATE claude_usage SET cost_usd = CASE WHEN steps.p IS NULL OR steps.r < steps.p THEN steps.r ELSE steps.r - steps.p END
+  FROM steps WHERE steps.id = claude_usage.id;
+
+  -- A session's first logged run still carries everything the session spent before
+  -- usage was logged, when that run resumed an older session: the Coordinator's
+  -- session, /compact and /context runs, and tasks that had turns before. Charge
+  -- those runs their tokens at the model's rate from the exact rows instead.
+  -- (Captain sessions started after usage logging, so their first runs are exact.)
+  CREATE TEMP TABLE usage_firsts AS
+    SELECT id FROM (
+      SELECT id, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY ended_at, started_at, rowid) AS n
+      FROM claude_usage WHERE session_id IS NOT NULL AND reported_cost_usd > 0
+    ) WHERE n = 1;
+  CREATE TEMP TABLE usage_rates AS
+    SELECT COALESCE(model, '') AS model, SUM(cost_usd) / SUM(total_tokens) AS rate
+    FROM claude_usage WHERE total_tokens > 0 AND id NOT IN (SELECT id FROM usage_firsts)
+    GROUP BY COALESCE(model, '') HAVING SUM(cost_usd) > 0;
+  INSERT INTO usage_rates
+    SELECT '*', SUM(cost_usd) / SUM(total_tokens) FROM claude_usage
+    WHERE total_tokens > 0 AND id NOT IN (SELECT id FROM usage_firsts) HAVING SUM(cost_usd) > 0;
+  UPDATE claude_usage SET cost_estimated = 1, cost_usd = MIN(cost_usd, total_tokens * COALESCE(
+      (SELECT rate FROM usage_rates r WHERE r.model = COALESCE(claude_usage.model, '')),
+      (SELECT rate FROM usage_rates r WHERE r.model = '*'), 0))
+  WHERE id IN (SELECT id FROM usage_firsts)
+    AND (run_kind != 'turn'
+      OR (source = 'orchestrator' AND project_id IS NULL)
+      OR (source = 'task' AND (SELECT COUNT(*) FROM task_turns tt WHERE tt.task_id = claude_usage.task_id AND tt.started_at < claude_usage.started_at) >= 2))
+    AND (total_tokens = 0 OR EXISTS (SELECT 1 FROM usage_rates));
+  DROP TABLE usage_firsts;
+  DROP TABLE usage_rates;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
@@ -372,11 +455,12 @@ export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
   return db
 }
 
-export function migrate(db: DB) {
+/** Apply pending migrations, up to `upTo` of them (tests stop early to seed old-shaped rows). */
+export function migrate(db: DB, upTo = MIGRATIONS.length) {
   db.exec("CREATE TABLE IF NOT EXISTS _migrations (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)")
   const row = db.prepare("SELECT MAX(version) AS v FROM _migrations").get() as { v: number | null }
   const current = row.v ?? 0
-  for (let i = current; i < MIGRATIONS.length; i++) {
+  for (let i = current; i < Math.min(upTo, MIGRATIONS.length); i++) {
     db.transaction(() => {
       db.exec(MIGRATIONS[i]!)
       db.prepare("INSERT INTO _migrations (version, applied_at) VALUES (?, ?)").run(i + 1, Date.now())

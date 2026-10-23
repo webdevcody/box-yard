@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
+import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
   Artifact,
@@ -34,6 +35,7 @@ import type {
   UsageBoxTotal,
   UsageProjectTotal,
   UsageReport,
+  UsagePeriodReport,
   UsageTaskTotal,
   UsageWindow,
 } from "../shared/types.js"
@@ -232,7 +234,11 @@ export interface ClaudeUsageRow {
   cache_read_input_tokens: number
   output_tokens: number
   total_tokens: number
+  /** This run's own cost. */
   cost_usd: number
+  /** What the CLI reported: the session's running total. */
+  reported_cost_usd: number
+  cost_estimated: number
   raw_usage_json: string
 }
 
@@ -1237,6 +1243,13 @@ export class Store {
 
   // ---------- usage and costs ----------
 
+  /**
+   * Log one Claude CLI run and return the cost charged to it. `costUsd` is the CLI's
+   * `total_cost_usd`, which is the session's running total (a resumed session starts
+   * from the total its transcript saved), so the run is charged the step from the
+   * session's previous report. A lower report means the total was reset; then the
+   * report is the run's own cost.
+   */
   recordClaudeUsage(input: {
     source: ClaudeUsageSource
     runKind: string
@@ -1255,6 +1268,8 @@ export class Store {
       output_tokens?: number
     } | null
     costUsd?: number | null
+    /** The run resumed an existing session (so its report includes the session's earlier spend). */
+    resumed?: boolean
   }) {
     const u = input.usage ?? {}
     const inputTokens = intToken(u.input_tokens)
@@ -1262,15 +1277,16 @@ export class Store {
     const cacheRead = intToken(u.cache_read_input_tokens)
     const outputTokens = intToken(u.output_tokens)
     const totalTokens = inputTokens + cacheCreation + cacheRead + outputTokens
-    const costUsd = typeof input.costUsd === "number" && Number.isFinite(input.costUsd) ? input.costUsd : 0
+    const reportedUsd = typeof input.costUsd === "number" && Number.isFinite(input.costUsd) && input.costUsd > 0 ? input.costUsd : 0
     // Some CLI runs report only cost, or only duration. Keep those rows too.
-    if (totalTokens <= 0 && costUsd <= 0 && !(input.durationMs && input.durationMs > 0)) return
+    if (totalTokens <= 0 && reportedUsd <= 0 && !(input.durationMs && input.durationMs > 0)) return 0
+    const { costUsd, estimated } = this.runCost({ sessionId: input.sessionId ?? null, reportedUsd, totalTokens, model: input.model ?? null, resumed: Boolean(input.resumed) })
     this.db
       .prepare(
         `INSERT INTO claude_usage
           (id, source, run_kind, task_id, project_id, turn_id, session_id, model, started_at, ended_at, duration_ms,
-           input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, raw_usage_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           input_tokens, cache_creation_input_tokens, cache_read_input_tokens, output_tokens, total_tokens, cost_usd, reported_cost_usd, cost_estimated, raw_usage_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         newId("cu"),
@@ -1290,8 +1306,42 @@ export class Store {
         outputTokens,
         totalTokens,
         costUsd,
+        reportedUsd,
+        estimated ? 1 : 0,
         JSON.stringify(u),
       )
+    return costUsd
+  }
+
+  /**
+   * This run's share of a session's running cost total (see recordClaudeUsage). With no
+   * earlier report for a resumed session, the report also holds spend from before Box Yard
+   * logged the session, so the run is charged its tokens at the model's recent rate instead.
+   */
+  private runCost(r: { sessionId: string | null; reportedUsd: number; totalTokens: number; model: string | null; resumed: boolean }): { costUsd: number; estimated: boolean } {
+    if (!r.sessionId || r.reportedUsd <= 0) return { costUsd: r.reportedUsd, estimated: false }
+    const prev = this.db
+      .prepare("SELECT reported_cost_usd AS r FROM claude_usage WHERE session_id = ? AND reported_cost_usd > 0 ORDER BY ended_at DESC, rowid DESC LIMIT 1")
+      .get(r.sessionId) as { r: number } | undefined
+    if (prev && r.reportedUsd >= prev.r) return { costUsd: r.reportedUsd - prev.r, estimated: false }
+    if (prev || !r.resumed) return { costUsd: r.reportedUsd, estimated: false }
+    const rate = this.tokenRate(r.model)
+    if (r.totalTokens > 0 && rate === null) return { costUsd: r.reportedUsd, estimated: false }
+    return { costUsd: Math.min(r.reportedUsd, r.totalTokens * (rate ?? 0)), estimated: true }
+  }
+
+  /** Recent $/token for a model (else any model) from exactly priced runs, or null with no data. */
+  private tokenRate(model: string | null): number | null {
+    const since = Date.now() - 30 * 24 * 3_600_000
+    const q = this.db.prepare(
+      `SELECT SUM(cost_usd) AS c, SUM(total_tokens) AS t FROM claude_usage
+       WHERE cost_estimated = 0 AND total_tokens > 0 AND started_at >= ? AND (? IS NULL OR model = ?)`,
+    )
+    for (const m of model ? [model, null] : [null]) {
+      const row = q.get(since, m, m) as { c: number | null; t: number | null }
+      if (row.c && row.t) return row.c / row.t
+    }
+    return null
   }
 
   taskClaudeTotals(taskId: string): ClaudeUsageTotals {
@@ -1346,7 +1396,7 @@ export class Store {
       )
   }
 
-  usageReport(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now()): UsageReport {
+  usageReport(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now(), period?: { from: number; to: number }): UsageReport {
     const windows = usageWindows(now).map((w) => this.usageWindow(w, settings.costRates))
     const projects = this.usageProjects()
     const tasks = this.usageTasks()
@@ -1363,7 +1413,45 @@ export class Store {
       boxes,
       orchestrator,
       captains,
+      ...(period ? { period: this.usagePeriod(period.from, period.to, settings.costRates) } : {}),
     }
+  }
+
+  /** Spend in [from, to): claude runs by start time, box intervals by their overlap. See usagePeriod.ts. */
+  usagePeriod(from: number, to: number, rates: CostRates): UsagePeriodReport {
+    const claude = this.db
+      .prepare(
+        `SELECT u.source, u.project_id AS projectId, p.name AS projectName, u.task_id AS taskId, t.title AS taskTitle,
+          t.schedule_id AS scheduleId, s.name AS scheduleName, u.model, u.started_at AS startedAt, u.duration_ms AS durationMs,
+          u.cost_usd AS costUsd, u.input_tokens AS inputTokens, u.cache_creation_input_tokens AS cacheCreationInputTokens,
+          u.cache_read_input_tokens AS cacheReadInputTokens, u.output_tokens AS outputTokens, u.total_tokens AS totalTokens
+         FROM claude_usage u
+         LEFT JOIN projects p ON p.id = u.project_id
+         LEFT JOIN tasks t ON t.id = u.task_id
+         LEFT JOIN schedules s ON s.id = t.schedule_id
+         WHERE u.started_at >= ? AND u.started_at < ?`,
+      )
+      .all(from, to) as PeriodClaudeRow[]
+    const intervals = (this.db.prepare("SELECT * FROM box_usage_intervals WHERE ended_at > ? AND started_at < ?").all(from, to) as BoxUsageIntervalRow[]).map(
+      (r): PeriodBoxInterval => {
+        const size = normalizeBoxSize(r.size)
+        const keepAlive = Boolean(r.keep_alive)
+        return {
+          boxId: r.box_id,
+          size,
+          keepAlive,
+          startedAt: r.started_at,
+          endedAt: r.ended_at,
+          activeMs: r.active_ms,
+          uptimeMs: r.uptime_ms,
+          diskBytes: r.disk_bytes,
+          costUsd: boxCost({ activeMs: r.active_ms, uptimeMs: r.uptime_ms, diskBytes: r.disk_bytes, size, keepAlive }, rates),
+          source: r.source === "actual" ? "actual" : "estimated",
+        }
+      },
+    )
+    const liveBoxes = this.listBoxes().map((b) => ({ boxId: b.id, size: normalizeBoxSize(b.size), keepAlive: Boolean(b.keep_alive), diskBytes: b.disk_bytes }))
+    return buildUsagePeriod({ from, to, claude, intervals, liveBoxes })
   }
 
   usageBudgetStatus(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now()): BudgetStatus {

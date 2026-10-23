@@ -1,5 +1,5 @@
 import { useCallback } from "react"
-import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
@@ -119,7 +119,15 @@ export const useAgentSettings = () =>
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
 export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
-export const useUsage = () => useQuery({ queryKey: keys.usage, queryFn: () => api<UsageReport>("/api/usage"), refetchInterval: 30_000 })
+/** The usage report; with a range it includes `period` for it. Live events invalidate every range (prefix key). */
+export const useUsage = (range?: { from: number; to: number; live: boolean }) =>
+  useQuery({
+    // A range that runs to "now" is keyed by its start only, so refetches don't make a new cache entry.
+    queryKey: range ? [...keys.usage, range.from, range.live ? "now" : range.to] : keys.usage,
+    queryFn: () => api<UsageReport>(range ? `/api/usage?from=${range.from}${range.live ? "" : `&to=${range.to}`}` : "/api/usage"),
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+  })
 
 export const useChatStream = () =>
   useQuery({ queryKey: keys.chatStream, queryFn: () => "", initialData: "", staleTime: Infinity, gcTime: Infinity })

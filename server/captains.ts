@@ -662,6 +662,7 @@ class Captain {
             durationMs: resultDurationMs,
             usage: resultUsage,
             costUsd: resultCostUsd,
+            resumed: resume,
           })
         }
         const base = { text: said, raw, sessionId: seenSession }

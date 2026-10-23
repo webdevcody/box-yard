@@ -190,6 +190,8 @@ async function runTurn() {
     durationMs: attempt.result?.duration_ms ?? null,
     numTurns: attempt.result?.num_turns ?? null,
     sessionId,
+    // Whether this turn continued its session; the CLI's total_cost_usd then includes earlier turns.
+    resumed: Boolean(turn.resume) && sessionId === turn.sessionId,
     compact: Boolean(turn.compact),
     usage,
     resultUsage: attempt.result?.usage ?? null,
