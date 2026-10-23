@@ -33,16 +33,18 @@ type FileLinkProps = Omit<ComponentProps<"a">, "href"> & {
   mime?: string
   /** An artifact's title, shown in the preview header. */
   fileTitle?: string
+  /** What ←/→ step through, when it isn't the images around the link (e.g. every file of a task). */
+  gallery?: () => PreviewItem[]
 }
 
-export function FileLink({ href, name, size, mime, fileTitle, onClick, children, ...rest }: FileLinkProps) {
+export function FileLink({ href, name, size, mime, fileTitle, gallery, onClick, children, ...rest }: FileLinkProps) {
   const item: PreviewItem = { url: href, name, size, mime, title: fileTitle }
   const kind = isFilePath(href) ? previewKind(item) : null
   const click = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e)
     const anchor = e.currentTarget
     // Inside a card that is itself a link, open the file and not the card.
-    if (interceptPreviewClick(e, item, (it) => openPreview(it, galleryFor(anchor, it)))) e.stopPropagation()
+    if (interceptPreviewClick(e, item, (it) => openPreview(it, gallery?.() ?? galleryFor(anchor, it)))) e.stopPropagation()
   }
   return (
     <a
