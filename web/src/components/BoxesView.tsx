@@ -265,7 +265,6 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
           {money(box.estimatedCostUsd)} {box.usageSource}
         </span>
         {box.keepAlive && <span className="text-yard-300">keep-alive</span>}
-        {box.status === "ready" && <CleanUpButton box={box} />}
       </div>
 
       {box.diskLow && box.status === "ready" && (
@@ -274,7 +273,7 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
           <span>Low on disk. New tasks go to other boxes while it cleans up; they wait here only when no other box has room.</span>
         </div>
       )}
-      {box.cleanup && <CleanupReport cleanup={box.cleanup} />}
+      {(box.cleanup || box.status === "ready") && <CleanupReport box={box} />}
 
       <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/80">
         {active.length === 0 ? (
@@ -356,7 +355,7 @@ function CleanUpButton({ box }: { box: BoxInfo }) {
       variant="ghost"
       loading={running || clean.isPending}
       onClick={() => clean.mutate(box.id)}
-      className="-my-1 ml-auto"
+      className="shrink-0 sm:-my-1"
       title="Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."
     >
       {!running && !clean.isPending && <Sparkles className="h-3.5 w-3.5" />}
@@ -365,25 +364,37 @@ function CleanUpButton({ box }: { box: BoxInfo }) {
   )
 }
 
-/** The running cleanup, or the last one, with what each step freed. */
-function CleanupReport({ cleanup }: { cleanup: BoxCleanup }) {
+/** The running cleanup, or the last one, with what each step freed, and the Clean up now button. */
+function CleanupReport({ box }: { box: BoxInfo }) {
   const [open, setOpen] = useState(false)
-  const ran = cleanup.steps.filter((s) => s.freedBytes > 0 || s.removed.length > 0 || (s.skipped && s.skipped !== "enough room already"))
-  const when = cleanup.status === "running" ? null : timeAgo(cleanup.finishedAt ?? cleanup.startedAt)
-  const tone = cleanup.status === "failed" || (cleanup.status === "done" && cleanup.targetFreeBytes !== null && !cleanup.enough) ? "text-amber-300" : cleanup.status === "running" ? "text-sky-300" : "text-zinc-400"
+  const cleanup: BoxCleanup | null = box.cleanup
+  const ran = cleanup?.steps.filter((s) => s.freedBytes > 0 || s.removed.length > 0 || (s.skipped && s.skipped !== "enough room already")) ?? []
+  const when = !cleanup || cleanup.status === "running" ? null : timeAgo(cleanup.finishedAt ?? cleanup.startedAt)
+  const tone = !cleanup
+    ? "text-zinc-500"
+    : cleanup.status === "failed" || (cleanup.status === "done" && cleanup.targetFreeBytes !== null && !cleanup.enough)
+      ? "text-amber-300"
+      : cleanup.status === "running"
+        ? "text-sky-300"
+        : "text-zinc-400"
   return (
     <div className="mt-2 rounded-lg border border-zinc-800/70 bg-zinc-950/30 text-xs" data-testid="cleanup-report">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        disabled={!ran.length}
-        className="flex min-h-11 w-full items-center gap-1.5 px-3 py-2 text-left disabled:cursor-default sm:min-h-0"
-      >
-        {ran.length > 0 ? <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-500 transition", open && "rotate-90")} /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
-        <span className={cx("min-w-0 flex-1", tone)}>{cleanupLine(cleanup)}</span>
-        {when && <span className="shrink-0 text-zinc-600">{when}</span>}
-      </button>
-      {open && ran.length > 0 && (
+      <div className="flex items-center gap-2 pr-2">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          disabled={!ran.length}
+          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 py-2 pl-3 text-left disabled:cursor-default sm:min-h-0"
+        >
+          {ran.length > 0 ? <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-500 transition", open && "rotate-90")} /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+          <span className={cx("min-w-0 flex-1", tone)}>
+            {cleanup ? cleanupLine(cleanup) : "No disk cleanup has run here yet."}
+            {when && <span className="text-zinc-600"> · {when}</span>}
+          </span>
+        </button>
+        {box.status === "ready" && <CleanUpButton box={box} />}
+      </div>
+      {open && cleanup && ran.length > 0 && (
         <ol className="space-y-1 border-t border-zinc-800/70 px-3 py-2">
           {ran.map((s) => (
             <li key={s.key} className="flex gap-3">
