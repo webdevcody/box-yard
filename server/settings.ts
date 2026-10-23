@@ -5,6 +5,8 @@ import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
   BOX_SIZES,
+  DEFAULT_CAPTAIN_EFFORT,
+  DEFAULT_CAPTAIN_MODEL,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   EFFORTS,
@@ -25,6 +27,8 @@ export const DEFAULT_SETTINGS: Settings = {
   orchestratorModel: DEFAULT_MODEL,
   orchestratorEffort: DEFAULT_EFFORT,
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
+  captainModel: DEFAULT_CAPTAIN_MODEL,
+  captainEffort: DEFAULT_CAPTAIN_EFFORT,
   agentModel: DEFAULT_MODEL,
   agentEffort: DEFAULT_EFFORT,
   agentRoutingConfig: "",
@@ -82,6 +86,8 @@ export const settingsPatch = z
     orchestratorModel: model,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
+    captainModel: model,
+    captainEffort: z.enum(EFFORTS),
     agentModel: model,
     agentEffort: z.enum([...EFFORTS, "orchestrator"]),
     agentRoutingConfig: z.string().max(50_000),
@@ -102,7 +108,7 @@ export const settingsPatch = z
 
 /**
  * Settings saved in the UI live in SQLite (kv). Precedence: saved in the UI >
- * ORCHESTRATOR_MODEL / WORKER_MODEL env vars (models only) > built-in defaults.
+ * ORCHESTRATOR_MODEL / WORKER_MODEL / CAPTAIN_MODEL / CAPTAIN_EFFORT env vars > built-in defaults.
  * Every turn reads them fresh, so a change applies from the next turn on.
  */
 export class SettingsStore {
@@ -113,6 +119,8 @@ export class SettingsStore {
       Config,
       | "orchestratorModel"
       | "workerModel"
+      | "captainModel"
+      | "captainEffort"
       | "workerSize"
       | "maxBoxes"
       | "slotsPerBox"
@@ -141,6 +149,8 @@ export class SettingsStore {
     const env: Partial<Settings> = {}
     if (this.c.orchestratorModel) env.orchestratorModel = this.c.orchestratorModel
     if (this.c.workerModel) env.agentModel = this.c.workerModel
+    if (this.c.captainModel) env.captainModel = this.c.captainModel
+    if (this.c.captainEffort) env.captainEffort = this.c.captainEffort
     const configWorkerSize = this.c.workerSize ?? DEFAULT_SETTINGS.workerSize
     if (process.env.WORKER_SIZE !== undefined) env.workerSize = configWorkerSize
     const workerSize = (saved.workerSize ?? configWorkerSize) as WorkerSize

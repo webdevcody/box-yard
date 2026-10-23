@@ -68,9 +68,10 @@ export function UsageView() {
 
       <section className="grid gap-3 lg:grid-cols-2">
         <Panel title="Claude Code" icon={<Bot className="h-4 w-4" />}>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-2 sm:grid-cols-3">
             <Mini label="Task turns" value={money(thirty.claude.costUsd)} sub={`${thirty.claude.turns} runs · ${compactTokens(thirty.claude.totalTokens)} tokens`} />
-            <Mini label="Orchestrator all-time" value={money(data.orchestrator.costUsd)} sub={`${data.orchestrator.turns} runs · ${compactTokens(data.orchestrator.totalTokens)} tokens`} />
+            <Mini label="Coordinator all-time" value={money(data.orchestrator.costUsd)} sub={`${data.orchestrator.turns} runs · ${compactTokens(data.orchestrator.totalTokens)} tokens`} />
+            <Mini label="Captains all-time" value={money(data.captains.costUsd)} sub={`${data.captains.turns} runs · ${compactTokens(data.captains.totalTokens)} tokens`} />
           </div>
           <Table empty="No project usage yet.">
             {data.projects.slice(0, 8).map((p) => (
