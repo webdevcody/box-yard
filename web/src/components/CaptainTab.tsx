@@ -356,7 +356,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
         <Bot className="h-4 w-4 shrink-0 text-yard-400" />
         <span className="text-sm font-semibold text-zinc-100">Captain</span>
         <StatusPill state={state} />
-        <ContextMiniBar tokens={state?.usage.tokens ?? null} window={state?.usage.window ?? null} className="sm:hidden" />
+        <ContextMiniBar tokens={state?.usage.tokens ?? null} window={state?.usage.window ?? null} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className="sm:hidden" />
       </div>
       <div className="flex min-w-0 items-center gap-x-3 text-xs text-zinc-500 max-sm:order-last max-sm:w-full">
         {model && (
