@@ -28,7 +28,7 @@ import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask 
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
+import { Button, NewTabLink, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 import { FilesChip } from "./TaskFiles"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
@@ -193,15 +193,13 @@ function Breadcrumb({ task, project }: { task: Task; project: Project | undefine
 /** A preview the agent registered (report_preview) or Cody opened: opens in a new tab. */
 function PreviewChip({ preview }: { preview: PreviewLink }) {
   return (
-    <a
+    <NewTabLink
       href={preview.url}
-      target="_blank"
-      rel="noreferrer"
       title={preview.label}
       className="inline-flex min-h-11 items-center gap-1 rounded-md border border-sky-900/60 bg-sky-500/10 px-2 py-1 font-medium text-sky-300 transition hover:bg-sky-500/20 sm:min-h-0 sm:px-1.5 sm:py-0.5"
     >
       <Globe className="h-3 w-3" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-70" />
-    </a>
+    </NewTabLink>
   )
 }
 
@@ -427,7 +425,7 @@ function OpenPortForm({ taskId, onDone }: { taskId: string; onDone: () => void }
         if (!n) return
         try {
           const link = await api<{ url: string }>(`/api/tasks/${taskId}/preview`, { body: { port: n } })
-          window.open(link.url, "_blank")
+          window.open(link.url, "_blank", "noopener")
           onDone()
         } catch (err) {
           toast.error("Couldn't open a preview", (err as Error).message)

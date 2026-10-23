@@ -476,10 +476,6 @@ export function createBoxYard(
     orchestrator.cancel()
     res.json({ ok: true })
   })
-  api.post("/chat/reset", (_req, res) => {
-    orchestrator.reset()
-    res.json({ ok: true })
-  })
 
   // ---- artifacts and boxes
   // ---- notifications (task finished / needs you)

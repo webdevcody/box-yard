@@ -6,7 +6,6 @@
  *   npx tsx scripts/yardctl.ts wait [seconds]                                # until no agent is busy
  *   npx tsx scripts/yardctl.ts task <id> [lines]                             # a task's transcript
  *   npx tsx scripts/yardctl.ts chat [lines]                                  # recent orchestrator chat
- *   npx tsx scripts/yardctl.ts reset                                         # new orchestrator session
  *
  * YARD_URL (default http://localhost:3000) and YARD_PASSWORD pick the server.
  */
@@ -114,11 +113,7 @@ switch (cmd) {
     for (const m of chat.slice(-Number(rest[0] ?? 40))) printChat(m)
     break
   }
-  case "reset":
-    await api("POST", "/chat/reset")
-    console.log("orchestrator session reset")
-    break
   default:
-    console.log("usage: yardctl say <msg> | status | wait [s] | task <id> [n] | chat [n] | reset")
+    console.log("usage: yardctl say <msg> | status | wait [s] | task <id> [n] | chat [n]")
     process.exit(1)
 }

@@ -122,6 +122,19 @@ describe("links", () => {
     expect(linkTarget("//evil.test/x").kind).toBe("external")
   })
 
+  it("treats only Box Yard's own origin as in-app", () => {
+    const origin = "http://yard.test"
+    expect(linkTarget("https://github.com/webdevcody/box-yard/pull/66", origin)).toEqual({ kind: "external", href: "https://github.com/webdevcody/box-yard/pull/66" })
+    expect(linkTarget("http://yard.test", origin)).toEqual({ kind: "app", href: "/" })
+    expect(linkTarget("http://yard.test?tab=recent", origin)).toEqual({ kind: "app", href: "/?tab=recent" })
+    expect(linkTarget("http://YARD.test/tasks/task_1", origin)).toEqual({ kind: "app", href: "/tasks/task_1" })
+    expect(linkTarget("http://yard.test/artifacts/art_1/a.html", origin)).toEqual({ kind: "file", href: "/artifacts/art_1/a.html" })
+    // Look-alike hosts and other ports are other sites.
+    expect(linkTarget("http://yard.test.evil/tasks/task_1", origin).kind).toBe("external")
+    expect(linkTarget("http://yard.test:4051/", origin).kind).toBe("external")
+    expect(linkTarget("https://yard.test/tasks/task_1", origin).kind).toBe("external")
+  })
+
   it("finds the entity behind an in-app href", () => {
     expect(refForHref("/tasks/task_fb675b48a4e1", index)?.kind).toBe("task")
     expect(refForHref("/projects/prj_demo01?tab=schedules", index)?.kind).toBe("project")

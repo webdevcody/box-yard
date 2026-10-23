@@ -43,8 +43,9 @@ export function FileLink({ href, name, size, mime, fileTitle, gallery, onClick, 
   const click = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e)
     const anchor = e.currentTarget
-    // Inside a card that is itself a link, open the file and not the card.
-    if (interceptPreviewClick(e, item, (it) => openPreview(it, gallery?.() ?? galleryFor(anchor, it)))) e.stopPropagation()
+    // Inside a clickable card, open the file and not the card.
+    e.stopPropagation()
+    interceptPreviewClick(e, item, (it) => openPreview(it, gallery?.() ?? galleryFor(anchor, it)))
   }
   return (
     <a
