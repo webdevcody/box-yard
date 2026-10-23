@@ -62,7 +62,7 @@ interface RunResult {
 type RunKind = "turn" | "summary" | "compact" | "context"
 
 /** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
-function attachmentNote(files: unknown): string {
+export function attachmentNote(files: unknown): string {
   if (!Array.isArray(files) || !files.length) return ""
   const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
   return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`

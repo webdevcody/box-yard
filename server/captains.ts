@@ -11,6 +11,8 @@ import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resul
 import { routingInstructions } from "./routing.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
+import { attachmentNote } from "./orchestrator.js"
+import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import {
   SUMMARY_PROMPT,
   captainCompactionsDir,
@@ -24,7 +26,7 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
-import type { CaptainCompaction, CaptainMessage, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
+import type { Attachment, CaptainCompaction, CaptainMessage, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 const WAKE_DEBOUNCE_MS = 3000
@@ -86,8 +88,8 @@ export class CaptainManager {
     return this.get(projectId).state()
   }
 
-  send(projectRef: string, content: string, id?: string) {
-    return this.find(projectRef).send(content, id)
+  send(projectRef: string, content: string, id?: string, attachments: Attachment[] = []) {
+    return this.find(projectRef).send(content, id, attachments)
   }
 
   async ask(projectRef: string, content: string, timeoutSeconds = 120) {
@@ -189,8 +191,8 @@ class Captain {
     fs.writeFileSync(this.mcpConfigPath, this.mcpConfig, { mode: 0o600 })
   }
 
-  send(content: string, id?: string): CaptainMessage {
-    const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), null, id)
+  send(content: string, id?: string, attachments: Attachment[] = []): CaptainMessage {
+    const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), attachments.length ? { attachments } : null, id)
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
     this.autoTurns = 0
@@ -297,7 +299,7 @@ class Captain {
     return this.store
       .listCaptainMessages(this.project.id, 200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content)
+      .map((m) => m.content + attachmentNote(m.meta?.attachments))
       .filter((text) => text.trim())
   }
 
@@ -503,15 +505,20 @@ class Captain {
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
           const tokens = msg.message.model === "<synthetic>" || kind !== "turn" ? null : contextTokens(msg.message.usage)
           if (tokens) this.setUsage(tokens)
-          const text = msg.message.content
-            .filter((b: any) => b.type === "text")
-            .map((b: any) => b.text)
-            .join("")
-            .trim()
+          // The hidden next-step block becomes chips under the reply; reports upward don't carry it.
+          const parsed = parseNextSteps(
+            msg.message.content
+              .filter((b: any) => b.type === "text")
+              .map((b: any) => b.text)
+              .join("")
+              .trim(),
+          )
+          const text = parsed.content.trim()
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
           if (text && text !== NO_UPDATE) {
-            const m = this.store.addCaptainMessage(this.project.id, "assistant", text)
+            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
+            const m = this.store.addCaptainMessage(this.project.id, "assistant", text, meta)
             this.hub.broadcast({ type: "captain.message", message: m })
           }
           for (const b of msg.message.content) {

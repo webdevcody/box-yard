@@ -274,7 +274,8 @@ export function createBoxYard(
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
     const body = parse(schemas.chat, req.body)
-    res.status(201).json(captains.send(id, body.content, body.id))
+    const files = withAttachments(body.content, body.attachments)
+    res.status(201).json(captains.send(id, body.content, body.id, files))
   })
   api.post("/projects/:id/captain/compact", (req, res) => {
     const id = req.params.id!

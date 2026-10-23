@@ -167,6 +167,10 @@ export function captainPrompt(project: Project): string {
     `Stay inside this project. Do not create work in other projects unless Cody explicitly asks and the Coordinator routed that cross-project request to you.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,
+    `When you answer a message (not an automatic wake-up), you may end with a hidden block of 2-4 short follow-ups Cody could click on the project's Captain tab, exactly like this:`,
+    `<!-- boxyard-next-steps`,
+    `["Check the open PR","Retry the failed task"]`,
+    `-->`,
   ]
     .filter(Boolean)
     .join("\n")
