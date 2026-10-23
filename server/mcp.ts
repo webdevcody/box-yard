@@ -15,7 +15,7 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
 import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
-import { cleanupSummary, formatBytes } from "../shared/disk.js"
+import { cleanupSummary, diskLine } from "../shared/disk.js"
 
 export interface McpDeps {
   store: Store
@@ -841,7 +841,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           projects: b.projects,
           running: `${b.runningTurns}/${b.slots}`,
           tasks: b.residentTasks.length,
-          disk: b.diskFreeBytes !== null ? `${formatBytes(b.diskFreeBytes)} free of ${formatBytes(b.diskTotalBytes)}${b.diskLow ? " (low)" : ""}` : "unknown",
+          disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
         })),
         pool: tasks.poolLimits(),

@@ -7,7 +7,7 @@ import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
 import { bytes, hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter } from "../lib/diskCleanup"
-import { formatBytes } from "../../../shared/disk"
+import { formatBytes, measuredAgo } from "../../../shared/disk"
 import { Button, Empty, PrChip, StatusBadge, cx, timeAgo } from "./ui"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
@@ -328,22 +328,50 @@ function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks
 }
 
 /** Free and total space on the box's work disk, from its last df. */
+/**
+ * Free and total space on the box's work disk (df), the same numbers pool_status and the low-disk
+ * notice give. The folder total (du) is only in the tooltip: it leaves out files the provider keeps on
+ * that disk, so it never matches df's "used".
+ */
 function DiskUse({ box }: { box: BoxInfo }) {
+  const now = useNow(5_000)
   const disk = diskMeter(box)
+  const folders = box.diskBytes ? ` Box Yard's folders on it use ${bytes(box.diskBytes)} (du); the rest is the provider's own files.` : ""
   if (!disk)
     return (
-      <span title="Current disk use, including task folders and local snapshots when visible">
-        disk {bytes(box.diskBytes)}
+      <span className="flex items-center gap-2 whitespace-nowrap" title={`Free space is measured with df when Box Yard next places a task or checks the box.${folders}`} data-testid="disk-use">
+        <HardDrive className="h-3.5 w-3.5" />
+        free space not measured yet
       </span>
     )
-  const checked = box.diskCheckedAt ? ` Checked ${timeAgo(box.diskCheckedAt)}.` : ""
   return (
-    <span className={cx("flex items-center gap-2 whitespace-nowrap", disk.low && "font-medium text-amber-300")} title={`${formatBytes(disk.used)} used.${checked}`} data-testid="disk-use">
-      <HardDrive className="h-3.5 w-3.5" />
-      {disk.label}
-      <Meter used={disk.used} total={disk.total} warn={disk.low} label="Disk used" className="w-16" />
+    <span
+      className={cx("flex flex-wrap items-center gap-x-2 gap-y-1", disk.low && "font-medium text-amber-300")}
+      title={`df on the box's work disk: ${formatBytes(disk.used)} used.${folders}`}
+      data-testid="disk-use"
+    >
+      <span className="flex items-center gap-2 whitespace-nowrap">
+        <HardDrive className="h-3.5 w-3.5" />
+        {disk.label}
+        <Meter used={disk.used} total={disk.total} warn={disk.low} label="Disk used" className="w-16" />
+      </span>
+      {box.diskCheckedAt && (
+        <span className="font-normal whitespace-nowrap text-zinc-600" title={new Date(box.diskCheckedAt).toLocaleString()}>
+          {measuredAgo(box.diskCheckedAt, now)}
+        </span>
+      )}
     </span>
   )
+}
+
+/** The current time, re-read every `ms` so relative labels stay true. */
+function useNow(ms: number) {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms)
+    return () => clearInterval(t)
+  }, [ms])
+  return now
 }
 
 function CleanUpButton({ box }: { box: BoxInfo }) {
