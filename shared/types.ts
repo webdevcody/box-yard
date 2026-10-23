@@ -359,6 +359,44 @@ export interface CompactionInfo {
   file: string
 }
 
+export interface CompactionTaskSnapshot {
+  taskId: string
+  title: string
+  status: TaskStatus
+  projectId: string
+  projectName: string
+  branch: string | null
+  prUrl: string | null
+  sessionId: string
+  summary: string
+  lastActiveAt: number
+}
+
+export interface OrchestratorCompactionRecord extends CompactionInfo {
+  id: string
+  sessionId: string
+  model: string
+  jsonFile: string
+  taskCount: number
+  tasks: CompactionTaskSnapshot[]
+  markdown?: string
+}
+
+export interface TaskCompactionRecord {
+  id: string
+  taskId: string
+  sessionId: string
+  at: number
+  statusBefore: TaskStatus | null
+  statusAfter: TaskStatus | null
+  tokensBefore: number | null
+  tokensAfter: number | null
+  summary: string
+  archivePath: string | null
+  archiveAvailable: boolean
+  archiveNote: string | null
+}
+
 export interface OrchestratorState {
   busy: boolean
   usage: ContextUsage
