@@ -61,18 +61,23 @@ const effortSchema = z
       "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Default if omitted: high.",
   )
 
+const modelSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(100)
+  .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
+  .optional()
+  .describe("Claude model for this task or subsequent turn, chosen from the routing rules. Omit to use project/global defaults.")
+const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
+const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
+const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /** The tools the orchestrator's Claude uses to run Box Yard. */
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
-  // The `effort` param only exists while Cody lets the orchestrator decide. The server is built per
-  // request and the orchestrator's CLI lists tools at the start of every turn, so a settings change
-  // shows up on its next turn. In fixed mode the param is absent (and an extra one would be ignored).
-  const decideEffort = deps.settings?.get().agentEffort === "orchestrator"
-  const effortParam: Record<string, typeof effortSchema> = decideEffort ? { effort: effortSchema } : {}
-
   const project = (ref: string): Project => {
     const p = store.findProject(ref)
     if (!p) throw new Error(`No project "${ref}". Use list_projects.`)
@@ -101,6 +106,9 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
     turns: t.turnCount,
+    model: t.model ?? undefined,
+    effort: t.effort ?? undefined,
+    routing: t.routingRule || t.routingReason ? { rule: t.routingRule ?? undefined, reason: t.routingReason ?? undefined } : undefined,
     lastActive: ago(t.updatedAt),
     summary: t.summary ? preview(t.summary, 300, "call get_task or wait_for_tasks for the full reply") : undefined,
   })
@@ -273,10 +281,10 @@ export function buildMcpServer(deps: McpDeps): McpServer {
           .optional()
           .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)"),
         attachments: attachmentsSchema,
-        ...effortParam,
+        ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; effort?: Effort }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       let prompt = a.prompt
       if (a.related_tasks?.length) {
         const context = a.related_tasks.map((ref) => {
@@ -287,7 +295,17 @@ export function buildMcpServer(deps: McpDeps): McpServer {
         })
         prompt = `${prompt}\n\n## Related earlier work\n${context.join("\n")}`
       }
-      const t = tasks.createTask({ projectId: project(a.project).id, title: a.title, prompt, env: a.env, attachments: uploads.resolveAll(a.attachments), effort: decideEffort ? (a.effort ?? null) : null })
+      const t = tasks.createTask({
+        projectId: project(a.project).id,
+        title: a.title,
+        prompt,
+        env: a.env,
+        attachments: uploads.resolveAll(a.attachments),
+        model: a.model ?? null,
+        effort: a.effort ?? null,
+        routingRule: a.routing_rule ?? null,
+        routingReason: a.routing_reason ?? null,
+      })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
   )
@@ -297,15 +315,39 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     {
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
-        (decideEffort ? "Set effort for this follow-up: it applies from the agent's next turn on (omit it to keep the effort the agent already has). " : "") +
+        "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
         "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
-      inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...effortParam },
+      inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...routeParams },
     },
-    safe(async (a: { task: string; message: string; attachments?: string[]; effort?: Effort }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, "orchestrator", uploads.resolveAll(a.attachments), decideEffort ? (a.effort ?? null) : null)
+      const t = tasks.sendInput(before.id, a.message, "orchestrator", uploads.resolveAll(a.attachments), {
+        model: a.model,
+        effort: a.effort,
+        routingRule: a.routing_rule,
+        routingReason: a.routing_reason,
+      })
       return ok({ ...brief(t), delivery: how })
+    }),
+  )
+
+  server.registerTool(
+    "set_task_model",
+    {
+      description:
+        "Change the model and/or effort an existing task will use on subsequent turns without sending it a message. Use send_to_task instead when you also have follow-up instructions.",
+      inputSchema: { task: z.string(), ...routeParams },
+    },
+    safe(async (a: { task: string; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+      if (!a.model && !a.effort && !a.routing_rule && !a.routing_reason) return fail("Pass at least one of model, effort, routing_rule or routing_reason.")
+      const t = tasks.setTaskModel(task(a.task).id, {
+        model: a.model ?? undefined,
+        effort: a.effort ?? undefined,
+        routingRule: a.routing_rule ?? undefined,
+        routingReason: a.routing_reason ?? undefined,
+      })
+      return ok(brief(t))
     }),
   )
 

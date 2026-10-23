@@ -79,6 +79,11 @@ export const TaskCard = memo(function TaskCard({
             <AlarmClock className="h-3.5 w-3.5" /> scheduled
           </span>
         )}
+        {(task.model || task.effort) && (
+          <span className="shrink-0 truncate" title={[task.model, task.effort ? `${task.effort} effort` : "", task.routingRule, task.routingReason].filter(Boolean).join(" · ")}>
+            {[task.model, task.effort].filter(Boolean).join(" · ")}
+          </span>
+        )}
         <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
           {task.pendingCount > 0 && `${task.pendingCount} queued · `}
           <TimeAgo ts={task.updatedAt} />

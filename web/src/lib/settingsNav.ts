@@ -22,7 +22,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "agents",
     label: "Box agents",
     description: "Defaults for the Claude Code agents that work on tasks inside boxes.",
-    fields: ["agentModel", "agentEffort", "agentAutoCompact"],
+    fields: ["agentModel", "agentEffort", "agentRoutingConfig", "agentAutoCompact"],
   },
   {
     key: "limits",

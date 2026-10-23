@@ -26,6 +26,7 @@ import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
@@ -220,15 +221,23 @@ export class TaskManager {
     prompt: string
     env?: Record<string, string>
     scheduleId?: string | null
+    model?: string | null
     effort?: Effort | null
+    routingRule?: string | null
+    routingReason?: string | null
     attachments?: StoredUpload[]
   }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
     if (!input.title.trim()) throw new BadRequestError("title is required")
     if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
+    const route = this.initialRoute(project, input)
     const task = this.store.createTask({
       ...input,
+      model: route.model,
+      effort: route.effort,
+      routingRule: route.routingRule,
+      routingReason: route.routingReason,
       branch: project.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
     })
     const files = input.attachments ?? []
@@ -245,7 +254,7 @@ export class TaskManager {
     content: string,
     source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody",
     attachments: StoredUpload[] = [],
-    effort?: Effort | null,
+    route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
   ): Task {
     const row = this.requireRow(taskId)
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
@@ -256,15 +265,34 @@ export class TaskManager {
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
-    if (effort) patch.effort = effort
+    if (route?.model) patch.model = route.model
+    if (route?.effort) patch.effort = route.effort
+    if (route?.routingRule !== undefined) patch.routingRule = route.routingRule
+    if (route?.routingReason !== undefined) patch.routingReason = route.routingReason
     if (row.status === "needs_input" && source !== "system" && !source.startsWith("agent:")) patch.question = null
     if (!row.current_turn_id && RESTING.includes(row.status)) {
       patch.status = "queued"
       patch.error = null
     }
     this.store.updateTask(row.id, patch)
+    if (source !== "system" && (route?.model || route?.effort)) {
+      this.addEvent(row.id, `Routing updated for the next turn: ${this.routeLabel({ model: route.model ?? row.model, effort: route.effort ?? row.effort, routingRule: route.routingRule ?? row.routing_rule, routingReason: route.routingReason ?? row.routing_reason })}.`)
+    }
     this.emitTask(row.id)
     this.schedule()
+    return this.store.getTask(row.id)!
+  }
+
+  setTaskModel(taskId: string, route: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null }): Task {
+    const row = this.requireRow(taskId)
+    const patch: Parameters<Store["updateTask"]>[1] = {}
+    if (route.model !== undefined) patch.model = route.model
+    if (route.effort !== undefined) patch.effort = route.effort
+    if (route.routingRule !== undefined) patch.routingRule = route.routingRule
+    if (route.routingReason !== undefined) patch.routingReason = route.routingReason
+    this.store.updateTask(row.id, patch)
+    this.addEvent(row.id, `Routing updated for subsequent turns: ${this.routeLabel({ model: route.model ?? row.model, effort: route.effort ?? row.effort, routingRule: route.routingRule ?? row.routing_rule, routingReason: route.routingReason ?? row.routing_reason })}.`)
+    this.emitTask(row.id)
     return this.store.getTask(row.id)!
   }
 
@@ -647,6 +675,7 @@ export class TaskManager {
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId), null, 2))
+      const agent = this.agentSettings(row)
       await this.provider.writeFile(
         boxId,
         `${dir}/turn.json`,
@@ -656,7 +685,7 @@ export class TaskManager {
           sessionId: row.session_id,
           resume: !firstTurn,
           compact,
-          ...this.agentSettings(row),
+          ...agent,
           systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
@@ -665,6 +694,16 @@ export class TaskManager {
       )
 
       if (this.stopRequested.has(taskId)) throw new StoppedBeforeStart()
+      this.store.startTaskTurn({
+        id: turnId,
+        taskId,
+        turnIndex: compact ? row.turn_count : row.turn_count + 1,
+        model: agent.model,
+        effort: agent.effort,
+        routingRule: row.routing_rule,
+        routingReason: row.routing_reason,
+        status: compact ? "compact" : "started",
+      })
 
       // setsid (where it exists; macOS has none) + nohup: the turn survives a
       // dropped exec connection. The runner writes turn.pid itself.
@@ -696,6 +735,7 @@ export class TaskManager {
       if (!stopped) console.error(`[box-yard] launch ${taskId} on ${boxId} failed: ${message}`)
       const current = this.store.getTaskRow(taskId)
       if (!current) return
+      this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       // A compaction that couldn't start isn't worth failing the task over.
       const wasCompact = Boolean(current.compact_pending || current.compacting)
       const prev = current.compact_prev_status
@@ -721,8 +761,8 @@ export class TaskManager {
   /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
   private agentSettings(row: TaskRow) {
     const s = this.settings.get()
-    const effort: Effort = s.agentEffort === "orchestrator" ? (row.effort ?? DEFAULT_EFFORT) : s.agentEffort
-    return { model: s.agentModel, effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window) }
+    const effort: Effort = row.effort ?? (s.agentEffort === "orchestrator" ? DEFAULT_EFFORT : s.agentEffort)
+    return { model: row.model ?? s.agentModel, effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window) }
   }
 
   /**
@@ -1079,6 +1119,7 @@ export class TaskManager {
     else status = "idle"
 
     const result = typeof ev.result === "string" ? ev.result : null
+    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: typeof ev.costUsd === "number" ? ev.costUsd : null, error })
     this.store.updateTask(row.id, {
       status,
       error,
@@ -1122,6 +1163,7 @@ export class TaskManager {
     // The PR may have been merged or closed while the compaction ran.
     if (status === "pr_ready" && isFinalPrState(row.pr_state)) status = row.pr_state === "merged" ? "done" : "idle"
     const usage = usageFields(ev.usage)
+    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : ev.ok ? "compacted" : "failed", error: ev.ok ? null : String(ev.error ?? "claude exited with an error") })
     this.store.updateTask(row.id, {
       status,
       currentTurnId: null,
@@ -1513,6 +1555,24 @@ export class TaskManager {
     if (!this.store.getTaskRow(taskId)) return
     const msg = this.store.addTaskMessage(taskId, "event", content)
     this.hub.broadcast({ type: "task.message", message: msg })
+  }
+
+  private initialRoute(
+    project: NonNullable<ReturnType<Store["getProject"]>>,
+    input: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null },
+  ) {
+    const fallback = resolveDefaultRoute(loadRouting(this.c.dataDir, this.settings.get()).config, project)
+    return {
+      model: input.model ?? fallback.model,
+      effort: input.effort ?? fallback.effort,
+      routingRule: input.routingRule ?? (input.model || input.effort ? null : fallback.rule),
+      routingReason: input.routingReason ?? (input.model || input.effort ? null : fallback.reason),
+    }
+  }
+
+  private routeLabel(route: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null }) {
+    const bits = [route.model ? `model ${route.model}` : null, route.effort ? `${route.effort} effort` : null, route.routingRule ? `rule ${route.routingRule}` : null, route.routingReason ? `reason: ${route.routingReason}` : null].filter(Boolean)
+    return bits.length ? bits.join(", ") : "global defaults"
   }
 
   /** A line in the orchestrator chat; the orchestrator reads it on its next turn. */

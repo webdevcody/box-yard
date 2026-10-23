@@ -49,6 +49,7 @@ describe("settings", () => {
     expect(s.settings.orchestratorEffort).toBe("high")
     expect(s.settings.agentModel).toBe("claude-opus-5-5")
     expect(s.settings.agentEffort).toBe("high")
+    expect(s.settings.agentRoutingConfig).toBe("")
     expect(s.sources.agentModel).toBe("default")
   })
   it("env vars override the defaults, and values saved in the UI win over env vars", () => {
@@ -66,6 +67,12 @@ describe("settings", () => {
     expect(new SettingsStore(store, { orchestratorModel: "", workerModel: "" }).get().agentModel).toBe("ui-model")
     settings.reset()
     expect(settings.info().settings.agentModel).toBe("env-worker")
+  })
+  it("saves routing YAML as a free-text setting", () => {
+    const settings = new SettingsStore(memStore(), { orchestratorModel: "", workerModel: "" })
+    const info = settings.update({ agentRoutingConfig: "fallback:\n  model: claude-sonnet-5-5\n  effort: medium\n" })
+    expect(info.settings.agentRoutingConfig).toContain("fallback")
+    expect(info.sources.agentRoutingConfig).toBe("ui")
   })
   it("rejects bad values", () => {
     const settings = new SettingsStore(memStore(), { orchestratorModel: "", workerModel: "" })

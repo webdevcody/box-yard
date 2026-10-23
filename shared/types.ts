@@ -83,8 +83,14 @@ export interface Task {
   compactPending: boolean
   /** A compaction turn is running right now. */
   compacting: boolean
-  /** Effort the orchestrator picked for this agent (used only in "let the orchestrator decide" mode). */
+  /** Model currently selected for subsequent turns, when routing overrode the global agent model. */
+  model: string | null
+  /** Effort currently selected for subsequent turns, when routing or the orchestrator overrode the global effort. */
   effort: Effort | null
+  /** Routing rule name or id that picked the current model/effort, if any. */
+  routingRule: string | null
+  /** Short explanation of why that route was picked. */
+  routingReason: string | null
   createdAt: number
   updatedAt: number
 }
@@ -298,6 +304,8 @@ export interface Settings {
   orchestratorAutoCompact: AutoCompact
   agentModel: string
   agentEffort: AgentEffort
+  /** YAML routing rules the orchestrator uses to choose per-task/per-turn model and effort. */
+  agentRoutingConfig: string
   /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
   agentAutoCompact: AutoCompact
   /** Upstash Box size used for new worker boxes. */

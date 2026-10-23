@@ -24,6 +24,7 @@ export const DEFAULT_SETTINGS: Settings = {
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
   agentModel: DEFAULT_MODEL,
   agentEffort: DEFAULT_EFFORT,
+  agentRoutingConfig: "",
   // Off means the CLI's own default (compact near the model's window) applies.
   agentAutoCompact: { enabled: false, unit: "percent", value: 80 },
   workerSize: "small",
@@ -64,6 +65,7 @@ export const settingsPatch = z
     orchestratorAutoCompact: autoCompact,
     agentModel: model,
     agentEffort: z.enum([...EFFORTS, "orchestrator"]),
+    agentRoutingConfig: z.string().max(50_000),
     agentAutoCompact: autoCompact,
     workerSize: z.enum(WORKER_SIZES),
     maxBoxes: z.number().int().min(1).max(100),

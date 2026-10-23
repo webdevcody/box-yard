@@ -21,6 +21,7 @@ import {
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
+import { routingInstructions } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -470,7 +471,7 @@ export class Orchestrator {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${ORCHESTRATOR_PROMPT}\n${compactionsPrompt(this.compactionsDir)}`,
+      `${ORCHESTRATOR_PROMPT}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
       ...session,
       ...model,
       "--effort",

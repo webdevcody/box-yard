@@ -397,6 +397,21 @@ export function SettingsDialog({
               </Select>
             </Row>
             <Row
+              id={fid("arc")}
+              label="Routing YAML"
+              help="Optional rules the orchestrator reads when choosing a task model and effort. Also works from routing.yaml in the data directory."
+              hint={hint("agentRoutingConfig")}
+            >
+              <textarea
+                id={fid("arc")}
+                className={cx(inputClass, "min-h-40 resize-y font-mono text-xs leading-5")}
+                spellCheck={false}
+                value={s.agentRoutingConfig}
+                onChange={(e) => set("agentRoutingConfig", e.target.value)}
+                placeholder={"fallback:\n  model: claude-opus-5-5\n  effort: high\nrules:\n  - name: docs-small-fixes\n    when: docs, typos, small fixes\n    model: claude-haiku-5-5\n    effort: low"}
+              />
+            </Row>
+            <Row
               id={fid("aac")}
               label="Custom auto-compact threshold"
               help="Passed to each agent's CLI as its auto-compact window (100k–1M tokens). Off: the CLI's own default."

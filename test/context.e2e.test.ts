@@ -147,7 +147,7 @@ describe("settings reach the CLI", () => {
     expect(argOf(turn.args, "--autocompact")).toBe("500000") // 50% of the assumed 1m window on a first turn
   })
 
-  it("lets the orchestrator decide effort per task and per message, and hides the param otherwise", async () => {
+  it("routes model and effort per task and per message, and records each turn", async () => {
     const lines = logFile()
     const r = await start()
     const connect = async () => {
@@ -163,35 +163,46 @@ describe("settings reach the CLI", () => {
       const tools = (await (await connect()).listTools()).tools
       return tools.find((t) => t.name === name)!
     }
-    // fixed mode: no effort param
-    expect(Object.keys((await schema("create_task")).inputSchema.properties ?? {})).not.toContain("effort")
-    expect(Object.keys((await schema("send_to_task")).inputSchema.properties ?? {})).not.toContain("effort")
-
-    await call(r, "PUT", "/api/agent-settings", { agentEffort: "orchestrator" })
     const create = await schema("create_task")
+    expect(Object.keys(create.inputSchema.properties ?? {})).toContain("model")
     expect(Object.keys(create.inputSchema.properties ?? {})).toContain("effort")
+    expect(Object.keys(create.inputSchema.properties ?? {})).toContain("routing_rule")
     expect(JSON.stringify(create.inputSchema.properties)).toMatch(/one-command chores/)
     expect(JSON.stringify(create.inputSchema.properties)).toMatch(/real coding/)
 
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const client = await connect()
-    const out = (await client.callTool({ name: "create_task", arguments: { project: p.name, title: "Chore", prompt: "run ls", effort: "low" } })) as { content: { text: string }[] }
+    const out = (await client.callTool({
+      name: "create_task",
+      arguments: { project: p.name, title: "Chore", prompt: "run ls", model: "claude-haiku-5-5", effort: "low", routing_rule: "docs-small-fixes", routing_reason: "Small chore." },
+    })) as { content: { text: string }[] }
     const id = JSON.parse(out.content[0]!.text).id as string
     await untilQuiet(r, id)
-    expect((await getTask(r, id)).effort).toBe("low")
-    expect(argOf(lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Chore"))!.args, "--effort")).toBe("low")
+    expect(await getTask(r, id)).toMatchObject({ model: "claude-haiku-5-5", effort: "low", routingRule: "docs-small-fixes", routingReason: "Small chore." })
+    const first = lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Chore"))!
+    expect(argOf(first.args, "--model")).toBe("claude-haiku-5-5")
+    expect(argOf(first.args, "--effort")).toBe("low")
 
-    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "now implement the feature [slow]", effort: "high" } })
+    await client.callTool({
+      name: "send_to_task",
+      arguments: { task: id, message: "now implement the feature [slow]", model: "claude-opus-5-5", effort: "high", routing_rule: "architecture-migrations-debugging", routing_reason: "Escalating after scope grew." },
+    })
     await untilQuiet(r, id)
-    expect((await getTask(r, id)).effort).toBe("high")
+    expect(await getTask(r, id)).toMatchObject({ model: "claude-opus-5-5", effort: "high", routingRule: "architecture-migrations-debugging" })
     const follow = lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from"))
+    expect(argOf(follow.at(-1)!.args, "--model")).toBe("claude-opus-5-5")
     expect(argOf(follow.at(-1)!.args, "--effort")).toBe("high")
+    expect(r.yard.store.listTaskTurns(id).map((t) => ({ model: t.model, effort: t.effort, rule: t.routing_rule, status: t.status }))).toEqual([
+      { model: "claude-haiku-5-5", effort: "low", rule: "docs-small-fixes", status: "done" },
+      { model: "claude-opus-5-5", effort: "high", rule: "architecture-migrations-debugging", status: "done" },
+    ])
 
-    // back to a fixed level: the effort the orchestrator picked is ignored
-    await call(r, "PUT", "/api/agent-settings", { agentEffort: "medium" })
-    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "again", effort: "max" } })
+    await client.callTool({ name: "set_task_model", arguments: { task: id, model: "claude-sonnet-5-5", effort: "medium", routing_rule: "ui", routing_reason: "Follow-up is UI-sized." } })
+    await client.callTool({ name: "send_to_task", arguments: { task: id, message: "again" } })
     await untilQuiet(r, id)
-    expect(argOf(lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from")).at(-1)!.args, "--effort")).toBe("medium")
+    const last = lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from")).at(-1)!
+    expect(argOf(last.args, "--model")).toBe("claude-sonnet-5-5")
+    expect(argOf(last.args, "--effort")).toBe("medium")
   })
 })
 
