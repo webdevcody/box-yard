@@ -144,6 +144,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
     prState: t.prUrl ? (t.prState ?? undefined) : undefined,
+    mergeRequested: t.mergeRequest
+      ? `Cody pressed Merge PR for #${t.mergeRequest.prNumber} (${t.mergeRequest.deliveredAt ? "the agent is on it" : "queued behind its current turn"}); don't start another merge of this PR`
+      : undefined,
     previews: t.previews.length ? t.previews.map((p) => p.url) : undefined,
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
@@ -497,7 +500,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
         "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments.",
       inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...routeParams },
     },
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {

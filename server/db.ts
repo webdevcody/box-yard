@@ -454,6 +454,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN disk_total_bytes INTEGER;
   ALTER TABLE boxes ADD COLUMN disk_checked_at INTEGER;
   `,
+  `
+  -- "Merge PR" button: the pending merge request (JSON: prNumber, prUrl, requestedAt, deliveredAt, inputId).
+  ALTER TABLE tasks ADD COLUMN merge_request_json TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
