@@ -46,6 +46,8 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     orchestratorAutoWake: false,
     archiveWorkspaces: true,
     selfBoxId: "",
+    // Local boxes live on this machine's disk; don't let a nearly full dev disk hold tasks back.
+    diskMinFreeMb: 0,
     ...overrides,
   }
 }

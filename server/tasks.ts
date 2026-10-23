@@ -30,6 +30,8 @@ import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
+import { cleanupSummary, dfCommand, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
+import { BoxJanitor } from "./janitor.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -43,6 +45,9 @@ const START_TIMEOUT_MS = 15 * 60_000
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 const BRANCH_MARK = "boxyard-branch="
+const CLONE_SIZE_MARK = "boxyard-clone-kb="
+/** A df reading this fresh is good enough for placement. */
+const DISK_CACHE_MS = 20_000
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
 const ARCHIVE_EXCLUDED_DIRS = ["node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target"]
 
@@ -69,6 +74,8 @@ const captainMeta = (store: Store, projectId: string) => ({ source: "captain", c
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
+/** kv key for a repo's last measured clone size in bytes (by mirror name). */
+const cloneBytesKey = (mirror: string) => `clone_bytes:${mirror}`
 
 const usageFields = (u: unknown): { contextTokens?: number; contextWindow?: number } => {
   const x = u as { tokens?: unknown; window?: unknown } | null | undefined
@@ -136,6 +143,18 @@ export class TaskManager {
   private stopped = false
   private lastBoxProbeAt = new Map<string, number>()
   private budgetNoticeAt = 0
+  /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
+  readonly janitor: BoxJanitor
+  /** Latest df per box, so a scheduling pass doesn't run df for every task. */
+  private diskCache = new Map<string, { at: number; space: DiskSpace }>()
+  /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
+  private reserved = new Map<string, Map<string, number>>()
+  /** Boxes the last placement check found too full for a new workspace. */
+  private lowBoxes = new Set<string>()
+  /** Tasks whose setup already hit a full disk once; the next one fails for good. */
+  private diskRetried = new Set<string>()
+  /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
+  private diskHold = new Map<string, string>()
   /** Called after every notice; return true when another owner handled delivery. */
   onNotice: ((content: string, meta: Record<string, unknown> | null) => boolean | void) | null = null
 
@@ -156,6 +175,23 @@ export class TaskManager {
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
+    this.janitor = new BoxJanitor({
+      store: this.store,
+      provider: this.provider,
+      hub: this.hub,
+      probe: (boxId) => this.probeDisk(boxId, 0),
+      taskDir: (boxId, taskId) => this.taskDir(boxId, taskId),
+      installRunner: async (boxId) => {
+        const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
+        await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
+        return runnerPath
+      },
+      hasFreshArchive: (row) => this.hasFreshArchive(row),
+      archive: (taskId) => this.archive(taskId),
+      park: (taskId, boxId, note) => this.park(taskId, boxId, note),
+      mirrorsToKeep: (boxId) => this.mirrorsToKeep(boxId),
+      finished: (report) => this.cleanupFinished(report),
+    })
   }
 
   get busMode() {
@@ -430,6 +466,7 @@ export class TaskManager {
   boxes(): BoxInfo[] {
     this.meterBoxes()
     const rates = this.settings.get().costRates
+    const floor = this.diskNeed(null)
     const now = Date.now()
     return this.store.listBoxes().map((b) => {
       const residents = this.store.listTaskRows({ boxId: b.id })
@@ -448,6 +485,11 @@ export class TaskManager {
         activeMs: b.active_ms ?? 0,
         uptimeMs,
         diskBytes: b.disk_bytes ?? null,
+        diskFreeBytes: b.disk_free_bytes ?? null,
+        diskTotalBytes: b.disk_total_bytes ?? null,
+        diskCheckedAt: b.disk_checked_at ?? null,
+        diskLow: this.lowBoxes.has(b.id) || (b.disk_free_bytes !== null && b.disk_free_bytes !== undefined && b.disk_free_bytes < floor),
+        cleanup: this.janitor.current(b.id),
         estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
         usageSource: b.usage_source ?? "estimated",
         createdAt: b.created_at,
@@ -513,12 +555,15 @@ export class TaskManager {
         continue
       }
       const turnId = randomUUID()
+      // A workspace about to be made here takes disk the next placement mustn't count on.
+      if (row.box_id !== boxId) this.reserve(boxId, row.id, this.cloneBytes(row) ?? 0)
       // Reserve the slot before any await so parallel passes see it taken.
       this.store.updateTask(row.id, {
         status: "starting",
         boxId,
         currentTurnId: turnId,
         error: null,
+        waitReason: null,
         ...(row.compact_pending ? { compactPrevStatus: row.status } : {}),
       })
       this.store.touchBox(boxId)
@@ -539,13 +584,20 @@ export class TaskManager {
 
   /** Pick a box for a task's next turn, or null to wait. */
   private async place(row: TaskRow): Promise<string | null> {
+    // A cleanup step is working in its folder right now.
+    if (this.janitor.isBusy(row.id)) return null
     if (row.box_id) {
       const box = this.store.getBox(row.box_id)
       if (box?.status === "ready") {
+        // It ran out of space here; its workspace stays, so it waits for the cleanup on this box.
+        if (this.diskHold.get(row.id) === box.id && this.janitor.isRunning(box.id)) {
+          this.setWaitReason(row.id, `Waiting for disk cleanup on ${box.id}`)
+          return null
+        }
         if (this.runningOn(box.id) < this.limits().slotsPerBox) return box.id
         // Its box is busy. Move to a free box if the archive is fresh enough.
         if (!this.hasFreshArchive(row)) return null
-        const other = this.pickBox(row.id, box.id)
+        const other = await this.pickBox(row.id, box.id)
         if (!other) return null
         const oldBox = box.id
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
@@ -557,7 +609,7 @@ export class TaskManager {
       // Box is gone or lost; the workspace comes back from the archive.
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     }
-    const boxId = this.pickBox(row.id)
+    const boxId = await this.pickBox(row.id)
     return boxId ? this.assign(row.id, boxId) : null
   }
 
@@ -567,9 +619,12 @@ export class TaskManager {
    * 2. an empty box,
    * 3. nothing yet, when the pool has room: a new box is made for the project,
    * 4. a free slot on a box another project uses (the pool is full).
+   * A box without enough free disk for a new workspace is skipped and cleaned up
+   * in the background; the task waits for that cleanup only when no other box
+   * (or new one) can take it.
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
-  private pickBox(taskId: string, exclude?: string): string | null {
+  private async pickBox(taskId: string, exclude?: string): Promise<string | null> {
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -588,19 +643,179 @@ export class TaskManager {
       })
       .filter((b) => b.running < this.limits().slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
+    const low: { boxId: string; state: "running" | "exhausted" }[] = []
     for (const b of candidates) {
       if (b.rank === 2 && this.poolHasRoom()) {
         // Rather than crowd another project's box, make one for this project.
         this.wantsBox.add(taskId)
+        this.holdForDisk(taskId, low)
         return null
+      }
+      if (b.residents >= this.limits().maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
+      const room = row ? await this.diskRoom(b.id, row) : "ok"
+      if (room !== "ok") {
+        low.push({ boxId: b.id, state: room })
+        continue
       }
       if (b.residents < this.limits().maxResidentPerBox || this.evictOne(b.id, taskId)) {
         this.wantsBox.delete(taskId)
+        this.holdForDisk(taskId, [])
         return b.id
       }
     }
     if (this.poolHasRoom()) this.wantsBox.add(taskId)
+    else {
+      // Its setup already ran out of space once and no box has room even after cleanup:
+      // the threshold is cautious, so make the one retry on the cleaned box instead of waiting forever.
+      const cleaned = this.diskRetried.has(taskId) ? low.find((l) => l.state === "exhausted") : undefined
+      if (cleaned && (this.store.listTaskRows({ boxId: cleaned.boxId }).filter((r) => r.id !== taskId).length < this.limits().maxResidentPerBox || this.evictOne(cleaned.boxId, taskId))) {
+        this.holdForDisk(taskId, [])
+        return cleaned.boxId
+      }
+    }
+    this.holdForDisk(taskId, low)
     return null
+  }
+
+  /**
+   * Pre-flight disk check for a new workspace on a box: "ok", or the state of the
+   * cleanup it just started (or that already did all it could) when the box is low.
+   */
+  private async diskRoom(boxId: string, row: TaskRow): Promise<"ok" | "running" | "exhausted"> {
+    const space = await this.probeDisk(boxId, DISK_CACHE_MS)
+    // df failing shouldn't stop work; a real shortage shows up as ENOSPC and is retried.
+    if (!space) return "ok"
+    const need = this.diskNeed(row)
+    let pending = 0
+    for (const [id, bytes] of this.reserved.get(boxId) ?? []) if (id !== row.id) pending += bytes
+    if (space.freeBytes - pending >= need) {
+      if (this.lowBoxes.delete(boxId)) this.emitBoxes()
+      return "ok"
+    }
+    if (!this.lowBoxes.has(boxId)) {
+      this.lowBoxes.add(boxId)
+      console.log(`[box-yard] box ${boxId} is low on disk: ${formatBytes(space.freeBytes)} free, ${formatBytes(need + pending)} needed`)
+      this.emitBoxes()
+    }
+    return this.janitor.ensure(boxId, need + pending)
+  }
+
+  /** Say on a queued task why it's waiting when that's about disk space, or clear it. */
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[]) {
+    const first = low[0]
+    let reason: string | null = null
+    if (first) {
+      if (this.wantsBox.has(taskId)) reason = `Waiting for a new box: ${first.boxId} is low on disk`
+      else if (first.state === "running" || low.some((l) => this.janitor.isRunning(l.boxId))) {
+        reason = `Waiting for disk cleanup on ${low.find((l) => this.janitor.isRunning(l.boxId))?.boxId ?? first.boxId}`
+      } else reason = `Waiting for disk space on ${first.boxId}: cleanup couldn't free enough room`
+    }
+    this.setWaitReason(taskId, reason)
+  }
+
+  private setWaitReason(taskId: string, reason: string | null) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row || (row.wait_reason ?? null) === reason) return
+    this.store.updateTask(taskId, { waitReason: reason }, { touch: false })
+    if (reason) this.addEvent(taskId, `${reason}.`)
+    this.emitTask(taskId)
+  }
+
+  /** df on a box's work disk, cached for `maxAgeMs`. Saves the numbers on the box row for the Boxes page. */
+  async probeDisk(boxId: string, maxAgeMs = DISK_CACHE_MS): Promise<DiskSpace | null> {
+    const hit = this.diskCache.get(boxId)
+    if (hit && maxAgeMs > 0 && Date.now() - hit.at < maxAgeMs) return hit.space
+    const res = await this.provider.exec(boxId, dfCommand(this.provider.root(boxId))).catch(() => null)
+    const space = res && res.exitCode === 0 ? parseDf(res.stdout) : null
+    if (!space) return null
+    const now = Date.now()
+    this.diskCache.set(boxId, { at: now, space })
+    if (this.store.getBox(boxId)) {
+      const before = this.store.getBox(boxId)
+      this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now })
+      // Only a real change is worth a Boxes update (df runs often while placing).
+      if (Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 || before?.disk_total_bytes !== space.totalBytes) this.emitBoxes()
+    }
+    return space
+  }
+
+  /** Free disk a new workspace for `row` needs (Settings: the floor, or cloneFactor x its repo's last clone size). */
+  private diskNeed(row: TaskRow | null): number {
+    const s = this.settings.get()
+    return requiredFreeBytes({ minFreeMb: s.diskMinFreeMb, cloneFactor: s.diskCloneFactor }, row ? this.cloneBytes(row) : null)
+  }
+
+  /** The task's repo's last measured clone size, if Box Yard has cloned it before. */
+  private cloneBytes(row: TaskRow): number | null {
+    const mirror = this.repoMirrorName(this.store.getProject(row.project_id)?.repo ?? null)
+    const raw = mirror ? this.store.getKv(cloneBytesKey(mirror)) : null
+    const n = raw ? Number(raw) : NaN
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+
+  private reserve(boxId: string, taskId: string, bytes: number) {
+    const m = this.reserved.get(boxId) ?? new Map<string, number>()
+    m.set(taskId, bytes)
+    this.reserved.set(boxId, m)
+  }
+
+  private release(boxId: string, taskId: string) {
+    const m = this.reserved.get(boxId)
+    if (!m?.delete(taskId)) return
+    if (!m.size) this.reserved.delete(boxId)
+    // The workspace landed (or didn't): the next check reads df again.
+    this.diskCache.delete(boxId)
+  }
+
+  /**
+   * Clean up a box now (the Boxes page button). Runs every safe step; done
+   * workspaces are parked only while the box is below the low-disk threshold.
+   * Resolves with the first report (status "running") without waiting for the end.
+   */
+  async cleanBox(boxId: string): Promise<BoxCleanup> {
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleaned up.`)
+    if (!this.janitor.isRunning(boxId)) void this.janitor.run(boxId, { reason: "manual", target: null, parkBelow: this.diskNeed(null) })
+    return this.janitor.current(boxId)!
+  }
+
+  private cleanupFinished(report: BoxCleanup) {
+    this.diskCache.delete(report.boxId)
+    if (report.enough && report.targetFreeBytes !== null) this.lowBoxes.delete(report.boxId)
+    const summary = cleanupSummary(report)
+    if (report.reason !== "manual" && !report.enough && this.store.getBox(report.boxId)) {
+      const free = report.freeAfter !== null ? `${formatBytes(report.freeAfter)} free` : "free space unknown"
+      this.notice(
+        `⚠️ Box ${report.boxId} is low on disk: cleanup ${summary}, and it has ${free}; new workspaces need ${formatBytes(report.targetFreeBytes)}. ` +
+          `Tasks that can't go elsewhere wait for room. Add a box (raise Max boxes) or free space on it.`,
+      )
+    }
+    this.emitBoxes()
+    this.schedule()
+  }
+
+  /** Repo mirrors a box still needs: those of its tasks' projects and of the project it was made for. */
+  private mirrorsToKeep(boxId: string): Set<string> {
+    const keep = new Set<string>()
+    for (const row of this.store.listTaskRows({ boxId })) {
+      const name = this.repoMirrorName(this.store.getProject(row.project_id)?.repo ?? null)
+      if (name) keep.add(name)
+    }
+    const owner = this.store.getKv(boxOwnerKey(boxId))
+    if (owner) {
+      const name = this.repoMirrorName(this.store.getProject(owner)?.repo ?? null)
+      if (name) keep.add(name)
+    }
+    return keep
+  }
+
+  /** Take a resting task's folder off its box; it restores from its archive on the next message. */
+  private async park(taskId: string, boxId: string, note: string) {
+    this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] }, { touch: false })
+    await this.removeTaskDir(boxId, taskId)
+    this.addEvent(taskId, note)
+    this.emitTask(taskId)
   }
 
   /** Room to create another box (and box creation isn't failing right now). */
@@ -626,9 +841,12 @@ export class TaskManager {
     return boxId
   }
 
-  /** Free a folder on a full box by removing the least recently used, archived, resting task. */
-  private evictOne(boxId: string, forTaskId: string): boolean {
-    const victim = this.store
+  private canEvict(boxId: string, forTaskId: string) {
+    return Boolean(this.evictionVictim(boxId, forTaskId))
+  }
+
+  private evictionVictim(boxId: string, forTaskId: string) {
+    return this.store
       .listTaskRows({ boxId })
       .filter(
         (r) =>
@@ -638,6 +856,11 @@ export class TaskManager {
           this.hasFreshArchive(r),
       )
       .sort((a, b) => a.last_active_at - b.last_active_at)[0]
+  }
+
+  /** Free a folder on a full box by removing the least recently used, archived, resting task. */
+  private evictOne(boxId: string, forTaskId: string): boolean {
+    const victim = this.evictionVictim(boxId, forTaskId)
     if (!victim) return false
     this.store.updateTask(victim.id, { boxId: null, portBase: null, previews: [] })
     void this.removeTaskDir(boxId, victim.id).catch(() => {})
@@ -663,7 +886,10 @@ export class TaskManager {
         this.store.setKv(projectBoxKey(projectId), id)
         this.store.setKv(boxOwnerKey(id), projectId)
       }
-      void this.refreshBoxUsage(id, true).finally(() => this.emitBoxes())
+      void this.refreshBoxUsage(id, true).finally(() => {
+        this.emitBoxes()
+        this.schedule()
+      })
       this.lastBoxError = null
       console.log(`[box-yard] created box ${id}${project ? ` for project ${project.name}` : ""}`)
     } catch (err) {
@@ -694,6 +920,8 @@ export class TaskManager {
   private async launch(taskId: string, boxId: string, turnId: string) {
     let row = this.requireRow(taskId)
     const dir = this.taskDir(boxId, taskId)
+    /** The workspace is being made fresh, so a failure leaves nothing worth keeping in its folder. */
+    let fresh = false
     try {
       await this.provider.wake(boxId)
       const project = this.store.getProject(row.project_id)
@@ -701,7 +929,9 @@ export class TaskManager {
 
       const check = await this.provider.exec(boxId, `[ -d ${q(dir + "/work")} ] && echo present || echo missing`)
       if (check.exitCode !== 0) throw new Error(`box not responding: ${check.stderr.slice(-300)}`)
-      const prepared = check.stdout.includes("missing") ? await this.prepareWorkspace(row, boxId, dir) : null
+      fresh = check.stdout.includes("missing")
+      const prepared = fresh ? await this.prepareWorkspace(row, boxId, dir).finally(() => this.release(boxId, taskId)) : null
+      this.release(boxId, taskId)
       row = this.requireRow(taskId)
 
       // The task ran before but its folder came back without an archive (expired,
@@ -771,6 +1001,8 @@ export class TaskManager {
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
 
       this.store.deleteInputs(queued.map((i) => i.id))
+      this.diskRetried.delete(taskId)
+      this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
       this.store.updateTask(taskId, {
         status: "working",
@@ -786,15 +1018,28 @@ export class TaskManager {
       this.holdOpen(taskId, boxId)
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
+      this.release(boxId, taskId)
       const stopped = err instanceof StoppedBeforeStart
       this.stopRequested.delete(taskId)
-      const message = errorMessage(err)
+      let message = errorMessage(err)
       if (!stopped) console.error(`[box-yard] launch ${taskId} on ${boxId} failed: ${message}`)
       const current = this.store.getTaskRow(taskId)
       if (!current) return
-      this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       // A compaction that couldn't start isn't worth failing the task over.
       const wasCompact = Boolean(current.compact_pending || current.compacting)
+      const outOfSpace = !stopped && isOutOfSpace(message)
+      if (outOfSpace && !wasCompact && !this.diskRetried.has(taskId)) {
+        this.store.finishTaskTurn(turnId, { status: "failed", error: message })
+        await this.retryAfterOutOfSpace(current, boxId, fresh)
+        return
+      }
+      if (outOfSpace) {
+        this.diskRetried.delete(taskId)
+        this.diskHold.delete(taskId)
+        const space = await this.probeDisk(boxId, 0)
+        message = `box ${boxId} is out of disk space${space ? ` (${formatBytes(space.freeBytes)} free of ${formatBytes(space.totalBytes)})` : ""}, even after cleaning it up and retrying. Free space on it or add a box, then retry. ${message}`
+      }
+      this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       const prev = current.compact_prev_status
       this.store.updateTask(taskId, {
         status: wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : stopped ? "idle" : "failed",
@@ -813,6 +1058,42 @@ export class TaskManager {
       this.emitTask(taskId)
       this.schedule()
     }
+  }
+
+  /**
+   * The box ran out of disk while setting the task up. Clean that box up and try
+   * once more: a fresh workspace is dropped (it was half-made) and placed again,
+   * on another box if one has room; an existing workspace waits for the cleanup
+   * on its own box. The task stays queued with a visible reason meanwhile.
+   */
+  private async retryAfterOutOfSpace(row: TaskRow, boxId: string, fresh: boolean) {
+    this.diskRetried.add(row.id)
+    this.diskCache.delete(boxId)
+    this.lowBoxes.add(boxId)
+    const need = this.diskNeed(row)
+    this.janitor.ensure(boxId, need, "out-of-space", true)
+    if (fresh) {
+      this.diskHold.delete(row.id)
+      await this.removeTaskDir(boxId, row.id).catch(() => {})
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    } else {
+      this.diskHold.set(row.id, boxId)
+    }
+    this.store.updateTask(row.id, {
+      status: "queued",
+      currentTurnId: null,
+      compactPending: false,
+      error: null,
+      waitReason: `Waiting for disk cleanup on ${boxId}`,
+    })
+    this.addEvent(
+      row.id,
+      `Box ${boxId} ran out of disk space while ${fresh ? "setting up the workspace" : "starting the turn"}. ` +
+        `Cleaning it up and retrying once${fresh ? ", on another box if one has room" : " when the cleanup is done"}.`,
+    )
+    this.emitTask(row.id)
+    this.emitBoxes()
+    this.schedule()
   }
 
   /** A resumed task whose session is gone gets a new session id; say so in its thread. */
@@ -942,6 +1223,8 @@ export class TaskManager {
         `git config user.email ${q(this.c.gitUserEmail)}`,
       )
       if (row.branch) steps.push(`( (git checkout ${q(row.branch)} >/dev/null 2>&1 && echo ${BRANCH_MARK}origin) || (git checkout -b ${q(row.branch)} && echo ${BRANCH_MARK}base) )`)
+      // How much disk a clone of this repo takes, for the next pre-flight check.
+      steps.push(`(echo ${CLONE_SIZE_MARK}$(du -sk . 2>/dev/null | cut -f1); true)`)
     } else {
       steps.push(`mkdir -p ${q(dir + "/work")}`)
     }
@@ -951,6 +1234,9 @@ export class TaskManager {
       throw new Error(project.repo ? `git clone of ${project.repo} failed: ${detail}` : `workspace setup failed: ${detail}`)
     }
     this.store.updateTask(row.id, { eventCursor: null })
+    const kb = Number(res.stdout.match(new RegExp(`${CLONE_SIZE_MARK}(\\d+)`))?.[1])
+    const mirrorName = this.repoMirrorName(project.repo)
+    if (mirrorName && Number.isFinite(kb) && kb > 0) this.store.setKv(cloneBytesKey(mirrorName), String(kb * 1024))
     this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
@@ -1564,10 +1850,13 @@ export class TaskManager {
   }
 
   private async refreshBoxUsage(boxId: string, force = false) {
-    if (!this.provider.usage) return
     const now = Date.now()
     if (!force && now - (this.lastBoxProbeAt.get(boxId) ?? 0) < 5 * 60_000) return
     this.lastBoxProbeAt.set(boxId, now)
+    if (!this.provider.usage) {
+      await this.probeDisk(boxId, 0).catch(() => null)
+      return
+    }
     let probe: BoxUsageProbe
     try {
       probe = await this.provider.usage(boxId)
@@ -1583,6 +1872,7 @@ export class TaskManager {
     const row = this.store.getBox(boxId)
     if (row && typeof probe.activeMs === "number" && probe.activeMs > (row.active_ms ?? 0)) patch.activeMs = probe.activeMs
     this.store.meterBox(boxId, patch)
+    await this.probeDisk(boxId, 0).catch(() => null)
   }
 
   private async maintainRestingStorage(now = Date.now()) {
@@ -1651,16 +1941,7 @@ export class TaskManager {
       const residents = this.store.listTaskRows({ boxId: box.id })
       // Avoid racing a clone/fetch that may be using a mirror.
       if (residents.some((r) => r.current_turn_id || r.status === "starting")) continue
-      const keep = new Set<string>()
-      for (const row of residents) {
-        const name = this.repoMirrorName(this.store.getProject(row.project_id)?.repo ?? null)
-        if (name) keep.add(name)
-      }
-      const owner = this.store.getKv(boxOwnerKey(box.id))
-      if (owner) {
-        const name = this.repoMirrorName(this.store.getProject(owner)?.repo ?? null)
-        if (name) keep.add(name)
-      }
+      const keep = this.mirrorsToKeep(box.id)
       const repos = `${this.provider.root(box.id)}/.boxyard/repos`
       const keepList = [...keep].join(" ")
       const script = `[ -d ${q(repos)} ] || exit 0; for d in ${q(repos)}/*.git; do [ -e "$d" ] || continue; b=$(basename "$d"); case " ${keepList} " in *" $b "*) ;; *) rm -rf "$d";; esac; done`
@@ -1740,6 +2021,12 @@ export class TaskManager {
       this.lastRetentionAt = now
       await this.maintainRestingStorage(now)
     }
+    // Clean a box that is filling up before a task trips over it.
+    const floor = this.diskNeed(null)
+    for (const box of this.store.listBoxes()) {
+      if (box.status !== "ready" || box.disk_free_bytes === null || box.disk_free_bytes === undefined) continue
+      if (box.disk_free_bytes < floor && !this.janitor.isRunning(box.id)) this.janitor.ensure(box.id, floor)
+    }
     this.schedule()
   }
 
@@ -1776,6 +2063,11 @@ export class TaskManager {
     if (!box) return
     this.store.setBoxStatus(boxId, "lost")
     this.store.setKv(boxOwnerKey(boxId), null)
+    this.janitor.forget(boxId)
+    this.diskCache.delete(boxId)
+    this.reserved.delete(boxId)
+    this.lowBoxes.delete(boxId)
+    for (const [taskId, held] of this.diskHold) if (held === boxId) this.diskHold.delete(taskId)
     for (const row of this.store.listTaskRows({ boxId })) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       if (row.current_turn_id) this.interrupt(this.requireRow(row.id), reason)

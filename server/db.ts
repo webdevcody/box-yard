@@ -446,6 +446,14 @@ export const MIGRATIONS: string[] = [
   -- What the agent reported about a run: 'noop' for a schedule run that found nothing to do (shared/quiet.ts).
   ALTER TABLE tasks ADD COLUMN outcome TEXT;
   `,
+  `
+  -- Low-disk handling: why a queued task is held back (e.g. waiting for disk cleanup on a box),
+  -- and each box's free/total space from df, for placement and the Boxes page.
+  ALTER TABLE tasks ADD COLUMN wait_reason TEXT;
+  ALTER TABLE boxes ADD COLUMN disk_free_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_total_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN disk_checked_at INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

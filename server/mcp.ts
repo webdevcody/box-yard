@@ -15,6 +15,7 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
 import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
+import { cleanupSummary, formatBytes } from "../shared/disk.js"
 
 export interface McpDeps {
   store: Store
@@ -834,9 +835,34 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     { description: "Show worker boxes (which projects live on each, busy slots) and queued tasks. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room." },
     safe(async () =>
       ok({
-        boxes: tasks.boxes().map((b) => ({ id: b.id, status: b.status, projects: b.projects, running: `${b.runningTurns}/${b.slots}`, tasks: b.residentTasks.length })),
+        boxes: tasks.boxes().map((b) => ({
+          id: b.id,
+          status: b.status,
+          projects: b.projects,
+          running: `${b.runningTurns}/${b.slots}`,
+          tasks: b.residentTasks.length,
+          disk: b.diskFreeBytes !== null ? `${formatBytes(b.diskFreeBytes)} free of ${formatBytes(b.diskTotalBytes)}${b.diskLow ? " (low)" : ""}` : "unknown",
+          ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
+        })),
         pool: tasks.poolLimits(),
-        queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}`),
+        queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason})` : ""}`),
+      }),
+    ),
+  )
+
+  // Boxes are shared across projects, so cleaning one up is the Coordinator's call.
+  coordinatorOnly(
+    server.registerTool(
+      "clean_up_box",
+      {
+        description:
+          "Coordinator tool: free disk on a worker box now, in safe steps (partial clones, caches, git-ignored node_modules/build dirs of resting tasks, git gc, then parking archived done workspaces only if still low). " +
+          "Never touches uncommitted work. Runs in the background; check pool_status for the result. Box Yard also does this on its own when a box runs low.",
+        inputSchema: { box: z.string().describe("Box id, from pool_status") },
+      },
+      safe(async (a: { box: string }) => {
+        const report = await tasks.cleanBox(a.box)
+        return ok({ started: true, box: report.boxId, next: "Call pool_status in a minute to see what it freed." })
       }),
     ),
   )

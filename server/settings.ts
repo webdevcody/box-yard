@@ -49,6 +49,8 @@ export const DEFAULT_SETTINGS: Settings = {
   workspaceRetentionDays: 7,
   archiveRetentionDays: 7,
   archiveKeepTouchedDays: 30,
+  diskMinFreeMb: 1024,
+  diskCloneFactor: 2,
 }
 
 /** Env vars that seed box/pool settings; saved settings win over them. */
@@ -62,6 +64,8 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
   archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
   archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
+  diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
+  diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
 }
 
 const autoCompact = z
@@ -105,6 +109,8 @@ export const settingsPatch = z
     workspaceRetentionDays: z.number().int().min(0).max(3650),
     archiveRetentionDays: z.number().int().min(0).max(3650),
     archiveKeepTouchedDays: z.number().int().min(0).max(3650),
+    diskMinFreeMb: z.number().int().min(0).max(1_000_000),
+    diskCloneFactor: z.number().min(1).max(20),
   })
   .partial()
   .strict()
@@ -133,6 +139,8 @@ export class SettingsStore {
       | "workspaceRetentionDays"
       | "archiveRetentionDays"
       | "archiveKeepTouchedDays"
+      | "diskMinFreeMb"
+      | "diskCloneFactor"
       >
     >,
   ) {}
@@ -174,6 +182,8 @@ export class SettingsStore {
       workspaceRetentionDays: this.c.workspaceRetentionDays ?? DEFAULT_SETTINGS.workspaceRetentionDays,
       archiveRetentionDays: this.c.archiveRetentionDays ?? DEFAULT_SETTINGS.archiveRetentionDays,
       archiveKeepTouchedDays: this.c.archiveKeepTouchedDays ?? DEFAULT_SETTINGS.archiveKeepTouchedDays,
+      diskMinFreeMb: this.c.diskMinFreeMb ?? DEFAULT_SETTINGS.diskMinFreeMb,
+      diskCloneFactor: this.c.diskCloneFactor ?? DEFAULT_SETTINGS.diskCloneFactor,
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings
