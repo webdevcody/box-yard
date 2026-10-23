@@ -183,7 +183,7 @@ export function buildUsagePeriod(input: PeriodInput): UsagePeriodReport {
     box.uptimeMs += iv.uptimeMs * share
     box.costUsd += iv.costUsd * share
     if (iv.source !== "actual") box.source = "estimated"
-    if (iv.endedAt >= box.lastAt) Object.assign(box, { lastAt: iv.endedAt, size: iv.size, keepAlive: iv.keepAlive, diskBytes: iv.diskBytes ?? box.diskBytes })
+    if (iv.endedAt >= box.lastAt) Object.assign(box, { lastAt: iv.endedAt, size: iv.size, keepAlive: iv.keepAlive, diskBytes: iv.diskBytes || box.diskBytes })
     for (let t = start; t < end; ) {
       const b = bucketAt(t)
       const next = Math.min(end, b.start + bucketMs > t ? b.start + bucketMs : end)
@@ -195,7 +195,7 @@ export function buildUsagePeriod(input: PeriodInput): UsagePeriodReport {
     if (!perBox.has(b.boxId)) perBox.set(b.boxId, { ...b, live: true, activeMs: 0, uptimeMs: 0, costUsd: 0, source: "estimated", lastAt: 0 })
     else {
       const box = perBox.get(b.boxId)!
-      Object.assign(box, { size: b.size, keepAlive: b.keepAlive, diskBytes: b.diskBytes ?? box.diskBytes })
+      Object.assign(box, { size: b.size, keepAlive: b.keepAlive, diskBytes: b.diskBytes || box.diskBytes })
     }
   }
   const boxList = [...perBox.values()].map(({ lastAt: _, ...b }) => b).sort((a, b) => Number(b.live) - Number(a.live) || b.costUsd - a.costUsd)
