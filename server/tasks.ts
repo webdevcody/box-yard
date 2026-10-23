@@ -1205,8 +1205,8 @@ export class TaskManager {
     else status = "idle"
 
     const result = typeof ev.result === "string" ? ev.result : null
-    this.recordTaskClaudeUsage(row, ev)
-    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: typeof ev.costUsd === "number" ? ev.costUsd : null, error })
+    const turnCost = this.recordTaskClaudeUsage(row, ev)
+    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: turnCost, error })
     this.store.updateTask(row.id, {
       status,
       error,
@@ -1220,7 +1220,7 @@ export class TaskManager {
     }, { quiet: stopped })
     if (row.box_id) this.store.touchBox(row.box_id)
 
-    const cost = typeof ev.costUsd === "number" ? ` · $${ev.costUsd.toFixed(3)}` : ""
+    const cost = turnCost !== null ? ` · $${turnCost.toFixed(3)}` : ""
     this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`)
     // What the agent said at the end of the turn, for the orchestrator.
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
@@ -1487,11 +1487,12 @@ export class TaskManager {
     return true
   }
 
-  private recordTaskClaudeUsage(row: TaskRow, ev: WorkerEvent) {
+  /** Logs the turn's Claude usage; returns the turn's own cost (the CLI reports the session's running total), or null when it reported none. */
+  private recordTaskClaudeUsage(row: TaskRow, ev: WorkerEvent): number | null {
     const usage = usageObject(ev.resultUsage) ?? usageObject(ev.usage)
     const hasCost = typeof ev.costUsd === "number" && Number.isFinite(ev.costUsd)
-    if (!usage && !hasCost && typeof ev.durationMs !== "number") return
-    this.store.recordClaudeUsage({
+    if (!usage && !hasCost && typeof ev.durationMs !== "number") return null
+    const cost = this.store.recordClaudeUsage({
       source: "task",
       runKind: ev.compact ? "compact" : "turn",
       taskId: row.id,
@@ -1504,7 +1505,10 @@ export class TaskManager {
       durationMs: typeof ev.durationMs === "number" ? ev.durationMs : null,
       usage,
       costUsd: hasCost ? (ev.costUsd as number) : null,
+      // Runners before this field didn't say; then a session's first logged turn is charged what it reported.
+      resumed: ev.resumed === true,
     })
+    return hasCost ? cost : null
   }
 
   private meterBoxes(now = Date.now()) {
