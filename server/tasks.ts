@@ -42,6 +42,8 @@ const START_TIMEOUT_MS = 15 * 60_000
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 const BRANCH_MARK = "boxyard-branch="
+/** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
+const ARCHIVE_EXCLUDED_DIRS = ["node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target"]
 
 export interface TaskManagerDeps {
   config: Config
@@ -897,6 +899,7 @@ export class TaskManager {
         `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`)
       // The restored events log keeps its own seq numbers; restart the byte offset.
       const cursor = parseCursor(row.event_cursor)
       const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
@@ -939,6 +942,21 @@ export class TaskManager {
     this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
+  }
+
+  /**
+   * The archive leaves out dirs like `dist/` and `build/` by name, including
+   * ones a repo commits. Check those tracked files out again in every repo under
+   * work/. Only files under an excluded dir that are missing are touched, so
+   * uncommitted edits and deletions elsewhere stay as they were archived.
+   */
+  private async restoreExcludedTrackedFiles(boxId: string, work: string) {
+    const specs = ARCHIVE_EXCLUDED_DIRS.map((d) => q(`:(glob)**/${d}/**`)).join(" ")
+    const res = await this.provider.exec(
+      boxId,
+      `cd ${q(work)} 2>/dev/null && find . -maxdepth 6 -name .git -prune -print | while IFS= read -r g; do r="\${g%/.git}"; git -C "$r" ls-files -z -d -- ${specs} | xargs -0 git -C "$r" checkout -- >/dev/null 2>&1; done; true`,
+    )
+    if (res.exitCode !== 0) console.warn(`[box-yard] restoring tracked build dirs on ${boxId} failed: ${res.stderr.slice(-300)}`)
   }
 
   /** Keep an exec stream open while the turn runs so the box isn't paused for being idle. */
@@ -1362,7 +1380,7 @@ export class TaskManager {
     try {
       const root = `${this.provider.root(boxId)}/tasks`
       const excludes = [
-        "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
+        ...ARCHIVE_EXCLUDED_DIRS,
         `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`,
       ]
         .map((e) => `--exclude=${q(e)}`)
