@@ -182,6 +182,18 @@ export interface ChatMessage {
   createdAt: number
 }
 
+/** Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain) or a schedule. */
+export type CaptainSource = "cody" | "coordinator" | "schedule"
+
+/** The Captain-tool fields the Coordinator chat keeps on a send_to_captain/ask_captain/wait_for_captain tool line (meta.captain). */
+export interface CaptainToolResult {
+  projectId: string | null
+  /** The Captain's reply (ask/wait), when it gave one. */
+  reply: string | null
+  /** False when the Coordinator stopped waiting while the Captain was still working. */
+  finished: boolean | null
+}
+
 export interface CaptainMessage {
   id: string
   projectId: string
