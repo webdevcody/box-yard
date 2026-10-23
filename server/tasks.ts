@@ -1361,27 +1361,18 @@ export class TaskManager {
     }
   }
 
-  /** Remove generated dependency/build/cache directories that are intentionally excluded from archives. */
+  /**
+   * Remove regenerable dependency/build/cache directories from a resting workspace.
+   * The runner's `clean` mode does the work on the box: it deletes only dirs git
+   * ignores and doesn't track (never committed source like a checked-in `build/`).
+   */
   private async cleanRestingWorkspace(taskId: string) {
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || !RESTING.includes(row.status) || this.store.hasInputs(row.id) || !this.hasFreshArchive(row)) return
-    const work = `${this.taskDir(row.box_id, row.id)}/work`
-    const names = [
-      "node_modules",
-      ".next",
-      ".turbo",
-      ".cache",
-      ".parcel-cache",
-      ".vite",
-      "dist",
-      "build",
-      "coverage",
-      "target",
-      ".venv",
-      "__pycache__",
-    ]
-    const nameExpr = names.map((n) => `-name ${q(n)}`).join(" -o ")
-    await this.provider.exec(row.box_id, `[ -d ${q(work)} ] && find ${q(work)} -type d \\( ${nameExpr} \\) -prune -exec rm -rf {} + 2>/dev/null || true`)
+    const runnerPath = `${this.provider.root(row.box_id)}/.boxyard/box-runner.mjs`
+    const dir = this.taskDir(row.box_id, row.id)
+    const res = await this.provider.exec(row.box_id, `[ -d ${q(dir + "/work")} ] && ${q(this.provider.nodeBin)} ${q(runnerPath)} clean ${q(dir)}`)
+    if (res.exitCode !== 0 && res.stderr.trim()) throw new Error(res.stderr.slice(-300))
   }
 
   private async removeTaskDir(boxId: string, taskId: string) {
