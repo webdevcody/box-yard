@@ -418,9 +418,18 @@ export function createBoxYard(
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())
   })
-  api.get("/usage", (_req, res) => {
+  // ?from=&to= (epoch ms) adds `period`: the page's numbers for that range. The client
+  // sends its own local midnights, so "Today" and the daily chart follow Cody's time zone.
+  api.get("/usage", (req, res) => {
     tasks.boxes()
-    res.json(store.usageReport(settings.get()))
+    const now = Date.now()
+    const from = Number(req.query.from)
+    const to = req.query.to === undefined ? now : Number(req.query.to)
+    const period = req.query.from === undefined ? undefined : { from, to }
+    if (period && (!Number.isFinite(from) || !Number.isFinite(to) || from >= to || to - from > 400 * 24 * 3_600_000)) {
+      throw new BadRequestError("from and to must be epoch milliseconds, from before to, at most 400 days apart")
+    }
+    res.json(store.usageReport(settings.get(), now, period))
   })
   api.post("/orchestrator/compact", (_req, res) => {
     res.json(orchestrator.requestCompact("button"))
