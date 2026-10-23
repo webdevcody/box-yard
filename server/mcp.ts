@@ -15,6 +15,7 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
 import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
+import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, formatBytes } from "../shared/disk.js"
 
 export interface McpDeps {
@@ -54,7 +55,7 @@ const attachmentsSchema = z
   .array(z.string())
   .optional()
   .describe(
-    "Files Cody attached in this chat, as the ids (up_…) or paths shown in his message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
+    "Files Cody attached in this chat, as the ids (up_…) or paths shown in their message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
   )
 
 const effortSchema = z
@@ -86,9 +87,25 @@ const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars
  * A Captain caller is scoped on the server: Coordinator-only tools are not registered, and every
  * project, task, schedule, note, preview and artifact reference must belong to its own project.
  */
+/** Rewrite tool and parameter descriptions with the configured owner name as tools are registered. */
+function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
+  if (!ownerName?.trim() || ownerName.trim() === DEFAULT_OWNER_NAME) return
+  const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: unknown) => RegisteredTool
+  const named = (text: unknown) => (typeof text === "string" ? withOwner(text, ownerName) : text)
+  server.registerTool = ((name: string, config: { description?: string; inputSchema?: Record<string, z.ZodType> }, cb: unknown) => {
+    const inputSchema = config.inputSchema
+      ? Object.fromEntries(Object.entries(config.inputSchema).map(([k, v]) => [k, v.description ? v.describe(named(v.description) as string) : v]))
+      : undefined
+    return register(name, { ...config, description: named(config.description), ...(inputSchema ? { inputSchema } : {}) }, cb)
+  }) as typeof server.registerTool
+}
+
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
   const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
+  const ownerName = deps.settings?.get().ownerName
+  const owner = (text: string) => withOwner(text, ownerName)
+  nameOwnerInTools(server, ownerName)
   const scopeId = caller.kind === "captain" ? caller.projectId : null
   const ownProject = (): Project => {
     const p = scopeId ? store.getProject(scopeId) : null
@@ -98,7 +115,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const outOfScope = (what: string) =>
     new Error(
       `Out of scope: ${what}. You are the Captain for project "${ownProject().name}" and can only work inside that project. ` +
-        `If Cody wants work in another project, say so in your reply and the Coordinator will route it.`,
+        owner(`If Cody wants work in another project, say so in your reply and the Coordinator will route it.`),
     )
   const project = (ref: string): Project => {
     const p = store.findProject(ref)
@@ -195,7 +212,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     if (mode === "box") return `resuming: the agent's Claude session resumes now on box ${t.boxId} with full context`
     if (mode === "archive") return "resuming: the workspace and Claude session are restored from the archive onto a box, then the session resumes with full context"
     if (mode === "recap")
-      return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. Tell Cody if that matters`
+      return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. ${owner("Tell Cody if that matters")}`
     return "starting: the agent's first turn starts as soon as a box slot is free"
   }
   const projectView = (p: Project) => ({

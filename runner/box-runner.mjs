@@ -34,6 +34,18 @@ if (!mode || !taskDirArg) {
 const taskDir = path.resolve(taskDirArg)
 const task = mode === "clean" ? {} : readJson(path.join(taskDir, "task.json"))
 
+/** Box Yard's built-in text says "Cody"; swap in the configured owner name (same rule as shared/owner.ts). */
+function owner(text) {
+  const name = typeof task.ownerName === "string" ? task.ownerName.trim() : ""
+  return name && name !== "Cody" ? text.replace(/\bCody\b/g, () => name) : text
+}
+/** Tool definitions with every description run through owner(). */
+function namedTools(value) {
+  if (Array.isArray(value)) return value.map(namedTools)
+  if (!value || typeof value !== "object") return value
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, k === "description" && typeof v === "string" ? owner(v) : namedTools(v)]))
+}
+
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"))
@@ -508,7 +520,7 @@ async function callTool(name, args = {}) {
     case "ask_user": {
       if (!args.question?.trim()) return text("question is required", true)
       await emit({ t: "ask_user", question: args.question.trim() })
-      return text("Your question was sent to Cody. End your turn now; the answer will arrive as your next message.")
+      return text(owner("Your question was sent to Cody. End your turn now; the answer will arrive as your next message."))
     }
     case "list_agents": {
       const agents = (await liveDirectory()).filter((a) => a.id !== task.taskId)
@@ -541,7 +553,7 @@ async function callTool(name, args = {}) {
       const port = Number(args.port)
       if (!Number.isInteger(port) || port < 1 || port > 65535) return text("port must be an integer 1-65535", true)
       await emit({ t: "preview", port, label: args.label ? String(args.label) : `Port ${port}` })
-      return text(`Preview registered for port ${port}. Box Yard will show Cody the public URL. Keep the server running.`)
+      return text(owner(`Preview registered for port ${port}. Box Yard will show Cody the public URL. Keep the server running.`))
     }
     case "publish_artifact": {
       const p = path.resolve(path.join(taskDir, "work"), String(args.path ?? ""))
@@ -589,7 +601,7 @@ async function createPullRequest(args) {
   const slug = task.github?.slug
   const token = task.env?.GITHUB_TOKEN
   if (!slug) return text("This project has no GitHub repo, so there is nothing to open a PR against.", true)
-  if (!token) return text("GITHUB_TOKEN is not set for this task; ask Cody with ask_user.", true)
+  if (!token) return text(owner("GITHUB_TOKEN is not set for this task; ask Cody with ask_user."), true)
 
   const branch = (await sh("git", ["rev-parse", "--abbrev-ref", "HEAD"])).stdout.trim()
   if (!branch || branch === "HEAD") return text("Not on a branch. Create one with git checkout -b.", true)
@@ -675,7 +687,7 @@ function serveMcp() {
       case "ping":
         return {}
       case "tools/list":
-        return { tools: TOOLS }
+        return { tools: namedTools(TOOLS) }
       case "tools/call":
         return callTool(req.params?.name, req.params?.arguments ?? {})
       default:
