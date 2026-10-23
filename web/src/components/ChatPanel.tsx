@@ -88,7 +88,7 @@ export const ChatPanel = memo(function ChatPanel() {
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 px-4 pt-[env(safe-area-inset-top)] xl:min-h-0 xl:py-3 xl:pt-3">
         <Bot className="h-4 w-4 text-yard-400" />
-        <div className="text-sm font-semibold text-zinc-100">Orchestrator</div>
+        <div className="text-sm font-semibold text-zinc-100">Coordinator</div>
         {busy.data && <span className="text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex items-center gap-1">
           <VoiceControl />
@@ -105,7 +105,7 @@ export const ChatPanel = memo(function ChatPanel() {
             variant="ghost"
             title="New conversation"
             onClick={() => {
-              void confirmDialog({ title: "Start a new conversation?", body: "Starts a new orchestrator conversation. Projects and tasks are kept.", confirmLabel: "New conversation" }).then(
+              void confirmDialog({ title: "Start a new conversation?", body: "Starts a new Coordinator conversation. Projects and tasks are kept.", confirmLabel: "New conversation" }).then(
                 (ok) => ok && void control.reset(),
               )
             }}
@@ -148,7 +148,7 @@ export const ChatPanel = memo(function ChatPanel() {
 
       <Composer
         onSubmit={submit}
-        placeholder={busy.data ? "Queue another message…" : "Ask the orchestrator…"}
+        placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
         textareaRef={box}
         panelRef={panel}
       />
@@ -214,7 +214,7 @@ const ToolLine = memo(function ToolLine({ m }: { m: ChatMessage }) {
 
 const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
-    // A prompt injected by an orchestrator schedule, not typed by Cody.
+    // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
       <div id={`chat-${m.id}`} className="flex justify-end">
         <div className="max-w-[85%] rounded-2xl rounded-br-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm whitespace-pre-wrap text-zinc-100">

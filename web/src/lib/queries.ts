@@ -8,6 +8,9 @@ import type {
   Artifact,
   Attachment,
   BoxInfo,
+  CaptainCompaction,
+  CaptainMessage,
+  CaptainState,
   ChatMessage,
   Health,
   OrchestratorCompactionRecord,
@@ -44,6 +47,9 @@ export const keys = {
   taskCompactions: (id: string) => ["task-compactions", id] as const,
   settings: ["settings"] as const,
   orchestrator: ["orchestrator"] as const,
+  captain: (projectId: string) => ["captain", projectId] as const,
+  captainMessages: (projectId: string) => ["captain-messages", projectId] as const,
+  captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
@@ -101,6 +107,12 @@ export const useSettings = () =>
   })
 export const useOrchestratorState = () =>
   useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
+export const useCaptainState = (projectId: string) =>
+  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity })
+export const useCaptainMessages = (projectId: string) =>
+  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`) })
+export const useCaptainCompactions = (projectId: string) =>
+  useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = () =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
 /** Newest first; kept live by the event stream (see lib/notifications.ts). */
@@ -359,7 +371,7 @@ export function useDeleteTask() {
 export interface ScheduleInput {
   id: string
   target: ScheduleTarget
-  /** Null for orchestrator schedules. */
+  /** Null for Coordinator schedules (stored as target "orchestrator" for compatibility). */
   projectId: string | null
   name: string
   cron: string
@@ -470,16 +482,36 @@ export function useSendChat() {
     onError: (err, _v, ctx) => {
       ctx?.undo()
       qc.setQueryData(keys.chatBusy, false)
-      fail("Couldn't send to the orchestrator")(err)
+      fail("Couldn't send to the Coordinator")(err)
     },
     onSuccess: (msg) => qc.setQueryData<ChatMessage[]>(keys.chat, (list) => upsert(list, msg)),
+  })
+}
+
+export function useSendCaptainMessage(projectId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { id: string; content: string }) => api<CaptainMessage>(`/api/projects/${projectId}/captain/messages`, { body: input }),
+    onMutate: async (input) => {
+      await qc.cancelQueries({ queryKey: keys.captainMessages(projectId) })
+      const undo = snapshot<CaptainMessage[]>(qc, keys.captainMessages(projectId))
+      qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) =>
+        upsert(list, { id: input.id, projectId, role: "user", content: input.content, meta: { pending: true }, createdAt: Date.now() }),
+      )
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't message the Captain")(err)
+    },
+    onSuccess: (msg) => qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => upsert(list, msg)),
   })
 }
 
 export function useChatControl() {
   const qc = useQueryClient()
   return {
-    stop: () => api("/api/chat/stop", { method: "POST" }).catch(fail("Couldn't stop the orchestrator")),
+    stop: () => api("/api/chat/stop", { method: "POST" }).catch(fail("Couldn't stop the Coordinator")),
     reset: async () => {
       try {
         await api("/api/chat/reset", { method: "POST" })
@@ -531,5 +563,14 @@ export function useCompactOrchestrator() {
     mutationFn: () => api<OrchestratorState>("/api/orchestrator/compact", { method: "POST", body: {} }),
     onSuccess: (state) => qc.setQueryData(keys.orchestrator, state),
     onError: fail("Couldn't compact"),
+  })
+}
+
+export function useCompactCaptain(projectId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<CaptainState>(`/api/projects/${projectId}/captain/compact`, { method: "POST", body: {} }),
+    onSuccess: (state) => qc.setQueryData(keys.captain(projectId), state),
+    onError: fail("Couldn't compact the Captain"),
   })
 }

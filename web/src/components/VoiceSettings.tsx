@@ -68,7 +68,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           Voice isn't supported in this browser.
         </p>
       )}
-      <Row id={fid("ve")} label="Voice announcements" help="Box Yard says short updates out loud: a one-line summary of each orchestrator reply, and task events. Off by default.">
+      <Row id={fid("ve")} label="Voice announcements" help="Box Yard says short updates out loud: a one-line summary of each Coordinator reply, and task events. Off by default.">
         <Check
           id={fid("ve")}
           disabled={!supported}
@@ -83,11 +83,11 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
       </Row>
       <Row
         label="What to speak"
-        help="Task events are said only when the orchestrator doesn't report them itself, so nothing is said twice. Several at once become one line, like “3 tasks finished”."
+        help="Task events are said only when the Coordinator doesn't report them itself, so nothing is said twice. Several at once become one line, like “3 tasks finished”."
       >
         <div className="space-y-2">
           <Check disabled={off} checked={s.orchestrator} onChange={(orchestrator) => set({ orchestrator })}>
-            Orchestrator summaries
+            Coordinator summaries
           </Check>
           <Check disabled={off} checked={s.taskEvents} onChange={(taskEvents) => set({ taskEvents })}>
             Task events
@@ -166,7 +166,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
         </Button>
       </Row>
       <p className="mt-2 text-xs text-zinc-500">
-        Saved in this browser only. Toggle voice from the speaker in the orchestrator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
+        Saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
         <kbd className="rounded bg-zinc-800 px-1">Shift</kbd>+<kbd className="rounded bg-zinc-800 px-1">V</kbd>.
       </p>
       <DictationSection fid={fid} />

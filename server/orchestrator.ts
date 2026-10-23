@@ -10,7 +10,7 @@ import type { Attachment, ChatMessage, CompactionTaskSnapshot, ContextUsage, Orc
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
-import { contextTokens, contextWindowOf, formatTokens, parseContextReport } from "./usage.js"
+import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { preview } from "./replies.js"
 import {
   SUMMARY_PROMPT,
@@ -66,18 +66,6 @@ function attachmentNote(files: unknown): string {
   if (!Array.isArray(files) || !files.length) return ""
   const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
   return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
-}
-
-function usageObject(u: unknown) {
-  const x = u as Record<string, unknown> | null | undefined
-  if (!x) return null
-  const out = {
-    input_tokens: typeof x.input_tokens === "number" ? x.input_tokens : 0,
-    cache_creation_input_tokens: typeof x.cache_creation_input_tokens === "number" ? x.cache_creation_input_tokens : 0,
-    cache_read_input_tokens: typeof x.cache_read_input_tokens === "number" ? x.cache_read_input_tokens : 0,
-    output_tokens: typeof x.output_tokens === "number" ? x.output_tokens : 0,
-  }
-  return Object.values(out).some((n) => n > 0) ? out : null
 }
 
 /**
@@ -682,7 +670,7 @@ export class Orchestrator {
             const window = contextWindowOf(msg.modelUsage)
             if (window) this.setUsage(this.usage().tokens, window)
           }
-          resultUsage = usageObject(msg.usage)
+          resultUsage = resultUsageObject(msg.usage)
           resultCostUsd = typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : null
           resultDurationMs = typeof msg.duration_ms === "number" ? msg.duration_ms : null
           resultModel = typeof msg.model === "string" ? msg.model : null

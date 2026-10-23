@@ -121,7 +121,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
       <div className="scroll-thin flex-1 space-y-0.5 overflow-y-auto px-2" onClick={onNavigate}>
         {projects.data?.length === 0 && (
           <button onClick={() => setCreating(true)} className="min-h-11 w-full rounded-lg border border-dashed border-zinc-800 px-3 py-3 text-left text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
-            No projects yet. Create one, or just ask the orchestrator.
+            No projects yet. Create one, or just ask the Coordinator.
           </button>
         )}
         {projects.data?.map((p) => {

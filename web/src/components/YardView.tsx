@@ -124,7 +124,7 @@ export function YardView() {
 
       {list.length === 0 ? (
         <Empty icon={<Boxes className="h-8 w-8" />} title="Nothing in the yard yet">
-          Tell the orchestrator what you want built, researched or written. It creates projects and starts agents in boxes for you.
+          Tell the Coordinator what you want built, researched or written. It creates projects and routes work to project Captains for you.
         </Empty>
       ) : (
         <>
@@ -160,7 +160,7 @@ export function YardView() {
                 <TaskGrid key={tab} stable={stable} projectName={projectNameOf} />
               ) : (
                 <Empty icon={<CheckCircle2 className="h-8 w-8" />} title="All quiet in the yard">
-                  No agents are working right now. Ask the orchestrator for something new
+                  No agents are working right now. Ask the Coordinator for something new
                   {counts.needs_you > 0 && (
                     <>
                       , or{" "}

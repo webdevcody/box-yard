@@ -154,7 +154,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       return (
         <div className={cx("rounded-lg border-l-2 border-yard-500 bg-yard-500/5 px-3 py-2", m.meta?.pending ? "opacity-60" : "")}>
           <div className="mb-0.5 text-[11px] font-semibold text-yard-400">
-            {m.meta?.kind === "task_prompt" ? "Task" : m.meta?.source === "orchestrator" ? "Orchestrator" : "Cody"}
+            {m.meta?.kind === "task_prompt" ? "Task" : m.meta?.source === "orchestrator" ? "Coordinator" : "Cody"}
             {time}
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap text-zinc-200">{m.content}</div>}

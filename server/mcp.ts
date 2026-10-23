@@ -9,6 +9,7 @@ import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
+import type { CaptainManager } from "./captains.js"
 import { describeCron } from "../shared/cron.js"
 import type { SettingsStore } from "./settings.js"
 import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
@@ -24,6 +25,7 @@ export interface McpDeps {
   uploads: Uploads
   /** Optional so tests can build the server without it; then effort is fixed. */
   settings?: SettingsStore
+  captains?: CaptainManager
 }
 
 type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
@@ -74,7 +76,7 @@ const routingReasonSchema = z.string().trim().min(1).max(500).optional().describ
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
-/** The tools the orchestrator's Claude uses to run Box Yard. */
+/** The tools the Coordinator and project Captains use to run Box Yard. */
 export function buildMcpServer(deps: McpDeps): McpServer {
   const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
@@ -161,6 +163,56 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     notes: p.notes.map((n) => `(${n.author}) ${n.content}`),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
+
+  server.registerTool(
+    "send_to_captain",
+    {
+      description:
+        "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        message: z.string().min(1).describe("The project-scoped request for the Captain."),
+      },
+    },
+    safe(async (a: { project: string; message: string }) => {
+      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+      const msg = deps.captains.send(a.project, a.message)
+      return ok({ delivered: true, projectId: msg.projectId, messageId: msg.id, state: deps.captains.state(msg.projectId) })
+    }),
+  )
+
+  server.registerTool(
+    "ask_captain",
+    {
+      description:
+        "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        message: z.string().min(1),
+        timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+      },
+    },
+    safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
+      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+      return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
+    }),
+  )
+
+  server.registerTool(
+    "wait_for_captain",
+    {
+      description:
+        "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
+      inputSchema: {
+        project: z.string().describe("Project id or name"),
+        timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+      },
+    },
+    safe(async (a: { project: string; timeout_seconds?: number }) => {
+      if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
+      return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
+    }),
+  )
 
   server.registerTool(
     "list_projects",
@@ -580,8 +632,8 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "list_schedules",
     {
       description:
-        "List schedules (recurring jobs). Each has a target: \"project\" (starts a task in a project) or \"orchestrator\" (injects a prompt into this chat). " +
-        "Filter by project, or by target; project: \"none\" and target: \"orchestrator\" both list only orchestrator schedules.",
+        "List schedules (recurring jobs). Each has a target: \"project\" (starts a task in a project) or \"orchestrator\" (compatibility name for Coordinator schedules that inject a prompt into this chat). " +
+        "Filter by project, or by target; project: \"none\" and target: \"orchestrator\" both list only Coordinator schedules.",
       inputSchema: { project: z.string().optional(), target: z.enum(["project", "orchestrator"]).optional() },
     },
     safe(async (a: { project?: string; target?: "project" | "orchestrator" }) => {
@@ -600,14 +652,14 @@ export function buildMcpServer(deps: McpDeps): McpServer {
       description:
         "Create a recurring job of one of two kinds. " +
         "PROJECT schedule (give `project`): every time the cron fires, a new task starts in that project with this prompt (plus a note on the previous run), on a box; Cody can watch it live like any task. Use it for repo-specific recurring work: nightly test runs, dependency bumps, issue triage in one repo. " +
-        "ORCHESTRATOR schedule (leave `project` out, or target: \"orchestrator\"): every time the cron fires, the prompt is injected into this chat as \"[Scheduled: <name>] <prompt>\" and you handle it like a message from Cody, using your tools. No box is used. Use it for cross-project, digest, reminder or routing work: \"every morning summarize open PRs and anything waiting on me across all repos\", \"remind me to...\". If you're busy, it waits until your turn ends. " +
+        "COORDINATOR schedule (leave `project` out, or target: \"orchestrator\" for compatibility): every time the cron fires, the prompt is injected into this chat as \"[Scheduled: <name>] <prompt>\" and you handle it like a message from Cody, using your tools. No box is used. Use it for cross-project, digest, reminder or routing work: \"every morning summarize open PRs and anything waiting on me across all repos\", \"remind me to...\". If you're busy, it waits until your turn ends. " +
         "cron is 5 fields (minute hour day-of-month month day-of-week) or @hourly/@daily/@weekly/@monthly. Write the prompt so it works on its own every run.",
       inputSchema: {
-        project: z.string().optional().describe("Project id or name for a project schedule. Omit for an orchestrator schedule."),
+        project: z.string().optional().describe("Project id or name for a project schedule. Omit for a Coordinator schedule."),
         target: z
           .enum(["project", "orchestrator"])
           .optional()
-          .describe('"project" or "orchestrator". Defaults to "project" when `project` is given, otherwise "orchestrator".'),
+          .describe('"project" or "orchestrator" (Coordinator schedule compatibility name). Defaults to "project" when `project` is given, otherwise "orchestrator".'),
         name: z.string().min(1).max(120),
         cron: z.string().describe('e.g. "0 9 * * 1-5" for weekdays at 9:00'),
         prompt: z.string().min(1),
@@ -640,7 +692,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
   server.registerTool(
     "update_schedule",
     {
-      description: "Change a schedule of either kind: rename, new cron/time zone/prompt, or pause (enabled: false) and resume it. A schedule's kind (project vs orchestrator) can't change; delete it and create a new one.",
+      description: "Change a schedule of either kind: rename, new cron/time zone/prompt, or pause (enabled: false) and resume it. A schedule's kind (project vs Coordinator) can't change; delete it and create a new one.",
       inputSchema: {
         schedule: z.string().describe("Schedule id or name"),
         name: z.string().optional(),
@@ -684,7 +736,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
     "run_schedule_now",
     {
       description:
-        "Start a run of a schedule right now (doesn't change its next planned run). A project schedule starts a task; an orchestrator schedule queues its prompt into this chat (delivered after your current turn ends, so don't wait on it).",
+        "Start a run of a schedule right now (doesn't change its next planned run). A project schedule starts a task; a Coordinator schedule queues its prompt into this chat (delivered after your current turn ends, so don't wait on it).",
       inputSchema: { schedule: z.string() },
     },
     safe(async (a: { schedule: string }) => ok(anyRunView(scheduler.runNow(a.schedule)))),
@@ -692,7 +744,7 @@ export function buildMcpServer(deps: McpDeps): McpServer {
 
   server.registerTool(
     "list_schedule_runs",
-    { description: "Past runs of a schedule, newest first: tasks for a project schedule; for an orchestrator schedule, the injected chat messages with their status (queued, running, done, failed).", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
+    { description: "Past runs of a schedule, newest first: tasks for a project schedule; for a Coordinator schedule, the injected chat messages with their status (queued, running, done, failed).", inputSchema: { schedule: z.string(), limit: z.number().int().min(1).max(100).optional() } },
     safe(async (a: { schedule: string; limit?: number }) => ok(scheduler.runs(a.schedule, a.limit ?? 10).map(anyRunView))),
   )
 

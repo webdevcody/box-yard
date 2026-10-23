@@ -146,7 +146,7 @@ describe("searchPalette", () => {
 
   it("shows schedule targets and cron meaning", () => {
     const s = group(searchPalette(items, "digest"), "schedule")!.items[0]!
-    expect(s.subtitle).toMatch(/^Orchestrator · /)
+    expect(s.subtitle).toMatch(/^Coordinator · /)
     expect(s.subtitle).toContain("9:00")
   })
 

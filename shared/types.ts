@@ -182,6 +182,15 @@ export interface ChatMessage {
   createdAt: number
 }
 
+export interface CaptainMessage {
+  id: string
+  projectId: string
+  role: ChatRole
+  content: string
+  meta: Record<string, unknown> | null
+  createdAt: number
+}
+
 export interface Artifact {
   id: string
   projectId: string | null
@@ -240,6 +249,8 @@ export type UiEvent =
   /** An orchestrator turn ended. `replyId` is its final reply (text after its last tool call), if it said anything. */
   | { type: "chat.turn"; startedAt: number; replyId: string | null }
   | { type: "orchestrator.state"; state: OrchestratorState }
+  | { type: "captain.message"; message: CaptainMessage }
+  | { type: "captain.state"; state: CaptainState }
   | { type: "settings"; info: SettingsInfo }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
@@ -507,4 +518,19 @@ export interface OrchestratorState {
   lastCompaction: CompactionInfo | null
   compactionsDir: string
   error: string | null
+}
+
+export interface CaptainState {
+  projectId: string
+  busy: boolean
+  usage: ContextUsage
+  compacting: boolean
+  compactQueued: boolean
+  lastCompaction: CompactionInfo | null
+  compactionsDir: string
+  error: string | null
+}
+
+export interface CaptainCompaction extends CompactionInfo {
+  content: string
 }

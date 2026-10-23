@@ -96,7 +96,7 @@ export function App() {
         <button
           onClick={() => setChatOpen(true)}
           className="fixed right-4 bottom-4 z-30 hidden rounded-full bg-yard-500 p-3 text-zinc-950 shadow-lg hover:bg-yard-400 lg:block xl:hidden"
-          title="Open the orchestrator"
+          title="Open the Coordinator"
         >
           <MessageSquare className="h-5 w-5" />
         </button>

@@ -126,8 +126,8 @@ export class TaskManager {
   private stopped = false
   private lastBoxProbeAt = new Map<string, number>()
   private budgetNoticeAt = 0
-  /** Called after every notice, so the orchestrator can wake up and report. */
-  onNotice: (() => void) | null = null
+  /** Called after every notice; return true when another owner handled delivery. */
+  onNotice: ((content: string, meta: Record<string, unknown> | null) => boolean | void) | null = null
 
   constructor(deps: TaskManagerDeps) {
     this.c = deps.config
@@ -1732,11 +1732,14 @@ export class TaskManager {
     return bits.length ? bits.join(", ") : "global defaults"
   }
 
-  /** A line in the orchestrator chat; the orchestrator reads it on its next turn. */
+  /** A line for the owner of a task update; by default the Coordinator reads it on its next turn. */
   notice(content: string, meta: Record<string, unknown> | null = null) {
+    const handled = Boolean(this.onNotice?.(content, meta))
     const msg = this.store.addChat("notice", content, meta)
+    // Keep the historical main-chat notice for existing installs, but do not
+    // make the Coordinator process every project task event once a Captain owns it.
+    if (handled) this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
     this.hub.broadcast({ type: "chat.message", message: msg })
-    this.onNotice?.()
   }
 
   emitTask(taskId: string) {
