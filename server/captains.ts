@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { randomUUID } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import type { Config } from "./config.js"
@@ -11,6 +11,7 @@ import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resul
 import { routingInstructions } from "./routing.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
+import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
 import { attachmentNote } from "./orchestrator.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { captainSourceOf } from "../shared/captain.js"
@@ -30,8 +31,6 @@ import {
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
-const WAKE_DEBOUNCE_MS = 3000
-const MAX_AUTO_TURNS = 6
 const NO_UPDATE = "(no update)"
 const MAX_THRESHOLD_SHARE = 0.95
 
@@ -71,9 +70,18 @@ function briefTask(t: Task) {
   return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}`
 }
 
+export interface CaptainTuning {
+  wakeDebounceMs: number
+  loopGuard: LoopGuardOptions
+}
+
 export class CaptainManager {
   private readonly captains = new Map<string, Captain>()
+  /** Each Captain's own MCP bearer token, so the MCP server can scope it to its project. */
+  private readonly tokens = new Map<string, string>()
   onReport: ((projectId: string, content: string) => void) | null = null
+  /** Read when a Captain is created; tests shorten these. */
+  readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
   constructor(
     private readonly c: Config,
@@ -88,10 +96,27 @@ export class CaptainManager {
     if (!project) throw new BadRequestError(`No project ${projectId}`)
     let captain = this.captains.get(project.id)
     if (!captain) {
-      captain = new Captain(this.c, this.store, this.hub, this.mcp, this.settings, project, (text) => this.onReport?.(project.id, text))
+      const mcp = { url: this.mcp.url, token: this.tokenFor(project.id) }
+      captain = new Captain(this.c, this.store, this.hub, mcp, this.settings, project, (text) => this.onReport?.(project.id, text), this.tuning)
       this.captains.set(project.id, captain)
     }
     return captain
+  }
+
+  /** The MCP token a project's Captain connects with. The Coordinator's token is never handed out. */
+  tokenFor(projectId: string) {
+    let token = this.tokens.get(projectId)
+    if (!token) {
+      token = `cpt_${randomBytes(24).toString("hex")}`
+      this.tokens.set(projectId, token)
+    }
+    return token
+  }
+
+  /** Which project a Captain MCP token belongs to, or null for any other token. */
+  projectForToken(token: string): string | null {
+    for (const [projectId, t] of this.tokens) if (t === token) return projectId
+    return null
   }
 
   find(ref: string) {
@@ -169,7 +194,10 @@ class Captain {
   private pending = false
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
+  private throttleTimer: NodeJS.Timeout | null = null
+  /** Unattended wake-ups since Cody or the Coordinator last wrote. */
   private autoTurns = 0
+  private readonly loopGuard: WakeLoopGuard
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
   private compacting = false
@@ -187,7 +215,9 @@ class Captain {
     private readonly settings: SettingsStore,
     private readonly project: Project,
     private readonly report: (content: string) => void,
+    private readonly tuning: CaptainTuning,
   ) {
+    this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
     this.compactionsDir = captainCompactionsDir(c.dataDir, project.id)
     fs.mkdirSync(this.workdir, { recursive: true })
@@ -216,6 +246,9 @@ class Captain {
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
     this.autoTurns = 0
+    this.loopGuard.reset()
+    this.clearThrottleTimer()
+    this.publishState()
     void this.drain()
     return msg
   }
@@ -229,14 +262,20 @@ class Captain {
       if (!ready) return
       this.wakeWanted = true
       void this.drain()
-    }, WAKE_DEBOUNCE_MS)
+    }, this.tuning.wakeDebounceMs)
     this.wakeTimer.unref?.()
   }
 
   stop() {
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
+    this.clearThrottleTimer()
     this.child?.kill("SIGTERM")
+  }
+
+  private clearThrottleTimer() {
+    if (this.throttleTimer) clearTimeout(this.throttleTimer)
+    this.throttleTimer = null
   }
 
   usage(): ContextUsage {
@@ -263,6 +302,8 @@ class Captain {
       lastCompaction: lastCompaction(this.compactionsDir),
       compactionsDir: this.compactionsDir,
       error: this.lastError,
+      autoTurns: this.autoTurns,
+      throttledUntil: this.loopGuard.throttledUntil,
     }
   }
 
@@ -335,9 +376,26 @@ class Captain {
   }
 
   private async autoTurn() {
-    if (this.autoTurns >= MAX_AUTO_TURNS) return
+    const queued = this.store.peekUnseenCaptainNotices(this.project.id)
+    if (!queued.length) return
+    const decision = this.loopGuard.check(queued)
+    if (!decision.wake) {
+      // Throttled, never dropped: the updates stay queued and go out with the next wake.
+      this.holdUntil(decision.until)
+      if (decision.started) {
+        const minutes = Math.max(1, Math.round((decision.until - Date.now()) / 60_000))
+        this.report(
+          `Loop guard: the same task update${queued.length === 1 ? "" : "s"} kept waking me with nothing new, so my automatic wake-ups are paused for ${minutes} min. ` +
+            `${queued.length} update${queued.length === 1 ? " is" : "s are"} queued, not dropped. I'll handle them then, or sooner when a new task event or a message arrives.`,
+        )
+      }
+      this.publishState()
+      return
+    }
+    this.clearThrottleTimer()
     const notices = this.store.takeUnseenCaptainNotices(this.project.id)
     if (!notices.length) return
+    this.loopGuard.record(notices)
     this.autoTurns++
     const result = await this.runPrompt(
       [
@@ -347,6 +405,16 @@ class Captain {
       true,
     )
     if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
+  }
+
+  /** Wake up again when the throttle ends, to deliver whatever queued up meanwhile. */
+  private holdUntil(until: number) {
+    if (this.throttleTimer) return
+    this.throttleTimer = setTimeout(() => {
+      this.throttleTimer = null
+      this.nudge()
+    }, Math.max(0, until - Date.now()))
+    this.throttleTimer.unref?.()
   }
 
   private projectNow(): string {
@@ -433,7 +501,8 @@ class Captain {
         { kind: "compaction" },
       )
       this.hub.broadcast({ type: "captain.message", message: msg })
-      this.store.takeUnseenCaptainNotices(this.project.id)
+      // Only this line: queued task updates still go to the Captain on its next wake.
+      this.store.markCaptainMessageSeen(msg.id)
     } catch (err) {
       this.lastError = `Compaction skipped: ${(err as Error).message}`
       const m = this.store.addCaptainMessage(this.project.id, "error", this.lastError)
@@ -593,6 +662,7 @@ class Captain {
             durationMs: resultDurationMs,
             usage: resultUsage,
             costUsd: resultCostUsd,
+            resumed: resume,
           })
         }
         const base = { text: said, raw, sessionId: seenSession }

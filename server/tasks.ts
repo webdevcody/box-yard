@@ -16,6 +16,7 @@ import {
   firstTurnPrompt,
   followupPrompt,
   recapPrompt,
+  recapWorkspaceNote,
   workerSystemPrompt,
   type DirectoryEntry,
 } from "./prompts.js"
@@ -41,6 +42,9 @@ const STALL_MS = 45_000
 const START_TIMEOUT_MS = 15 * 60_000
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
+const BRANCH_MARK = "boxyard-branch="
+/** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
+const ARCHIVE_EXCLUDED_DIRS = ["node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target"]
 
 export interface TaskManagerDeps {
   config: Config
@@ -55,6 +59,11 @@ export interface TaskManagerDeps {
 
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
+
+/** Who a queued task input is from. `captain:<projectId>` is that project's Captain. */
+export type InputSource = "cody" | "orchestrator" | "system" | `agent:${string}` | `captain:${string}`
+/** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
+const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
 
 /** kv key for the box a project's work goes to first. */
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
@@ -241,6 +250,8 @@ export class TaskManager {
     routingRule?: string | null
     routingReason?: string | null
     attachments?: StoredUpload[]
+    /** Who the attached files are from (a Captain labels them as its own). */
+    source?: InputSource
   }): Task {
     const project = this.store.getProject(input.projectId)
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
@@ -257,7 +268,7 @@ export class TaskManager {
     })
     const files = input.attachments ?? []
     this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
-    if (files.length) this.store.queueInput(task.id, "orchestrator", "These files go with the task:", files.map((f) => f.id))
+    if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
     this.emitTask(task.id)
     this.publishDirectory()
     this.schedule()
@@ -267,7 +278,7 @@ export class TaskManager {
   sendInput(
     taskId: string,
     content: string,
-    source: "cody" | "orchestrator" | "system" | `agent:${string}` = "cody",
+    source: InputSource = "cody",
     attachments: StoredUpload[] = [],
     route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
   ): Task {
@@ -275,8 +286,9 @@ export class TaskManager {
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
     this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
-    if (source === "cody" || source === "orchestrator") {
-      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { source, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
+    if (source === "cody" || source === "orchestrator" || source.startsWith("captain:")) {
+      const from = source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
+      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
@@ -689,9 +701,14 @@ export class TaskManager {
 
       const check = await this.provider.exec(boxId, `[ -d ${q(dir + "/work")} ] && echo present || echo missing`)
       if (check.exitCode !== 0) throw new Error(`box not responding: ${check.stderr.slice(-300)}`)
-      if (check.stdout.includes("missing")) await this.prepareWorkspace(row, boxId, dir)
+      const prepared = check.stdout.includes("missing") ? await this.prepareWorkspace(row, boxId, dir) : null
       row = this.requireRow(taskId)
 
+      // The task ran before but its folder came back without an archive (expired,
+      // never made, or lost with its box): its Claude session is gone too. Start a
+      // fresh session that carries a recap instead of resuming a missing one.
+      const recapped = Boolean(prepared && !prepared.restored && row.session_started)
+      if (recapped && row.compact_pending) throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
       const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
       // A compaction is a turn of its own; queued messages wait for the next one.
       const queued = compact ? [] : this.store.peekInputs(taskId)
@@ -699,11 +716,18 @@ export class TaskManager {
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
+      const projectName = (id: string) => this.store.getProject(id)?.name
+      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName)
+      if (recapped) {
+        row = this.recapSession(row, prepared!.branch, project.baseBranch)
+      }
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followupPrompt(inputs)] : [] })
-        : followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }])
+        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [] })
+        : recapped
+        ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
+        : followup
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
@@ -716,7 +740,7 @@ export class TaskManager {
           turnId,
           prompt,
           sessionId: row.session_id,
-          resume: !firstTurn,
+          resume: !firstTurn && !recapped,
           compact,
           ...agent,
           systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
@@ -791,6 +815,14 @@ export class TaskManager {
     }
   }
 
+  /** A resumed task whose session is gone gets a new session id; say so in its thread. */
+  private recapSession(row: TaskRow, branch: "origin" | "base" | undefined, baseBranch: string): TaskRow {
+    this.store.updateTask(row.id, { sessionId: randomUUID() })
+    const checkout = !row.branch ? "a fresh workspace" : branch === "base" ? `branch ${row.branch} recreated from ${baseBranch} (it is gone from origin)` : `a fresh checkout of branch ${row.branch}`
+    this.addEvent(row.id, `Resumed from a recap: no workspace archive was left, so a new Claude session started on ${checkout} with the task's summary, PR and recent messages.`)
+    return this.requireRow(row.id)
+  }
+
   /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
   private agentSettings(row: TaskRow) {
     const s = this.settings.get()
@@ -862,8 +894,12 @@ export class TaskManager {
     }
   }
 
-  /** Fresh folder for a task: restore its archive, or clone its repo. */
-  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string) {
+  /**
+   * Fresh folder for a task: restore its archive, or clone its repo. `branch`
+   * says how a clone got the task's branch: from origin, or recreated from the
+   * base branch because it no longer exists there.
+   */
+  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string): Promise<{ restored: boolean; branch?: "origin" | "base" }> {
     const root = this.provider.root(boxId)
     if (row.archive_path && fs.existsSync(row.archive_path)) {
       const remote = `${root}/.boxyard/restore-${row.id}.tgz`
@@ -873,12 +909,13 @@ export class TaskManager {
         `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`)
       // The restored events log keeps its own seq numbers; restart the byte offset.
       const cursor = parseCursor(row.event_cursor)
       const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
       this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
       this.addEvent(row.id, `Workspace restored on box ${boxId}.`)
-      return
+      return { restored: true }
     }
 
     const project = this.store.getProject(row.project_id)!
@@ -902,7 +939,7 @@ export class TaskManager {
         `git config user.name ${q(this.c.gitUserName)}`,
         `git config user.email ${q(this.c.gitUserEmail)}`,
       )
-      if (row.branch) steps.push(`(git checkout ${q(row.branch)} 2>/dev/null || git checkout -b ${q(row.branch)})`)
+      if (row.branch) steps.push(`( (git checkout ${q(row.branch)} >/dev/null 2>&1 && echo ${BRANCH_MARK}origin) || (git checkout -b ${q(row.branch)} && echo ${BRANCH_MARK}base) )`)
     } else {
       steps.push(`mkdir -p ${q(dir + "/work")}`)
     }
@@ -913,6 +950,23 @@ export class TaskManager {
     }
     this.store.updateTask(row.id, { eventCursor: null })
     this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
+    const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
+    return { restored: false, branch: mark }
+  }
+
+  /**
+   * The archive leaves out dirs like `dist/` and `build/` by name, including
+   * ones a repo commits. Check those tracked files out again in every repo under
+   * work/. Only files under an excluded dir that are missing are touched, so
+   * uncommitted edits and deletions elsewhere stay as they were archived.
+   */
+  private async restoreExcludedTrackedFiles(boxId: string, work: string) {
+    const specs = ARCHIVE_EXCLUDED_DIRS.map((d) => q(`:(glob)**/${d}/**`)).join(" ")
+    const res = await this.provider.exec(
+      boxId,
+      `cd ${q(work)} 2>/dev/null && find . -maxdepth 6 -name .git -prune -print | while IFS= read -r g; do r="\${g%/.git}"; git -C "$r" ls-files -z -d -- ${specs} | xargs -0 git -C "$r" checkout -- >/dev/null 2>&1; done; true`,
+    )
+    if (res.exitCode !== 0) console.warn(`[box-yard] restoring tracked build dirs on ${boxId} failed: ${res.stderr.slice(-300)}`)
   }
 
   /** Keep an exec stream open while the turn runs so the box isn't paused for being idle. */
@@ -1156,8 +1210,8 @@ export class TaskManager {
     const result = typeof ev.result === "string" ? ev.result : null
     const noopIgnored = flags.noop && !stopped ? noopBlockers(this.runEvidence(row, flags, status)) : []
     const outcome = flags.noop && !stopped && !noopIgnored.length ? "noop" : null
-    this.recordTaskClaudeUsage(row, ev)
-    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: typeof ev.costUsd === "number" ? ev.costUsd : null, error })
+    const turnCost = this.recordTaskClaudeUsage(row, ev)
+    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: turnCost, error })
     this.store.updateTask(row.id, {
       status,
       error,
@@ -1172,7 +1226,7 @@ export class TaskManager {
     }, { quiet: stopped })
     if (row.box_id) this.store.touchBox(row.box_id)
 
-    const cost = typeof ev.costUsd === "number" ? ` · $${ev.costUsd.toFixed(3)}` : ""
+    const cost = turnCost !== null ? ` · $${turnCost.toFixed(3)}` : ""
     this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`)
     // What the agent said at the end of the turn, for the orchestrator.
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
@@ -1330,6 +1384,17 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ archives
 
+  /**
+   * How the task's next turn gets its workspace and session back: still on its
+   * box, restored from its archive, or (archive gone) a fresh session from a recap.
+   */
+  resumeMode(taskId: string): "box" | "archive" | "recap" | "new" {
+    const row = this.requireRow(taskId)
+    if (row.box_id) return "box"
+    if (row.archive_path && fs.existsSync(row.archive_path)) return "archive"
+    return row.session_started ? "recap" : "new"
+  }
+
   private hasFreshArchive(row: TaskRow) {
     return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
   }
@@ -1350,7 +1415,7 @@ export class TaskManager {
     try {
       const root = `${this.provider.root(boxId)}/tasks`
       const excludes = [
-        "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
+        ...ARCHIVE_EXCLUDED_DIRS,
         `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`,
       ]
         .map((e) => `--exclude=${q(e)}`)
@@ -1448,11 +1513,12 @@ export class TaskManager {
     return true
   }
 
-  private recordTaskClaudeUsage(row: TaskRow, ev: WorkerEvent) {
+  /** Logs the turn's Claude usage; returns the turn's own cost (the CLI reports the session's running total), or null when it reported none. */
+  private recordTaskClaudeUsage(row: TaskRow, ev: WorkerEvent): number | null {
     const usage = usageObject(ev.resultUsage) ?? usageObject(ev.usage)
     const hasCost = typeof ev.costUsd === "number" && Number.isFinite(ev.costUsd)
-    if (!usage && !hasCost && typeof ev.durationMs !== "number") return
-    this.store.recordClaudeUsage({
+    if (!usage && !hasCost && typeof ev.durationMs !== "number") return null
+    const cost = this.store.recordClaudeUsage({
       source: "task",
       runKind: ev.compact ? "compact" : "turn",
       taskId: row.id,
@@ -1465,7 +1531,10 @@ export class TaskManager {
       durationMs: typeof ev.durationMs === "number" ? ev.durationMs : null,
       usage,
       costUsd: hasCost ? (ev.costUsd as number) : null,
+      // Runners before this field didn't say; then a session's first logged turn is charged what it reported.
+      resumed: ev.resumed === true,
     })
+    return hasCost ? cost : null
   }
 
   private meterBoxes(now = Date.now()) {
@@ -1535,6 +1604,17 @@ export class TaskManager {
     }
   }
 
+  /**
+   * Archives that retention must never delete: the work behind a PR that isn't
+   * merged yet, and anything touched in the last `archiveKeepTouchedDays`.
+   */
+  private archiveProtected(row: TaskRow, now: number) {
+    if (row.pr_url && row.pr_state !== "merged") return true
+    const keepDays = this.settings.get().archiveKeepTouchedDays
+    const touched = Math.max(row.last_active_at, row.updated_at)
+    return keepDays > 0 && touched > now - keepDays * 24 * 60 * 60_000
+  }
+
   private async pruneArchives(now: number) {
     const days = this.settings.get().archiveRetentionDays
     if (days <= 0) return
@@ -1553,7 +1633,7 @@ export class TaskManager {
         continue
       }
       const longDone = row.status === "done" && !row.current_turn_id && !this.store.hasInputs(row.id) && row.last_active_at <= cutoff
-      if (!longDone) continue
+      if (!longDone || this.archiveProtected(row, now)) continue
       fs.rmSync(file, { force: true })
       if (row.archive_path === file) this.store.updateTask(row.id, { archivePath: null, lastArchivedAt: null }, { touch: false })
     }

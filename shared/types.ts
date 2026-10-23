@@ -388,6 +388,8 @@ export interface Settings {
   workspaceRetentionDays: number
   /** Prune orphan and long-done archives after this many days. 0 = keep archives. */
   archiveRetentionDays: number
+  /** Never prune the archive of a task touched within this many days (on top of archiveRetentionDays). 0 = no extra protection. */
+  archiveKeepTouchedDays: number
 }
 
 /** Agents that can run at once under a set of limits. */
@@ -481,6 +483,66 @@ export interface UsageReport {
   orchestrator: ClaudeUsageTotals
   /** Per-project Captain runs (all-time), including older rows logged as orchestrator usage with a project id. */
   captains: ClaudeUsageTotals
+  /** Everything for one period. Only present when the request passed `from` (GET /api/usage?from=&to=). */
+  period?: UsagePeriodReport
+}
+
+/** Where spend goes. Agents are task turns that no schedule started; schedule runs are the rest. */
+export type UsageCategory = "coordinator" | "captains" | "agents" | "schedules" | "boxes"
+export const USAGE_CATEGORIES: UsageCategory[] = ["coordinator", "captains", "agents", "schedules", "boxes"]
+
+/** One line of a breakdown table. Every breakdown's rows sum to the period total. */
+export interface UsageBreakdownRow {
+  key: string
+  label: string
+  /** Second line, e.g. a task's project or a schedule's run count. */
+  detail?: string | null
+  href?: string | null
+  /** Set on rows that aren't the breakdown's own kind (Boxes in "By model", the Coordinator in "By project"). */
+  other?: boolean
+  category?: UsageCategory | null
+  /** Claude runs that did work (a run with no tokens and no cost, like a /context probe, isn't a turn). */
+  turns: number
+  tokens: number
+  costUsd: number
+  /** Schedule runs: tasks the schedule started in the period. */
+  runs?: number
+  children?: UsageBreakdownRow[]
+}
+
+export interface UsageBucket {
+  start: number
+  /** Cost per category in this bucket. */
+  costs: Record<UsageCategory, number>
+}
+
+export interface UsagePeriodBox {
+  boxId: string
+  size: BoxSize
+  keepAlive: boolean
+  /** False once the box is gone; its metered time still counts. */
+  live: boolean
+  activeMs: number
+  uptimeMs: number
+  diskBytes: number | null
+  costUsd: number
+  source: "actual" | "estimated"
+}
+
+export interface UsagePeriodReport {
+  from: number
+  to: number
+  bucketMs: number
+  totalCostUsd: number
+  claude: ClaudeUsageTotals
+  boxes: BoxUsageTotals
+  categories: Record<UsageCategory, { costUsd: number; turns: number; tokens: number }>
+  buckets: UsageBucket[]
+  byProject: UsageBreakdownRow[]
+  byTask: UsageBreakdownRow[]
+  byModel: UsageBreakdownRow[]
+  bySource: UsageBreakdownRow[]
+  boxList: UsagePeriodBox[]
 }
 
 export interface ContextUsage {
@@ -554,6 +616,10 @@ export interface CaptainState {
   lastCompaction: CompactionInfo | null
   compactionsDir: string
   error: string | null
+  /** Unattended wake-ups since Cody or the Coordinator last wrote. */
+  autoTurns?: number
+  /** Set while the loop guard holds back automatic wake-ups; queued updates go out when it ends. */
+  throttledUntil?: number | null
 }
 
 export interface CaptainCompaction extends CompactionInfo {

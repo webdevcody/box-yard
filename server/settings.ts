@@ -48,6 +48,7 @@ export const DEFAULT_SETTINGS: Settings = {
   boxIdleDeleteMinutes: 0,
   workspaceRetentionDays: 7,
   archiveRetentionDays: 7,
+  archiveKeepTouchedDays: 30,
 }
 
 /** Env vars that seed box/pool settings; saved settings win over them. */
@@ -60,6 +61,7 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
   archiveRetentionDays: "BOXYARD_ARCHIVE_RETENTION_DAYS",
+  archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
 }
 
 const autoCompact = z
@@ -102,6 +104,7 @@ export const settingsPatch = z
     boxIdleDeleteMinutes: z.number().int().min(0).max(30 * 24 * 60),
     workspaceRetentionDays: z.number().int().min(0).max(3650),
     archiveRetentionDays: z.number().int().min(0).max(3650),
+    archiveKeepTouchedDays: z.number().int().min(0).max(3650),
   })
   .partial()
   .strict()
@@ -129,6 +132,7 @@ export class SettingsStore {
       | "boxIdleDeleteMinutes"
       | "workspaceRetentionDays"
       | "archiveRetentionDays"
+      | "archiveKeepTouchedDays"
       >
     >,
   ) {}
@@ -169,6 +173,7 @@ export class SettingsStore {
       boxIdleDeleteMinutes: this.c.boxIdleDeleteMinutes ?? DEFAULT_SETTINGS.boxIdleDeleteMinutes,
       workspaceRetentionDays: this.c.workspaceRetentionDays ?? DEFAULT_SETTINGS.workspaceRetentionDays,
       archiveRetentionDays: this.c.archiveRetentionDays ?? DEFAULT_SETTINGS.archiveRetentionDays,
+      archiveKeepTouchedDays: this.c.archiveKeepTouchedDays ?? DEFAULT_SETTINGS.archiveKeepTouchedDays,
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings
