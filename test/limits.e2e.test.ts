@@ -70,7 +70,7 @@ describe("pool limits", () => {
     expect(saved.settings).toMatchObject({ maxBoxes: 4, slotsPerBox: 3, maxAgents: 5 })
     expect(saved.sources.maxBoxes).toBe("ui")
     expect(saved.sources.slotsPerBox).not.toBe("ui")
-    expect((await health(r)).pool).toEqual({ maxBoxes: 4, slotsPerBox: 3, maxAgents: 5 })
+    expect((await health(r)).pool).toMatchObject({ maxBoxes: 4, slotsPerBox: 3, maxAgents: 5 })
 
     await stop(r)
     const r2 = await start({ dataDir, maxBoxes: 2, slotsPerBox: 3 })

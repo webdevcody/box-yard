@@ -18,10 +18,19 @@ html,
 body,
 #root {
   height: 100%;
+  min-height: 100%;
+}
+
+html {
+  overflow-x: hidden;
 }
 
 body {
   @apply bg-zinc-950 text-zinc-200 antialiased;
+  min-width: 320px;
+  overflow-x: hidden;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 ::selection {
@@ -64,10 +73,13 @@ body {
   @apply rounded bg-zinc-800 px-1 py-0.5 font-mono text-[0.85em];
 }
 .prose-chat pre {
-  @apply my-2 overflow-x-auto rounded-lg bg-zinc-900 p-3 text-xs;
+  @apply my-2 max-w-full overflow-x-auto rounded-lg bg-zinc-900 p-3 text-xs;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(63 63 70) transparent;
 }
 .prose-chat pre code {
   @apply bg-transparent p-0;
+  white-space: pre;
 }
 .prose-chat h1,
 .prose-chat h2,
@@ -88,11 +100,19 @@ body {
   @apply my-2 border-l-2 border-zinc-700 pl-3 text-zinc-400;
 }
 .prose-chat table {
-  @apply my-2 text-sm;
+  @apply my-2 block max-w-full overflow-x-auto text-sm;
 }
 .prose-chat th,
 .prose-chat td {
   @apply border border-zinc-800 px-2 py-1;
+}
+
+.prose-chat img,
+.prose-doc img,
+.prose-chat video,
+.prose-doc video {
+  max-width: 100%;
+  height: auto;
 }
 
 /* While dragging a panel border: no text selection, and keep the resize cursor everywhere */

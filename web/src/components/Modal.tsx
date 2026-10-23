@@ -112,7 +112,7 @@ export function Modal({
   return createPortal(
     <div
       className={cx(
-        "fixed inset-0 z-50 flex justify-center bg-black/60 backdrop-blur-sm sm:p-4",
+        "fixed inset-0 z-50 flex justify-center bg-black/60 backdrop-blur-sm p-[env(safe-area-inset-top)_env(safe-area-inset-right)_env(safe-area-inset-bottom)_env(safe-area-inset-left)] sm:p-4",
         placement === "top" ? "items-stretch sm:items-start sm:pt-[12vh]" : "items-stretch sm:items-center",
       )}
       onMouseDown={(e) => {
@@ -129,26 +129,26 @@ export function Modal({
         onSubmit={onSubmit}
         onKeyDown={onKeyDown}
         className={cx(
-          "flex w-full flex-col overflow-hidden border-zinc-800 bg-zinc-950 shadow-2xl focus:outline-none sm:max-h-[calc(100dvh-2rem)] sm:rounded-2xl sm:border",
+          "flex max-h-[100dvh] w-full flex-col overflow-hidden border-zinc-800 bg-zinc-950 shadow-2xl focus:outline-none sm:max-h-[calc(100dvh-2rem)] sm:rounded-2xl sm:border",
           MODAL_SIZES[size],
           className,
         )}
       >
         {title && (
-          <header className="flex shrink-0 items-start gap-3 border-b border-zinc-900 px-5 py-3.5">
-            <div className="min-w-0">
-              <h2 id={`${id}-title`} className="text-base font-semibold whitespace-nowrap text-zinc-50">
+          <header className="flex shrink-0 items-start gap-3 border-b border-zinc-900 px-4 py-3.5 sm:px-5">
+            <div className="min-w-0 flex-1">
+              <h2 id={`${id}-title`} className="truncate text-base font-semibold text-zinc-50">
                 {title}
               </h2>
               {description && <p className="text-xs text-zinc-500">{description}</p>}
             </div>
-            <button type="button" onClick={onClose} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200" aria-label="Close">
+            <button type="button" onClick={onClose} className="-my-2 -mr-2 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200 sm:my-0 sm:mr-0 sm:h-8 sm:w-8" aria-label="Close">
               <X className="h-5 w-5" />
             </button>
           </header>
         )}
-        <div className={bodyClassName ?? "scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5"}>{children}</div>
-        {footer && <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-zinc-900 px-5 py-3">{footer}</footer>}
+        <div className={bodyClassName ?? "scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-5"}>{children}</div>
+        {footer && <footer className="flex shrink-0 flex-col-reverse gap-2 border-t border-zinc-900 px-4 py-3 max-sm:[&>button]:w-full max-sm:[&>div]:w-full sm:flex-row sm:items-center sm:justify-end sm:px-5">{footer}</footer>}
       </Panel>
     </div>,
     document.body,

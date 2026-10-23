@@ -50,13 +50,13 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
 
   const navItem = (href: string, active: boolean) =>
     cx(
-      "flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm transition",
+      "flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition lg:min-h-0 lg:px-2.5 lg:py-1.5",
       active ? "bg-zinc-800 text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100",
     )
 
   return (
     <aside className="flex h-full w-full shrink-0 flex-col border-r border-zinc-900 bg-zinc-950">
-      <div className="flex items-center gap-2 px-4 pt-4 pb-3">
+      <div className="flex items-center gap-2 px-4 pt-[calc(1rem+env(safe-area-inset-top))] pb-3 lg:pt-4">
         <BrandLogo className="min-w-0" />
         {health.data?.mock && (
           <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300" title="A fake claude is answering. Set real keys and drop BOXYARD_MOCK to go live.">
@@ -76,7 +76,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
             openPalette()
           }}
           title={`Search everything (${MOD_KEY.trim()}+K or /)`}
-          className="flex w-full items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-2.5 py-1.5 text-sm text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-300"
+          className="flex min-h-11 w-full items-center gap-2.5 rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-2 text-sm text-zinc-500 transition hover:border-zinc-700 hover:text-zinc-300 lg:min-h-0 lg:px-2.5 lg:py-1.5"
         >
           <Search className="h-4 w-4" /> Search…
           <kbd className="ml-auto rounded border border-zinc-800 bg-zinc-900 px-1.5 font-sans text-[10px] text-zinc-500">{MOD_KEY}K</kbd>
@@ -108,13 +108,13 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
 
       <div className="mt-5 flex items-center justify-between px-4 pb-1.5">
         <span className="text-[11px] font-semibold tracking-wider text-zinc-500 uppercase">Projects</span>
-        <button onClick={() => setCreating(true)} className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="New project">
+        <button onClick={() => setCreating(true)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 lg:h-6 lg:w-6" title="New project" aria-label="New project">
           <Plus className="h-4 w-4" />
         </button>
       </div>
       <div className="scroll-thin flex-1 space-y-0.5 overflow-y-auto px-2" onClick={onNavigate}>
         {projects.data?.length === 0 && (
-          <button onClick={() => setCreating(true)} className="w-full rounded-lg border border-dashed border-zinc-800 px-3 py-3 text-left text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
+          <button onClick={() => setCreating(true)} className="min-h-11 w-full rounded-lg border border-dashed border-zinc-800 px-3 py-3 text-left text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
             No projects yet. Create one, or just ask the orchestrator.
           </button>
         )}
