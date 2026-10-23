@@ -416,7 +416,7 @@ function Row({ name, row, total, muted, nested }: { name: ReactNode; row: UsageB
       <td className="hidden px-3 py-2 text-right text-zinc-400 tabular-nums sm:table-cell">{row.turns || "–"}</td>
       <td className="hidden px-3 py-2 text-right text-zinc-400 tabular-nums md:table-cell">{row.tokens ? compactTokens(row.tokens) : "–"}</td>
       <td className="hidden px-3 py-2 text-right text-zinc-400 tabular-nums md:table-cell">{avg === null ? "–" : money(avg)}</td>
-      <td className={cx("px-3 py-2 text-right tabular-nums", nested ? "text-zinc-300" : "font-medium text-zinc-100")}>{money(row.costUsd)}</td>
+      <td className={cx("px-3 py-2 text-right whitespace-nowrap tabular-nums", nested ? "text-zinc-300" : "font-medium text-zinc-100")}>{money(row.costUsd)}</td>
       <td className="px-3 py-2 text-right text-zinc-400 tabular-nums">{pct(row.costUsd, total)}</td>
     </tr>
   )
@@ -480,8 +480,8 @@ function BoxesTable({ period }: { period: UsagePeriodReport }) {
                   <td className="hidden px-3 py-2 text-zinc-400 sm:table-cell">{b.size}</td>
                   <td className="hidden px-3 py-2 text-zinc-400 sm:table-cell">{b.keepAlive ? "Yes" : "No"}</td>
                   <td className="px-3 py-2 text-right text-zinc-400 tabular-nums">{hours(b.activeMs).replace(/h$/, "")}</td>
-                  <td className="hidden px-3 py-2 text-right text-zinc-400 tabular-nums md:table-cell">{b.diskBytes ? bytes(b.diskBytes) : "–"}</td>
-                  <td className="px-3 py-2 text-right font-medium text-zinc-100 tabular-nums">{money(b.costUsd)}</td>
+                  <td className="hidden px-3 py-2 text-right whitespace-nowrap text-zinc-400 tabular-nums md:table-cell">{b.diskBytes ? bytes(b.diskBytes) : "–"}</td>
+                  <td className="px-3 py-2 text-right font-medium whitespace-nowrap text-zinc-100 tabular-nums">{money(b.costUsd)}</td>
                 </tr>
               ))}
             </tbody>
