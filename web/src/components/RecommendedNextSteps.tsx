@@ -27,7 +27,7 @@ export function RecommendedNextSteps({
           key={step}
           type="button"
           onClick={() => onPick(step)}
-          className="rounded-full border border-zinc-800 bg-zinc-900/70 px-2.5 py-1 text-left text-xs text-zinc-300 transition hover:border-yard-500/50 hover:bg-yard-500/10 hover:text-yard-100 focus:ring-2 focus:ring-yard-500 focus:outline-none"
+          className="max-w-full rounded-full border border-zinc-800 bg-zinc-900/70 px-2.5 py-1 text-left text-xs wrap-anywhere text-zinc-300 transition hover:border-yard-500/50 hover:bg-yard-500/10 hover:text-yard-100 focus:ring-2 focus:ring-yard-500 focus:outline-none"
         >
           {step}
         </button>
