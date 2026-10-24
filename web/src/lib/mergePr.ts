@@ -31,6 +31,13 @@ export const MERGE_LABEL: Record<Exclude<MergeButtonState, "hidden">, string> = 
   requested: "Merge requested…",
 }
 
+/** The same states as a suffix on the task header's PR chip ("PR #76 · merging…"). */
+export const MERGE_CHIP_LABEL: Record<Exclude<MergeButtonState, "hidden" | "ready">, string> = {
+  sending: "sending…",
+  queued: "merge queued",
+  requested: "merging…",
+}
+
 export const mergeTitle = (task: Pick<Task, "title">) => `Send merge request to "${task.title}"?`
 
 export const mergeBody = (task: Pick<Task, "prUrl">) =>

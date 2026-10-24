@@ -8,7 +8,7 @@ import { ArrowRight, File, FileCode, FileImage, FileText, Film, Music, Paperclip
 import { Modal } from "./Modal"
 import { ArtifactLink } from "./FileLink"
 import { formatSize } from "./Attachments"
-import { TimeAgo, cx } from "./ui"
+import { META_CHIP, TimeAgo, cx } from "./ui"
 import { useArtifacts } from "../lib/queries"
 import { FILTER_MIN, fileKind, fileType, galleryOf, isImageFile, latestAt, listFiles, seenKey, shortTitle, unseenCount, type TaskFile } from "../lib/taskFiles"
 import type { PreviewKind } from "../lib/filePreview"
@@ -58,15 +58,12 @@ export function FilesChip({ taskId, projectId, files }: { taskId: string; projec
         }}
         aria-haspopup="dialog"
         aria-label={fresh ? `${label}, ${fresh} new` : label}
-        title={fresh ? `${fresh} new since you last looked` : "Files this task published"}
-        className="relative inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md border border-yard-600/40 bg-yard-500/10 px-2 py-1 font-medium whitespace-nowrap text-yard-400 transition hover:bg-yard-500/20 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none sm:min-h-0 sm:px-1.5 sm:py-0.5"
+        title={fresh ? `${label}, ${fresh} new since you last looked` : "Files this task published"}
+        className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none")}
       >
-        <Paperclip className="h-3 w-3" /> {label}
-        {fresh > 0 && (
-          <span className="ml-0.5 rounded-full bg-sky-500 px-1 text-[10px] leading-4 font-semibold text-zinc-950" aria-hidden>
-            {fresh} new
-          </span>
-        )}
+        <Paperclip className="h-3 w-3 text-zinc-400" /> {label}
+        {/* New files since the drawer was last opened: a dot, with the count in the tooltip and the label. */}
+        {fresh > 0 && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" aria-hidden data-testid="files-new-dot" />}
       </button>
       {open && <FilesDrawer taskId={taskId} projectId={projectId} files={files} seenAt={seenAtOpen} onClose={() => setOpen(false)} />}
     </>
