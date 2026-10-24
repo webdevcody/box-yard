@@ -3,6 +3,7 @@ import type { TaskOutcome } from "./quiet.js"
 import type { BoxCleanup } from "./disk.js"
 import type { Hook, HookRun } from "./hooks.js"
 import type { BoxResize } from "./boxSizes.js"
+import type { TtsInfo } from "./tts.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -329,6 +330,8 @@ export type UiEvent =
   | { type: "captain.message"; message: CaptainMessage }
   | { type: "captain.state"; state: CaptainState }
   | { type: "settings"; info: SettingsInfo }
+  /** Settings › Voice text-to-speech choices changed (keys only as set/unset). */
+  | { type: "tts"; info: TtsInfo }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

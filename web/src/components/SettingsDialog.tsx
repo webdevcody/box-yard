@@ -70,7 +70,7 @@ export function SettingsHost() {
 
 const SOURCE_LABEL: Record<SettingSource, string> = { ui: "saved here", env: "from env", default: "default" }
 
-function SourceHint({ source, env, changed }: { source?: SettingSource; env?: string; changed: boolean }) {
+export function SourceHint({ source, env, changed }: { source?: SettingSource; env?: string; changed: boolean }) {
   if (changed) return <span className="rounded bg-amber-500/15 px-1.5 py-px text-[11px] text-amber-300">unsaved</span>
   if (!source) return null
   return (

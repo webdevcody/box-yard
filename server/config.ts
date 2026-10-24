@@ -119,6 +119,15 @@ export const config = {
   captainModel: env.CAPTAIN_MODEL?.trim() ?? "",
   captainEffort: envEffort(env.CAPTAIN_EFFORT),
 
+  /** Text-to-speech keys (Settings › Voice); a key saved in the UI wins. They never reach the browser. */
+  elevenlabsApiKey: env.ELEVENLABS_API_KEY?.trim() ?? "",
+  openaiApiKey: env.OPENAI_API_KEY?.trim() ?? "",
+  /** browser | elevenlabs | openai; empty means the Settings default (browser). */
+  ttsProvider: env.TTS_PROVIDER?.trim().toLowerCase() ?? "",
+  /** Overridable for tests and proxies. */
+  elevenlabsBaseUrl: env.ELEVENLABS_BASE_URL?.trim() || "https://api.elevenlabs.io",
+  openaiBaseUrl: env.OPENAI_BASE_URL?.trim() || "https://api.openai.com",
+
   /** Poll interval for worker events. */
   pollMs: int("BOXYARD_POLL_MS", 1500),
   /** Archive each task folder after every turn so it can move to another box. */

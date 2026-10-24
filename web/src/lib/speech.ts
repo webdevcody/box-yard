@@ -1,6 +1,7 @@
-// Voice announcements, the live side: a speech queue over window.speechSynthesis, the announcer that
-// decides what to say for orchestrator turns and task notifications, and the small stores the UI reads
-// (settings, lock state). Everything here runs outside React, so speaking never re-renders the chat.
+// Voice announcements, the live side: a speech queue over window.speechSynthesis (or a cloud voice,
+// see lib/tts.ts), the announcer that decides what to say for orchestrator turns and task
+// notifications, and the small stores the UI reads (settings, lock state). Everything here runs
+// outside React, so speaking never re-renders the chat.
 import { useEffect, useState, useSyncExternalStore } from "react"
 import type { AppNotification, ChatMessage } from "../../../shared/types"
 import {
@@ -14,6 +15,7 @@ import {
   voiceAllowed,
   type VoiceSettings,
 } from "./voice"
+import { CloudSynth, activeProvider, audioElement, fetchTts, primeAudio, reportFallback, subscribeTtsInfo } from "./tts"
 
 // ------------------------------------------------------------------ speech queue
 
@@ -36,6 +38,10 @@ export interface SynthLike {
   resume(): void
   readonly speaking: boolean
   readonly paused: boolean
+  /** Longest chunk to hand over at once; unset, the queue's own (short, for Chrome) limit applies. */
+  readonly chunkMax?: number
+  /** Time an utterance may take before it starts (a network round trip), added to the watchdog. */
+  readonly latencyMs?: number
 }
 
 export interface SpeakOptions {
@@ -88,7 +94,7 @@ export class SpeechQueue {
 
   say(text: string, opts: SpeakOptions) {
     // Slower speech fits fewer characters into Chrome's ~15 s limit.
-    const chunks = chunkForSpeech(text, Math.max(60, Math.round(160 * Math.min(1, opts.rate))))
+    const chunks = chunkForSpeech(text, this.synth.chunkMax ?? Math.max(60, Math.round(160 * Math.min(1, opts.rate))))
     if (!chunks.length) return
     this.items.push({ chunks, opts })
     while (this.items.length > MAX_QUEUE) this.items.shift()
@@ -190,7 +196,7 @@ export class SpeechQueue {
         this.synth.cancel()
       } catch {}
       done()
-    }, (chunk.length * 90) / Math.max(0.5, rate) + WATCHDOG_SLACK_MS)
+    }, (chunk.length * 90) / Math.max(0.5, rate) + WATCHDOG_SLACK_MS + (this.synth.latencyMs ?? 0))
     this.keepAlive ??= this.timers.setInterval(() => {
       // Chrome pauses (and sometimes never resumes) speech in background tabs.
       if (this.synth.paused) this.synth.resume()
@@ -352,10 +358,12 @@ export class Announcer {
 // ------------------------------------------------------------------ live (browser) state
 
 const browser = typeof window !== "undefined"
+/** The browser's own engine: Browser / OS voices, and the fallback for cloud ones. */
 const synth = (): (SynthLike & { getVoices(): SpeechSynthesisVoice[] }) | null =>
   browser && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined" ? window.speechSynthesis : null
 
-export const voiceSupported = () => synth() !== null
+/** Something can speak: the browser's engine, or a cloud voice played through an <audio> element. */
+export const voiceSupported = () => synth() !== null || (activeProvider() !== "browser" && audioElement() !== null)
 
 // Settings: one cached copy, shared by every component and kept in sync across tabs.
 type Listener = () => void
@@ -405,6 +413,8 @@ function refreshStatus() {
   emit(statusListeners)
 }
 settingsListeners.add(refreshStatus)
+// Switching to or from a cloud voice changes whether this browser can speak at all.
+subscribeTtsInfo(refreshStatus)
 
 const subscribeStatus = (l: Listener) => {
   statusListeners.add(l)
@@ -414,10 +424,21 @@ const getStatus = () => status
 export const useVoiceStatus = () => useSyncExternalStore(subscribeStatus, getStatus, getStatus)
 
 let queueInstance: SpeechQueue | null = null
+let cloudSynth: CloudSynth | null = null
 function queue(): SpeechQueue | null {
+  if (!voiceSupported()) return null
   const sy = synth()
-  if (!sy) return null
-  queueInstance ??= new SpeechQueue(sy, (text) => new SpeechSynthesisUtterance(text) as unknown as UtteranceLike, globalThis, {
+  // One queue for every engine: CloudSynth plays cloud lines itself and hands the rest to speechSynthesis.
+  cloudSynth ??= new CloudSynth({
+    provider: () => activeProvider(),
+    os: sy,
+    osUtter: (text) => new SpeechSynthesisUtterance(text) as unknown as UtteranceLike,
+    audio: audioElement,
+    fetchAudio: (text, signal) => fetchTts({ text }, signal),
+    onFallback: reportFallback,
+  })
+  const utter = (text: string): UtteranceLike => ({ text, voice: null, lang: "", rate: 1, pitch: 1, volume: 1, onstart: null, onend: null, onerror: null })
+  queueInstance ??= new SpeechQueue(cloudSynth, utter, globalThis, {
     onChange: refreshStatus,
     onStart: () => {
       blocked = false
@@ -445,6 +466,7 @@ function options(s: VoiceSettings): SpeakOptions {
 export function unlockVoice() {
   activated = true
   blocked = false
+  primeAudio()
   const sy = synth()
   if (sy && !sy.speaking) {
     try {
@@ -460,6 +482,8 @@ if (browser) {
   // Any click or key press unlocks speech. This runs before the "Click to enable voice" chip's own
   // handler (which unmounts once unlocked), so the chip's "Voice on." is said from here.
   const onGesture = (e: Event) => {
+    // Mobile browsers and PWAs only let an <audio> element play later if it played inside a tap.
+    if (getVoiceSettings().enabled && activeProvider() !== "browser") primeAudio()
     if (activated && !blocked) return
     if (!getVoiceSettings().enabled) activated = true
     else if ((e.target as Element | null)?.closest?.("[data-voice-unlock]")) speakNow("Voice on.")

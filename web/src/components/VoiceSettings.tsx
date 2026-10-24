@@ -5,6 +5,10 @@ import { VOICE_EVENTS, VOICE_EVENT_LABEL, pickVoice, type VoiceSettings } from "
 import { DICTATION_KEYS, LANGUAGES, keyLabel, type DictationKey } from "../lib/dictation"
 import { dictationSupported, isMac, setDictationSettings, useDictationSettings } from "../lib/useDictation"
 import { Panel, Row } from "./SettingsDialog"
+import { TtsSection } from "./TtsSettings"
+import { useTtsSettings } from "../lib/queries"
+import { activeProvider, useLastFallback } from "../lib/tts"
+import { TTS_PROVIDER_LABEL } from "../../../shared/tts"
 import { Button, Select, cx, inputClass } from "./ui"
 
 const TEST_LINE = "This is Box Yard. PR number 30 merged, and task cards now have equal heights."
@@ -18,7 +22,7 @@ function Check({ checked, disabled, onChange, children, id }: { checked: boolean
   )
 }
 
-function Slider({ id, label, value, min, max, step, disabled, onChange, format }: {
+export function Slider({ id, label, value, min, max, step, disabled, onChange, format }: {
   id: string
   label: string
   value: number
@@ -50,10 +54,16 @@ function Slider({ id, label, value, min, max, step, disabled, onChange, format }
   )
 }
 
-/** Settings → Voice. Saved per browser (localStorage), applied at once: they're about this device. */
+/**
+ * Settings → Voice. Applied at once. What to speak, the browser voice and volume are saved per
+ * browser (localStorage); the provider, its voice and keys are server settings (TtsSection).
+ */
 export function VoicePanel({ fid }: { fid: (k: string) => string }) {
   const s = useVoiceSettings()
   const voices = useVoices()
+  const tts = useTtsSettings().data ?? null
+  const cloud = activeProvider(tts)
+  const fallback = useLastFallback()
   const supported = voiceSupported()
   const set = (patch: Partial<VoiceSettings>) => setVoiceSettings(patch)
   const off = !supported || !s.enabled
@@ -101,7 +111,16 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           </div>
         </div>
       </Row>
-      <Row id={fid("vv")} label="Voice" help="The browser's voices. Local voices work offline and sound the same every time.">
+      <TtsSection fid={fid} />
+      <Row
+        id={fid("vv")}
+        label={cloud === "browser" ? "Browser voice" : "Fallback voice"}
+        help={
+          cloud === "browser"
+            ? "The browser's voices. Local voices work offline and sound the same every time."
+            : `The browser voice that speaks if ${TTS_PROVIDER_LABEL[cloud]} fails (bad key, quota, no network).`
+        }
+      >
         <Select id={fid("vv")} className="w-full" disabled={off} value={s.voiceURI} onChange={(e) => set({ voiceURI: e.target.value })}>
           <option value="">Default{auto ? ` (${auto.name})` : ""}</option>
           {sorted.map((v) => (
@@ -112,7 +131,11 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           ))}
         </Select>
       </Row>
-      <Row id={fid("vr")} label="Rate, pitch and volume" help="How fast, how high and how loud.">
+      <Row
+        id={fid("vr")}
+        label="Rate, pitch and volume"
+        help={cloud === "browser" ? "How fast, how high and how loud." : `Rate and pitch shape the browser voice; ${TTS_PROVIDER_LABEL[cloud]} uses its own Speed above. Volume applies to every voice.`}
+      >
         <div className="space-y-2">
           <Slider id={fid("vr")} label="Rate" value={s.rate} min={0.5} max={2} step={0.1} disabled={off} onChange={(rate) => set({ rate })} format={x} />
           <Slider label="Pitch" id={fid("vp")} value={s.pitch} min={0} max={2} step={0.1} disabled={off} onChange={(pitch) => set({ pitch })} format={x} />
@@ -164,9 +187,14 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
         <Button type="button" variant="subtle" disabled={!supported} onClick={() => speakNow(TEST_LINE)}>
           <Volume2 className="h-4 w-4" /> Test voice
         </Button>
+        {fallback && cloud === fallback.provider && (
+          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-fallback>
+            {TTS_PROVIDER_LABEL[fallback.provider]} failed, so the browser voice spoke instead: {fallback.message}
+          </p>
+        )}
       </Row>
       <p className="mt-2 text-xs text-zinc-500">
-        Saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
+        The provider, its voice and keys are saved on the server for every browser; everything else is saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
         <kbd className="rounded bg-zinc-800 px-1">Shift</kbd>+<kbd className="rounded bg-zinc-800 px-1">V</kbd>.
       </p>
       <DictationSection fid={fid} />
