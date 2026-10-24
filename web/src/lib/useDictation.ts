@@ -85,6 +85,8 @@ if (browser) {
     "keydown",
     (e) => {
       if (e.key === "Escape" && entries.some((x) => x.machine.active)) {
+        // Claimed: this Esc only stops listening (it doesn't also leave Zen mode).
+        e.preventDefault()
         stopAll()
         return
       }

@@ -59,7 +59,7 @@ export function UsageView() {
     <div className="space-y-5 pb-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Usage & costs</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">$ Usage</h1>
           <p className="mt-1 text-sm text-zinc-500">What Claude and your boxes cost, and where it went.</p>
         </div>
         <Button size="sm" onClick={() => openSettings("costs")}>
@@ -453,7 +453,7 @@ function BoxesTable({ period }: { period: UsagePeriodReport }) {
                     className="inline-flex cursor-help items-center gap-1 whitespace-nowrap"
                     title={
                       estimated
-                        ? "Estimated from your rates in Settings → Usage & costs: active CPU hours, keep-alive time and disk. Upstash doesn't report per-box billing to Box Yard."
+                        ? "Estimated from your rates in Settings → $ Usage: active CPU hours, keep-alive time and disk. Upstash doesn't report per-box billing to Box Yard."
                         : "Reported by the box provider."
                     }
                   >
