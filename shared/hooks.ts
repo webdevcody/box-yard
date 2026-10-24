@@ -9,7 +9,7 @@ export type HookTrigger = (typeof HOOK_TRIGGERS)[number]
 
 export const TRIGGER_INFO: Record<HookTrigger, { label: string; description: string }> = {
   "task.finished": { label: "Task finished", description: "A turn ended and the agent is resting: idle, PR ready, or done (mark_done)." },
-  "task.pr_ready": { label: "PR ready", description: "The agent opened or pushed to a pull request and its turn ended. Fires once per head commit." },
+  "task.pr_ready": { label: "PR ready", description: "A turn ended with an open PR (fires once per head commit), whatever the status: PR ready, done or idle. Merged and closed PRs are skipped." },
   "task.failed": { label: "Task failed", description: "A turn failed, or the agent couldn't start." },
   "task.needs_input": { label: "Needs input", description: "The agent asked a question (ask_user) and is waiting for the answer." },
   "pr.merged": { label: "PR merged", description: "The task's pull request was merged on GitHub." },

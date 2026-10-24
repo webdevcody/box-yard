@@ -35,7 +35,7 @@ import type { Project, Task } from "../shared/types.js"
  *
  * Guards, in order:
  * - Fire once: a hook fires once per (hook, task, event, key), where the key is the PR's head commit for
- *   task.pr_ready (a new push fires again, the same commit never does), the PR for pr.merged, and the
+ *   task.pr_ready, raised by any turn that ends with an open PR (a new push fires again, the same commit never does), the PR for pr.merged, and the
  *   turn that ended for the other events.
  * - Loop guard: a hook doesn't fire on a turn its own prompt started, or on a task it created (directly or
  *   down a chain of hook-made tasks), unless the hook allows it (allowSelfTrigger).
@@ -106,10 +106,12 @@ export function prLabels(row: Pick<TaskRow, "pr_labels_json">): string[] {
 
 /**
  * What makes one fire of a hook on a task distinct, or null when the event can't be told apart from one
- * already handled (a pr_ready with no known head commit and no push this turn).
+ * already handled (a pr_ready with no known head commit and no push this turn) or has no open PR.
  */
-export function fireKey(event: TaskEvent, row: Pick<TaskRow, "pr_head_sha" | "pr_url">): string | null {
+export function fireKey(event: TaskEvent, row: Pick<TaskRow, "pr_head_sha" | "pr_url" | "pr_state">): string | null {
   if (event.type === "task.pr_ready") {
+    // Only an open (or draft) PR is ready; a merged or closed one has nothing left to act on.
+    if (!row.pr_url || row.pr_state === "merged" || row.pr_state === "closed") return null
     if (row.pr_head_sha) return `sha:${row.pr_head_sha}`
     return event.sawPr && event.turnId ? `turn:${event.turnId}` : null
   }

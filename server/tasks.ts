@@ -2426,7 +2426,7 @@ export class TaskManager {
     const originHookIds = (row.current_turn_id ? flags.hookIds : flags.lastHookIds) ?? []
     if (info.state === "merged" && (prev === "open" || prev === "draft")) {
       this.emitTaskEvent({ type: "pr.merged", taskId, turnId: row.current_turn_id, originHookIds })
-    } else if (prev === "draft" && info.state === "open" && row.status === "pr_ready" && !row.current_turn_id) {
+    } else if (prev === "draft" && info.state === "open" && ["pr_ready", "done", "idle"].includes(row.status) && !row.current_turn_id) {
       this.emitTaskEvent({ type: "task.pr_ready", taskId, turnId: null, originHookIds })
     }
   }
@@ -2495,7 +2495,9 @@ export class TaskManager {
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
       this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
-    if (!stopped) this.turnEvents(row, status, Boolean(more), Boolean(finished && isQuietRun(finished)), flags)
+    // The PR as it stands now: turn_end just asked GitHub (head commit and state), or the runner's push if it couldn't.
+    const livePr = Boolean(row.pr_url) && !isFinalPrState(pr ?? row.pr_state)
+    if (!stopped) this.turnEvents(row, status, Boolean(more), Boolean(finished && isQuietRun(finished)), flags, livePr)
 
     this.emitTask(row.id)
     this.publishDirectory()
@@ -2504,7 +2506,7 @@ export class TaskManager {
   }
 
   /** The hook events a finished turn raises. A stopped turn raises none: Cody stepped in. */
-  private turnEvents(row: TaskRow, status: TaskStatus, more: boolean, quiet: boolean, flags: TurnFlags) {
+  private turnEvents(row: TaskRow, status: TaskStatus, more: boolean, quiet: boolean, flags: TurnFlags, livePr: boolean) {
     const base = { taskId: row.id, turnId: row.current_turn_id, originHookIds: flags.hookIds ?? [], sawPr: Boolean(flags.sawPr) }
     if (row.schedule_id && ["done", "idle", "pr_ready", "failed"].includes(status) && !more) this.emitTaskEvent({ ...base, type: "schedule.run_finished" })
     // A quiet run did nothing worth acting on; only schedule.run_finished hooks that include quiet runs see it.
@@ -2513,7 +2515,9 @@ export class TaskManager {
     else if (status === "needs_input") this.emitTaskEvent({ ...base, type: "task.needs_input" })
     else if (!more && (status === "idle" || status === "pr_ready" || status === "done")) {
       this.emitTaskEvent({ ...base, type: "task.finished" })
-      if (status === "pr_ready") this.emitTaskEvent({ ...base, type: "task.pr_ready" })
+      // Any resting turn with an open PR, not just pr_ready: an agent that opens a PR and calls mark_done ends "done".
+      // The hook engine fires once per head commit, so a later turn on the same commit doesn't fire again.
+      if (livePr) this.emitTaskEvent({ ...base, type: "task.pr_ready" })
     }
   }
 
