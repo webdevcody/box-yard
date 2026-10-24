@@ -40,7 +40,7 @@ describe("parseDf", () => {
   })
 
   it("quotes the path", () => {
-    expect(dfCommand("/workspace/home")).toBe("df -Pk '/workspace/home' | tail -n 1; echo @@boxyard-root-df; df -Pk /tmp 2>/dev/null | tail -n 1")
+    expect(dfCommand("/workspace/home")).toMatch(/^df -Pk '\/workspace\/home' \| tail -n 1; echo @@boxyard-root-df; df -Pk \/tmp 2>\/dev\/null \| tail -n 1; echo @@boxyard-mem; /)
     expect(dfCommand("/a'b")).toContain(`'/a'\\''b'`)
   })
 })

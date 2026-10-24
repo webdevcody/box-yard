@@ -33,6 +33,7 @@ import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
+import { HEAVY_TASKS } from "../shared/memory.js"
 import { BOX_SIZES, EFFORTS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -87,6 +88,7 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
   projectOrder: z.object({ ids: z.array(z.string().max(64)).max(1000) }).strict(),
@@ -100,6 +102,7 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
   note: z.object({ content: z.string().trim().min(1).max(MAX_NOTE_CHARS) }),
