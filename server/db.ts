@@ -587,6 +587,34 @@ export const MIGRATIONS: string[] = [
     SELECT COUNT(*) FROM projects AS p
     WHERE p.created_at < projects.created_at OR (p.created_at = projects.created_at AND p.rowid < projects.rowid)
   );
+  `,  `
+  -- Box history (server/boxHistory.ts): every box lifecycle event (created, resized, deleted, lost, cleanups, orphan
+  -- sweeps) and who did it. Rows outlive the box they're about and are pruned by age and count, never backfilled.
+  CREATE TABLE box_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    box_id TEXT NOT NULL,
+    box_name TEXT,
+    type TEXT NOT NULL,
+    -- owner | coordinator | captain | scheduler | resize | resize-cleanup | janitor | orphan-sweep | provider
+    actor TEXT NOT NULL,
+    -- The Captain's project when actor = 'captain'.
+    actor_project_id TEXT,
+    reason TEXT,
+    size TEXT,
+    from_size TEXT,
+    to_size TEXT,
+    -- The other box of a resize migration: the new box on the old one's events, the old box on the new one's.
+    related_box_id TEXT,
+    resize_id TEXT,
+    -- [{ "id", "name" }] of the projects on the box then, so names survive a deleted project.
+    projects_json TEXT NOT NULL DEFAULT '[]',
+    task_ids_json TEXT NOT NULL DEFAULT '[]',
+    freed_bytes INTEGER,
+    detail TEXT
+  );
+  CREATE INDEX box_events_at ON box_events(at);
+  CREATE INDEX box_events_box ON box_events(box_id, at);
   `,
 ]
 
