@@ -26,8 +26,11 @@ export function workerSystemPrompt(input: {
   box?: BoxPromptInfo
 }): string {
   const { project, task, branch, port } = input
+  const local = Boolean(input.box?.local)
   const header = [
-    `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
+    local
+      ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
+      : `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
   ]
@@ -40,7 +43,9 @@ export function workerSystemPrompt(input: {
     `  Which to use: ask_user when only Cody can decide (credentials, product choices, spending), message_captain for project questions the Captain can settle, message_agent to talk to one specific agent.`,
     `- suggest_note / read_notes: the project's notes are a small, curated set of lasting rules that every agent starts with. You can't write them: suggest_note proposes one (with why: what a future agent would get wrong without it), and the project's Captain decides when your task is finished.`,
     `  Only suggest environment or box gotchas, Cody's decisions and preferences, and project facts that aren't in the code. Run logs, merge reports and code tours go in the PR description instead.`,
-    `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
+    local
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
+      : `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
     `- publish_artifact: for any deliverable file (report, page, image, export) so Cody can open it.`,
     `- mark_done: when the task is finished and there is nothing left to do. A scheduled run that found nothing to do and changed nothing passes outcome "noop".`,
   ]
@@ -82,10 +87,21 @@ export interface BoxPromptInfo {
   slots: number
   /** The project's heavy-tasks setting (shared/memory.ts). */
   heavyTasks: HeavyTasks
+  /** The local runner: the turn runs on the computer running Box Yard, unsandboxed (shared/runner.ts). */
+  local?: boolean
 }
 
 /** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */
 function boxLines(b: BoxPromptInfo): string[] {
+  if (b.local) {
+    const mem = b.memoryBytes ? `This computer has ${formatBytes(b.memoryBytes)} of memory` : `This computer's memory is shared`
+    const others = b.slots <= 1 ? `Cody's own apps` : `up to ${b.slots - 1} other local agents and Cody's own apps`
+    return [
+      `You run on Cody's own computer, with its real GPU and its logged-in tools (claude, gh, git). Nothing is sandboxed: stay in your working directory, don't touch Cody's files, settings, keys or other projects outside it, and ask before installing anything system-wide.`,
+      `${mem}, shared with ${others}. Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need.`,
+      `The computer may sleep (a closed lid). Box Yard resumes a turn that sleep cut off; when that happens, check where things stand and carry on.`,
+    ]
+  }
   const mem = b.memoryBytes ? `This box has ${formatBytes(b.memoryBytes)} of memory` : `This box's memory is limited`
   const heavy = `Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need: running out of memory kills every agent on the box.`
   if (b.heavyTasks === "whole-box") return [`${mem}, and your project runs its agents alone on a box, so it's yours while your turn runs. ${heavy}`]
