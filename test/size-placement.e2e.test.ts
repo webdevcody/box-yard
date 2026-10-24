@@ -64,7 +64,8 @@ interface Running {
 }
 const running: Running[] = []
 
-async function start(overrides: Partial<Config> = {}): Promise<Running> {
+/** A Box Yard on the fake provider. `placementResize` is Settings › Resize an idle box… (off by default in the app). */
+async function start(overrides: Partial<Config> = {}, { placementResize = true } = {}): Promise<Running> {
   const port = await freePort()
   const provider = new SizedBoxes(tmpDir("boxes-"), FAKE_CLAUDE)
   const yard = createBoxYard(testConfig({ port, maxBoxes: 1, ...overrides }), { webDir: "/nonexistent", provider })
@@ -74,6 +75,7 @@ async function start(overrides: Partial<Config> = {}): Promise<Running> {
   await yard.start()
   const r = { yard, server, base: `http://127.0.0.1:${port}`, provider }
   running.push(r)
+  if (placementResize) await call(r, "PUT", "/api/agent-settings", { placementResizeEnabled: true })
   return r
 }
 
@@ -210,6 +212,34 @@ describe("placement by project box size", () => {
     expect(sizeOf(r, done.boxId)).toBe("medium")
     expect(r.provider.destroyed).toEqual([b.boxId])
     expect((await getTask(r, a.id)).boxId).toBe(a.boxId)
+  })
+
+  it("with Settings › Resize an idle box off (the default) the task waits and no box is resized, until it's turned on", async () => {
+    const r = await start({}, { placementResize: false })
+    expect(r.yard.settings.get().placementResizeEnabled).toBe(false)
+    const alpha = await project(r, "alpha")
+    const big = await project(r, "big", "large")
+    const a = await settled(r, (await task(r, alpha.id, "first")).id)
+    const small = a.boxId!
+
+    // The only box is small and idle, the pool is full: the task waits for a large box rather than resizing it.
+    const t = await task(r, big.id, "needs ram")
+    const waiting = await status(r, t.id, (x) => x.status === "queued" && Boolean(x.waitReason), "the big task to wait with a reason")
+    expect(waiting.waitReason).toBe("Waiting for a large box: the pool is full and none has room")
+    expect(waiting.waitBoxSize).toBe("large")
+    await new Promise((res) => setTimeout(res, 800))
+    expect((await getTask(r, t.id)).boxId).toBeNull()
+    expect(r.yard.tasks.resizeReport(small)).toBeFalsy()
+    expect(r.provider.created).toEqual(["small"])
+    expect(r.provider.destroyed).toEqual([])
+    expect(sizeOf(r, small)).toBe("small")
+
+    // Turned on, the idle box is grown and the task runs on it.
+    await call(r, "PUT", "/api/agent-settings", { placementResizeEnabled: true })
+    r.yard.tasks.schedule()
+    const done = await settled(r, t.id)
+    expect(sizeOf(r, done.boxId)).toBe("large")
+    expect(r.provider.created).toEqual(["small", "large"])
   })
 
   it("never picks a smaller box: a medium project shares a large box, not a small one with a free slot", async () => {

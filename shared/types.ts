@@ -565,6 +565,8 @@ export interface Settings {
   autoResizeEnabled: boolean
   /** The largest size resize_box may pick. */
   autoResizeMaxSize: BoxSize
+  /** When the pool is full and no box of a project's size is free, placement may resize an idle box up to it. Off: the task waits. */
+  placementResizeEnabled: boolean
   /** Most worker boxes alive at once. */
   maxBoxes: number
   /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
