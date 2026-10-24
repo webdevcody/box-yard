@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
 import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
@@ -14,6 +14,7 @@ import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
 import { BoxResizeDialog } from "./BoxResizeDialog"
+import { BoxHistory } from "./BoxHistory"
 import { resizeLine } from "../lib/boxResize"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
@@ -56,6 +57,7 @@ export function BoxesView() {
   const queued = all.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt)
   const shown = filterBoxes(list, filter)
   const selected = list.find((b) => b.id === hash) ?? null
+  const liveBoxIds = useMemo(() => new Set(list.map((b) => b.id)), [list])
   const [action, setAction] = useState<{ boxId: string; kind: BoxAction } | null>(null)
   const actionBox = action ? list.find((b) => b.id === action.boxId) ?? null : null
   const onAction = (boxId: string, kind: BoxAction) => setAction({ boxId, kind })
@@ -122,6 +124,13 @@ export function BoxesView() {
           </div>
         )}
       </section>
+
+      <BoxHistory
+        liveBoxIds={liveBoxIds}
+        onOpenBox={openBox}
+        projectName={(id) => projects.data?.find((p) => p.id === id)?.name}
+        taskTitle={(id) => all.find((t) => t.id === id)?.title}
+      />
 
       {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} onAction={onAction} />}
       {action?.kind === "resize" && actionBox && <BoxResizeDialog key={`${action.boxId}-resize`} box={actionBox} onClose={() => setAction(null)} />}
