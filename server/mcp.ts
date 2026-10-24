@@ -9,7 +9,7 @@ import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
-import type { CaptainManager } from "./captains.js"
+import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
@@ -71,11 +71,11 @@ const effortSchema = z
   .enum(EFFORTS)
   .optional()
   .describe(
-    "How hard the agent should think (reasoning effort). Pick the lowest level that fits: " +
+    "How hard the agent should think (reasoning effort). Omit it to use the project route, Settings or routing defaults; pass one for a matching routing rule, an escalation, or when Settings leaves effort to the Coordinator, and then pick the lowest level that fits: " +
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Default if omitted: high.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
   )
 
 const modelSchema = z
@@ -85,7 +85,7 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, chosen from the routing rules. Omit to use project/global defaults.")
+  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
@@ -296,7 +296,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "send_to_captain",
       {
         description:
-          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
+          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project. " +
+          'When it finishes the turn that handles your message, its reply reaches you as a Box Yard update ("Captain for <project> replied: …") that wakes you, so you don\'t need wait_for_captain.',
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1).describe("The project-scoped request for the Captain."),
@@ -315,16 +316,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "ask_captain",
       {
         description:
-          "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
+          "Coordinator tool: send a project-scoped request to a Captain and wait briefly (at most 60 s) for its reply; it returns as soon as the reply lands. Use it only for quick questions. If the wait runs out, the Captain keeps working and its reply reaches you as a Box Yard update. Prefer send_to_captain for anything that may take a while.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )
@@ -334,15 +335,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "wait_for_captain",
       {
         description:
-          "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
+          "Coordinator tool: wait briefly (at most 60 s) for a Captain's next reply to you; it returns as soon as that lands or the Captain goes idle, with its latest reply. Rarely needed: replies to send_to_captain are pushed to you as Box Yard updates. If it times out, the Captain keeps working and its reply still reaches you.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )

@@ -949,6 +949,10 @@ export class Store {
       .run(patch.status, Date.now(), patch.costUsd ?? null, patch.error ?? null, id)
   }
 
+  getTaskTurn(id: string): TaskTurnRow | null {
+    return (this.db.prepare("SELECT * FROM task_turns WHERE id = ?").get(id) as TaskTurnRow | undefined) ?? null
+  }
+
   listTaskTurns(taskId: string): TaskTurnRow[] {
     return this.db.prepare("SELECT * FROM task_turns WHERE task_id = ? ORDER BY started_at ASC").all(taskId) as TaskTurnRow[]
   }
