@@ -1508,19 +1508,17 @@ export class TaskManager {
         console.warn(`[box-yard] couldn't resize idle box ${box.id} to ${min} for ${row.id}: ${errorMessage(err)}`)
         continue
       }
-      return this.setWaitReason(row.id, `${waitFor}: resizing idle box ${box.id} (${normalizeBoxSize(box.size)} → ${min})`, min)
+      return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
     }
-    this.setWaitReason(row.id, `${waitFor}: none has a free slot and the pool is at its limit`, min)
+    const n = this.store.listBoxes().length
+    this.setWaitReason(row.id, `${waitFor}: the pool is full (${n} of ${this.limits().maxBoxes} boxes) and no box is idle to resize`, min)
   }
 
   /** A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. */
   private sizedBoxComing(size: BoxSize): string | null {
-    for (const b of this.store.listBoxes()) {
-      if (b.status === "creating" && sizeFits(b.size, size)) return "a new one is being created"
-      const r = this.resizes.get(b.id)
-      if (r?.status === "running" && b.id === r.boxId && sizeFits(r.to, size)) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
-    }
-    return null
+    // A migration's old box leaves the list before its resize is over, so the resizes are read on their own.
+    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size)) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
+    return this.store.listBoxes().some((b) => b.status === "creating" && sizeFits(b.size, size)) ? "a new one is being created" : null
   }
 
   /**
