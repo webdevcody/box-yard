@@ -14,8 +14,9 @@ import type { HookEngine } from "./hooks.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
-import type { SettingsStore } from "./settings.js"
-import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
+import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
+import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine } from "../shared/disk.js"
@@ -34,6 +35,8 @@ export interface McpDeps {
   captains?: CaptainManager
   /** Optional so older tests can build the server without it; then the hook tools aren't offered. */
   hooks?: HookEngine
+  /** Every note change goes through it. Built from the other deps when a test leaves it out. */
+  notes?: ProjectNotes
 }
 
 /** Who is calling the MCP server. Captains only see and touch their own project. */
@@ -231,6 +234,49 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. ${owner("Tell Cody if that matters")}`
     return "starting: the agent's first turn starts as soon as a box slot is free"
   }
+  const notes =
+    deps.notes ??
+    new ProjectNotes({
+      store,
+      hub,
+      settings: deps.settings ?? { get: () => DEFAULT_SETTINGS },
+      publish: (id) => tasks.publishNotes(id),
+      tellCaptain: deps.captains ? (id, content, meta) => deps.captains!.projectNotice(id, content, meta) : undefined,
+    })
+  /** Who is editing notes through this server, as stored on the note. */
+  const editor = { by: scopeId ? "captain" : "orchestrator", captain: Boolean(scopeId) }
+  /** The project a note tool works on: a Captain's own by default; the Coordinator names one. */
+  const notesProject = (ref?: string): Project => {
+    if (ref) return project(ref)
+    if (scopeId) return ownProject()
+    throw new Error("Pass project: which project's notes. Use list_projects.")
+  }
+  const note = (ref: string): ProjectNote => {
+    const n = notes.require(ref.trim())
+    if (scopeId && n.projectId !== scopeId) throw outOfScope(`note ${n.id} belongs to another project`)
+    return n
+  }
+  const suggestion = (ref: string): NoteSuggestion => {
+    const s = notes.requireSuggestion(ref.trim())
+    if (scopeId && s.projectId !== scopeId) throw outOfScope(`suggestion ${s.id} belongs to another project`)
+    return s
+  }
+  /** The notes budget, as every note tool reports it. */
+  const budgetView = (projectId: string) => {
+    const b = notes.budgetStatus(projectId)
+    return { budget: b.line, ...(b.over ? { overBudget: true, prune: b.prune } : {}) }
+  }
+  const suggestionView = (s: NoteSuggestion) => ({
+    id: s.id,
+    content: s.content,
+    why: s.why || undefined,
+    task: s.taskId ? `${s.taskId} ${s.taskTitle}` : s.taskTitle,
+    status: s.status,
+    note: s.noteId ?? undefined,
+    resolvedBy: s.resolvedBy ?? undefined,
+    reason: s.reason ?? undefined,
+    suggested: ago(s.createdAt),
+  })
   const projectView = (p: Project) => ({
     id: p.id,
     name: p.name,
@@ -239,7 +285,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
     ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
-    notes: p.notes.map((n) => `(${n.author}) ${n.content}`),
+    notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
+    ...(p.pendingSuggestions ? { pendingNoteSuggestions: p.pendingSuggestions } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
 
@@ -634,18 +681,136 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     ),
   )
 
+  coordinatorOnly(
+    server.registerTool(
+      "save_note",
+      {
+        description:
+          "Add a lasting rule to a project's notes right away (same as add_note). Every agent in the project starts with them, so keep it to what Cody decided, box gotchas and facts not in the code.",
+        inputSchema: { project: z.string(), content: z.string().min(1).max(MAX_NOTE_CHARS) },
+      },
+      safe(async (a: { project: string; content: string }) => {
+        const p = project(a.project)
+        const n = notes.add(p.id, a.content, editor)
+        return ok({ saved: n.id, ...budgetView(p.id) })
+      }),
+    ),
+  )
+
+  const noteContent = z.string().min(1).max(MAX_NOTE_CHARS)
+  const notesProjectParam = z
+    .string()
+    .optional()
+    .describe(scopeId ? "Leave out: your own project." : "Project id or name.")
+
   server.registerTool(
-    "save_note",
+    "list_notes",
     {
-      description: "Save a lasting fact to a project's shared notes. Every agent in the project sees them.",
-      inputSchema: { project: z.string(), content: z.string().min(1) },
+      description:
+        "A project's notes, oldest first, with ids, who wrote and last edited each, and the budget. Every agent in the project starts with these notes; when they're over budget, the ones marked leftOut aren't in agents' prompts.",
+      inputSchema: { project: notesProjectParam },
     },
-    safe(async (a: { project: string; content: string }) => {
-      const p = project(a.project)
-      store.addNote(p.id, scopeId ? "captain" : "orchestrator", a.content)
-      tasks.publishNotes(p.id)
-      hub.broadcast({ type: "project", project: store.getProject(p.id)! })
-      return ok("Saved.")
+    safe(async (a: { project?: string }) => {
+      const p = notesProject(a.project)
+      const report = notes.budget(p.id)
+      const left = new Set(report.hidden.map((n) => n.id))
+      return ok({
+        project: p.name,
+        ...budgetView(p.id),
+        pendingSuggestions: store.pendingSuggestionCount(p.id) || undefined,
+        notes: report.shown.concat(report.hidden).sort((x, y) => x.createdAt - y.createdAt).map((n) => ({
+          id: n.id,
+          content: n.content,
+          author: n.author,
+          created: ago(n.createdAt),
+          ...(n.updatedAt !== n.createdAt ? { edited: `${ago(n.updatedAt)}${n.updatedBy ? ` by ${n.updatedBy}` : ""}` } : {}),
+          ...(left.has(n.id) ? { leftOut: true } : {}),
+        })),
+      })
+    }),
+  )
+
+  server.registerTool(
+    "add_note",
+    {
+      description:
+        "Add a lasting rule to the project's notes: an environment or box gotcha, a decision or preference of Cody's, or a project fact that isn't in the code. One short rule per note.",
+      inputSchema: { project: notesProjectParam, content: noteContent },
+    },
+    safe(async (a: { project?: string; content: string }) => {
+      const p = notesProject(a.project)
+      const n = notes.add(p.id, a.content, editor)
+      return ok({ added: n.id, ...budgetView(p.id) })
+    }),
+  )
+
+  server.registerTool(
+    "update_note",
+    {
+      description: "Rewrite a note (shorten it, fix it, or fold another note into it). Pass the whole new text.",
+      inputSchema: { note: z.string().describe("Note id (note_…) from list_notes."), content: noteContent },
+    },
+    safe(async (a: { note: string; content: string }) => {
+      const n = notes.update(note(a.note).id, a.content, editor)
+      return ok({ updated: n.id, ...budgetView(n.projectId) })
+    }),
+  )
+
+  server.registerTool(
+    "delete_note",
+    {
+      description: "Delete a note that's stale, wrong or covered by another one.",
+      inputSchema: { note: z.string().describe("Note id (note_…) from list_notes.") },
+    },
+    safe(async (a: { note: string }) => {
+      const n = notes.remove(note(a.note).id, editor)
+      return ok({ deleted: n.id, ...budgetView(n.projectId) })
+    }),
+  )
+
+  server.registerTool(
+    "list_note_suggestions",
+    {
+      description: "Notes agents suggested (suggest_note) with their reasons, oldest first. Pending ones wait for resolve_suggestion.",
+      inputSchema: {
+        project: notesProjectParam,
+        task: z.string().optional().describe("Only this task's suggestions."),
+        status: z.enum(["pending", "all"]).optional().describe("pending (default) or all, including resolved ones."),
+      },
+    },
+    safe(async (a: { project?: string; task?: string; status?: "pending" | "all" }) => {
+      const t = a.task ? task(a.task) : null
+      const p = t ? store.getProject(t.projectId)! : notesProject(a.project)
+      if (t && a.project && project(a.project).id !== t.projectId) throw new Error(`Task ${t.id} isn't in project ${a.project}.`)
+      const list = store.listNoteSuggestions({ projectId: p.id, taskId: t?.id, status: a.status === "all" ? undefined : ["pending"] })
+      return ok({ project: p.name, ...budgetView(p.id), suggestions: list.map(suggestionView) })
+    }),
+  )
+
+  server.registerTool(
+    "resolve_suggestion",
+    {
+      description:
+        "Settle an agent's note suggestion. accept: add it as a note (pass content to reword it as one short rule). merge: fold it into an existing note (pass note and that note's whole new content). reject: drop it, with a short reason (e.g. it's a run log, already covered, or a code convention for AGENTS.md).",
+      inputSchema: {
+        suggestion: z.string().describe("Suggestion id (sug_…)."),
+        action: z.enum(SUGGESTION_ACTIONS),
+        content: noteContent.optional().describe("accept: the note's text if you reword it. merge: the merged note's whole new text."),
+        note: z.string().optional().describe("merge: the id of the note to merge into."),
+        reason: z.string().max(500).optional().describe("Why, in a few words (shown on the Notes tab)."),
+      },
+    },
+    safe(async (a: { suggestion: string; action: SuggestionAction; content?: string; note?: string; reason?: string }) => {
+      const s = suggestion(a.suggestion)
+      const target = a.note ? note(a.note) : undefined
+      const r = notes.resolve(s.id, { action: a.action, content: a.content, noteId: target?.id, reason: a.reason }, editor)
+      const left = store.pendingSuggestionCount(s.projectId)
+      return ok({
+        [r.suggestion.status]: s.id,
+        ...(r.note ? { note: r.note.id } : {}),
+        ...budgetView(s.projectId),
+        pendingSuggestions: left,
+      })
     }),
   )
 
