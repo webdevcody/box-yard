@@ -1,5 +1,5 @@
 // Disk and cleanup display for the Boxes page and the cleanup toasts.
-import { cleanupSummary, formatBytes, LOW_DISK_RATIO } from "../../../shared/disk"
+import { cleanupSummary, diskLine, formatBytes, LOW_DISK_RATIO } from "../../../shared/disk"
 import type { BoxCleanup, BoxInfo } from "../../../shared/types"
 import { toast } from "./toast"
 
@@ -26,7 +26,7 @@ export function diskMeter(box: Pick<BoxInfo, "diskFreeBytes" | "diskTotalBytes" 
     used,
     usedRatio: Math.min(1, used / total),
     low: box.diskLow || free / total < LOW_DISK_RATIO,
-    label: `${formatBytes(free)} free of ${formatBytes(total)}`,
+    label: diskLine({ freeBytes: free, totalBytes: total }),
   }
 }
 

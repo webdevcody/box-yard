@@ -542,18 +542,8 @@ export function useSendCaptainMessage(projectId: string) {
 }
 
 export function useChatControl() {
-  const qc = useQueryClient()
   return {
     stop: () => api("/api/chat/stop", { method: "POST" }).catch(fail("Couldn't stop the Coordinator")),
-    reset: async () => {
-      try {
-        await api("/api/chat/reset", { method: "POST" })
-        qc.setQueryData(keys.chat, [])
-        qc.setQueryData(keys.chatStream, "")
-      } catch (err) {
-        fail("Couldn't reset the chat")(err as Error)
-      }
-    },
   }
 }
 

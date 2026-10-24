@@ -322,4 +322,12 @@ describe("orchestrator usage, compaction and the durable log", () => {
     const r = await start()
     await expect(call(r, "POST", "/api/orchestrator/compact")).rejects.toThrow(/nothing to compact/)
   })
+
+  it("has no way to clear the conversation: compacting is the only way to shrink it", async () => {
+    const r = await start()
+    await say(r, "status")
+    const before = await chat(r)
+    expect((await fetch(`${r.base}/api/chat/reset`, { method: "POST" })).status).toBe(404)
+    expect(await chat(r)).toEqual(before)
+  })
 })

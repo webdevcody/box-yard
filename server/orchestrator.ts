@@ -202,16 +202,6 @@ export class Orchestrator {
     this.child?.kill("SIGTERM")
   }
 
-  reset() {
-    this.cancel()
-    this.store.setKv(SESSION_KEY, null)
-    this.store.setKv(STARTED_KEY, null)
-    this.store.setKv(USAGE_KEY, null)
-    this.compactWanted = null
-    this.store.clearChat()
-    this.publishState()
-  }
-
   // ------------------------------------------------------------------ context usage and compaction
 
   usage(): ContextUsage {
