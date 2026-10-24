@@ -50,6 +50,11 @@ export interface CredentialTest {
   ms: number
 }
 
+/** GET /api/setup/repos: the GitHub token's most recently pushed repos ("owner/name"), for Zen's first prompts. */
+export interface RecentRepos {
+  repos: string[]
+}
+
 /** What the setup card and Settings › Credentials say about each credential. */
 export const CREDENTIAL_INFO: Record<
   CredentialKey,

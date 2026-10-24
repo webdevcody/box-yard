@@ -571,6 +571,10 @@ export function createBoxYard(
     applyPoolChange()
     res.json(status)
   })
+  /** Repo names (never the token) for the first prompts Zen suggests. */
+  api.get("/setup/repos", async (_req, res) => {
+    res.json(await setup.recentRepos())
+  })
   /** A cheap live check: the value in the body when there is one (not saved), else the one in effect. */
   api.post("/setup/test/:key", async (req, res) => {
     const key = String(req.params.key)

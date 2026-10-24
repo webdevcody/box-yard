@@ -283,6 +283,53 @@ describe("POST /api/setup/test/:key", () => {
   })
 })
 
+describe("GET /api/setup/repos", () => {
+  /** GitHub's /user/repos, newest push first, answering only to `token`. */
+  const github = (token: string, seen: string[] = []) =>
+    (async (url: string, init?: RequestInit) => {
+      seen.push(String(url))
+      if (new Headers(init?.headers).get("authorization") !== `Bearer ${token}`) return new Response('{"message":"Bad credentials"}', { status: 401 })
+      return new Response(
+        JSON.stringify([
+          { full_name: "cody/box-yard", archived: false },
+          { full_name: "cody/old-thing", archived: true },
+          { full_name: "acme/site", archived: false },
+          { full_name: "cody/dotfiles", archived: false },
+          { full_name: "cody/fourth", archived: false },
+        ]),
+      )
+    }) as typeof globalThis.fetch
+
+  it("lists the token's most recently pushed repos (3, archived skipped), and never the token", async () => {
+    const seen: string[] = []
+    const { call, json } = await boot(firstRun({ port: await freePort() }), { github: { fetch: github(GH, seen), token: () => null } })
+    expect((await json("GET", "/api/setup/repos")).body).toEqual({ repos: [] })
+    expect(seen).toEqual([])
+    await call("PUT", "/api/setup/credentials", { githubToken: GH })
+    const res = await call("GET", "/api/setup/repos")
+    const text = await res.text()
+    expect(JSON.parse(text)).toEqual({ repos: ["cody/box-yard", "acme/site", "cody/dotfiles"] })
+    expect(text).not.toContain(GH)
+    expect(seen).toEqual(["https://api.github.com/user/repos?sort=pushed&direction=desc&per_page=20"])
+  })
+
+  it("is empty, not an error, when GitHub refuses or can't be reached, and in mock mode", async () => {
+    const { json } = await boot(firstRun({ port: await freePort(), githubToken: ENV_GH }), { github: { fetch: github(GH), token: () => null } })
+    expect(await json("GET", "/api/setup/repos")).toEqual({ status: 200, body: { repos: [] } })
+    yard!.stop()
+    await new Promise((res) => server!.close(() => res(null)))
+    const offline = (async () => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } }))) as typeof globalThis.fetch
+    const second = await boot(firstRun({ port: await freePort(), githubToken: ENV_GH }), { github: { fetch: offline, token: () => null } })
+    expect(await second.json("GET", "/api/setup/repos")).toEqual({ status: 200, body: { repos: [] } })
+    yard!.stop()
+    await new Promise((res) => server!.close(() => res(null)))
+    const seen: string[] = []
+    const mock = await boot(testConfig({ port: await freePort(), githubToken: GH }), { github: { fetch: github(GH, seen), token: () => null } })
+    expect((await mock.json("GET", "/api/setup/repos")).body).toEqual({ repos: [] })
+    expect(seen).toEqual([])
+  })
+})
+
 describe("box provider", () => {
   it("new boxes move to Upstash once a key is saved, with no restart; each box stays with the provider that made it", async () => {
     const c = firstRun({ port: await freePort() })

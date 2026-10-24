@@ -11,7 +11,7 @@ import { BadRequestError } from "./store.js"
 import { credentialValue, redact, type CredentialStore } from "./credentials.js"
 import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
-import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type SetupStatus } from "../shared/setup.js"
+import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
@@ -66,6 +66,28 @@ export class Setup {
       github: { state: creds.githubToken.state },
       owner: { name: info.settings.ownerName, source: info.sources.ownerName },
       restart,
+    }
+  }
+
+  /**
+   * The repos the GitHub token in effect pushed to most recently, newest first, for the prompts Zen suggests once
+   * setup is done. Empty without a token, in mock mode, or when GitHub can't be asked: the prompts then keep their
+   * <owner/repo> placeholder, so nothing here is worth an error.
+   */
+  async recentRepos(limit = 3): Promise<RecentRepos> {
+    const token = this.d.credentials.get("githubToken")
+    if (isMockRun(this.d.c) || !token) return { repos: [] }
+    try {
+      const res = await this.request(this.d.githubFetch, "https://api.github.com/user/repos?sort=pushed&direction=desc&per_page=20", { headers: githubHeaders(token) }, "GitHub")
+      if (!res.ok) return { repos: [] }
+      const list = (await res.json()) as unknown
+      if (!Array.isArray(list)) return { repos: [] }
+      const repos = list
+        .filter((r) => typeof r?.full_name === "string" && !r.archived && !r.disabled)
+        .map((r) => r.full_name as string)
+      return { repos: repos.slice(0, limit) }
+    } catch {
+      return { repos: [] }
     }
   }
 
@@ -136,7 +158,7 @@ export class Setup {
     const res = await this.request(
       this.d.githubFetch,
       "https://api.github.com/user",
-      { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "box-yard", "X-GitHub-Api-Version": "2022-11-28" } },
+      { headers: githubHeaders(token) },
       "GitHub",
     )
     const body = await res.text().catch(() => "")
@@ -168,6 +190,8 @@ export class Setup {
     return "Works: Claude answered using this token."
   }
 }
+
+const githubHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "box-yard", "X-GitHub-Api-Version": "2022-11-28" })
 
 const causeOf = (err: unknown) => {
   const cause = (err as { cause?: { code?: string; message?: string } })?.cause
