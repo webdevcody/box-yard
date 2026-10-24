@@ -53,6 +53,29 @@ export function staleTmpScript(root: string, sharedTmp: boolean): string {
   ].join("\n")
 }
 
+/** The box's dependency cache (box-runner.mjs depsSave), under the provider root: on the work disk, beside tasks/. */
+export const DEPS_DIR = ".boxyard/deps"
+
+/** The npm cache dir an agent shell may name, when it's set (it is for agents, maybe not for this exec). */
+const NPM_CACHE_ENV = '${NPM_CONFIG_CACHE:+"$NPM_CONFIG_CACHE/_cacache" "$NPM_CONFIG_CACHE/_npx"}'
+
+/**
+ * Removes dependency cache entries (box-runner.mjs depsSave) no task links any more: their sentinel file has one
+ * link. `all` (Clear box, after every workspace left) removes the whole store. Prints one line per entry removed.
+ */
+export function depsPruneScript(root: string, all: boolean): string {
+  const store = q(`${root}/${DEPS_DIR}`)
+  if (all) return `[ -d ${store} ] && for e in ${store}/*/*/; do [ -d "$e" ] && rm -rf "$e" && echo "$e"; done; rm -rf ${store}; true`
+  return [
+    `for e in ${store}/*/*/; do`,
+    `  [ -f "$e/meta.json" ] || continue`,
+    `  s=$(sed -n 's/.*"sentinel":"\\([^"]*\\)".*/\\1/p' "$e/meta.json")`,
+    `  [ -n "$s" ] && [ "$(stat -c %h "$e/node_modules/$s" 2>/dev/null)" = 1 ] || continue`,
+    `  rm -rf "$e" && echo "$e"`,
+    `done; true`,
+  ].join("\n")
+}
+
 /** What the pushed check prints first; "yes" or "no <why>" follows. */
 const PUSHED_MARK = "boxyard-pushed="
 /** pushedCheck's verdict from its output: "yes", or why not. */
@@ -478,9 +501,13 @@ export class BoxJanitor {
           "find /tmp -xdev -mindepth 1 -type d -empty -mmin +60 -delete 2>/dev/null",
         ]
         // An npm install mid-turn would trip over its cache vanishing, so package caches wait for idle boxes.
-        if (!agents) parts.unshift(`rm -rf "$HOME/.npm/_cacache" "$HOME/.npm/_npx" "$HOME/.cache/pip" "$HOME/.cache/yarn" "$HOME/.yarn/berry/cache" "$HOME/.cache/pnpm" "$HOME/.local/share/pnpm/store" 2>/dev/null`)
+        // Agent shells on Upstash have NPM_CONFIG_CACHE=/tmp/.npm-cache, and there's no ~/.npm: clear both.
+        if (!agents) parts.unshift(`rm -rf "$HOME/.npm/_cacache" "$HOME/.npm/_npx" /tmp/.npm-cache/_cacache /tmp/.npm-cache/_npx ${NPM_CACHE_ENV} "$HOME/.cache/pip" "$HOME/.cache/yarn" "$HOME/.yarn/berry/cache" "$HOME/.cache/pnpm" "$HOME/.local/share/pnpm/store" 2>/dev/null`)
+        // The dependency cache lives on the work disk, so the quiet root-disk sweep leaves it alone.
+        const deps = !agents && opts.reason !== "routine" ? (await exec(depsPruneScript(root, Boolean(opts.clear)))).split("\n").filter(Boolean) : []
         await exec(`${parts.join("; ")}; true`)
         entry.removed.push(...(agents ? ["old /tmp files (package caches kept: agents are running)"] : ["npm, pip, yarn and pnpm caches", "old /tmp files"]))
+        if (deps.length) entry.removed.push(`${deps.length} unused dependency cache ${deps.length === 1 ? "entry" : "entries"}`)
         return null
       }
 
