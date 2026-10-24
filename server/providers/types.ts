@@ -38,6 +38,12 @@ export interface BoxProvider {
   wake(boxId: string): Promise<void>
   exec(boxId: string, command: string): Promise<ExecResult>
   /**
+   * Run a command and hand its output to `onOutput` as it arrives, without buffering it all (archives stream off
+   * the box this way, so they need no scratch space there). On Upstash stdout and stderr arrive merged, so send
+   * stderr elsewhere. Resolves with the exit code; rejects if the connection fails.
+   */
+  execStream(boxId: string, command: string, onOutput: (chunk: string) => void): Promise<{ exitCode: number }>
+  /**
    * Run a long command and keep the box busy while it runs. Resolves when the
    * command ends or the connection drops; never rejects.
    */

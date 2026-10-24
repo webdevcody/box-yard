@@ -13,7 +13,7 @@ import {
 } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
-import { AppLink, Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -180,9 +180,12 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
     }
     case "assistant":
       return (
-        <div className="flex min-w-0 gap-2">
-          <Bot className="mt-1 h-4 w-4 shrink-0 text-zinc-500" />
-          <div className="min-w-0 text-sm text-zinc-200">
+        // The reply's first block drops its top margin (pt-1.5 keeps the gap) and the row sets one leading,
+        // so the icon's one-line box sits on the first line. A reply opening with a code block: the box
+        // skips the block's p-3 and is one 16px code line tall.
+        <div className="group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed">
+          <LineIcon icon={Bot} className="h-4 w-4 text-zinc-500" box="group-has-[>div>.prose-chat>pre:first-child]:mt-3 group-has-[>div>.prose-chat>pre:first-child]:h-4" />
+          <div className="min-w-0 text-zinc-200 [&>.prose-chat>:first-child]:mt-0!">
             <Markdown>{m.content}</Markdown>
             <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
           </div>
@@ -197,11 +200,11 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       )
     case "agent":
       return (
-        <div className="flex gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200">
-          <Users className="mt-0.5 h-4 w-4 shrink-0 text-violet-400" />
+        <div className="flex items-start gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200">
+          <LineIcon icon={Users} className="h-4 w-4 text-violet-400" />
           <div className="min-w-0">
             {typeof m.meta?.from === "string" && (
-              <Link href={`/tasks/${m.meta.from}`} className="mb-0.5 block text-[11px] font-semibold text-violet-400 hover:underline">
+              <Link href={`/tasks/${m.meta.from}`} className="mb-0.5 block text-[11px] leading-5 font-semibold text-violet-400 hover:underline">
                 From {String(m.meta.fromTitle ?? m.meta.from)}
               </Link>
             )}
@@ -213,8 +216,8 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       const url = typeof m.meta?.url === "string" ? m.meta.url : null
       if (m.meta?.kind === "hook")
         return (
-          <div className={cx("flex items-start gap-1.5 pl-1 text-xs", m.meta.status === "fired" ? "text-teal-300/90" : "text-amber-200/80")} data-testid="hook-event">
-            <Webhook className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div className={cx("flex items-start gap-1.5 pl-1 text-xs leading-relaxed", m.meta.status === "fired" ? "text-teal-300/90" : "text-amber-200/80")} data-testid="hook-event">
+            <LineIcon icon={Webhook} className="h-3.5 w-3.5" />
             <div className="min-w-0 wrap-anywhere [&_p]:inline">
               <Markdown>{m.content}</Markdown>
               {time}

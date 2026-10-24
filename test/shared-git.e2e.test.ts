@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import type { Server } from "node:http"
+import crypto from "node:crypto"
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
@@ -279,6 +280,40 @@ describe("shared git objects", () => {
     expect(git(restored, "status", "--porcelain").split("\n").map((l) => l.trim()).sort()).toEqual(["?? box-yard-demo.md", "M README.md"])
     expect(git(restored, "show", "HEAD~2:big.bin")).toContain("first version")
     expect(fs.existsSync(path.join(path.dirname(restored), "git-keep.pack"))).toBe(false)
+  })
+
+  it("keeps the borrowed objects in a too-big archive too (git history only, uncommitted work on refs/boxyard/wip)", async () => {
+    const o = origin()
+    const r = await start({ archiveMaxMb: 1 })
+    const p = await repoProject(r, "alpha", o.url)
+    const feature = o.pushBranch("feature")
+    const t = await startTask(r, p.id, "too big")
+    const work = workOf(r, t)
+    const mirror = mirrorOf(r, t.boxId!)
+    git(work, "branch", "keep-feature", "origin/feature")
+    o.deleteBranch("feature", true)
+    fetchMirror(mirror)
+    fs.writeFileSync(path.join(work, "notes.md"), "uncommitted\n")
+    // Incompressible and git-ignored: the whole archive goes over the cap, the WIP snapshot leaves it out.
+    fs.appendFileSync(path.join(work, ".git", "info", "exclude"), "noise.bin\n")
+    fs.writeFileSync(path.join(work, "noise.bin"), crypto.randomBytes(2_000_000))
+
+    await r.yard.tasks.archive(t.id)
+    const archive = r.yard.store.getTaskRow(t.id)!.archive_path!
+    const listing = execFileSync("tar", ["tzf", archive]).toString().split("\n")
+    expect(listing).toContain(`${t.id}/git-keep.pack`)
+    expect(listing).not.toContain(`${t.id}/work/noise.bin`)
+    expect(events(r, t.id).some((e) => e.includes("uncommitted work is on refs/boxyard/wip"))).toBe(true)
+
+    r.yard.store.updateTask(t.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+    fs.rmSync(path.dirname(work), { recursive: true, force: true })
+    fs.rmSync(mirror, { recursive: true, force: true })
+    await send(r, t.id, "continue")
+    const back = await archivedDone(r, t.id, 2)
+    const restored = workOf(r, back)
+    expect(git(restored, "cat-file", "-t", feature)).toBe("commit")
+    expect(git(restored, "show", "refs/boxyard/wip:notes.md")).toBe("uncommitted")
+    expect(git(restored, "rev-parse", "--abbrev-ref", "HEAD")).toBe(t.branch)
   })
 
   it("refuses a restore whose shared objects can't be rebuilt, and restores once the repo is reachable again", async () => {

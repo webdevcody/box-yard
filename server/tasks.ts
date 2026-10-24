@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
@@ -8,6 +8,7 @@ import type { Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
+import { archiveOutcome, archiveScript, ArchiveDecoder, type ArchiveOutcome } from "./archive.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
 import type { Redis } from "./redis.js"
 import type { Artifacts } from "./artifacts.js"
@@ -35,7 +36,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
-import { GIT_MARK, MIRROR_MARK, KEEP_PACK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
+import { GIT_MARK, MIRROR_MARK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
   compareSizes,
@@ -58,6 +59,14 @@ function busyMessage(boxId: string, op: BoxOperation) {
   const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing" }[op]
   return `Box ${boxId} is busy: ${what} is in progress.`
 }
+
+/** "Couldn't archive task_a" / "Couldn't archive 3 workspaces (task_a, task_b, task_c)". */
+function couldntArchive(taskIds: string[]) {
+  return taskIds.length === 1 ? `Couldn't archive ${taskIds[0]}` : `Couldn't archive ${taskIds.length} workspaces (${taskIds.join(", ")})`
+}
+
+/** How a resize error names its failed step. */
+const RESIZE_STEP_NAMES: Record<ResizeStep["key"], string> = { stop: "stop agents", resize: "resize", create: "create", archive: "archive", move: "move", delete: "destroy" }
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -209,6 +218,8 @@ export class TaskManager {
   private lastBoxError: { at: number; message: string } | null = null
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
+  /** Each task's last archive error, until an archive succeeds. */
+  private archiveErrors = new Map<string, string>()
   private lastRetentionAt = 0
   /** Routine upkeep: each resting task's last_active_at when its build output was last cleaned. */
   private buildsCleaned = new Map<string, number>()
@@ -217,6 +228,9 @@ export class TaskManager {
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
   private lastBoxProbeAt = new Map<string, number>()
+  /** Last delete attempt of a box stuck in "deleting". */
+  private lastReclaimAt = new Map<string, number>()
+  private lastOrphanSweepAt = Date.now()
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
@@ -266,12 +280,18 @@ export class TaskManager {
       taskDir: (boxId, taskId) => this.taskDir(boxId, taskId),
       installRunner: async (boxId) => {
         const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
-        await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
+        const source = this.runnerSource()
+        // Only when it changed: a full disk can't take the write, and cleanup has to work then.
+        const sum = createHash("sha256").update(source).digest("hex")
+        const current = await this.provider.exec(boxId, `sha256sum ${q(runnerPath)} 2>/dev/null | cut -c1-64`).catch(() => null)
+        if (current?.stdout.trim() !== sum) await this.provider.writeFile(boxId, runnerPath, source)
         return runnerPath
       },
       hasFreshArchive: (row) => this.hasFreshArchive(row),
       archive: (taskId) => this.archiveFresh(taskId),
+      archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, withOwner(note, this.owner())),
+      dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
@@ -314,6 +334,9 @@ export class TaskManager {
       const r = this.resizeReport(box.id)
       if (r?.status !== "running") continue
       this.finishResize(r, "failed", "Box Yard restarted during the resize; nothing was moved. Try again.")
+      // The box it was making holds no work yet: delete it rather than leave it empty.
+      const made = r.newBoxId ? this.store.getBox(r.newBoxId) : null
+      if (made && !this.store.listTaskRows({ boxId: made.id }).length) void this.dropBox(made.id).then((note) => this.noteResizeCleanup(r, note))
     }
     for (const row of this.store.listTaskRows({ status: ["starting"] })) {
       // We died while launching. Inputs are only deleted after a launch
@@ -339,8 +362,10 @@ export class TaskManager {
     if (!this.provider.listIds) return
     try {
       const label = this.installLabel()
-      const known = new Set(this.store.listBoxes().map((b) => b.id))
       const ids = await this.provider.listIds(label)
+      // A box being created is at the provider before it's in the database.
+      if (this.creatingBoxes) return
+      const known = new Set(this.store.listBoxes().map((b) => b.id))
       for (const id of ids) {
         if (!known.has(id)) {
           console.log(`[box-yard] deleting orphan box ${id}`)
@@ -578,6 +603,7 @@ export class TaskManager {
       fs.rmSync(row.archive_path, { force: true })
       this.store.noteTaskArchiveUnavailable(row.id, row.archive_path, "archive deleted with task")
     }
+    this.archiveErrors.delete(row.id)
     if (this.redis) await this.redis.cmd("DEL", redisEventsKey(row.id)).catch(() => {})
     this.store.deleteTask(row.id)
     this.hub.broadcast({ type: "task.deleted", taskId: row.id })
@@ -642,7 +668,8 @@ export class TaskManager {
     const rates = this.settings.get().costRates
     const floor = this.diskNeed(null)
     const now = Date.now()
-    return this.store.listBoxes().map((b) => {
+    // Boxes still being deleted show too: they exist (and bill) until the provider confirms.
+    return [...this.store.listBoxes(), ...this.store.listDeletingBoxes()].map((b) => {
       const residents = this.store.listTaskRows({ boxId: b.id })
       const size = normalizeBoxSize(b.size)
       const uptimeMs = Math.max(0, now - b.created_at)
@@ -765,10 +792,7 @@ export class TaskManager {
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
         }
-        if (kept.length) {
-          const why = this.c.archiveWorkspaces ? "" : " Workspace archiving is off (BOXYARD_ARCHIVE=0)."
-          throw new ConflictError(`Couldn't archive ${kept.join(", ")}, so ${boxId} was not deleted.${why}`)
-        }
+        if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so ${boxId} was not deleted: ${this.archiveProblems(kept)}`)
       } catch (err) {
         this.boxOps.delete(boxId)
         this.emitBoxes()
@@ -950,7 +974,8 @@ export class TaskManager {
       else await this.resizeByMigration(r)
       this.finishResize(r, "done")
     } catch (err) {
-      this.finishResize(r, "failed", errorMessage(err))
+      const step = r.steps.find((s) => s.status === "failed")
+      this.finishResize(r, "failed", step ? `${RESIZE_STEP_NAMES[step.key]} step failed: ${errorMessage(err)}` : errorMessage(err))
     }
   }
 
@@ -976,8 +1001,17 @@ export class TaskManager {
     let created: string | null = null
     try {
       await this.resizeStep(r, "create", async () => {
-        const id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
-        this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+        // Counted like a pool box being created, so the orphan sweep leaves it alone until it's in the database.
+        this.creatingBoxes++
+        let id: string
+        try {
+          id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
+          this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+        } catch (err) {
+          throw new Error(`Couldn't create a ${r.to} box: ${errorMessage(err)}`)
+        } finally {
+          this.creatingBoxes--
+        }
         created = id
         // Nothing lands on it until the move is done.
         this.boxOps.set(id, "resize")
@@ -994,14 +1028,12 @@ export class TaskManager {
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === r.boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
         }
-        if (kept.length) {
-          const why = this.c.archiveWorkspaces ? "" : " Workspace archiving is off (BOXYARD_ARCHIVE=0)."
-          throw new ConflictError(`Couldn't archive ${kept.join(", ")}, so nothing moved and ${r.boxId} keeps its work.${why}`)
-        }
+        if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so nothing moved and ${r.boxId} keeps its work: ${this.archiveProblems(kept)}`)
         return rows.length ? `${rows.length} ${rows.length === 1 ? "workspace" : "workspaces"} archived` : "no workspaces on the box"
       })
     } catch (err) {
-      if (created) await this.dropBox(created)
+      // Nothing moved to it, so it must not sit there empty (and billed).
+      if (created) r.cleanup = await this.dropBox(created)
       throw err
     }
     const to = r.newBoxId!
@@ -1031,14 +1063,63 @@ export class TaskManager {
     })
   }
 
-  /** Remove a box Box Yard made but never used (a failed migration). */
-  private async dropBox(boxId: string) {
+  /**
+   * Delete a box Box Yard made but never used (a failed migration). Its row stays, as "deleting", until the provider
+   * confirms, so a failed delete is retried (maintain) instead of leaving a box nobody sees. Says what happened.
+   */
+  private async dropBox(boxId: string): Promise<string> {
+    const box = this.store.getBox(boxId)
     this.boxOps.delete(boxId)
     this.resizes.delete(boxId)
     this.store.setKv(boxOwnerKey(boxId), null)
-    this.store.removeBox(boxId)
-    await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
+    if (!box) return `The new box ${boxId} is already gone.`
+    this.store.setBoxStatus(boxId, "deleting")
     this.emitBoxes()
+    try {
+      await this.provider.destroy(boxId)
+      this.store.removeBox(boxId)
+      console.log(`[box-yard] deleted unused box ${boxId}`)
+      return `Deleted the new ${normalizeBoxSize(box.size)} box ${boxId}.`
+    } catch (err) {
+      console.warn(`[box-yard] destroy ${boxId}: ${errorMessage(err)}`)
+      return `Couldn't delete the new box ${boxId} yet (${errorMessage(err)}); Box Yard keeps trying.`
+    } finally {
+      this.emitBoxes()
+    }
+  }
+
+  /**
+   * Boxes that must not linger: ones whose delete failed (status "deleting"), and empty boxes a failed resize made
+   * that are still here (a restart mid-resize, or a failure from before failed resizes cleaned up after themselves).
+   */
+  private async reclaimUnusedBoxes(now: number) {
+    for (const box of [...this.store.listDeletingBoxes(), ...this.store.listBoxes()]) {
+      if (this.boxOps.has(box.id) || this.store.listTaskRows({ boxId: box.id }).length) continue
+      if (box.status === "deleting") {
+        if (now - (this.lastReclaimAt.get(box.id) ?? 0) < 5 * 60_000) continue
+        this.lastReclaimAt.set(box.id, now)
+        const made = this.resizeReport(box.id)
+        const note = await this.dropBox(box.id)
+        if (made?.newBoxId === box.id && made.boxId !== box.id) this.noteResizeCleanup(made, note)
+        continue
+      }
+      const r = this.resizeReport(box.id)
+      if (box.status !== "ready" || r?.status !== "failed" || r.newBoxId !== box.id || r.boxId === box.id) continue
+      // Used since (it took tasks once the resize gave up): it's a pool box like any other now.
+      if (box.last_used_at > (r.finishedAt ?? r.startedAt) + 60_000) continue
+      const note = await this.dropBox(box.id)
+      console.log(`[box-yard] reclaimed ${box.id}, left empty by the failed resize of ${r.boxId}: ${note}`)
+      this.noteResizeCleanup(r, note)
+    }
+  }
+
+  /** Add what happened to a failed resize's new box to its report, on the box that was being resized. */
+  private noteResizeCleanup(r: BoxResize, note: string) {
+    const current = this.resizeReport(r.boxId)
+    if (current?.id !== r.id) return
+    const updated = { ...current, cleanup: note }
+    this.store.setKv(resizeKey(r.boxId), JSON.stringify(updated))
+    this.hub.broadcast({ type: "box.resize", resize: updated })
   }
 
   private async resizeStep(r: BoxResize, key: ResizeStep["key"], fn: () => Promise<string | null>) {
@@ -1093,7 +1174,7 @@ export class TaskManager {
     const content =
       r.status === "done"
         ? `📦 ${who} resized box ${r.boxId} ${r.from} → ${r.to}: ${resizeSummary(r)}.${why}`
-        : `⚠️ ${who} couldn't resize box ${r.boxId} ${r.from} → ${r.to}: ${r.error ?? "unknown error"}.${why}`
+        : `⚠️ ${who} couldn't resize box ${r.boxId} ${r.from} → ${r.to}: ${resizeSummary(r)}${/[.!?]$/.test(resizeSummary(r)) ? "" : "."}${why}`
     this.notice(content, { boxId, resizeId: r.id, projectIds, ...(captainProject ? { captainProjectId: captainProject } : {}) })
     const names = projectIds.map((id) => this.store.getProject(id)!.name)
     this.store.addBoxNotification({
@@ -1431,6 +1512,26 @@ export class TaskManager {
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] }, { touch: false })
     await this.removeTaskDir(boxId, taskId)
     this.addEvent(taskId, note)
+    this.emitTask(taskId)
+  }
+
+  /**
+   * Emergency cleanup: remove a done task's folder without an archive because its PR is merged and nothing in it is
+   * unpushed (the janitor checked), so GitHub has all of it. An older archive is let go too: the next message starts
+   * from a recap of the task instead of an out-of-date session.
+   */
+  private async dropPushed(taskId: string, boxId: string) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [], archivePath: null, lastArchivedAt: null }, { touch: false })
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; workspace removed after its PR merged")
+    await this.removeTaskDir(boxId, taskId)
+    const pr = prNumber(row.pr_url)
+    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    this.addEvent(
+      taskId,
+      `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+    )
     this.emitTask(taskId)
   }
 
@@ -2415,58 +2516,91 @@ export class TaskManager {
     if (row && !this.hasFreshArchive(row)) await this.archive(taskId)
   }
 
-  /** Copy the task folder (repo, Claude session, event log) to the orchestrator's disk. */
+  /**
+   * Copy the task folder (repo, Claude session, event log) to the orchestrator's disk. It streams off the box
+   * (server/archive.ts), so it works on a box whose work disk is full. A failure is kept for `archiveProblem`.
+   */
   async archive(taskId: string) {
     if (!this.c.archiveWorkspaces || this.archiving.has(taskId)) return
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id) return
     this.archiving.add(taskId)
     const boxId = row.box_id
-    const tmp = `/tmp/boxyard-archive-${taskId}.tgz`
+    const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
+    const part = `${file}.part`
     try {
-      const root = `${this.provider.root(boxId)}/tasks`
-      const excludes = [
-        ...ARCHIVE_EXCLUDED_DIRS,
-        `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`,
-      ]
-        .map((e) => `--exclude=${q(e)}`)
-        .join(" ")
-      const max = this.c.archiveMaxMb * 1024 * 1024
-      // A clone that borrows the mirror's objects: pack the borrowed ones GitHub may not have, so the archive
-      // restores anywhere (server/gitShare.ts).
-      const keep = await this.provider.exec(boxId, keepPackScript(`${root}/${taskId}`, taskId))
+      // A clone that borrows the mirror's objects: stage the borrowed ones GitHub may not have on /tmp, so the
+      // archive restores anywhere (server/gitShare.ts). Nothing is written to the work disk.
+      const keep = await this.provider.exec(boxId, keepPackScript(this.taskDir(boxId, taskId), taskId))
       if (keep.exitCode !== 0) console.warn(`[box-yard] keep pack for ${taskId} failed: ${keep.stderr.slice(-300)}`)
-      const stage = keepPackStage(taskId)
-      const keepPack = `$( [ -f ${q(`${stage}/${taskId}/${KEEP_PACK}`)} ] && echo -C ${q(stage)} ${q(`${taskId}/${KEEP_PACK}`)})`
-      let res = await this.provider.exec(boxId, `cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId)} ${keepPack} 2>/dev/null; wc -c < ${tmp}`)
-      let size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
-      let partial = false
-      if (!Number.isFinite(size)) throw new Error(`tar failed: ${res.stderr.slice(-300)}`)
-      if (size > max) {
-        // Too big: keep the Claude session, the log and git history (with any
-        // uncommitted work stashed into a WIP commit on a side ref).
-        partial = true
-        res = await this.provider.exec(
-          boxId,
-          `cd ${q(root + "/" + taskId + "/work")} 2>/dev/null && [ -d .git ] && (git add -A && git -c user.name=box-yard -c user.email=box-yard@local commit -qm "box-yard: wip snapshot" --no-verify && git update-ref refs/boxyard/wip HEAD && git reset -q HEAD~1) >/dev/null 2>&1; cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId + "/claude")} ${q(taskId + "/events.jsonl")} $( [ -d ${q(taskId + "/work/.git")} ] && echo ${q(taskId + "/work/.git")}) ${keepPack} 2>/dev/null; wc -c < ${tmp}`,
-        )
-        size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
-        if (!Number.isFinite(size) || size > max) throw new Error(`workspace is too large to archive (${Math.round(size / 1e6)} MB)`)
-      }
-      const data = await this.provider.readFile(boxId, tmp)
-      const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
-      fs.writeFileSync(`${file}.tmp`, data)
-      fs.renameSync(`${file}.tmp`, file)
+      let res = await this.streamArchive(boxId, taskId, part, false)
+      // Too big: keep the Claude session, the log and git history, with any uncommitted work as a WIP commit on a side ref.
+      const partial = !res.ok && res.tooBig
+      if (partial) res = await this.streamArchive(boxId, taskId, part, true)
+      if (!res.ok && res.tooBig)
+        throw new Error(`workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`)
+      if (!res.ok) throw new Error(res.error)
+      fs.renameSync(part, file)
+      this.archiveErrors.delete(taskId)
       if (this.store.getTaskRow(taskId)) {
         this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: Date.now() })
-        if (partial) this.addEvent(taskId, "Workspace was too big to archive whole; saved the Claude session and git history (uncommitted work is on refs/boxyard/wip).")
+        if (partial) {
+          const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work is on refs/boxyard/wip"
+          this.addEvent(taskId, `Workspace was too big to archive whole; saved the Claude session and git history (${wip}).`)
+        }
       }
     } catch (err) {
+      this.archiveErrors.set(taskId, errorMessage(err))
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
-      await this.provider.exec(boxId, `rm -rf ${tmp} ${q(keepPackStage(taskId))}`).catch(() => {})
+      fs.rmSync(part, { force: true })
+      await this.provider.exec(boxId, `rm -rf ${q(keepPackStage(taskId))}`).catch(() => {})
       this.archiving.delete(taskId)
     }
+  }
+
+  /** Stream one archive of a task folder into `dest` on this machine. */
+  private async streamArchive(boxId: string, taskId: string, dest: string, partial: boolean): Promise<ArchiveOutcome> {
+    const maxBytes = this.c.archiveMaxMb * 1024 * 1024
+    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
+    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, keepStage: keepPackStage(taskId) })
+    const fd = fs.openSync(dest, "w")
+    let writeError: unknown = null
+    try {
+      const decoder = new ArchiveDecoder((data) => {
+        if (writeError || decoder.bytes > maxBytes) return
+        try {
+          fs.writeSync(fd, data)
+        } catch (err) {
+          writeError = err
+        }
+      })
+      const { exitCode } = await this.provider.execStream(boxId, script, (chunk) => decoder.push(chunk))
+      decoder.end()
+      if (writeError) throw new Error(`saving the archive on the Box Yard server failed: ${errorMessage(writeError)}`)
+      return archiveOutcome(decoder, { maxBytes, partial, exitCode })
+    } finally {
+      fs.closeSync(fd)
+    }
+  }
+
+  /** "archive task_a: …; archive task_b: …" */
+  private archiveProblems(taskIds: string[]) {
+    return taskIds.map((id) => this.archiveProblem(id)).join("; ")
+  }
+
+  /**
+   * Why a task has no fresh archive, as "archive task_x: <reason>": its last attempt's error, archiving being off,
+   * or a running agent. For the messages of operations that need every workspace archived.
+   */
+  archiveProblem(taskId: string): string {
+    const row = this.store.getTaskRow(taskId)
+    const why = !this.c.archiveWorkspaces
+      ? "workspace archiving is off (BOXYARD_ARCHIVE=0)"
+      : row?.current_turn_id
+      ? "its agent is running"
+      : this.archiveErrors.get(taskId) ?? "no archive was made"
+    return `archive ${taskId}: ${why}`
   }
 
   private async removeTaskDir(boxId: string, taskId: string) {
@@ -2733,6 +2867,13 @@ export class TaskManager {
     if (now - this.lastRetentionAt > 5 * 60_000) {
       this.lastRetentionAt = now
       await this.maintainRestingStorage(now)
+    }
+    await this.reclaimUnusedBoxes(now)
+    // Boxes at the provider that Box Yard has no row for (a delete that failed before rows waited for it). Not while
+    // a box is being created: it's at the provider before it's in the database.
+    if (now - this.lastOrphanSweepAt > 60 * 60_000 && !this.creatingBoxes) {
+      this.lastOrphanSweepAt = now
+      await this.cleanupOrphanBoxes()
     }
     // Clean a box that is filling up before a task trips over it.
     const floor = this.diskNeed(null)

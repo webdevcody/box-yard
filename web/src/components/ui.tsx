@@ -30,6 +30,19 @@ export const STATUS: Record<TaskStatus, { label: string; dot: string; chip: stri
 export const MERGED_BADGE = { label: "Merged", dot: "bg-merged", chip: "bg-merged/15 text-merged-fg" }
 
 /** Pass `badgeStatus(task)` to show a purple Merged pill instead of Done when the task's PR merged. */
+/**
+ * A row's leading icon, centred on the first line of the text beside it however the text wraps. The box is one
+ * line tall (`h-lh`: the line-height it inherits), so use it in an `items-start` row that sets the text's font size
+ * and leading, and keep that leading on the text's first line.
+ */
+export function LineIcon({ icon: Icon, className, box, label }: { icon: LucideIcon; className?: string; box?: string; label?: string }) {
+  return (
+    <span className={cx("flex h-lh shrink-0 items-center", box)}>
+      <Icon className={className} aria-label={label} aria-hidden={label ? undefined : true} />
+    </span>
+  )
+}
+
 export function StatusBadge({ status }: { status: BadgeStatus }) {
   const s = status === "merged" ? MERGED_BADGE : STATUS[status]
   return (

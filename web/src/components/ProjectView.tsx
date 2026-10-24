@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, Webhook, X } from "lucide-react"
+import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, Webhook, X } from "lucide-react"
 import {
   newClientId,
   useAddNote,
   useAgentSettings,
   useArtifacts,
-  useBoxes,
   useCaptainState,
   useCreateTask,
   useDeleteProject,
@@ -34,7 +33,7 @@ import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, 
 import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
-import { BOX_SIZES, type Artifact, type BoxInfo, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
+import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -147,15 +146,7 @@ function repoUrl(repo: string) {
   return repo.includes("://") ? repo : `https://github.com/${repo}`
 }
 
-/** The boxes this project's tasks live on right now. */
-function projectBoxes(boxes: BoxInfo[], project: Project, tasks: Task[]) {
-  const ids = new Set(tasks.map((t) => t.id))
-  return boxes.filter((b) => b.residentTasks.some((t) => ids.has(t)) || b.projects.includes(project.name))
-}
-
 function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks: Task[]; onNewTask: () => void }) {
-  const boxes = useBoxes()
-  const onBoxes = projectBoxes(boxes.data ?? [], project, tasks)
   const count = (statuses: TaskStatus[]) => tasks.filter((t) => statuses.includes(t.status)).length
   const stats: { label: string; n: number; dot: string; filter: TaskFilter }[] = [
     { label: "working", n: count(["working", "starting", "waiting", "queued"]), dot: STATUS.working.dot, filter: "active" },
@@ -171,28 +162,12 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
         <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">{project.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
           {project.repo ? (
-            <>
-              <NewTabLink href={repoUrl(project.repo)} className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
-                <FolderGit2 className="h-4 w-4 shrink-0" /> <span className="truncate">{project.repo}</span>
-              </NewTabLink>
-              <span className="inline-flex items-center gap-1.5" title="Base branch">
-                <GitBranch className="h-4 w-4" /> {project.baseBranch}
-              </span>
-            </>
+            <NewTabLink href={repoUrl(project.repo)} className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
+              <FolderGit2 className="h-4 w-4 shrink-0" /> <span className="truncate">{project.repo}</span>
+            </NewTabLink>
           ) : (
             <span>No repo (non-coding project)</span>
           )}
-          <span className="inline-flex min-w-0 items-center gap-1.5" title={onBoxes.length ? `Lives on ${onBoxes.map((b) => b.id).join(", ")}` : "No box right now"}>
-            <Box className="h-4 w-4 shrink-0" />
-            {onBoxes.length ? (
-              <span className="truncate font-mono text-xs">
-                {onBoxes[0]!.id}
-                {onBoxes.length > 1 && <span className="font-sans text-zinc-600"> +{onBoxes.length - 1} more</span>}
-              </span>
-            ) : (
-              "no box yet"
-            )}
-          </span>
         </div>
         {project.description && <p className="mt-2 line-clamp-2 max-w-2xl text-sm text-zinc-400">{project.description}</p>}
         <div className="mt-3 flex flex-wrap gap-2">

@@ -1649,6 +1649,11 @@ export class Store {
     return this.db.prepare("SELECT * FROM boxes WHERE status != 'deleting' ORDER BY created_at ASC").all() as BoxRow[]
   }
 
+  /** Boxes whose provider delete hasn't gone through yet (left out of listBoxes: nothing may use them). */
+  listDeletingBoxes(): BoxRow[] {
+    return this.db.prepare("SELECT * FROM boxes WHERE status = 'deleting' ORDER BY created_at ASC").all() as BoxRow[]
+  }
+
   getBox(id: string): BoxRow | null {
     return (this.db.prepare("SELECT * FROM boxes WHERE id = ?").get(id) as BoxRow | undefined) ?? null
   }
