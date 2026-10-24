@@ -119,7 +119,7 @@ const KIND_ICON: Record<PaletteItem["kind"], typeof Search> = {
 const GROUP_ICON: Partial<Record<GroupKey, typeof Search>> = { waiting: Hand, working: Activity, recent: History }
 
 const SCOPE_PLACEHOLDER: Record<PaletteScope, string> = {
-  command: "Run a command or go to a page…",
+  command: "Commands and pages…",
   pr: "PR number or title…",
   file: "Search files…",
   project: "Search projects…",
@@ -248,10 +248,11 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
       label="Command palette"
       onClose={onClose}
       onKeyDown={onKeyDown}
-      className="sm:max-h-[70vh]"
+      // Important: the Modal's own sm:max-h would win otherwise, and long lists ran off the screen.
+      className="sm:max-h-[70vh]!"
       bodyClassName="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex min-h-14 items-center gap-2.5 border-b border-zinc-900 px-4">
+      <div className="flex min-h-14 shrink-0 items-center gap-2.5 border-b border-zinc-900 px-4">
         {scope === "command" ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
         {scope && (
           <button
@@ -283,10 +284,13 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
           className="min-w-0 flex-1 bg-transparent py-3.5 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:text-sm"
         />
         <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500 max-sm:hidden">esc</kbd>
+        <button type="button" onClick={onClose} aria-label="Close" className="-mr-2 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:text-zinc-200 sm:hidden">
+          <X className="h-5 w-5" />
+        </button>
       </div>
 
       {!scope && !text && (
-        <div data-testid="palette-prefixes" className="scroll-thin flex items-center gap-1.5 overflow-x-auto border-b border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
+        <div data-testid="palette-prefixes" className="scroll-thin flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
           <span className="shrink-0">Narrow to</span>
           {PREFIXES.map((p) => (
             <button
@@ -331,7 +335,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500 max-sm:hidden">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500 max-sm:hidden">
         <span>
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd> move
