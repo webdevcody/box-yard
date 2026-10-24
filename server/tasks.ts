@@ -4001,8 +4001,6 @@ export class TaskManager {
     const now = Date.now()
     this.meterBoxes(now)
     for (const box of this.store.listBoxes()) void this.refreshBoxUsage(box.id)
-    // Idle boxes too: one deleted in the provider's console has no turn to notice it.
-    await this.reconcileBoxes(RECONCILE_MS)
     const active = this.store.listTaskRows({ status: ["working", "starting"] })
     const checkedBoxes = new Map<string, Awaited<ReturnType<BoxProvider["health"]>>>()
     const health = async (boxId: string) => {
@@ -4048,6 +4046,10 @@ export class TaskManager {
       const fresh = this.store.getTaskRow(row.id)
       if (fresh?.current_turn_id === row.current_turn_id) this.interrupt(fresh, "the worker process stopped without finishing")
     }
+
+    // Idle boxes too: one deleted in the provider's console has no turn to notice it. After the stalled turns, so
+    // a box a running turn noticed first is recorded with that reason.
+    await this.reconcileBoxes(RECONCILE_MS)
 
     // Retire idle boxes when configured to.
     const idleDelete = this.limits().boxIdleDeleteMinutes
