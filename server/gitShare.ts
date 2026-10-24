@@ -152,7 +152,7 @@ export function relinkTaskScript(taskDir: string, mirror: string): string {
   return [
     `bya=${w}/.git/objects/info/alternates`,
     `if [ -f "$bya" ] && [ -d ${q(mirrorObjects(mirror))} ]; then echo ${q(mirrorObjects(mirror))} > "$bya"; fi`,
-    `if [ -f ${pack} ]; then git -C ${w} index-pack -q --stdin < ${pack} >/dev/null 2>&1; rm -f ${pack}; fi`,
+    `if [ -f ${pack} ]; then git -C ${w} index-pack --stdin < ${pack} >/dev/null 2>&1; rm -f ${pack}; fi`,
     // An unborn HEAD (no commits yet) is fine; a HEAD whose commit or tree can't be read is not.
     `byh=$(git -C ${w} rev-parse -q --verify HEAD 2>/dev/null)`,
     `if [ -n "$byh" ]; then git -C ${w} cat-file -e "$byh^{tree}" 2>/dev/null && echo ${GIT_MARK}ok || echo ${GIT_MARK}broken; fi`,
