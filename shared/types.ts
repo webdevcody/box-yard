@@ -368,6 +368,8 @@ export interface BudgetSettings {
 }
 
 export interface Settings {
+  /** What Box Yard calls its human in prompts and labels (default "Cody"). */
+  ownerName: string
   orchestratorModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */

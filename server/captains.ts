@@ -13,6 +13,7 @@ import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
 import { attachmentNote } from "./orchestrator.js"
+import { withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { captainSourceOf } from "../shared/captain.js"
 import {
@@ -47,8 +48,8 @@ const sessionKey = (projectId: string) => `captain_session:${projectId}`
 const startedKey = (projectId: string) => `captain_session_started:${projectId}`
 const usageKey = (projectId: string) => `captain_usage:${projectId}`
 
-function captainSummaryPrompt(project: Project) {
-  return SUMMARY_PROMPT.replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
+function captainSummaryPrompt(project: Project, ownerName?: string) {
+  return withOwner(SUMMARY_PROMPT, ownerName).replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
 }
 
 export interface CaptainSendOptions {
@@ -355,12 +356,16 @@ class Captain {
     }
   }
 
+  private owner(): string {
+    return this.settings.get().ownerName
+  }
+
   private unansweredUserMessages(): string[] {
     const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
     return this.store
       .listCaptainMessages(this.project.id, 200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => `[${SOURCE_LABEL[captainSourceOf(m)]}]\n${m.content}${attachmentNote(m.meta?.attachments)}`)
+      .map((m) => `[${withOwner(SOURCE_LABEL[captainSourceOf(m)], this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
   }
 
@@ -400,7 +405,10 @@ class Captain {
     const result = await this.runPrompt(
       [
         `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
-        `(Automatic wake-up: there is no new message from Cody or the Coordinator. Decide whether a project-local next step is needed. If Cody or the Coordinator should hear about it, say so in a line or two. If nothing needs reporting, reply with exactly ${NO_UPDATE} and nothing else.)`,
+        withOwner(
+          `(Automatic wake-up: there is no new message from Cody or the Coordinator. Decide whether a project-local next step is needed. If Cody or the Coordinator should hear about it, say so in a line or two. If nothing needs reporting, reply with exactly ${NO_UPDATE} and nothing else.)`,
+          this.owner(),
+        ),
       ].join("\n\n"),
       true,
     )
@@ -477,7 +485,7 @@ class Captain {
       const s = this.session()
       const before = this.usage().tokens
       const model = this.settings.get().captainModel
-      const summary = await this.run(captainSummaryPrompt(this.project), s.id, true, "summary")
+      const summary = await this.run(captainSummaryPrompt(this.project, this.owner()), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
@@ -533,7 +541,7 @@ class Captain {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${captainPrompt(this.project)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
+      `${captainPrompt(this.project, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
       ...session,
       ...model,
       "--effort",
