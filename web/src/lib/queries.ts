@@ -8,6 +8,7 @@ import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import { setTtsInfo } from "./tts"
+import { applyOrder } from "./projectOrder"
 import type {
   BoxCleanup,
   BoxContents,
@@ -72,6 +73,8 @@ export const keys = {
   hooks: (scope: string) => ["hooks", scope] as const,
   hookRuns: (scope: string) => ["hook-runs", scope] as const,
   hookTemplates: ["hook-templates"] as const,
+  /** Mutation key of saving the project order, so live order events wait for the last save. */
+  projectsOrder: ["projects-order"] as const,
   /** A project's note suggestions from agents: "pending", or "all" for the resolved ones too. */
   noteSuggestions: (projectId: string) => ["note-suggestions", projectId] as const,
 }
@@ -338,6 +341,31 @@ export function useDeleteProject() {
     onError: (err, _v, ctx) => {
       ctx?.undo()
       fail("Couldn't delete the project")(err)
+    },
+  })
+}
+
+/**
+ * Save the owner's project order (every project id, first to last). The cache changes at once and rolls back with a
+ * toast if the server refuses. Once the last of several quick saves settles, the list is refetched so it can't drift.
+ */
+export function useReorderProjects() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationKey: keys.projectsOrder,
+    mutationFn: (ids: string[]) => api<{ ids: string[] }>("/api/projects/order", { method: "PUT", body: { ids } }),
+    onMutate: async (ids) => {
+      await qc.cancelQueries({ queryKey: keys.projects })
+      const undo = snapshot<Project[]>(qc, keys.projects)
+      qc.setQueryData<Project[]>(keys.projects, (list) => (list ? applyOrder(list, ids) : list))
+      return { undo }
+    },
+    onError: (err, _ids, ctx) => {
+      ctx?.undo()
+      fail("Couldn't save the project order")(err)
+    },
+    onSettled: () => {
+      if (qc.isMutating({ mutationKey: keys.projectsOrder }) <= 1) void qc.invalidateQueries({ queryKey: keys.projects })
     },
   })
 }

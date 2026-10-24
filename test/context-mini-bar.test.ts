@@ -9,7 +9,8 @@ describe("ContextMiniBar", () => {
   it("shows the percentage, with the full reading as its accessible name and tooltip", () => {
     const html = render(78_000, 1_000_000)
     expect(html).toContain('<span class="sr-only">Context 78k / 1m · 8%</span>')
-    expect(html).toContain('<span aria-hidden="true">8%</span>')
+    // Room for "100%" is reserved, so the chip's width holds as the number grows.
+    expect(html).toContain('<span aria-hidden="true" class="min-w-[4ch]">8%</span>')
     expect(html).toContain("title=\"Context 78k / 1m · 8%. How much of this agent&#x27;s context window is used. Compact when it gets high.\"")
   })
 

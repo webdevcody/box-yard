@@ -156,7 +156,7 @@ function SummaryStrip({ boxes, maxBoxes, running, maxAgents }: { boxes: BoxInfo[
           <Ratio value={running} max={maxAgents} />
           <Meter used={running} total={maxAgents} className="mt-1.5" />
         </Tile>
-        <Tile label="Est. cost" title="Estimated box cost since each live box started (active time, uptime and disk). See Usage & costs for periods.">
+        <Tile label="Est. cost" title="Estimated box cost since each live box started (active time, uptime and disk). See Usage for periods.">
           <div className="text-base font-semibold text-zinc-50 tabular-nums">{money(costUsd)}</div>
         </Tile>
         <Link

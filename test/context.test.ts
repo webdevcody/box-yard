@@ -124,6 +124,7 @@ describe("compaction log", () => {
     expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\ntask_ids: task_abc123\n---/)
     expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tokensAfter).toBe(38_000)
     for (const h of ["## Decisions and preferences", "## Projects and repos", "## Ongoing work", "## Open threads and next steps"]) expect(text).toContain(h)
+    // The -2 file was written second, so it lists after the first.
     expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05Z.md", "2026-10-22T18-40-05Z-2.md"])
     expect(fs.readdirSync(dir).some((f) => f.endsWith(".tmp"))).toBe(false)
     expect(lastCompaction(dir)).toMatchObject({ trigger: "auto", tokensBefore: 412_000 })

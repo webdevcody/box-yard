@@ -88,6 +88,7 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     ...projectNotesBudget,
   }),
+  projectOrder: z.object({ ids: z.array(z.string().max(64)).max(1000) }).strict(),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
     description: z.string().max(4000).optional(),
@@ -268,9 +269,13 @@ export function createBoxYard(
     const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
     if (ids.length) retro.settle(projectId, ids, ok)
   }
-  captains.onReport = (projectId, content) => {
+  // A Captain's automatic report, or its reply to a send_to_captain: a notice that wakes the Coordinator, like a task's.
+  captains.onReport = (projectId, content, report) => {
     const project = store.getProject(projectId)
-    const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
+    const who = `Captain${project ? ` for ${project.name}` : ""}`
+    const msg = report.replyTo
+      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo })
+      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true })
     hub.broadcast({ type: "chat.message", message: msg })
     orchestrator.nudge()
   }
@@ -364,6 +369,13 @@ export function createBoxYard(
     const project = store.createProject(body)
     hub.broadcast({ type: "project", project })
     res.status(201).json(project)
+  })
+  // The owner's project order (sidebar drag-to-reorder): every project id, first to last.
+  api.put("/projects/order", (req, res) => {
+    const projects = store.reorderProjects(parse(schemas.projectOrder, req.body).ids)
+    const ids = projects.map((p) => p.id)
+    hub.broadcast({ type: "projects.order", ids })
+    res.json({ ids })
   })
   api.patch("/projects/:id", (req, res) => {
     const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))

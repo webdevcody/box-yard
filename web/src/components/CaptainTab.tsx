@@ -34,7 +34,7 @@ import {
 } from "../lib/queries"
 import { useTail } from "../lib/tail"
 import { useEntityIndex } from "../lib/entities"
-import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
+import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
 import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
 import { AttachmentList } from "./Attachments"
@@ -44,6 +44,7 @@ import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll } from "./StickyScroll"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
+import { PublishedRow } from "./PublishedNotices"
 import { menuItem, usePopover } from "./TaskHeader"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
@@ -186,7 +187,8 @@ const Row = memo(function Row({
   if (row.type === "message")
     return row.message.role === "user" ? <InboundMessage m={row.message} /> : <ChatLine m={row.message} onFollowUp={onFollowUp} />
   if (row.type === "notice") return <NoticeRow m={row.message} />
-  return <NoticeGroup id={row.id} messages={row.messages} open={open} onToggle={onToggle} />
+  if (row.type === "files") return <PublishedRow group={row.group} />
+  return <NoticeGroup id={row.id} items={row.items} messages={row.messages} open={open} onToggle={onToggle} />
 })
 
 const INBOUND: Record<CaptainSource, { label: string; icon: LucideIcon; box: string; head: string }> = {
@@ -276,11 +278,13 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
 /** Consecutive notices folded into "4 task updates", with their icons and titles as a preview. */
 const NoticeGroup = memo(function NoticeGroup({
   id,
+  items,
   messages,
   open,
   onToggle,
 }: {
   id: string
+  items: CaptainNoticeItem[]
   messages: CaptainMessage[]
   open: boolean
   onToggle: (id: string) => void
@@ -304,7 +308,7 @@ const NoticeGroup = memo(function NoticeGroup({
             return <Icon key={k} className={cx("h-3.5 w-3.5", className)} />
           })}
         </span>
-        <span className="shrink-0 font-medium text-zinc-300">{groupLabel(messages)}</span>
+        <span className="shrink-0 font-medium text-zinc-300">{groupLabel(messages, items.length)}</span>
         {titles.length > 0 && (
           <span className="min-w-0 flex-1 truncate text-zinc-600">
             · {titles.slice(0, 2).join(", ")}
@@ -317,9 +321,7 @@ const NoticeGroup = memo(function NoticeGroup({
       </button>
       {open && (
         <div className="space-y-0.5 border-t border-zinc-900 px-1 py-1">
-          {messages.map((m) => (
-            <NoticeRow key={m.id} m={m} />
-          ))}
+          {items.map((item) => (item.type === "files" ? <PublishedRow key={item.id} group={item.group} /> : <NoticeRow key={item.id} m={item.message} />))}
         </div>
       )}
     </div>

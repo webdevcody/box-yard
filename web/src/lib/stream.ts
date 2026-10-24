@@ -3,6 +3,7 @@ import { notifyManager, useQueryClient } from "@tanstack/react-query"
 import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
+import { applyOrder } from "./projectOrder"
 import { announceCleanup, withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
@@ -114,6 +115,11 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "note_suggestions":
           void qc.invalidateQueries({ queryKey: ["note-suggestions", ev.projectId] })
+          break
+        case "projects.order":
+          // Our own quick moves echo back one by one; the last save's refetch settles the list instead.
+          if (qc.isMutating({ mutationKey: keys.projectsOrder }) > 0) break
+          qc.setQueryData<Project[]>(keys.projects, (list) => (list ? applyOrder(list, ev.ids) : list))
           break
         case "project.deleted":
           qc.setQueryData<Project[]>(keys.projects, (list) => list?.filter((p) => p.id !== ev.projectId))

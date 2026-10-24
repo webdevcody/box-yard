@@ -388,6 +388,8 @@ export type UiEvent =
   /** A project's note suggestions changed (one was added or resolved). */
   | { type: "note_suggestions"; projectId: string }
   | { type: "project.deleted"; projectId: string }
+  /** The owner reordered the projects: every project id, first to last. */
+  | { type: "projects.order"; ids: string[] }
   | { type: "chat.message"; message: ChatMessage }
   | { type: "chat.delta"; text: string }
   | { type: "chat.busy"; busy: boolean }
@@ -746,6 +748,12 @@ export interface OrchestratorCompactionRecord extends CompactionInfo {
   taskCount: number
   tasks: CompactionTaskSnapshot[]
   markdown?: string
+}
+
+/** A compaction read back from its log files (Captain compactions have no database rows). */
+export interface CompactionRecord extends OrchestratorCompactionRecord {
+  /** Tasks the compaction links: snapshotted, listed in its frontmatter, or named in its summary. */
+  taskIds: string[]
 }
 
 export interface TaskCompactionRecord {

@@ -18,7 +18,7 @@ export function hookTemplates(): HookTemplateInfo[] {
     {
       key: "pr_merge",
       description:
-        "When an agent's PR is ready (opened or pushed, its turn over, not a draft), send it the Merge PR button's standard merge request, once per head commit. It takes the button's path, so it never runs while another merge of that PR is pending. PRs labelled no-automerge are skipped. Edit the prompt to make it your own.",
+        "When a turn ends with an open PR (whatever the status, not a draft), send it the Merge PR button's standard merge request, once per head commit. It takes the button's path, so it never runs while another merge of that PR is pending. PRs labelled no-automerge are skipped. Edit the prompt to make it your own.",
       draft: {
         name: "On PR ready → merge",
         trigger: "task.pr_ready",

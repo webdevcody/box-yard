@@ -191,7 +191,7 @@ const KIND_ICON: Partial<Record<PreviewKind, typeof File>> = {
   audio: Music,
 }
 
-function KindIcon({ kind, className = "h-4 w-4" }: { kind: PreviewKind | null; className?: string }) {
+export function KindIcon({ kind, className = "h-4 w-4" }: { kind: PreviewKind | null; className?: string }) {
   const Icon = (kind && KIND_ICON[kind]) || File
   return <Icon className={cx("shrink-0 text-zinc-500", className)} />
 }

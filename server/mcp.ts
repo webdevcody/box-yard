@@ -9,7 +9,7 @@ import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
-import type { CaptainManager } from "./captains.js"
+import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
@@ -71,11 +71,11 @@ const effortSchema = z
   .enum(EFFORTS)
   .optional()
   .describe(
-    "How hard the agent should think (reasoning effort). Pick the lowest level that fits: " +
+    "How hard the agent should think (reasoning effort). Omit it to use the project route, Settings or routing defaults; pass one for a matching routing rule, an escalation, or when Settings leaves effort to the Coordinator, and then pick the lowest level that fits: " +
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Default if omitted: high.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
   )
 
 const modelSchema = z
@@ -85,7 +85,7 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, chosen from the routing rules. Omit to use project/global defaults.")
+  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
@@ -296,7 +296,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "send_to_captain",
       {
         description:
-          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
+          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project. " +
+          'When it finishes the turn that handles your message, its reply reaches you as a Box Yard update ("Captain for <project> replied: …") that wakes you, so you don\'t need wait_for_captain.',
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1).describe("The project-scoped request for the Captain."),
@@ -315,16 +316,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "ask_captain",
       {
         description:
-          "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
+          "Coordinator tool: send a project-scoped request to a Captain and wait briefly (at most 60 s) for its reply; it returns as soon as the reply lands. Use it only for quick questions. If the wait runs out, the Captain keeps working and its reply reaches you as a Box Yard update. Prefer send_to_captain for anything that may take a while.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )
@@ -334,22 +335,22 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "wait_for_captain",
       {
         description:
-          "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
+          "Coordinator tool: wait briefly (at most 60 s) for a Captain's next reply to you; it returns as soon as that lands or the Captain goes idle, with its latest reply. Rarely needed: replies to send_to_captain are pushed to you as Box Yard updates. If it times out, the Captain keeps working and its reply still reaches you.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )
 
   server.registerTool(
     "list_projects",
-    { description: "List all projects with their repo, env var names, notes and tasks." },
+    { description: owner("List all projects, in the order Cody keeps them in the sidebar, with their repo, env var names, notes and tasks.") },
     safe(async () => ok(scopeId ? [projectView(ownProject())] : store.listProjects().map(projectView))),
   )
 
@@ -480,53 +481,78 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     }),
   )
 
-  coordinatorOnly(
-    server.registerTool(
-      "list_compactions",
-      {
-        description:
-          "List orchestrator compaction records, newest first. Use this to recover prior context after the orchestrator was compacted; pass task to filter to compactions that mentioned or snapshotted that task.",
-        inputSchema: {
-          task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
-          limit: z.number().int().min(1).max(100).optional(),
-        },
+  /** A project's Captain compactions live in files under the Captain's data dir; null when no Captains run here. */
+  const captainCompactions = (projectId: string, filter: { taskId?: string; limit?: number }) =>
+    deps.captains ? deps.captains.compactionRecords(projectId, filter).map((c) => ({ ...compactionView(c), captain: projectId })) : null
+  const noCaptains = "Captains are not available in this Box Yard process."
+
+  server.registerTool(
+    "list_compactions",
+    {
+      description: scopeId
+        ? "List your own Captain compaction records, newest first. Use this to recover prior context after you were compacted; pass task to filter to compactions that mentioned or snapshotted that task."
+        : "List compaction records, newest first: the Coordinator's own, or a project Captain's when you pass project. Use this to recover prior context after a compaction; pass task to filter to compactions that mentioned or snapshotted that task.",
+      inputSchema: {
+        task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
+        project: z
+          .string()
+          .optional()
+          .describe(scopeId ? "Leave out: your own project." : "Project id or name: list that project's Captain compactions instead of the Coordinator's."),
+        limit: z.number().int().min(1).max(100).optional(),
       },
-      safe(async (a: { task?: string; limit?: number }) => {
-        const taskId = a.task ? task(a.task).id : undefined
-        return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
-      }),
-    ),
+    },
+    safe(async (a: { task?: string; project?: string; limit?: number }) => {
+      const taskId = a.task ? task(a.task).id : undefined
+      const projectId = projectFilter(a.project)
+      if (!projectId) return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
+      const list = captainCompactions(projectId, { taskId, limit: a.limit ?? 20 })
+      return list ? ok(list) : fail(noCaptains)
+    }),
   )
 
-  coordinatorOnly(
-    server.registerTool(
-      "read_compaction",
-      {
-        description: "Read one orchestrator compaction's markdown summary and linked task snapshots.",
-        inputSchema: { compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z") },
+  server.registerTool(
+    "read_compaction",
+    {
+      description: scopeId
+        ? "Read one of your Captain compactions: its markdown summary and linked task snapshots."
+        : "Read one compaction's markdown summary and linked task snapshots: the Coordinator's, or a project Captain's when you pass project.",
+      inputSchema: {
+        compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z"),
+        project: z.string().optional().describe(scopeId ? "Leave out: your own project." : "Project id or name, for one of that project's Captain compactions."),
       },
-      safe(async (a: { compaction: string }) => {
+    },
+    safe(async (a: { compaction: string; project?: string }) => {
+      const projectId = projectFilter(a.project)
+      if (!projectId) {
         const c = store.getOrchestratorCompaction(a.compaction, true)
-        if (!c) throw new Error(`No compaction "${a.compaction}". Use list_compactions.`)
+        if (!c) throw new Error(`No Coordinator compaction "${a.compaction}". Use list_compactions, and pass project for a Captain compaction.`)
         return ok(compactionView(c, true))
-      }),
-    ),
+      }
+      if (!deps.captains) return fail(noCaptains)
+      const c = deps.captains.compactionRecord(projectId, a.compaction)
+      if (!c) throw new Error(`No Captain compaction "${a.compaction}" in this project. Use list_compactions.`)
+      return ok({ ...compactionView(c, true), captain: projectId })
+    }),
   )
 
   server.registerTool(
     "find_compactions_by_task",
     {
-      description:
-        "Find orchestrator compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
+      description: scopeId
+        ? "Find your Captain compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context."
+        : "Find Coordinator compactions and the task's project Captain compactions linked to a task, and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
       inputSchema: { task: z.string(), limit: z.number().int().min(1).max(100).optional() },
     },
     safe(async (a: { task: string; limit?: number }) => {
       const t = task(a.task)
+      const limit = a.limit ?? 20
       return ok({
         task: brief(t),
-        // Coordinator compactions span every project, so Captains only get the task's own.
-        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit: a.limit ?? 20 }).map((c) => compactionView(c)),
-        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit: a.limit ?? 20 }),
+        // Coordinator compactions span every project, so Captains only get their own and the task's.
+        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit }).map((c) => compactionView(c)),
+        // task() keeps a Captain inside its own project, so this is never another project's Captain.
+        captainCompactions: captainCompactions(t.projectId, { taskId: t.id, limit }) ?? undefined,
+        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit }),
       })
     }),
   )

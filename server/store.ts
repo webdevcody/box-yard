@@ -231,6 +231,7 @@ interface ProjectRow {
   push_at_turn_end: number | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
+  sort_order: number
   created_at: number
   updated_at: number
 }
@@ -526,8 +527,9 @@ export class Store {
     }
   }
 
+  /** In the owner's order (drag-to-reorder in the sidebar), then oldest first. */
   listProjects(): Project[] {
-    const rows = this.db.prepare("SELECT * FROM projects ORDER BY created_at ASC").all() as ProjectRow[]
+    const rows = this.db.prepare("SELECT * FROM projects ORDER BY sort_order ASC, created_at ASC, rowid ASC").all() as ProjectRow[]
     return rows.map((r) => this.projectFromRow(r))
   }
 
@@ -565,8 +567,8 @@ export class Store {
     const id = input.id ?? newId("prj")
     this.db
       .prepare(
-        `INSERT INTO projects (id, name, description, repo, base_branch, env_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects (id, name, description, repo, base_branch, env_json, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort_order) + 1, 0) FROM projects), ?, ?)`,
       )
       .run(
         id,
@@ -635,6 +637,29 @@ export class Store {
   private setProjectNotesBudget(id: string, b: { notesMaxCount?: number | null; notesMaxTokens?: number | null }) {
     if (b.notesMaxCount !== undefined) this.db.prepare("UPDATE projects SET notes_max_count = ? WHERE id = ?").run(b.notesMaxCount, id)
     if (b.notesMaxTokens !== undefined) this.db.prepare("UPDATE projects SET notes_max_tokens = ? WHERE id = ?").run(b.notesMaxTokens, id)
+  }
+
+  /**
+   * Put every project in this order, in one transaction. `ids` must name each project exactly once,
+   * so a list from a stale tab (missing a new project, or naming a deleted one) is refused rather than half-applied.
+   */
+  reorderProjects(ids: string[]): Project[] {
+    this.db.transaction(() => {
+      const known = (this.db.prepare("SELECT id FROM projects").all() as { id: string }[]).map((r) => r.id)
+      const knownSet = new Set(known)
+      const seen = new Set<string>()
+      for (const id of ids) {
+        if (seen.has(id)) throw new BadRequestError(`Project ${id} is listed twice`)
+        seen.add(id)
+      }
+      const unknown = ids.filter((id) => !knownSet.has(id))
+      if (unknown.length) throw new BadRequestError(`Unknown project${unknown.length > 1 ? "s" : ""}: ${unknown.join(", ")}`)
+      const missing = known.filter((id) => !seen.has(id))
+      if (missing.length) throw new BadRequestError(`The order must list every project; missing ${missing.join(", ")}`)
+      const stmt = this.db.prepare("UPDATE projects SET sort_order = ? WHERE id = ?")
+      ids.forEach((id, i) => stmt.run(i, id))
+    })()
+    return this.listProjects()
   }
 
   deleteProject(id: string) {
@@ -922,6 +947,10 @@ export class Store {
     this.db
       .prepare("UPDATE task_turns SET status = ?, finished_at = ?, cost_usd = ?, error = ? WHERE id = ?")
       .run(patch.status, Date.now(), patch.costUsd ?? null, patch.error ?? null, id)
+  }
+
+  getTaskTurn(id: string): TaskTurnRow | null {
+    return (this.db.prepare("SELECT * FROM task_turns WHERE id = ?").get(id) as TaskTurnRow | undefined) ?? null
   }
 
   listTaskTurns(taskId: string): TaskTurnRow[] {

@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
-import type { CompactionInfo, CompactionTaskSnapshot } from "../shared/types.js"
+import type { CompactionInfo, CompactionRecord, CompactionTaskSnapshot } from "../shared/types.js"
+import { mentionedTaskIds } from "./compactionTasks.js"
 
 /** `2026-10-22T18-40-05Z`: ISO time without colons or millis, so names sort chronologically on every filesystem. */
 export function compactionStamp(at: number): string {
@@ -133,13 +134,13 @@ export function finishCompaction(file: string, tokensAfter: number | null) {
   }
 }
 
-/** Log files, oldest first (the names sort chronologically). */
 /** `<stamp>.md`, then `<stamp>-2.md`, `-3`…: plain string order puts `-2` before the first one and `-10` before `-2`. */
 function compactionOrder(name: string): [string, number] {
   const m = /^(.*Z)(?:-(\d+))?\.md$/.exec(name)
   return m ? [m[1]!, Number(m[2] ?? 1)] : [name, 0]
 }
 
+/** Log files, oldest first. */
 export function listCompactions(dir: string): string[] {
   try {
     return fs
@@ -177,6 +178,61 @@ export function readCompactionInfo(file: string): CompactionInfo | null {
   } catch {
     return null
   }
+}
+
+/**
+ * A compaction log file read back as a record: the sidecar's task snapshots when there
+ * is one, and `taskIds` for every task it links (snapshotted, listed in the frontmatter
+ * or named in the summary), so older files without snapshots are still found by task.
+ */
+export function readCompactionRecord(file: string): CompactionRecord | null {
+  const info = readCompactionInfo(file)
+  if (!info) return null
+  let markdown: string
+  try {
+    markdown = readCompactionFile(file)
+  } catch {
+    return null
+  }
+  const jsonFile = sidecar(file)
+  let side: { sessionId?: string; model?: string; tasks?: CompactionTaskSnapshot[] } = {}
+  try {
+    side = JSON.parse(fs.readFileSync(jsonFile, "utf8")) as typeof side
+  } catch {
+    // Older compactions have no sidecar; the frontmatter has the rest.
+  }
+  const fm = /^---\n([\s\S]*?)\n---\n/.exec(markdown)?.[1] ?? ""
+  const get = (k: string) => new RegExp(`^${k}: (.*)$`, "m").exec(fm)?.[1]?.trim()
+  const tasks = Array.isArray(side.tasks) ? side.tasks : []
+  const taskIds = new Set([...tasks.map((t) => t.taskId), ...mentionedTaskIds([markdown])])
+  return {
+    ...info,
+    id: compactionIdFromMarkdown(file),
+    sessionId: side.sessionId ?? get("session_id") ?? "",
+    model: side.model ?? get("model") ?? "",
+    jsonFile,
+    taskCount: tasks.length,
+    tasks,
+    taskIds: [...taskIds],
+    markdown,
+  }
+}
+
+/** Every compaction in `dir`, newest first, optionally only those linked to `taskId`. */
+export function readCompactionRecords(dir: string, filter: { taskId?: string; limit?: number } = {}): CompactionRecord[] {
+  const out: CompactionRecord[] = []
+  for (const name of listCompactions(dir).reverse()) {
+    if (filter.limit !== undefined && out.length >= filter.limit) break
+    const r = readCompactionRecord(path.join(dir, name))
+    if (r && (!filter.taskId || r.taskIds.includes(filter.taskId))) out.push(r)
+  }
+  return out
+}
+
+/** One compaction by id; only names actually in `dir` are read, so an id can't point outside it. */
+export function findCompactionRecord(dir: string, id: string): CompactionRecord | null {
+  const name = listCompactions(dir).find((n) => n === `${id}.md`)
+  return name ? readCompactionRecord(path.join(dir, name)) : null
 }
 
 export function readCompactionFile(file: string): string {

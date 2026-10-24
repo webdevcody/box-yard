@@ -1,6 +1,6 @@
-import { memo, useMemo, useState } from "react"
+import { memo, useCallback, useMemo, useState } from "react"
 import { Link, useLocation } from "wouter"
-import { AlarmClock, Archive, DollarSign, FolderGit2, FolderOpen, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
+import { AlarmClock, Archive, DollarSign, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
@@ -10,6 +10,7 @@ import { RecentActivity } from "./RecentActivity"
 import { MOD_KEY, openPalette } from "./CommandPalette"
 import type { Connection } from "../lib/stream"
 import { BrandLogo } from "./BrandLogo"
+import { navItem, ProjectList } from "./ProjectList"
 
 export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
   const [location, navigate] = useLocation()
@@ -20,6 +21,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
   const schedules = useSchedules()
   const activeSchedules = schedules.data?.filter((s) => s.enabled).length ?? 0
   const [creating, setCreating] = useState(false)
+  const openCreate = useCallback(() => setCreating(true), [])
 
   const closing = usePendingCloses()
   // Badge counts in one pass over the tasks, recomputed only when they change.
@@ -40,19 +42,11 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
   }, [tasks.data, closing])
   const inboxCount = counts.inbox
   const needsYou = counts.needsYou
-  const active = (projectId: string) => counts.active.get(projectId) ?? 0
-  const attention = (projectId: string) => counts.attention.has(projectId)
 
   const pool = health.data?.pool
   const running = boxes.data?.reduce((n, b) => n + b.runningTurns, 0) ?? 0
   const capacity = pool ? agentCapacity(pool) : 0
   const overLimit = Boolean(pool && ((boxes.data?.length ?? 0) > pool.maxBoxes || (capacity > 0 && running > capacity)))
-
-  const navItem = (href: string, active: boolean) =>
-    cx(
-      "flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition lg:min-h-0 lg:px-2.5 lg:py-1.5",
-      active ? "bg-zinc-800 text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100",
-    )
 
   return (
     <aside className="flex h-full w-full shrink-0 flex-col border-r border-zinc-900 bg-zinc-950">
@@ -84,10 +78,10 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
       </div>
 
       <nav className="space-y-0.5 px-2" onClick={onNavigate}>
-        <Link href="/" className={navItem("/", location === "/")}>
+        <Link href="/" className={navItem(location === "/")}>
           <LayoutGrid className="h-4 w-4" /> Yard
         </Link>
-        <Link href="/inbox" className={navItem("/inbox", location === "/inbox")}>
+        <Link href="/inbox" className={navItem(location === "/inbox")}>
           <Inbox className="h-4 w-4" /> Inbox
           {inboxCount > 0 && (
             <span
@@ -100,14 +94,14 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
             </span>
           )}
         </Link>
-        <Link href="/schedules" className={navItem("/schedules", location === "/schedules")}>
+        <Link href="/schedules" className={navItem(location === "/schedules")}>
           <AlarmClock className="h-4 w-4" /> Schedules
           {activeSchedules > 0 && <span className="ml-auto text-xs text-zinc-500">{activeSchedules}</span>}
         </Link>
-        <Link href="/usage" className={navItem("/usage", location === "/usage")}>
-          <DollarSign className="h-4 w-4" /> Usage & costs
+        <Link href="/usage" className={navItem(location === "/usage")}>
+          <DollarSign className="h-4 w-4" /> Usage
         </Link>
-        <Link href="/compactions" className={navItem("/compactions", location === "/compactions")}>
+        <Link href="/compactions" className={navItem(location === "/compactions")}>
           <Archive className="h-4 w-4" /> Compactions
         </Link>
       </nav>
@@ -118,25 +112,14 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
           <Plus className="h-4 w-4" />
         </button>
       </div>
-      <div className="scroll-thin flex-1 space-y-0.5 overflow-y-auto px-2" onClick={onNavigate}>
-        {projects.data?.length === 0 && (
-          <button onClick={() => setCreating(true)} className="min-h-11 w-full rounded-lg border border-dashed border-zinc-800 px-3 py-3 text-left text-xs text-zinc-500 hover:border-zinc-700 hover:text-zinc-300">
-            No projects yet. Create one, or just ask the Coordinator.
-          </button>
-        )}
-        {projects.data?.map((p) => {
-          const href = `/projects/${p.id}`
-          const n = active(p.id)
-          return (
-            <Link key={p.id} href={href} className={navItem(href, location.startsWith(href))}>
-              {p.repo ? <FolderGit2 className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
-              <span className="truncate">{p.name}</span>
-              {attention(p.id) && <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-amber-400" title="A task needs you" />}
-              {!attention(p.id) && n > 0 && <span className="ml-auto text-xs text-sky-400">{n}</span>}
-            </Link>
-          )
-        })}
-      </div>
+      <ProjectList
+        projects={projects.data}
+        location={location}
+        active={counts.active}
+        attention={counts.attention}
+        onNavigate={onNavigate}
+        onCreate={openCreate}
+      />
 
       <RecentActivity onNavigate={onNavigate} />
 

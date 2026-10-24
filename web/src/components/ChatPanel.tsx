@@ -1,20 +1,24 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
-import { Bot, Settings as SettingsIcon, Square, X } from "lucide-react"
+import { Bot, Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
-import { Button, Markdown, warmMarkdown } from "./ui"
+import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
-import { Composer } from "./Composer"
-import { ContextMeter } from "./ContextMeter"
+import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
+import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import { ChatLine } from "./ChatLine"
+import { PublishedCard } from "./PublishedNotices"
+import { groupPublished } from "../lib/publishedNotices"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
-import type { Attachment, ChatMessage } from "../../../shared/types"
+import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
+import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
 
 const SUGGESTIONS = [
   "What's everyone working on?",
@@ -24,8 +28,12 @@ const SUGGESTIONS = [
 
 const NO_MESSAGES: ChatMessage[] = []
 
-/** `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). */
-export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => void }) {
+/**
+ * `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). `zen` lays the same
+ * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css), and the
+ * context meter moves into the header (ZenContext).
+ */
+export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onClose?: () => void; zen?: boolean }) {
   const chat = useChat()
   const busy = useChatBusy()
   const send = useSendChat()
@@ -33,6 +41,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
   const orch = useOrchestratorState()
   const compact = useCompactOrchestrator()
   const openSettings = useOpenSettings()
+  const compactNow = useCallback(() => compact.mutate(), [compact.mutate])
   const projects = useProjects()
   const tasks = useTasks()
   const [location] = useLocation()
@@ -84,12 +93,24 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
 
   return (
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
-      <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4">
+      <header
+        className={cx(
+          "flex min-h-14 items-center gap-2 pt-[env(safe-area-inset-top)]",
+          // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
+          zen ? "zen-column border-b border-zinc-900 sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]" : "border-b border-zinc-900 pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4",
+        )}
+      >
         <Bot className="h-4 w-4 shrink-0 text-yard-400" />
         <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">Coordinator</div>
         {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
+          {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
           <VoiceControl />
+          {!zen && (
+            <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
+              <Expand className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
             <SettingsIcon className="h-3.5 w-3.5" />
           </Button>
@@ -98,7 +119,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
               <Square className="h-3.5 w-3.5" />
             </Button>
           )}
-          {onClose && (
+          {zen && (
+            <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
+              <Shrink className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {onClose && !zen && (
             <button
               type="button"
               onClick={onClose}
@@ -111,17 +137,19 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
           )}
         </div>
       </header>
-      <ContextMeter
-        className="border-b border-zinc-900 px-4 py-2"
-        tokens={orch.data?.usage.tokens ?? null}
-        window={orch.data?.usage.window ?? null}
-        compacting={orch.data?.compacting ?? false}
-        queued={Boolean(orch.data?.compactQueued) || compact.isPending}
-        onCompact={() => compact.mutate()}
-      />
+      {!zen && (
+        <ContextMeter
+          className="border-b border-zinc-900 px-4 py-2"
+          tokens={orch.data?.usage.tokens ?? null}
+          window={orch.data?.usage.window ?? null}
+          compacting={orch.data?.compacting ?? false}
+          queued={Boolean(orch.data?.compactQueued) || compact.isPending}
+          onCompact={() => compact.mutate()}
+        />
+      )}
 
       <SelectionToTask source={selectionSource} onPrompt={submit}>
-        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className="px-4 py-4" contentClassName="space-y-3">
+        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
           {messages.length === 0 && !chat.isLoading && (
             <div className="space-y-3 pt-6 text-center">
               <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
@@ -148,13 +176,88 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
         placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
         textareaRef={box}
         panelRef={panel}
+        className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
       />
     </section>
   )
 })
 
+const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
+
+/**
+ * Zen's context reading, in the header left of the voice button: the mini bar and "58%" (full reading in its
+ * tooltip), then Compact, quiet until CONTEXT_WARN_PCT and amber from there. Compact keeps one width in every
+ * state (the icon turns into a spinner), so nothing in the header moves. On phones the chip alone opens a menu
+ * with the full reading and Compact.
+ */
+function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
+  const { open, setOpen, root, trigger } = usePopover()
+  const tokens = state?.usage.tokens ?? null
+  const window = state?.usage.window ?? null
+  const pct = contextPct(tokens, window)
+  const compacting = state?.compacting ?? false
+  const waiting = compacting || queued || Boolean(state?.compactQueued)
+  const warn = pct !== null && pct >= CONTEXT_WARN_PCT
+  const status = compacting ? "Compacting…" : waiting ? "Compact queued" : null
+  const title = status ?? "Compact: summarise the conversation to free up context. If a turn is running, it compacts right after."
+  const icon = waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Minimize2 className="h-3 w-3" />
+  const bar = pct === null ? <span className="text-xs text-zinc-500">Context</span> : <ContextMiniBar tokens={tokens} window={window} hint={ZEN_CONTEXT_HINT} />
+  return (
+    <div ref={root} data-testid="zen-context" className="relative mr-1 flex items-center gap-1.5">
+      <span className="max-sm:hidden">{bar}</span>
+      <button
+        type="button"
+        onClick={() => onCompact()}
+        disabled={waiting}
+        title={title}
+        aria-label={status ?? "Compact"}
+        className={cx(
+          META_CHIP,
+          "max-sm:hidden disabled:cursor-default",
+          warn ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
+        )}
+      >
+        {icon}
+        Compact
+      </button>
+      <button
+        ref={trigger}
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={`Context ${contextLabel(tokens, window)}: more`}
+        className={cx(META_CHIP, "sm:hidden", warn ? "border-amber-500/40 bg-amber-500/10" : "border-zinc-800")}
+      >
+        {bar}
+        <MoreHorizontal className="h-3.5 w-3.5 text-zinc-500" />
+      </button>
+      {open && (
+        <div role="menu" className="absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl sm:hidden">
+          <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">Context {contextLabel(tokens, window)}</div>
+          <button
+            type="button"
+            role="menuitem"
+            className={menuItem}
+            disabled={waiting}
+            onClick={() => {
+              onCompact()
+              setOpen(false)
+            }}
+          >
+            {icon}
+            {status ?? "Compact"}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** The thread, with back-to-back "published" file notices folded into one card per task. */
 const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {
-  return messages.map((m) => <ChatLine key={m.id} m={m} onFollowUp={onFollowUp} />)
+  const rows = useMemo(() => groupPublished(messages), [messages])
+  return rows.map((r) => (r.type === "files" ? <PublishedCard key={r.id} group={r.group} /> : <ChatLine key={r.id} m={r.message} onFollowUp={onFollowUp} />))
 })
 
 /** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */
