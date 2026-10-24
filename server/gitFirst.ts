@@ -15,8 +15,8 @@
 // index commit's tree to the index. Any failure removes the half-built folder; the archive is left as it was.
 //
 // A task whose push failed or was skipped (no write access, push off, submodules, LFS, a merge in progress)
-// keeps the full archive: whole, then partial (.git and a WIP snapshot), then thin (gitPrepScript without the
-// push: manifest plus a pack of everything origin's base branch lacks).
+// keeps the full archive: whole, then partial (.git and a WIP snapshot), then thin (server/archive.ts: HEAD, the
+// refs and a bundle of the commits GitHub lacks).
 //
 // The snapshot never runs `git commit` in the task's repo: it builds trees from copies of the index, with a
 // new object dir in a stage folder (/tmp, or the work disk when that has more room) and the repo's objects as
@@ -25,7 +25,7 @@
 import { q } from "./providers/types.js"
 
 export const wipRef = (taskId: string) => `refs/boxyard/wip/${taskId}`
-/** In a git-first or thin archive, next to work/: what to rebuild the repo from. */
+/** In a git-first archive, next to work/: what to rebuild the repo from. */
 export const GIT_MANIFEST = "git.manifest"
 /** Objects the task has that origin's base branch doesn't (its commits, the WIP snapshot). */
 export const GIT_PACK = "git.pack"
@@ -64,8 +64,6 @@ export interface GitPrepOptions {
   /** The task's branch: pushed when it has commits origin lacks. */
   branch: string | null
   baseBranch: string
-  /** Push the branch and the WIP ref. Off: only snapshot (the thin archive). */
-  push: boolean
   /** What refs/boxyard/wip/<task> held after the last push, for --force-with-lease and the cleanup delete. */
   lastWip: string | null
   /** Write git.pack when it fits in this many bytes; 0 = no pack (push only). */
@@ -76,10 +74,10 @@ export interface GitPrepOptions {
   env: string
 }
 
-export type GitPrepStatus = "pushed" | "local" | "skipped" | "failed"
+export type GitPrepStatus = "pushed" | "skipped" | "failed"
 
 export interface GitPrepResult {
-  /** pushed: origin has HEAD and the WIP; local: snapshot made, nothing pushed; skipped/failed: see `reason`. */
+  /** pushed: origin has HEAD and the WIP; skipped/failed: see `reason`. */
   status: GitPrepStatus
   /** The stage folder holding `<task>/git.manifest` and `<task>/git.pack`; remove it when done. */
   stage: string | null
@@ -101,7 +99,7 @@ export interface GitPrepResult {
 }
 
 /**
- * Snapshot a task's git work, push it (unless `push` is off) and stage the manifest and pack for the archive.
+ * Snapshot a task's git work, push it and stage the manifest and pack for the archive.
  * Prints one GIT_PREP_MARK line; always exits 0.
  */
 export function gitPrepScript(o: GitPrepOptions): string {
@@ -147,7 +145,7 @@ export function gitPrepScript(o: GitPrepOptions): string {
     // The branch first, so the commits on it don't count as extras below.
     branch
       ? [
-          `if [ ${q(o.push ? "1" : "")} ] && bytip=$(git rev-parse -q --verify ${q(`refs/heads/${branch}^{commit}`)}); then`,
+          `if bytip=$(git rev-parse -q --verify ${q(`refs/heads/${branch}^{commit}`)}); then`,
           `  if [ -z "$(git rev-list -n 1 "$bytip" --not --remotes 2>/dev/null)" ]; then bybp=up-to-date`,
           `  elif ${push(`origin ${q(`refs/heads/${branch}:refs/heads/${branch}`)}`)} 2>"$bys/err"; then bybp=yes`,
           `  elif grep -qiE 'non-fast-forward|fetch first|\\(rejected\\)' "$bys/err"; then bybp=rejected; bybpwhy="$(byerr)"`,
@@ -168,22 +166,20 @@ export function gitPrepScript(o: GitPrepOptions): string {
     `byneed=$bydirty; [ -n "$byx" ] && byneed=1`,
     `[ "$byhead" != - ] && [ -n "$(git rev-list -n 1 "$byhead" --not --remotes 2>/dev/null)" ] && byneed=1`,
     `bylast=${q(o.lastWip ?? "")}`,
-    o.push
-      ? [
-          `if [ "$byneed" = 1 ]; then`,
-          `  if ! ${push(`--force-with-lease=${q(ref)}:"$bylast" origin "$byW":${q(ref)}`)} >"$bys/out" 2>"$bys/err"; then`,
-          // Someone (an older run whose result was lost) moved the ref: lease against what's there now, once.
-          `    grep -qs 'stale info' "$bys/err" "$bys/out" || byend failed "git push of ${ref}: $(byerr)"`,
-          `    bylast=$($byto ${g} ls-remote origin ${q(ref)} 2>/dev/null | cut -f1)`,
-          `    ${push(`--force-with-lease=${q(ref)}:"$bylast" origin "$byW":${q(ref)}`)} 2>"$bys/err" || byend failed "git push of ${ref}: $(byerr)"`,
-          `  fi`,
-          `  bypw=$byW`,
-          `elif [ -n "$bylast" ]; then`,
-          // Clean and fully pushed: drop the WIP ref. If that fails it is still there; try again next time.
-          `  ${push(`origin --delete ${q(ref)}`)} 2>/dev/null || bypw=$bylast`,
-          `fi`,
-        ].join("\n")
-      : `bypw=-; [ -n "$bylast" ] && bypw=$bylast`,
+    [
+      `if [ "$byneed" = 1 ]; then`,
+      `  if ! ${push(`--force-with-lease=${q(ref)}:"$bylast" origin "$byW":${q(ref)}`)} >"$bys/out" 2>"$bys/err"; then`,
+      // Someone (an older run whose result was lost) moved the ref: lease against what's there now, once.
+      `    grep -qs 'stale info' "$bys/err" "$bys/out" || byend failed "git push of ${ref}: $(byerr)"`,
+      `    bylast=$($byto ${g} ls-remote origin ${q(ref)} 2>/dev/null | cut -f1)`,
+      `    ${push(`--force-with-lease=${q(ref)}:"$bylast" origin "$byW":${q(ref)}`)} 2>"$bys/err" || byend failed "git push of ${ref}: $(byerr)"`,
+      `  fi`,
+      `  bypw=$byW`,
+      `elif [ -n "$bylast" ]; then`,
+      // Clean and fully pushed: drop the WIP ref. If that fails it is still there; try again next time.
+      `  ${push(`origin --delete ${q(ref)}`)} 2>/dev/null || bypw=$bylast`,
+      `fi`,
+    ].join("\n"),
     // The pack: everything the snapshot reaches that origin's base branch doesn't. A scratch repo filters out
     // objects that aren't here (a partial clone's), since it has no promisor remote to fetch them from.
     o.packMaxBytes > 0
@@ -206,7 +202,7 @@ export function gitPrepScript(o: GitPrepOptions): string {
     `{ echo "version 1"; echo "head $byhead"; echo "branch $bycur"; echo "dirty $bydirty"; echo "wip $byW"; echo "index $byI"`,
     `  [ "$bypw" = "$byW" ] && echo "wipref ${ref}"; printf '%s\\n' "$byx" | sed '/^$/d; s/^/extra /'; } > ${t}/${GIT_MANIFEST} || byend failed "couldn't write the manifest"`,
     `rm -rf ${t}/objects "$bys/err" "$bys/out"`,
-    o.push ? `[ -n "$bybpwhy" ] && bybpwhy="origin rejected the branch push, so the WIP ref carries its commits: $bybpwhy"; byend pushed "$bybpwhy"` : `byend local ""`,
+    `[ -n "$bybpwhy" ] && bybpwhy="origin rejected the branch push, so the WIP ref carries its commits: $bybpwhy"; byend pushed "$bybpwhy"`,
   ]
     .filter(Boolean)
     .join("\n")
@@ -227,7 +223,7 @@ export function parseGitPrep(stdout: string, stderr = ""): GitPrepResult {
   try {
     why = Buffer.from(f.why ?? "", "base64").toString("utf8").trim()
   } catch {}
-  const status = (["pushed", "local", "skipped", "failed"] as const).find((s) => s === f.status) ?? "failed"
+  const status = (["pushed", "skipped", "failed"] as const).find((s) => s === f.status) ?? "failed"
   const pack = (["yes", "none", "toobig", "failed"] as const).find((s) => s === f.pack) ?? "-"
   const result: GitPrepResult = {
     status,
@@ -268,7 +264,7 @@ export interface GitRestoreOptions {
   baseBranch: string
   gitUserName: string
   gitUserEmail: string
-  /** Clones work/ when the archive has no .git (a git-first or thin archive). Null: no mirror (no repo). */
+  /** Clones work/ when the archive has no .git (a git-first archive). Null: no mirror (no repo). */
   clone: { script: string; helper: string } | null
   /** `git` with the credential helper, and the env exports that reach GitHub. */
   git: string
@@ -276,8 +272,8 @@ export interface GitRestoreOptions {
 }
 
 /**
- * After the archive is unpacked into the task folder: rebuild work/ from git.manifest (git-first and thin
- * archives), or check out the working tree of a partial archive (only .git was saved). A whole archive is left
+ * After the archive is unpacked into the task folder: rebuild work/ from git.manifest (a git-first archive),
+ * or check out the working tree of a partial archive (only .git was saved). A whole archive is left
  * alone. Prints `RESTORE_MARK git|partial|none|failed <b64 reason>`; on failure the caller removes the task folder.
  */
 export function gitRestoreScript(o: GitRestoreOptions): string {

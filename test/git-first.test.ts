@@ -1,5 +1,9 @@
-import { describe, expect, it } from "vitest"
-import { GIT_PREP_MARK, RESTORE_MARK, parseGitPrep, parseGitRestore } from "../server/gitFirst.js"
+import { execFileSync } from "node:child_process"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { afterAll, describe, expect, it } from "vitest"
+import { GIT_PREP_MARK, RESTORE_MARK, parseGitPrep, parseGitRestore, stageBaseScript } from "../server/gitFirst.js"
 
 const b64 = (s: string) => Buffer.from(s).toString("base64")
 const line = (fields: Record<string, string>) => `${GIT_PREP_MARK} ${Object.entries(fields).map(([k, v]) => `${k}=${v}`).join(" ")}`
@@ -64,5 +68,27 @@ describe("parseGitRestore", () => {
       reason: "git clone failed: https://x-access-token:***@github.com/o/r: 403",
     })
     expect(parseGitRestore("", "Killed")).toEqual({ ok: false, from: null, reason: "the restore script didn't finish: Killed" })
+  })
+})
+
+describe("stageBaseScript", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "box-yard-test-stage-"))
+  afterAll(() => fs.rmSync(dir, { recursive: true, force: true }))
+
+  /** Where the stage goes when df reports these free KB for /tmp and for the work disk. */
+  const base = (tmpKb: number, workKb: number) => {
+    const bin = path.join(dir, `bin-${tmpKb}-${workKb}`)
+    fs.mkdirSync(bin, { recursive: true })
+    const df = `#!/bin/sh\nlast=; for a; do last=$a; done\n[ "$last" = /tmp ] && f=${tmpKb} || f=${workKb}\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "fs 9999999 1 $f 1% /x"\n`
+    fs.writeFileSync(path.join(bin, "df"), df, { mode: 0o755 })
+    const script = `${stageBaseScript(path.join(dir, "root"))}\necho "$bybase"`
+    return execFileSync("bash", ["-c", script], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } }).toString().trim()
+  }
+
+  it("stages on whichever of /tmp and the work disk has more room", () => {
+    expect(base(5_000_000, 100)).toBe("/tmp")
+    expect(base(100, 5_000_000)).toBe(path.join(dir, "root", ".boxyard", "tmp"))
+    // A tie stays on /tmp.
+    expect(base(100, 100)).toBe("/tmp")
   })
 })
