@@ -15,8 +15,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
     label: "Coordinator",
-    description: "The model behind the chat that runs the yard, the per-project Captains, and when they compact their context.",
-    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort"],
+    description: "The model behind the chat that runs the yard, the per-project Captains and the project notes they curate, and when they compact their context.",
+    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort", "notesRetroEnabled", "notesMaxCount", "notesMaxTokens"],
   },
   {
     key: "agents",

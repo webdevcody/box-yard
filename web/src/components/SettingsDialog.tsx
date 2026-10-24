@@ -402,6 +402,50 @@ export function SettingsDialog({
                 <EffortOptions />
               </Select>
             </Row>
+            <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project notes</h4>
+            <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+              Every agent in a project starts with its notes. Agents only suggest notes; each project's Captain curates them into a small set of lasting rules, and you can edit
+              them on the project's Notes tab.
+            </p>
+            <Row
+              id={fid("nre")}
+              label="Notes retro"
+              help="When a task's PR merges, or a task without a PR ends done, its project's Captain goes through the note suggestions the agent left: it accepts, merges or rejects each one."
+              hint={hint("notesRetroEnabled")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("nre")} type="checkbox" checked={s.notesRetroEnabled} onChange={(e) => set("notesRetroEnabled", e.target.checked)} data-testid="notes-retro" />
+                {s.notesRetroEnabled ? "On: Captains curate suggestions" : "Off: suggestions wait on the Notes tab"}
+              </label>
+            </Row>
+            <Row
+              id={fid("nmc")}
+              label="Notes budget"
+              help="Most notes an agent's first prompt gets. Over the budget, agents get the newest notes that fit, their prompt says how many were left out, and the Captain is asked to prune."
+              hint={hint("notesMaxCount")}
+            >
+              <input
+                id={fid("nmc")}
+                type="number"
+                min={1}
+                max={200}
+                className={inputClass}
+                value={s.notesMaxCount}
+                onChange={(e) => set("notesMaxCount", Math.trunc(Number(e.target.value)))}
+              />
+            </Row>
+            <Row id={fid("nmt")} label="Notes token budget" help="About how many tokens all the notes may take in that prompt (4 characters is about 1 token)." hint={hint("notesMaxTokens")}>
+              <input
+                id={fid("nmt")}
+                type="number"
+                min={200}
+                max={50_000}
+                step={100}
+                className={inputClass}
+                value={s.notesMaxTokens}
+                onChange={(e) => set("notesMaxTokens", Math.trunc(Number(e.target.value)))}
+              />
+            </Row>
           </Panel>
         ) : section === "agents" ? (
           <Panel section="agents">
