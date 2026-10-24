@@ -3,12 +3,12 @@ import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, Loader2, type LucideIcon } from "lucide-react"
+import { Box, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
-import type { PrState, TaskStatus } from "../../../shared/types"
+import type { BoxSize, PrState, TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -79,6 +79,12 @@ export function QuietPill({ className }: { className?: string }) {
       Quiet
     </span>
   )
+}
+
+/** The icon for why a queued task waits: a box when it waits for a box of its project's size, else a disk. */
+export function WaitIcon({ task, className }: { task: { waitBoxSize?: BoxSize | null }; className?: string }) {
+  const Icon = task.waitBoxSize ? Box : HardDrive
+  return <Icon className={className} aria-hidden />
 }
 
 /** GitHub's PR colors and icons: open green, draft gray, merged purple, closed red. */

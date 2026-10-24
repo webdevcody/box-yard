@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
@@ -9,7 +9,7 @@ import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, fi
 import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
+import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, WaitIcon } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
@@ -772,8 +772,10 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
         </div>
         {note && (
           <div className="mt-0.5 flex items-center gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
-            <HardDrive className="h-3 w-3 shrink-0" />
-            <span className="truncate">{note}</span>
+            <WaitIcon task={task} className="h-3 w-3 shrink-0" />
+            <span className="truncate" title={note}>
+              {note}
+            </span>
           </div>
         )}
       </div>
