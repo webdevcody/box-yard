@@ -29,7 +29,7 @@ const SIZE_FN = `bysz() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else ec
  * parts and is joined on the box: each part is uploaded next to the destination, appended to `<destination>.boxyard-join`
  * and deleted, so the box needs room for the file plus one part, and so does this machine. Each append checks the join's
  * size first, so an exec that runs twice doesn't append twice; the whole file is moved into place only when its size is
- * right. A failure leaves neither the join nor a part behind. Returns how many uploads it took.
+ * right (any older file there is removed first). A failure leaves neither the join nor a part behind. Returns how many uploads it took.
  */
 export async function putFile(p: BoxProvider, boxId: string, localPath: string, destination: string): Promise<{ parts: number }> {
   const size = fs.statSync(localPath).size
@@ -46,7 +46,7 @@ export async function putFile(p: BoxProvider, boxId: string, localPath: string, 
   const local = path.join(tmp, "part")
   const fd = fs.openSync(localPath, "r")
   try {
-    const prep = await p.exec(boxId, `mkdir -p ${q(path.posix.dirname(destination))} && rm -f ${q(join)} ${q(piece)}`)
+    const prep = await p.exec(boxId, `mkdir -p ${q(path.posix.dirname(destination))} && rm -f ${q(join)} ${q(piece)} ${q(destination)}`)
     if (prep.exitCode !== 0) throw new Error(`couldn't prepare ${destination}: ${(prep.stderr || prep.stdout).trim().slice(-300)}`)
     const buf = Buffer.allocUnsafe(part)
     for (let i = 0, offset = 0; offset < size; i++, offset += part) {
@@ -66,7 +66,11 @@ export async function putFile(p: BoxProvider, boxId: string, localPath: string, 
       )
       if (res.exitCode !== 0) throw new Error(`joining part ${i + 1} of ${parts} of ${destination} on the box failed${res.stderr.trim() ? `: ${res.stderr.trim().slice(-300)}` : ""}`)
     }
-    const done = await p.exec(boxId, `${SIZE_FN}; [ "$(bysz ${q(join)})" = ${size} ] && mv -f ${q(join)} ${q(destination)}`)
+    // Already moved (the exec ran twice): the destination has the size, and there's no join any more.
+    const done = await p.exec(
+      boxId,
+      `${SIZE_FN}; { [ "$(bysz ${q(join)})" = ${size} ] && mv -f ${q(join)} ${q(destination)}; } || { [ ! -e ${q(join)} ] && [ "$(bysz ${q(destination)})" = ${size} ]; }`,
+    )
     if (done.exitCode !== 0) throw new Error(`${destination} came out the wrong size on the box after joining ${parts} parts`)
     return { parts }
   } catch (err) {

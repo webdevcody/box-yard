@@ -61,7 +61,8 @@ export interface ArchiveScript {
  * regenerable. Only ignored files: a tracked or not-ignored `perf/` is work and stays (git carries it).
  */
 export const ARCHIVE_SCRATCH_DIRS = ["tmp", ".tmp", "shots", "perf", "traces"]
-const SKIP_CASE = ARCHIVE_SCRATCH_DIRS.map((d) => `*/${d}/*`).join("|")
+/** tar --exclude patterns for a task's scratch dirs in work/, at any depth (tar's `*` matches `/` in exclusions). */
+const scratchExcludes = (taskId: string) => ARCHIVE_SCRATCH_DIRS.flatMap((d) => [`--exclude=${q(`${taskId}/work/${d}`)}`, `--exclude=${q(`${taskId}/work/*/${d}`)}`]).join(" ")
 
 /** In a thin archive, next to work/'s place: what restore needs to rebuild the repo (see ArchiveScript.thin). */
 export const THIN_DIR = "git-thin"
@@ -87,10 +88,11 @@ export function archiveScript(o: ArchiveScript): string {
       `  g=(-C ${stage} ${q(`${o.taskId}/${GIT_MANIFEST}`)}); [ -f ${q(`${o.git.stage}/${o.taskId}/${GIT_PACK}`)} ] && g+=(${q(`${o.taskId}/${GIT_PACK}`)})`,
       `  i=(); il=${q(`${o.git.stage}/ignored.list`)}`,
       o.git.ignored
-        ? `  if (cd ${id}/work 2>/dev/null && git ls-files -z -o -i --exclude-standard --directory 2>/dev/null) | while IFS= read -r -d '' f; do case "/$f" in ${SKIP_CASE}) continue;; esac; printf '%s\\0' ${id}/work/"$f"; done > "$il" 2>>"$err" && [ -s "$il" ]; then i=(--null -T "$il"); fi`
+        ? `  if (cd ${id}/work 2>/dev/null && git ls-files -z -o -i --exclude-standard --directory 2>/dev/null) | while IFS= read -r -d '' f; do printf '%s\\0' ${id}/work/"$f"; done > "$il" 2>>"$err" && [ -s "$il" ]; then i=(--null -T "$il"); fi`
         : `  :`,
-      // The excludes come first: they apply to the listed ignored folders too (node_modules/, dist/…).
-      `  tar czf - ${excludes} "\${m[@]}" "\${i[@]}" "\${g[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
+      // The excludes come first: they apply to the listed ignored folders too (node_modules/, dist/…). Everything
+      // from work/ here is ignored by git, so its scratch dirs can go too.
+      `  tar czf - ${excludes} ${o.git.ignored ? scratchExcludes(o.taskId) : ""} "\${m[@]}" "\${i[@]}" "\${g[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
     )
   } else if (o.thin) {
     lines.push(
