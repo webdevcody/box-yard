@@ -4,6 +4,7 @@ import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
+import { normalizeRunner, type Runner } from "../shared/runner.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -232,6 +233,7 @@ interface ProjectRow {
   partial_clone: number | null
   push_at_turn_end: number | null
   dep_cache?: number | null
+  runner?: string | null
   heavy_tasks: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
@@ -605,6 +607,7 @@ export class Store {
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
+      runner: normalizeRunner(row.runner),
       heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -632,6 +635,11 @@ export class Store {
     return normalizeHeavyTasks((this.db.prepare("SELECT heavy_tasks FROM projects WHERE id = ?").get(id) as { heavy_tasks: string | null } | undefined)?.heavy_tasks)
   }
 
+  /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
+  projectRunner(id: string): Runner {
+    return normalizeRunner((this.db.prepare("SELECT runner FROM projects WHERE id = ?").get(id) as { runner: string | null } | undefined)?.runner)
+  }
+
   findProject(idOrName: string): Project | null {
     const row = this.db
       .prepare("SELECT * FROM projects WHERE id = ? OR name = ? COLLATE NOCASE")
@@ -655,6 +663,7 @@ export class Store {
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
     depCache?: boolean | null
+    runner?: Runner
     heavyTasks?: HeavyTasks
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
@@ -680,6 +689,7 @@ export class Store {
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
+    this.setRunner(id, input.runner)
     this.setHeavyTasks(id, input.heavyTasks)
     this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
@@ -702,6 +712,8 @@ export class Store {
       pushAtTurnEnd?: boolean | null
       /** null clears it (Settings → Dependency cache applies). */
       depCache?: boolean | null
+      /** Where its agents run: Upstash boxes or this computer (shared/runner.ts). */
+      runner?: Runner
       /** How its running agents share boxes (shared/memory.ts HEAVY_TASKS). */
       heavyTasks?: HeavyTasks
       /** null clears it (Settings › Max notes applies). */
@@ -732,9 +744,16 @@ export class Store {
         Date.now(),
         id,
       )
+    this.setRunner(id, patch.runner)
     this.setHeavyTasks(id, patch.heavyTasks)
     this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** undefined leaves it as it is; "box" is stored as NULL, like a project from before the setting. */
+  private setRunner(id: string, v: Runner | undefined) {
+    if (v === undefined) return
+    this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(normalizeRunner(v) === "local" ? "local" : null, id)
   }
 
   /** undefined leaves it as it is; "off" is stored as NULL. */

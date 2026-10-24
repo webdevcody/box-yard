@@ -41,7 +41,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "Worker box size and resizing, capacity, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
+    description:
+      "Worker box size and resizing, capacity, local agents on this computer, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
     fields: [
       "workerSize",
       "autoResizeEnabled",
@@ -50,6 +51,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "maxBoxes",
       "slotsPerBox",
       "maxAgents",
+      "localAgents",
       "maxResidentPerBox",
       "boxIdleDeleteMinutes",
       "workspaceRetentionDays",
@@ -120,6 +122,7 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   maxBoxes: "BOX_POOL_MAX",
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
+  localAgents: "BOXYARD_LOCAL_AGENTS",
   maxResidentPerBox: "BOX_MAX_RESIDENT",
   boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
@@ -156,6 +159,7 @@ const POOL_KEYS = [
   "maxBoxes",
   "slotsPerBox",
   "maxAgents",
+  "localAgents",
   "maxResidentPerBox",
   "boxIdleDeleteMinutes",
   "workspaceRetentionDays",

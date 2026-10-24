@@ -9,6 +9,7 @@ import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { HeavyTasks } from "../../../shared/memory"
+import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
@@ -417,6 +418,7 @@ export function useCreateProject() {
           partialClone: null,
           pushAtTurnEnd: null,
           depCache: null,
+          runner: "box",
           heavyTasks: "off",
           createdAt: now,
           updatedAt: now,
@@ -452,6 +454,7 @@ export function useUpdateProject() {
       notesMaxTokens?: number | null
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
+      runner?: Runner
       heavyTasks?: HeavyTasks
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),

@@ -81,6 +81,8 @@ export const config = {
   maxBoxes: int("BOX_POOL_MAX", 5),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
+  /** Local runner: most agents of "This computer" projects running at once on this machine (their own queue, apart from box slots). */
+  localAgents: int("BOXYARD_LOCAL_AGENTS", 2),
   /** Claude turns that may run at the same time inside one box. */
   slotsPerBox: int("BOX_SLOTS", sizeDefaults.slotsPerBox),
   /** Task folders kept in one box before old, finished ones are evicted. */

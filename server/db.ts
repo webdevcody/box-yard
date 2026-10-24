@@ -646,6 +646,10 @@ export const MIGRATIONS: string[] = [
   -- A project's own choice of the box dependency cache (NULL uses Settings › Dependency cache).
   ALTER TABLE projects ADD COLUMN dep_cache INTEGER;
   `,
+  `
+  -- Where a project's agents run: NULL or 'box' in Upstash boxes, 'local' on the computer running Box Yard.
+  ALTER TABLE projects ADD COLUMN runner TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

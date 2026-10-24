@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { HeavyTasks } from "./memory.js"
+import type { Runner } from "./runner.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -56,6 +57,8 @@ export interface Project {
   pushAtTurnEnd: boolean | null
   /** Restore and save node_modules through the box's dependency cache; null uses Settings → Dependency cache. */
   depCache: boolean | null
+  /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
+  runner: Runner
   /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
   heavyTasks: HeavyTasks
   createdAt: number
@@ -589,6 +592,11 @@ export interface Settings {
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
   maxAgents: number
+  /**
+   * Local runner: most agents of "This computer" projects running at once on the machine running Box Yard. They
+   * queue on their own, apart from box slots and Max agents.
+   */
+  localAgents: number
   /** Rates used to estimate Upstash Box infrastructure costs. */
   costRates: CostRates
   /** Optional cost guardrail. When exceeded, Box Yard holds queued agent turns. */
