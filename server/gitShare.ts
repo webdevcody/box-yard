@@ -100,15 +100,16 @@ export function hydrateMirrorScript(s: MirrorSpec, refs: string[]): string {
  * Clone a task's work/ against the mirror (run inside the task folder). It borrows the mirror's objects; it is
  * a partial clone itself when the mirror is (or, with no mirror, when the setting says so), so blobs nobody has
  * yet are fetched from GitHub on demand. The alternates file is rewritten with the mirror's path as Box Yard
- * spells it, so in-use checks can match it exactly.
+ * spells it, so in-use checks can match it exactly. `target` is the folder to clone into (work/, or a temp folder
+ * whose .git a restore moves into work/).
  */
-export function cloneTaskScript(s: MirrorSpec): string {
+export function cloneTaskScript(s: MirrorSpec, target = "work"): string {
   const fallback = s.partial ? "--filter=blob:none" : ""
   return [
     `bym=${q(s.mirror)}`,
     `byf=${fallback ? q(fallback) : '""'}`,
     `if [ -d "$bym" ]; then byf=""; ${isPartial("$bym")} && byf=--filter=blob:none; fi`,
-    `${s.git} clone -q --no-checkout $byf --reference-if-able "$bym" ${q(s.url)} work && { [ ! -f work/.git/objects/info/alternates ] || echo "$bym/objects" > work/.git/objects/info/alternates; }`,
+    `${s.git} clone -q --no-checkout $byf --reference-if-able "$bym" ${q(s.url)} ${q(target)} && { [ ! -f ${q(`${target}/.git/objects/info/alternates`)} ] || echo "$bym/objects" > ${q(`${target}/.git/objects/info/alternates`)}; }`,
   ].join("\n")
 }
 
@@ -160,7 +161,7 @@ export function relinkTaskScript(taskDir: string, mirror: string): string {
     `if [ -f "$bya" ] && [ -d ${q(mirrorObjects(mirror))} ]; then echo ${q(mirrorObjects(mirror))} > "$bya"; fi`,
     `if [ -f ${pack} ]; then git -C ${w} index-pack --stdin < ${pack} >/dev/null 2>&1; rm -f ${pack}; fi`,
     // An unborn HEAD (no commits yet) is fine; a HEAD whose commit or tree can't be read is not.
-    `byh=$(git -C ${w} rev-parse -q --verify HEAD 2>/dev/null)`,
+    `byh=$([ -e ${w}/.git ] && git -C ${w} rev-parse -q --verify HEAD 2>/dev/null)`,
     `if [ -n "$byh" ]; then git -C ${w} cat-file -e "$byh^{tree}" 2>/dev/null && echo ${GIT_MARK}ok || echo ${GIT_MARK}broken; fi`,
     `true`,
   ].join("\n")
