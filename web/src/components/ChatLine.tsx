@@ -3,7 +3,7 @@
 import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
-import { AppLink, Markdown, cx } from "./ui"
+import { AppLink, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage } from "../lib/captainTranscript"
@@ -223,8 +223,8 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   }
   if (m.role === "error") {
     return (
-      <div className="flex gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <div className="flex items-start gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">
+        <LineIcon icon={AlertTriangle} className="h-3.5 w-3.5" />
         <div className="min-w-0 whitespace-pre-wrap wrap-anywhere">{m.content}</div>
       </div>
     )
