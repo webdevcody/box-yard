@@ -18,23 +18,32 @@ export function contextLabel(tokens: number | null, window: number | null): stri
 
 export const CONTEXT_HINT = "How much of this agent's context window is used. Compact when it gets high."
 
+/** Context use only gets loud near the limit: amber from 75%, red from 90%. Below that it stays muted. */
+export const CONTEXT_WARN_PCT = 75
+export const CONTEXT_DANGER_PCT = 90
+
+export function contextTone(pct: number | null): { bar: string; text: string } {
+  if (pct !== null && pct >= CONTEXT_DANGER_PCT) return { bar: "bg-red-500", text: "text-red-300" }
+  if (pct !== null && pct >= CONTEXT_WARN_PCT) return { bar: "bg-amber-400", text: "text-amber-300" }
+  return { bar: "bg-zinc-500", text: "text-zinc-500" }
+}
+
 /**
- * A tiny bar plus its label: "Context 84k / 1m · 8%" on desktop, "8% ctx" on phones.
- * Not clickable; Compact lives in the ⋯ menu.
+ * A tiny bar and the percentage ("58%"). The full reading ("Context 576k / 1m · 58%") is the tooltip and
+ * the accessible name. Not clickable; Compact lives in the ⋯ menu (and next to it in the task header when high).
  */
 export function ContextMiniBar({ tokens, window, hint = CONTEXT_HINT, className }: { tokens: number | null; window: number | null; hint?: string; className?: string }) {
   const pct = contextPct(tokens, window)
   if (pct === null) return null
-  const bar = pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-yard-500"
-  const text = pct >= 90 ? "text-red-300" : pct >= 70 ? "text-amber-300" : "text-zinc-400"
+  const tone = contextTone(pct)
   const label = `Context ${contextLabel(tokens, window)}`
   return (
-    <span title={`${label}. ${hint}`} className={cx("inline-flex shrink-0 items-center gap-1.5 text-xs whitespace-nowrap tabular-nums", text, className)} data-testid="context-mini">
+    <span title={`${label}. ${hint}`} className={cx("inline-flex shrink-0 items-center gap-1.5 text-xs whitespace-nowrap tabular-nums", tone.text, className)} data-testid="context-mini">
       <span aria-hidden className="block h-1.5 w-6 shrink-0 overflow-hidden rounded-full bg-zinc-800">
-        <span className={cx("block h-full rounded-full", bar)} style={{ width: `${Math.max(pct, 4)}%` }} />
+        <span className={cx("block h-full rounded-full", tone.bar)} style={{ width: `${Math.max(pct, 4)}%` }} />
       </span>
-      <span aria-hidden className="sm:hidden">{pct}% ctx</span>
-      <span className="max-sm:sr-only">{label}</span>
+      <span aria-hidden>{pct}%</span>
+      <span className="sr-only">{label}</span>
     </span>
   )
 }
@@ -59,7 +68,7 @@ export function ContextMeter({
   className?: string
 }) {
   const pct = contextPct(tokens, window)
-  const bar = pct === null ? "bg-zinc-600" : pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-yard-500"
+  const bar = pct === null ? "bg-zinc-600" : pct >= CONTEXT_WARN_PCT ? contextTone(pct).bar : "bg-yard-500"
   const label = contextLabel(tokens, window)
   return (
     <div className={cx("flex items-center gap-2 text-xs text-zinc-400", className)} data-testid="context-meter">

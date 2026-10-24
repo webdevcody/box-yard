@@ -327,17 +327,18 @@ const NoticeGroup = memo(function NoticeGroup({
 
 function StatusPill({ state }: { state: CaptainState | undefined }) {
   const s = !state
-    ? { label: "…", chip: "bg-zinc-800 text-zinc-400", dot: "bg-zinc-600" }
+    ? { label: "…", dot: "bg-zinc-600" }
     : state.error
-      ? { label: "Error", chip: "bg-red-500/10 text-red-300", dot: "bg-red-500" }
+      ? { label: "Error", dot: "bg-red-500" }
       : state.compacting
-        ? { label: "Compacting", chip: "bg-violet-500/10 text-violet-300", dot: "bg-violet-400 animate-pulse" }
+        ? { label: "Compacting", dot: "bg-violet-400 animate-pulse" }
         : state.busy
-          ? { label: "Working", chip: "bg-sky-500/10 text-sky-300", dot: "bg-sky-400 animate-pulse" }
-          : { label: "Idle", chip: "bg-zinc-800 text-zinc-300", dot: "bg-zinc-400" }
+          ? { label: "Working", dot: "bg-sky-400 animate-pulse" }
+          : { label: "Idle", dot: "bg-zinc-400" }
   return (
-    <span data-testid="captain-status" className={cx("inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", s.chip)}>
-      <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", s.dot)} />
+    // The same quiet dot-and-label as the task header's status (StatusDot).
+    <span data-testid="captain-status" className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium whitespace-nowrap text-zinc-200">
+      <span className={cx("h-2 w-2 shrink-0 rounded-full", s.dot)} aria-hidden />
       {s.label}
     </span>
   )
@@ -356,28 +357,14 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
     onCompact: () => compact.mutate(),
   }
   return (
-    <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
-      <div className="flex min-w-0 items-center gap-2">
-        <Bot className="h-4 w-4 shrink-0 text-yard-400" />
-        <span className="text-sm font-semibold text-zinc-100">Captain</span>
-        <StatusPill state={state} />
-        <ContextMiniBar tokens={state?.usage.tokens ?? null} window={state?.usage.window ?? null} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className="sm:hidden" />
-      </div>
-      <div className="flex min-w-0 items-center gap-x-3 text-xs text-zinc-500 max-sm:order-last max-sm:w-full">
-        {model && (
-          <span className="truncate" title="The Captain runs on the Coordinator's model and effort (Settings → Coordinator)">
-            {model}
-          </span>
-        )}
-        {lastActive && (
-          <span className="shrink-0 whitespace-nowrap">
-            Active <TimeAgo ts={lastActive} />
-          </span>
-        )}
-      </div>
+    // Like the task header: name, status and a small context reading; model, last active and the full meter are in ⋯.
+    <header className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
+      <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+      <span className="text-sm font-semibold text-zinc-100">Captain</span>
+      <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">
-        <ContextMeter className="max-sm:hidden" {...meter} />
-        <CaptainMenu projectId={projectId} meter={meter} />
+        <ContextMiniBar tokens={meter.tokens} window={meter.window} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className="mr-1" />
+        <CaptainMenu projectId={projectId} meter={meter} model={model} lastActive={lastActive} />
       </div>
     </header>
   )
@@ -385,7 +372,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
 
 type MeterProps = Omit<ComponentProps<typeof ContextMeter>, "className">
 
-function CaptainMenu({ projectId, meter }: { projectId: string; meter: MeterProps }) {
+function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: string; meter: MeterProps; model: string | null; lastActive: number | null }) {
   const { open, setOpen, root, trigger } = usePopover()
   const [history, setHistory] = useState(false)
   const compactions = useCaptainCompactions(projectId)
@@ -411,8 +398,19 @@ function CaptainMenu({ projectId, meter }: { projectId: string; meter: MeterProp
           aria-label="Captain actions"
           className="absolute top-full right-0 z-30 mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 text-sm shadow-2xl"
         >
-          {/* Phones have no room for the meter in the header. */}
-          <ContextMeter className="border-b border-zinc-800/80 px-2 pt-1.5 pb-2.5 sm:hidden" {...meter} />
+          <div className="space-y-1 border-b border-zinc-800/80 px-2 pt-1.5 pb-2.5 text-xs text-zinc-500">
+            {model && (
+              <p className="truncate" title="The Captain runs on the Coordinator's model and effort (Settings → Coordinator)">
+                <span className="text-zinc-300">{model}</span>
+              </p>
+            )}
+            {lastActive && (
+              <p>
+                Active <TimeAgo ts={lastActive} />
+              </p>
+            )}
+            <ContextMeter className="pt-1.5" {...meter} />
+          </div>
           <button
             type="button"
             autoFocus

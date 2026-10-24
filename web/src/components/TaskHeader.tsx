@@ -1,21 +1,16 @@
-// The task page header: one row with the title, status and the one action that matters
-// right now, a quiet second row with where it lives and its links, and a "⋯" popover
-// for everything else.
+// The task page header, three calm rows: the breadcrumb, the title with the actions that matter right now
+// (Merge PR, Stop / Mark done / Retry, ⋯), and one meta row (status · PR · files · previews · context).
+// Everything else (model and route, times, box, branch, id, full context numbers) is in the ⋯ details popover.
 import { useEffect, useRef, useState, type ReactNode } from "react"
 import { Link, useLocation } from "wouter"
 import {
-  AlarmClock,
   ChevronRight,
-  Bot,
-  Box,
   Check,
   CheckCircle2,
   CircleStop,
   Copy,
   ExternalLink,
-  GitBranch,
   Globe,
-  Hash,
   Loader2,
   Minimize2,
   MoreHorizontal,
@@ -28,17 +23,14 @@ import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask 
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, NewTabLink, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
+import { Button, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
 import { FilesChip } from "./TaskFiles"
-import { MergePrButton, MergePrMenuItem } from "./MergePr"
+import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
-import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
+import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
-
-/** Above this much context used, a "Compact" nudge shows next to the status. */
-const COMPACT_NUDGE_PCT = 60
 
 /** A boolean saved in localStorage, so a toggle keeps its state across tasks and reloads. */
 export function useStoredFlag(key: string): [boolean, (v: boolean) => void] {
@@ -71,23 +63,17 @@ export function TaskHeader({
   const stop = useStopTask()
   const close = useCloseTask()
   const retry = useRetryTask()
-  const compact = useCompactTask()
   const primary = primaryAction(task.status)
-  const pct = contextPct(task.contextTokens, task.contextWindow)
-  const canCompact = task.turnCount > 0 && task.status !== "failed"
 
   return (
     <header className="mb-4 space-y-1">
       <Breadcrumb task={task} project={project} />
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-          <h1 className="line-clamp-2 min-w-0 text-lg leading-snug font-semibold tracking-tight break-words text-zinc-50 sm:line-clamp-none sm:truncate" title={task.title}>
-            {task.title}
-          </h1>
-          <StatusBadge status={badgeStatus(task)} />
-          <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." />
-        </div>
-        <div className="flex shrink-0 items-center gap-1 max-sm:w-full max-sm:justify-end">
+      <div className="flex items-start gap-2 sm:items-center">
+        <h1 className="line-clamp-2 min-w-0 flex-1 text-lg leading-snug font-semibold tracking-tight wrap-anywhere text-zinc-50 max-sm:pt-1.5 sm:truncate" title={task.title}>
+          {task.title}
+        </h1>
+        <div className="flex shrink-0 items-center gap-1">
+          <MergePrButton task={task} placement="actions" />
           {primary === "stop" && (
             <Button size="sm" variant="subtle" aria-label="Stop" onClick={() => stop.mutate(task.id)}>
               <CircleStop className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Stop</span>
@@ -106,43 +92,67 @@ export function TaskHeader({
           <TaskMenu task={task} project={project} schedule={schedule} primary={primary} showTools={showTools} onShowTools={onShowTools} />
         </div>
       </div>
-
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-500">
-        <span>
-          Active <TimeAgo ts={task.updatedAt} />
-        </span>
-        {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
-        <PrChip task={task} />
-        <MergePrButton task={task} />
-        {(task.model || task.effort) && (
-          <span title={[task.routingRule, task.routingReason].filter(Boolean).join(" · ") || undefined}>
-            {[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}
-          </span>
-        )}
-        {task.previews.map((p) => (
-          <PreviewChip key={p.port} preview={p} />
-        ))}
-        <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
-        {task.compacting || task.compactPending ? (
-          <span className="inline-flex items-center gap-1">
-            <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
-          </span>
-        ) : (
-          pct !== null &&
-          pct >= COMPACT_NUDGE_PCT &&
-          canCompact && (
-            <button
-              type="button"
-              onClick={() => compact.mutate(task.id)}
-              title="Summarise the conversation to free up context"
-              className="inline-flex min-h-11 items-center gap-1 rounded-md px-2 text-amber-300 hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:outline-none sm:min-h-0 sm:px-1"
-            >
-              <Minimize2 className="h-3 w-3" /> {pct}% context · Compact
-            </button>
-          )
-        )}
-      </div>
+      <TaskMetaRow task={task} files={files} />
     </header>
+  )
+}
+
+/**
+ * The one meta row, always in this order so nothing jumps as the task moves along: status · PR · files ·
+ * previews, and the context reading at the far right. On phones it is two lines at most: status and context,
+ * then the chips, which scroll sideways inside their line. Everything else (model, times, box, branch, id, full
+ * context numbers) is in the ⋯ details.
+ */
+export function TaskMetaRow({ task, files }: { task: Task; files: Artifact[] }) {
+  const hasChips = Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
+  return (
+    <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+      <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
+        {task.pendingCount > 0 && <span className="font-normal text-zinc-500">· {task.pendingCount} queued</span>}
+      </StatusDot>
+      {hasChips && (
+        <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
+          <MergePrChip task={task} className={META_CHIP} />
+          <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
+          {task.previews.map((p) => (
+            <PreviewChip key={p.port} preview={p} />
+          ))}
+        </div>
+      )}
+      <ContextSlot task={task} />
+    </div>
+  )
+}
+
+/** The context bar and "58%"; from 75% it turns amber (red from 90%) and offers Compact right there. */
+function ContextSlot({ task }: { task: Task }) {
+  const compact = useCompactTask()
+  const pct = contextPct(task.contextTokens, task.contextWindow)
+  const canCompact = task.turnCount > 0 && task.status !== "failed"
+  const busy = task.compacting || task.compactPending
+  if (pct === null && !busy) return null
+  return (
+    <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+      <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." />
+      {busy ? (
+        <span className="inline-flex items-center gap-1 whitespace-nowrap">
+          <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
+        </span>
+      ) : (
+        pct !== null &&
+        pct >= CONTEXT_WARN_PCT &&
+        canCompact && (
+          <button
+            type="button"
+            onClick={() => compact.mutate(task.id)}
+            title="Summarise the conversation to free up context"
+            className="inline-flex min-h-11 items-center gap-1 rounded-md px-2 whitespace-nowrap text-amber-300 hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:outline-none sm:min-h-0 sm:px-1"
+          >
+            <Minimize2 className="h-3 w-3" /> Compact
+          </button>
+        )
+      )}
+    </span>
   )
 }
 
@@ -198,9 +208,9 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
     <NewTabLink
       href={preview.url}
       title={preview.label}
-      className="inline-flex min-h-11 items-center gap-1 rounded-md border border-sky-900/60 bg-sky-500/10 px-2 py-1 font-medium text-sky-300 transition hover:bg-sky-500/20 sm:min-h-0 sm:px-1.5 sm:py-0.5"
+      className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100")}
     >
-      <Globe className="h-3 w-3" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-70" />
+      <Globe className="h-3 w-3 text-sky-400" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-60" />
     </NewTabLink>
   )
 }
@@ -281,48 +291,69 @@ function TaskMenu({
           ref={panel}
           role="dialog"
           aria-label="Task details and actions"
-          className="absolute top-full right-0 z-30 mt-1 w-[calc(100vw-2rem)] max-w-80 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 text-sm shadow-2xl"
+          className="absolute top-full right-0 z-30 mt-1 w-[calc(100vw-2rem)] max-w-96 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 text-sm shadow-2xl"
         >
-          <div className="space-y-1.5 px-2 pt-1.5 pb-2 text-xs text-zinc-400">
-            {task.branch && (
-              <Detail icon={<GitBranch className="h-3.5 w-3.5" />} label="Branch">
-                <span className="min-w-0 flex-1 truncate font-mono" title={task.branch}>
-                  {task.branch}
-                </span>
-                <CopyButton text={task.branch} label="Copy branch name" />
+          <div className="px-2 pt-1.5 pb-2.5 text-xs text-zinc-400">
+            <p className="mb-2 text-sm leading-snug font-medium wrap-anywhere text-zinc-100">{task.title}</p>
+            <dl className="grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-x-2 gap-y-0.5">
+              <Detail label="Task">
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300">{task.id}</span>
+                <CopyButton text={task.id} label="Copy task id" />
               </Detail>
-            )}
-            <Detail icon={<Box className="h-3.5 w-3.5" />} label="Box">
-              {task.boxId ? (
-                <Link href={`/boxes#${encodeURIComponent(task.boxId)}`} className="truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
-                  {task.boxId}
-                </Link>
-              ) : (
-                <span>{task.lastArchivedAt ? "archived" : "no box yet"}</span>
+              {task.branch && (
+                <Detail label="Branch">
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-zinc-300" title={task.branch}>
+                    {task.branch}
+                  </span>
+                  <CopyButton text={task.branch} label="Copy branch name" />
+                </Detail>
               )}
-            </Detail>
-            <Detail icon={<Hash className="h-3.5 w-3.5" />} label="Turns">
-              <span>
-                {task.turnCount} turn{task.turnCount === 1 ? "" : "s"}
-                {task.effort ? ` · ${task.effort} effort` : ""}
-              </span>
-            </Detail>
-            {(task.model || task.routingRule || task.routingReason) && (
-              <Detail icon={<Bot className="h-3.5 w-3.5" />} label="Route">
-                <span className="min-w-0 flex-1 truncate" title={[task.model, task.effort ? `${task.effort} effort` : "", task.routingRule, task.routingReason].filter(Boolean).join(" · ")}>
-                  {[task.model, task.routingRule ?? task.routingReason].filter(Boolean).join(" · ")}
+              <Detail label="Box">
+                {task.boxId ? (
+                  <Link href={`/boxes#${encodeURIComponent(task.boxId)}`} className="min-w-0 truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
+                    {task.boxId}
+                  </Link>
+                ) : (
+                  <span>{task.lastArchivedAt ? "archived" : "no box yet"}</span>
+                )}
+              </Detail>
+              {(task.model || task.effort) && (
+                <Detail label="Model">
+                  <span className="min-w-0 truncate text-zinc-300">{[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}</span>
+                </Detail>
+              )}
+              {(task.routingRule || task.routingReason) && (
+                <Detail label="Route" top>
+                  <span className="min-w-0 py-0.5 leading-snug wrap-anywhere">
+                    {task.routingRule && <span className="text-zinc-300">{task.routingRule}</span>}
+                    {task.routingRule && task.routingReason && " · "}
+                    {task.routingReason}
+                  </span>
+                </Detail>
+              )}
+              <Detail label="Active">
+                <span className="text-zinc-300">
+                  <TimeAgo ts={task.updatedAt} />
+                </span>
+                <span>
+                  · {task.turnCount} turn{task.turnCount === 1 ? "" : "s"}
                 </span>
               </Detail>
-            )}
-            {task.scheduleId && (
-              <Detail icon={<AlarmClock className="h-3.5 w-3.5" />} label="Schedule">
-                <Link href="/schedules" className="truncate text-yard-400 hover:underline" onClick={() => setOpen(false)}>
-                  {schedule ? schedule.name : "a deleted schedule"}
-                </Link>
+              <Detail label="Created">
+                <span className="text-zinc-300">
+                  <TimeAgo ts={task.createdAt} />
+                </span>
               </Detail>
-            )}
+              {task.scheduleId && (
+                <Detail label="Schedule">
+                  <Link href="/schedules" className="min-w-0 truncate text-yard-400 hover:underline" onClick={() => setOpen(false)}>
+                    {schedule ? schedule.name : "a deleted schedule"}
+                  </Link>
+                </Detail>
+              )}
+            </dl>
             <ContextMeter
-              className="pt-1"
+              className="mt-2.5 border-t border-zinc-800/80 pt-2.5"
               tokens={task.contextTokens}
               window={task.contextWindow}
               compacting={task.compacting}
@@ -382,14 +413,13 @@ function TaskMenu({
   )
 }
 
-function Detail({ icon, label, children }: { icon: ReactNode; label: string; children: ReactNode }) {
+/** One label/value pair in the details grid; the value cell holds text plus an optional copy button. */
+function Detail({ label, top, children }: { label: string; top?: boolean; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 items-center gap-2" title={label}>
-      <span className="shrink-0 text-zinc-500" aria-label={label}>
-        {icon}
-      </span>
-      {children}
-    </div>
+    <>
+      <dt className={cx("text-zinc-500", top && "self-start py-0.5")}>{label}</dt>
+      <dd className="flex min-h-6 min-w-0 items-center gap-1">{children}</dd>
+    </>
   )
 }
 
@@ -400,7 +430,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
       type="button"
       aria-label={label}
       title={label}
-      className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none sm:h-7 sm:w-7"
+      className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none sm:h-6 sm:w-6"
       onClick={async () => {
         try {
           await navigator.clipboard.writeText(text)
