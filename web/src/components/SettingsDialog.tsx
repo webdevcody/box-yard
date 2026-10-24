@@ -490,7 +490,7 @@ function LimitsPanel({
 }) {
   const health = useHealth()
   const int =
-    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb") =>
+    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "buildCleanupIdleMinutes") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -612,6 +612,25 @@ function LimitsPanel({
           value={s.diskCloneFactor}
           onChange={(e) => set("diskCloneFactor", Number(e.target.value))}
         />
+      </Row>
+      <Row
+        id={fid("bci")}
+        label="Build output cleanup (idle minutes)"
+        help="Once a task's turn has ended and it has sat idle this long, its git-ignored build output (node_modules, dist, .cache, tmp, perf captures) is removed from the box. Only folders git ignores and doesn't track; uncommitted work is never touched. 0 = off (low-disk cleanup still runs)."
+        hint={hint("buildCleanupIdleMinutes")}
+      >
+        <input id={fid("bci")} type="number" min={0} max={43_200} className={inputClass} value={s.buildCleanupIdleMinutes} onChange={int("buildCleanupIdleMinutes")} />
+      </Row>
+      <Row
+        id={fid("gpc")}
+        label="Partial clone mirrors"
+        help="Each box keeps one mirror per repo, and task checkouts borrow its objects instead of copying them. With this on, mirrors skip old file versions (git clone --filter=blob:none); git fetches one from GitHub when log -p, blame or a checkout needs it. A project can override it."
+        hint={hint("gitPartialClone")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("gpc")} type="checkbox" checked={s.gitPartialClone} onChange={(e) => set("gitPartialClone", e.target.checked)} data-testid="git-partial-clone" />
+          {s.gitPartialClone ? "On: blob:none mirrors" : "Off: full mirrors"}
+        </label>
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>

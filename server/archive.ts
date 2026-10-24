@@ -1,4 +1,5 @@
 import { q } from "./providers/types.js"
+import { KEEP_PACK } from "./gitShare.js"
 
 /**
  * Workspace archives stream off the box: tar writes to stdout, base64 makes it text the exec stream can carry, and
@@ -29,6 +30,11 @@ export interface ArchiveScript {
    * into the archive from there; the repo itself isn't touched.
    */
   partial: boolean
+  /**
+   * Where archive() staged the task's git-keep.pack (server/gitShare.ts keepPackStage), on /tmp. When
+   * `<keepStage>/<taskId>/git-keep.pack` exists, it goes into the archive as `<taskId>/git-keep.pack`.
+   */
+  keepStage?: string
 }
 
 /** The bash script that streams a task's archive to stdout. */
@@ -41,18 +47,19 @@ export function archiveScript(o: ArchiveScript): string {
     `err=$(mktemp /tmp/boxyard-archive-err.XXXXXX 2>/dev/null) || err=/dev/null`,
     `stage=; wip=-; st="2 0 0 0"`,
     `if cd ${q(o.root)} 2>>"$err"; then`,
+    o.keepStage ? `  [ -f ${q(`${o.keepStage}/${o.taskId}/${KEEP_PACK}`)} ] && k=(-C ${q(o.keepStage)} ${q(`${o.taskId}/${KEEP_PACK}`)}) || k=()` : `  k=()`,
   ]
   if (o.partial) {
     lines.push(
-      `  m=(); for f in claude events.jsonl work/.git; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
+      `  m=(); for f in claude events.jsonl events.seq work/.git; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
       `  if [ -e ${id}/work/.git ]; then`,
       `    stage=$(mktemp -d /tmp/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${wipSnapshot(o.taskId)}) || wip=failed`,
       `  fi`,
       `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
-      `  tar czf - ${excludes} "\${m[@]}" "\${x[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
+      `  tar czf - ${excludes} "\${m[@]}" "\${x[@]}" "\${k[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
     )
   } else {
-    lines.push(`  tar czf - ${excludes} ${id} 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`)
+    lines.push(`  tar czf - ${excludes} ${id} "\${k[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`)
   }
   lines.push(
     `  st="\${PIPESTATUS[*]}"`,

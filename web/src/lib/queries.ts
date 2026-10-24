@@ -257,6 +257,7 @@ export function useCreateProject() {
           envKeys: Object.keys(input.env ?? {}),
           notes: [],
           boxSize: null,
+          partialClone: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -274,7 +275,7 @@ export function useCreateProject() {
 export function useUpdateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, ...patch }: { id: string; name?: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; removeEnv?: string[]; boxSize?: BoxSize | null }) =>
+    mutationFn: ({ id, ...patch }: { id: string; name?: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; removeEnv?: string[]; boxSize?: BoxSize | null; partialClone?: boolean | null }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
       await qc.cancelQueries({ queryKey: keys.projects })

@@ -709,6 +709,8 @@ function serveMcp() {
 
 const CLEAN_IN_REPO = new Set([
   "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", "target", ".venv", "__pycache__",
+  // Scratch space and perf/test captures (e.g. shots/perf/*.jsonl, Playwright reports, traces).
+  "tmp", ".tmp", "shots", "perf", "traces", "playwright-report", "test-results",
 ])
 const CLEAN_OUTSIDE_REPO = new Set(["node_modules", "__pycache__"])
 const CLEAN_MAX_DEPTH = 6

@@ -538,6 +538,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN pr_head_sha TEXT;
   ALTER TABLE tasks ADD COLUMN pr_labels_json TEXT;
   `,
+  `
+  -- Shared git objects: a project's own choice of partial-clone (blob:none) box mirrors. NULL uses Settings.
+  ALTER TABLE projects ADD COLUMN partial_clone INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

@@ -42,8 +42,11 @@ export interface CleanupStepReport {
   skipped: string | null
 }
 
-/** "clear" is Clear box: archive and remove every workspace, keep the box. */
-export type CleanupReason = "low-disk" | "out-of-space" | "manual" | "clear"
+/**
+ * "clear" is Clear box: archive and remove every workspace, keep the box. "routine" is the quiet upkeep Box Yard
+ * runs by itself: build output of tasks idle past Settings › buildCleanupIdleMinutes, and a light mirror gc.
+ */
+export type CleanupReason = "low-disk" | "out-of-space" | "manual" | "clear" | "routine"
 
 export interface BoxCleanup {
   boxId: string

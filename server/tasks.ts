@@ -34,8 +34,9 @@ import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
-import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
+import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
+import { GIT_MARK, MIRROR_MARK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
   compareSizes,
@@ -80,6 +81,8 @@ const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 const BRANCH_MARK = "boxyard-branch="
 const CLONE_SIZE_MARK = "boxyard-clone-kb="
+/** How often routine upkeep runs a light gc (`gc --auto`) on each box's repo mirrors. */
+const MIRROR_GC_MS = 6 * 60 * 60_000
 /** A df reading this fresh is good enough for placement. */
 const DISK_CACHE_MS = 20_000
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
@@ -218,6 +221,10 @@ export class TaskManager {
   /** Each task's last archive error, until an archive succeeds. */
   private archiveErrors = new Map<string, string>()
   private lastRetentionAt = 0
+  /** Routine upkeep: each resting task's last_active_at when its build output was last cleaned. */
+  private buildsCleaned = new Map<string, number>()
+  /** Routine upkeep: when each box's mirrors last got their light gc (first seen = now). */
+  private mirrorGcAt = new Map<string, number>()
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
   private lastBoxProbeAt = new Map<string, number>()
@@ -698,8 +705,10 @@ export class TaskManager {
   private boxOperation(boxId: string): BoxOperation | null {
     const op = this.boxOps.get(boxId)
     if (op) return op
-    if (!this.janitor.isRunning(boxId)) return null
-    return this.janitor.current(boxId)?.reason === "clear" ? "clear" : "cleanup"
+    const reason = this.janitor.runningReason(boxId)
+    // Routine upkeep is quick and quiet; it doesn't hold the box's buttons.
+    if (!reason || reason === "routine") return null
+    return reason === "clear" ? "clear" : "cleanup"
   }
 
   /** What Clear box and Delete box would touch: each task with its status and uncommitted files, and the disk in use. */
@@ -1459,6 +1468,8 @@ export class TaskManager {
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleaned up.`)
     const op = this.boxOps.get(boxId)
     if (op && !this.janitor.isRunning(boxId)) throw new ConflictError(busyMessage(boxId, op))
+    // Routine upkeep is short: let it finish, then run the full cleanup that was asked for.
+    if (this.janitor.runningReason(boxId) === "routine") await this.janitor.settle(boxId)
     if (!this.janitor.isRunning(boxId)) void this.janitor.run(boxId, { reason: "manual", target: null, parkBelow: this.diskNeed(null) })
     return this.janitor.current(boxId)!
   }
@@ -1913,6 +1924,8 @@ export class TaskManager {
    */
   private async prepareWorkspace(row: TaskRow, boxId: string, dir: string): Promise<{ restored: boolean; branch?: "origin" | "base" }> {
     const root = this.provider.root(boxId)
+    const project = this.store.getProject(row.project_id)!
+    const mirror = project.repo ? this.mirrorSpec(boxId, project) : null
     if (row.archive_path && fs.existsSync(row.archive_path)) {
       const remote = `${root}/.boxyard/restore-${row.id}.tgz`
       await this.provider.uploadFile(boxId, row.archive_path, remote)
@@ -1921,7 +1934,8 @@ export class TaskManager {
         `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
-      await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`)
+      if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
+      await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`, mirror?.env ?? "")
       // The restored events log keeps its own seq numbers; restart the byte offset.
       const cursor = parseCursor(row.event_cursor)
       const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
@@ -1930,26 +1944,21 @@ export class TaskManager {
       return { restored: true }
     }
 
-    const project = this.store.getProject(row.project_id)!
     const steps = [`mkdir -p ${q(dir)}`, `rm -rf ${q(dir + "/work")}`]
-    if (project.repo) {
-      const helper = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
-      const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.c.githubToken
-      const url = cloneUrl(project.repo)
-      // One bare mirror per repo per box: later tasks of the project clone from
-      // local disk. --dissociate copies the objects, so a task folder stays
-      // self-contained when it's archived or moved to another box.
-      const mirror = `${root}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`
-      const git = `GITHUB_TOKEN=${q(token)} GIT_TERMINAL_PROMPT=0 git -c credential.helper=${q(helper)}`
+    if (mirror) {
+      const { spec, env, helper } = mirror
+      // One mirror per repo per box (see server/gitShare.ts): the task's clone borrows its objects, so a task
+      // folder holds its working tree and only the objects it made or fetched itself.
+      const refs = [`refs/heads/${project.baseBranch}`, ...(row.branch ? [`refs/heads/${row.branch}`] : [])]
       steps.push(
-        `( [ -d ${q(mirror)} ] && ${git} -C ${q(mirror)} fetch -q --prune origin || (rm -rf ${q(mirror)} && mkdir -p ${q(root + "/.boxyard/repos")} && ${git} clone -q --mirror ${q(url)} ${q(mirror)}) ) >/dev/null 2>&1; true`,
-        `cd ${q(dir)}`,
-        `${git} clone --reference-if-able ${q(mirror)} --dissociate ${q(url)} work`,
+        env,
+        withMirrorLock(spec.mirror, [syncMirrorScript(spec), hydrateMirrorScript(spec, refs), `cd ${q(dir)}`, cloneTaskScript(spec)].join("\n")),
         `cd work`,
-        `(git checkout ${q(project.baseBranch)} 2>/dev/null || true)`,
         `git config credential.helper ${q(helper)}`,
         `git config user.name ${q(this.c.gitUserName)}`,
         `git config user.email ${q(this.c.gitUserEmail)}`,
+        // The clone has no checkout yet (so it never fetches the default branch's files for nothing).
+        `(git checkout -q -f ${q(project.baseBranch)} 2>/dev/null || git checkout -q -f 2>/dev/null || true)`,
       )
       if (row.branch) steps.push(`( (git checkout ${q(row.branch)} >/dev/null 2>&1 && echo ${BRANCH_MARK}origin) || (git checkout -b ${q(row.branch)} && echo ${BRANCH_MARK}base) )`)
       // How much disk a clone of this repo takes, for the next pre-flight check.
@@ -1966,9 +1975,47 @@ export class TaskManager {
     const kb = Number(res.stdout.match(new RegExp(`${CLONE_SIZE_MARK}(\\d+)`))?.[1])
     const mirrorName = this.repoMirrorName(project.repo)
     if (mirrorName && Number.isFinite(kb) && kb > 0) this.store.setKv(cloneBytesKey(mirrorName), String(kb * 1024))
+    if (res.stdout.includes(`${MIRROR_MARK}recreate`)) {
+      this.addEvent(row.id, `Re-created the box's mirror of ${project.repo} as a ${mirror!.spec.partial ? "partial (blob:none)" : "full"} clone to match the project's partial clone setting.`)
+    }
     this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
+  }
+
+  /** Whether a project's box mirrors are partial clones (blob:none): its own choice, else Settings. */
+  partialClone(project: { partialClone?: boolean | null }): boolean {
+    return project.partialClone ?? this.settings.get().gitPartialClone
+  }
+
+  /** The repo mirror on a box for a project, with the git command, env and credential helper that reach GitHub. */
+  private mirrorSpec(boxId: string, project: NonNullable<ReturnType<Store["getProject"]>>) {
+    const helper = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
+    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.c.githubToken
+    const spec: MirrorSpec = {
+      root: this.provider.root(boxId),
+      mirror: `${this.provider.root(boxId)}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`,
+      url: cloneUrl(project.repo!),
+      partial: this.partialClone(project),
+      git: `git -c credential.helper=${q(helper)}`,
+    }
+    return { spec, helper, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0` }
+  }
+
+  /**
+   * A restored work/ that borrows objects from a mirror: make sure this box has the mirror, point the clone at
+   * it (the archive may come from another box), and add the archive's keep pack. Fails when HEAD still can't
+   * be read, rather than handing the agent a broken repo.
+   */
+  private async relinkSharedObjects(boxId: string, dir: string, { spec, env }: { spec: MirrorSpec; env: string }) {
+    const alternates = q(`${dir}/work/.git/objects/info/alternates`)
+    const script = [env, `if [ -f ${alternates} ]; then ${withMirrorLock(spec.mirror, syncMirrorScript(spec))}; fi`, relinkTaskScript(dir, spec.mirror)].join("\n")
+    const res = await this.provider.exec(boxId, script)
+    if (res.stdout.includes(`${GIT_MARK}broken`)) {
+      // Drop the half-restored folder so the next try restores from the archive again (it stays as it was).
+      await this.provider.exec(boxId, `rm -rf ${q(dir + "/work")}`).catch(() => {})
+      throw new Error(`restoring workspace failed: its git history borrows objects from the repo mirror, and box ${boxId} couldn't fetch ${spec.url} to rebuild it`)
+    }
   }
 
   /**
@@ -1977,11 +2024,12 @@ export class TaskManager {
    * work/. Only files under an excluded dir that are missing are touched, so
    * uncommitted edits and deletions elsewhere stay as they were archived.
    */
-  private async restoreExcludedTrackedFiles(boxId: string, work: string) {
+  private async restoreExcludedTrackedFiles(boxId: string, work: string, env: string) {
     const specs = ARCHIVE_EXCLUDED_DIRS.map((d) => q(`:(glob)**/${d}/**`)).join(" ")
+    // `env` carries the token: a partial clone fetches the blobs it checks out.
     const res = await this.provider.exec(
       boxId,
-      `cd ${q(work)} 2>/dev/null && find . -maxdepth 6 -name .git -prune -print | while IFS= read -r g; do r="\${g%/.git}"; git -C "$r" ls-files -z -d -- ${specs} | xargs -0 git -C "$r" checkout -- >/dev/null 2>&1; done; true`,
+      `${env ? `${env}; ` : ""}cd ${q(work)} 2>/dev/null && find . -maxdepth 6 -name .git -prune -print | while IFS= read -r g; do r="\${g%/.git}"; git -C "$r" ls-files -z -d -- ${specs} | xargs -0 git -C "$r" checkout -- >/dev/null 2>&1; done; true`,
     )
     if (res.exitCode !== 0) console.warn(`[box-yard] restoring tracked build dirs on ${boxId} failed: ${res.stderr.slice(-300)}`)
   }
@@ -2279,7 +2327,7 @@ export class TaskManager {
 
     this.emitTask(row.id)
     this.publishDirectory()
-    void this.archiveAndClean(row.id).finally(() => this.schedule())
+    void this.archive(row.id).finally(() => this.schedule())
     this.schedule()
   }
 
@@ -2375,7 +2423,7 @@ export class TaskManager {
     })
     this.emitTask(row.id)
     this.publishDirectory()
-    void this.archiveAndClean(row.id)
+    void this.archive(row.id)
       .then(() => {
         const fresh = this.store.getTaskRow(row.id)
         if (!fresh?.archive_path) return
@@ -2468,11 +2516,6 @@ export class TaskManager {
     if (row && !this.hasFreshArchive(row)) await this.archive(taskId)
   }
 
-  private async archiveAndClean(taskId: string) {
-    await this.archive(taskId)
-    await this.cleanRestingWorkspace(taskId).catch((err) => console.warn(`[box-yard] cleanup ${taskId} failed: ${errorMessage(err)}`))
-  }
-
   /**
    * Copy the task folder (repo, Claude session, event log) to the orchestrator's disk. It streams off the box
    * (server/archive.ts), so it works on a box whose work disk is full. A failure is kept for `archiveProblem`.
@@ -2486,6 +2529,10 @@ export class TaskManager {
     const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
     const part = `${file}.part`
     try {
+      // A clone that borrows the mirror's objects: stage the borrowed ones GitHub may not have on /tmp, so the
+      // archive restores anywhere (server/gitShare.ts). Nothing is written to the work disk.
+      const keep = await this.provider.exec(boxId, keepPackScript(this.taskDir(boxId, taskId), taskId))
+      if (keep.exitCode !== 0) console.warn(`[box-yard] keep pack for ${taskId} failed: ${keep.stderr.slice(-300)}`)
       let res = await this.streamArchive(boxId, taskId, part, false)
       // Too big: keep the Claude session, the log and git history, with any uncommitted work as a WIP commit on a side ref.
       const partial = !res.ok && res.tooBig
@@ -2507,6 +2554,7 @@ export class TaskManager {
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
       fs.rmSync(part, { force: true })
+      await this.provider.exec(boxId, `rm -rf ${q(keepPackStage(taskId))}`).catch(() => {})
       this.archiving.delete(taskId)
     }
   }
@@ -2515,7 +2563,7 @@ export class TaskManager {
   private async streamArchive(boxId: string, taskId: string, dest: string, partial: boolean): Promise<ArchiveOutcome> {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial })
+    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, keepStage: keepPackStage(taskId) })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {
@@ -2553,20 +2601,6 @@ export class TaskManager {
       ? "its agent is running"
       : this.archiveErrors.get(taskId) ?? "no archive was made"
     return `archive ${taskId}: ${why}`
-  }
-
-  /**
-   * Remove regenerable dependency/build/cache directories from a resting workspace.
-   * The runner's `clean` mode does the work on the box: it deletes only dirs git
-   * ignores and doesn't track (never committed source like a checked-in `build/`).
-   */
-  private async cleanRestingWorkspace(taskId: string) {
-    const row = this.store.getTaskRow(taskId)
-    if (!row?.box_id || row.current_turn_id || !RESTING.includes(row.status) || this.store.hasInputs(row.id) || !this.hasFreshArchive(row)) return
-    const runnerPath = `${this.provider.root(row.box_id)}/.boxyard/box-runner.mjs`
-    const dir = this.taskDir(row.box_id, row.id)
-    const res = await this.provider.exec(row.box_id, `[ -d ${q(dir + "/work")} ] && ${q(this.provider.nodeBin)} ${q(runnerPath)} clean ${q(dir)}`)
-    if (res.exitCode !== 0 && res.stderr.trim()) throw new Error(res.stderr.slice(-300))
   }
 
   private async removeTaskDir(boxId: string, taskId: string) {
@@ -2757,10 +2791,8 @@ export class TaskManager {
       // Avoid racing a clone/fetch that may be using a mirror.
       if (residents.some((r) => r.current_turn_id || r.status === "starting")) continue
       const keep = this.mirrorsToKeep(box.id)
-      const repos = `${this.provider.root(box.id)}/.boxyard/repos`
-      const keepList = [...keep].join(" ")
-      const script = `[ -d ${q(repos)} ] || exit 0; for d in ${q(repos)}/*.git; do [ -e "$d" ] || continue; b=$(basename "$d"); case " ${keepList} " in *" $b "*) ;; *) rm -rf "$d";; esac; done`
-      await this.provider.exec(box.id, script).catch((err) => console.warn(`[box-yard] prune mirrors ${box.id}: ${errorMessage(err)}`))
+      // A mirror some task folder still borrows objects from stays, whatever the database says.
+      await this.provider.exec(box.id, pruneMirrorsScript(this.provider.root(box.id), [...keep])).catch((err) => console.warn(`[box-yard] prune mirrors ${box.id}: ${errorMessage(err)}`))
     }
   }
 
@@ -2849,7 +2881,32 @@ export class TaskManager {
       if (box.status !== "ready" || box.disk_free_bytes === null || box.disk_free_bytes === undefined) continue
       if (box.disk_free_bytes < floor && !this.janitor.isRunning(box.id) && !this.boxOps.has(box.id)) this.janitor.ensure(box.id, floor)
     }
+    await this.routineUpkeep(now)
     this.schedule()
+  }
+
+  /**
+   * Routine upkeep on each box, as a quiet janitor run (so what it frees lands in the box's cleanup report):
+   * remove the git-ignored build output of tasks resting longer than Settings › buildCleanupIdleMinutes (once
+   * per idle stretch), and every MIRROR_GC_MS drop stale task folders and gc the repo mirrors lightly.
+   */
+  private async routineUpkeep(now: number) {
+    const idleMs = this.settings.get().buildCleanupIdleMinutes * 60_000
+    const runs: Promise<unknown>[] = []
+    for (const box of this.store.listBoxes()) {
+      if (this.stopped || box.status !== "ready" || this.boxOps.has(box.id) || this.janitor.isRunning(box.id)) continue
+      if (!this.mirrorGcAt.has(box.id)) this.mirrorGcAt.set(box.id, now)
+      const idle = idleMs <= 0 ? [] : this.store
+        .listTaskRows({ boxId: box.id })
+        .filter((r) => !r.current_turn_id && RESTING.includes(r.status) && !this.store.hasInputs(r.id) && now - r.last_active_at >= idleMs && this.buildsCleaned.get(r.id) !== r.last_active_at)
+      const gc = now - this.mirrorGcAt.get(box.id)! >= MIRROR_GC_MS
+      if (!idle.length && !gc) continue
+      if (gc) this.mirrorGcAt.set(box.id, now)
+      for (const r of idle) this.buildsCleaned.set(r.id, r.last_active_at)
+      const steps: CleanupStepKey[] = [...(gc ? (["partials", "git"] as const) : []), ...(idle.length ? (["builds"] as const) : [])]
+      runs.push(this.janitor.run(box.id, { reason: "routine", target: null, parkBelow: 0, steps, builds: idle.map((r) => r.id), light: true }))
+    }
+    await Promise.all(runs)
   }
 
   /** The turn died. Requeue it (a couple of times) so the agent can carry on. */
