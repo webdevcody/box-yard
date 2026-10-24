@@ -1,67 +1,36 @@
-import { useEffect, useState } from "react"
-import { Link } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, ExternalLink, Globe, HardDrive, Info, Settings, Sparkles, X } from "lucide-react"
+import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { Link, useSearchParams } from "wouter"
+import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
-import { bytes, hours, money } from "../lib/usage"
+import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
+import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter } from "../lib/diskCleanup"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, NewTabLink, PrChip, StatusBadge, cx, timeAgo } from "./ui"
+import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
+import { Modal } from "./Modal"
+import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
+import { BoxActionDialog, type BoxAction } from "./BoxActionDialog"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
-const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string }> = {
-  creating: { label: "Starting", chip: "bg-sky-500/10 text-sky-300" },
-  ready: { label: "Running", chip: "bg-emerald-500/10 text-emerald-300" },
-  lost: { label: "Error", chip: "bg-red-500/10 text-red-300" },
-  deleting: { label: "Deleting", chip: "bg-zinc-800 text-zinc-300" },
+const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string; dot: string }> = {
+  creating: { label: "Starting", chip: "bg-sky-500/10 text-sky-300", dot: "bg-sky-400 animate-pulse" },
+  ready: { label: "Running", chip: "bg-emerald-500/10 text-emerald-300", dot: "bg-emerald-400" },
+  lost: { label: "Error", chip: "bg-red-500/10 text-red-300", dot: "bg-red-500" },
+  deleting: { label: "Deleting", chip: "bg-zinc-800 text-zinc-300", dot: "bg-zinc-500" },
 }
 
-function Stat({ label, value, max }: { label: string; value: number; max: number }) {
-  const over = value > max
-  return (
-    <div className={cx("rounded-xl border bg-zinc-900/40 px-4 py-2.5", over ? "border-amber-500/40" : "border-zinc-800/80")}>
-      <div className="flex items-center gap-3">
-        <span className="text-xs font-medium tracking-wide text-zinc-500 uppercase">{label}</span>
-        <span className="text-lg font-semibold text-zinc-50 tabular-nums">
-          {value}
-          <span className="text-zinc-500"> / {max}</span>
-        </span>
-        <Meter used={value} total={max} className="ml-auto w-24" />
-      </div>
-      {over && <div className="mt-1 text-xs font-medium text-amber-300">Over limit: running work continues, nothing new is placed until usage drops.</div>}
-    </div>
-  )
-}
+const TONE_BAR = { ok: "bg-yard-500", warn: "bg-amber-400", error: "bg-red-500", unknown: "bg-zinc-600" } as const
+const TONE_TEXT = { ok: "text-zinc-300", warn: "font-medium text-amber-300", error: "font-medium text-red-300", unknown: "text-zinc-500" } as const
 
-/** A thin bar; segmented when there are few enough slots to count at a glance. */
-function Meter({ used, total, className, warn, label }: { used: number; total: number; className?: string; warn?: boolean; label?: string }) {
-  const cells = Math.max(total, used)
-  if (warn !== undefined)
-    return (
-      <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={total} aria-valuenow={used} className={cx("h-1.5 overflow-hidden rounded-sm bg-zinc-700", className)}>
-        <div className={cx("h-full", warn ? "bg-amber-400" : "bg-yard-500")} style={{ width: `${total ? Math.min(100, (used / total) * 100) : 0}%` }} />
-      </div>
-    )
-  if (cells > 0 && cells <= 6)
-    return (
-      <div className={cx("flex gap-0.5", className)}>
-        {Array.from({ length: cells }, (_, i) => (
-          <div key={i} className={cx("h-1.5 flex-1 rounded-sm", i < used ? (i < total ? "bg-yard-500" : "bg-amber-400") : "bg-zinc-700")} />
-        ))}
-      </div>
-    )
-  return (
-    <div className={cx("h-1.5 overflow-hidden rounded-sm bg-zinc-700", className)}>
-      <div className={cx("h-full", used > total ? "bg-amber-400" : "bg-yard-500")} style={{ width: `${total ? Math.min(100, (used / total) * 100) : 0}%` }} />
-    </div>
-  )
-}
+/** A box's details live at /boxes#<id>, so links from tasks, the palette and Usage open them directly. */
+const boxHref = (id: string) => `/boxes#${encodeURIComponent(id)}`
 
 export function BoxesView() {
   const boxes = useBoxes()
@@ -71,16 +40,43 @@ export function BoxesView() {
   useScrollToHash(Boolean(boxes.data), "box-")
   const hash = useHash()
   const openSettings = useOpenSettings()
+  const [params] = useSearchParams()
+  const filter = parseBoxFilter(params.get("filter"))
 
   const pool = health.data?.pool
   const list = boxes.data ?? []
   const all = tasks.data ?? []
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name ?? id
+  const tasksOn = (boxId: string) => all.filter((t) => t.boxId === boxId)
   const running = all.filter((t) => t.boxId && RUNNING.includes(t.status)).length
   const queued = all.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt)
+  const shown = filterBoxes(list, filter)
+  const selected = list.find((b) => b.id === hash) ?? null
+  const [action, setAction] = useState<{ boxId: string; kind: BoxAction } | null>(null)
+  const actionBox = action ? list.find((b) => b.id === action.boxId) ?? null : null
+  const onAction = (boxId: string, kind: BoxAction) => setAction({ boxId, kind })
+
+  // Opening a row pushes #<id> so Back closes the details; closing pops it again (or drops a hash we arrived with).
+  const openedHere = useRef(false)
+  useEffect(() => {
+    if (!hash) openedHere.current = false
+  }, [hash])
+  const openBox = (id: string) => {
+    openedHere.current = true
+    window.location.hash = encodeURIComponent(id)
+  }
+  const closeBox = () => {
+    if (openedHere.current) {
+      openedHere.current = false
+      history.back()
+      return
+    }
+    history.replaceState(history.state, "", window.location.pathname + window.location.search)
+    window.dispatchEvent(new HashChangeEvent("hashchange"))
+  }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-5">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
@@ -95,27 +91,21 @@ export function BoxesView() {
 
       <CapacityNotice onEdit={() => openSettings("limits")} />
 
-      {pool && (
-        <div className="grid gap-2 sm:grid-cols-2">
-          <Stat label="Boxes" value={list.length} max={pool.maxBoxes} />
-          <Stat label="Agents running" value={running} max={agentCapacity(pool)} />
-        </div>
-      )}
+      {pool && <SummaryStrip boxes={list} maxBoxes={pool.maxBoxes} running={running} maxAgents={agentCapacity(pool)} />}
 
       {boxes.isLoading ? null : list.length === 0 ? (
         <Empty icon={<Boxes className="h-8 w-8" />} title="No boxes yet">
           Boxes are created when a task needs one.
         </Empty>
       ) : (
-        <div className="space-y-3">
-          {list.map((box) => (
-            <BoxCard key={box.id} box={box} highlighted={hash === box.id} tasks={all.filter((t) => t.boxId === box.id)} projectName={projectName} />
-          ))}
-        </div>
+        <section className="space-y-2">
+          <FilterTabs boxes={list} selected={filter} />
+          <BoxTable boxes={shown} filter={filter} highlighted={hash} tasksOn={tasksOn} onOpen={openBox} onAction={onAction} />
+        </section>
       )}
 
       <section>
-        <h2 className="mb-3 text-sm font-semibold text-zinc-300">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-300">
           Waiting for a slot <span className="text-zinc-600">{queued.length}</span>
         </h2>
         {queued.length === 0 ? (
@@ -128,6 +118,559 @@ export function BoxesView() {
           </div>
         )}
       </section>
+
+      {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} onAction={onAction} />}
+      {action && actionBox && (
+        <BoxActionDialog
+          key={`${action.boxId}-${action.kind}`}
+          box={actionBox}
+          action={action.kind}
+          onClose={() => setAction(null)}
+          onDone={() => {
+            if (action.kind === "delete" && hash === action.boxId) closeBox()
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- summary strip and filters
+
+function SummaryStrip({ boxes, maxBoxes, running, maxAgents }: { boxes: BoxInfo[]; maxBoxes: number; running: number; maxAgents: number }) {
+  const { costUsd, attention } = poolSummary(boxes)
+  const over = boxes.length > maxBoxes || running > maxAgents
+  return (
+    <div>
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="box-summary">
+        <Tile label="Boxes" over={boxes.length > maxBoxes}>
+          <Ratio value={boxes.length} max={maxBoxes} />
+          <Meter used={boxes.length} total={maxBoxes} className="mt-1.5" />
+        </Tile>
+        <Tile label="Agents running" over={running > maxAgents}>
+          <Ratio value={running} max={maxAgents} />
+          <Meter used={running} total={maxAgents} className="mt-1.5" />
+        </Tile>
+        <Tile label="Est. cost" title="Estimated box cost since each live box started (active time, uptime and disk). See Usage & costs for periods.">
+          <div className="text-base font-semibold text-zinc-50 tabular-nums">{money(costUsd)}</div>
+        </Tile>
+        <Link
+          href="/boxes?filter=attention"
+          replace
+          className={cx(
+            "rounded-xl border px-3 py-2 transition hover:border-zinc-700",
+            attention ? "border-amber-500/30 bg-amber-500/5" : "border-zinc-800/80 bg-zinc-900/40",
+          )}
+          title="Boxes that are low on disk, not responding, over their agent limit or whose last cleanup failed"
+        >
+          <div className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Needs attention</div>
+          <div className={cx("flex items-center gap-1.5 text-base font-semibold tabular-nums", attention ? "text-amber-300" : "text-zinc-50")}>
+            {attention > 0 && <AlertTriangle className="h-4 w-4" />}
+            {attention}
+          </div>
+        </Link>
+      </div>
+      {over && <div className="mt-1.5 text-xs font-medium text-amber-300">Over limit: running work continues, nothing new is placed until usage drops.</div>}
+    </div>
+  )
+}
+
+function Tile({ label, over, title, children }: { label: string; over?: boolean; title?: string; children: ReactNode }) {
+  return (
+    <div title={title} className={cx("rounded-xl border bg-zinc-900/40 px-3 py-2", over ? "border-amber-500/40" : "border-zinc-800/80")}>
+      <div className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{label}</div>
+      {children}
+    </div>
+  )
+}
+
+function Ratio({ value, max }: { value: number; max: number }) {
+  return (
+    <div className={cx("text-base font-semibold tabular-nums", value > max ? "text-amber-300" : "text-zinc-50")}>
+      {value}
+      <span className="font-normal text-zinc-500"> / {max}</span>
+    </div>
+  )
+}
+
+/** All / Busy / Idle / Needs attention, bound to `?filter=`. Filtering never reorders rows. */
+function FilterTabs({ boxes, selected }: { boxes: BoxInfo[]; selected: BoxFilter }) {
+  const counts = boxFilterCounts(boxes)
+  return (
+    <nav aria-label="Filter boxes" className="scroll-thin flex gap-1 overflow-x-auto">
+      {BOX_FILTERS.map((f) => {
+        const on = f.key === selected
+        const warn = f.key === "attention" && counts.attention > 0
+        return (
+          <Link
+            key={f.key}
+            href={f.key === "all" ? "/boxes" : `/boxes?filter=${f.key}`}
+            replace
+            aria-current={on ? "page" : undefined}
+            className={cx(
+              "inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium whitespace-nowrap transition sm:min-h-8",
+              on ? "bg-zinc-800 text-zinc-50" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200",
+            )}
+          >
+            {f.label}
+            <span className={cx("rounded-full px-1.5 text-[11px] tabular-nums", warn ? "bg-amber-500/15 text-amber-300" : on ? "bg-zinc-700 text-zinc-200" : "bg-zinc-800 text-zinc-500")}>
+              {counts[f.key]}
+            </span>
+          </Link>
+        )
+      })}
+    </nav>
+  )
+}
+
+/** A thin bar; segmented when there are few enough slots to count at a glance. */
+function Meter({ used, total, className, tone, label }: { used: number; total: number; className?: string; tone?: keyof typeof TONE_BAR; label?: string }) {
+  const cells = Math.max(total, used)
+  if (tone === undefined && cells > 0 && cells <= 6)
+    return (
+      <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={total} aria-valuenow={used} className={cx("flex gap-0.5", className)}>
+        {Array.from({ length: cells }, (_, i) => (
+          <div key={i} className={cx("h-1.5 flex-1 rounded-sm", i < used ? (i < total ? "bg-yard-500" : "bg-amber-400") : "bg-zinc-700")} />
+        ))}
+      </div>
+    )
+  const bar = tone ? TONE_BAR[tone] : used > total ? "bg-amber-400" : "bg-yard-500"
+  return (
+    <div role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={total} aria-valuenow={used} className={cx("h-1.5 overflow-hidden rounded-sm bg-zinc-700", className)}>
+      <div className={cx("h-full", bar)} style={{ width: `${total ? Math.min(100, (used / total) * 100) : 0}%` }} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- the table
+
+// One grid for the header and every row once the list is wide enough; below that a row is two lines.
+const COLS = "@2xl:grid-cols-[minmax(12rem,1.5fr)_3.75rem_6.5rem_minmax(4.5rem,0.7fr)_minmax(7rem,1.6fr)_2rem]"
+
+function BoxTable({
+  boxes,
+  filter,
+  highlighted,
+  tasksOn,
+  onOpen,
+  onAction,
+}: {
+  boxes: BoxInfo[]
+  filter: BoxFilter
+  highlighted: string
+  tasksOn: (boxId: string) => Task[]
+  onOpen: (id: string) => void
+  onAction: (boxId: string, kind: BoxAction) => void
+}) {
+  return (
+    <div className="@container rounded-xl border border-zinc-800/80 bg-zinc-900/40" data-testid="box-table">
+      <div className={cx("hidden gap-x-3 border-b border-zinc-800/80 px-3 py-1.5 text-[11px] font-medium tracking-wide text-zinc-500 uppercase @2xl:grid", COLS)}>
+        <span>Box</span>
+        <span>Agents</span>
+        <span>Disk</span>
+        <span>Projects</span>
+        <span>Running now</span>
+        <span className="sr-only">Actions</span>
+      </div>
+      {boxes.length === 0 ? (
+        <div className="px-3 py-4 text-sm text-zinc-500">{filter === "attention" ? "No box needs attention." : filter === "busy" ? "No box is running an agent." : "Every box is busy."}</div>
+      ) : (
+        <div className="divide-y divide-zinc-800/80">
+          {boxes.map((box) => (
+            <BoxRow key={box.id} box={box} tasks={tasksOn(box.id)} highlighted={highlighted === box.id} onOpen={onOpen} onAction={onAction} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BoxRow({
+  box,
+  tasks,
+  highlighted,
+  onOpen,
+  onAction,
+}: {
+  box: BoxInfo
+  tasks: Task[]
+  highlighted: boolean
+  onOpen: (id: string) => void
+  onAction: (boxId: string, kind: BoxAction) => void
+}) {
+  const st = BOX_STATUS[box.status]
+  const attention = boxAttention(box)
+  const disk = diskMeter(box)
+  const tone = diskTone(box)
+  const now = nowRunning(tasks)
+  const over = box.runningTurns > box.slots
+  const busy = boxBusyReason(box)
+  // A plain click opens the details here; Cmd/Ctrl or middle click opens them in a new tab. Not an <a>: the row holds links and a menu.
+  const open = (e: MouseEvent | KeyboardEvent) => {
+    if ((e.target as HTMLElement).closest("a, button, [role=menu]")) return
+    if ("key" in e) {
+      if (e.key !== "Enter") return
+    } else if (e.button > 1) return
+    e.preventDefault()
+    if ("button" in e && (e.button === 1 || e.metaKey || e.ctrlKey)) window.open(boxHref(box.id), "_blank", "noopener")
+    else onOpen(box.id)
+  }
+  return (
+    <div
+      id={`box-${box.id}`}
+      role="link"
+      tabIndex={0}
+      data-href={boxHref(box.id)}
+      aria-label={`${box.id} details`}
+      onClick={open}
+      onAuxClick={open}
+      onKeyDown={open}
+      data-testid="box-row"
+      className={cx(
+        "grid scroll-mt-6 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 px-3 py-2 text-xs transition first:rounded-t-xl last:rounded-b-xl hover:bg-zinc-900 focus-visible:bg-zinc-900 focus-visible:outline-none",
+        "cursor-pointer @2xl:py-2.5",
+        COLS,
+        highlighted && "bg-yard-500/5 ring-1 ring-yard-500/30 ring-inset",
+      )}
+    >
+      <div className="min-w-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className={cx("h-2 w-2 shrink-0 rounded-full", st.dot)} title={st.label} aria-label={st.label} role="img" />
+          <span className="truncate font-mono text-xs font-medium text-zinc-100 @2xl:text-[12.5px]" title={box.id}>
+            {box.id}
+          </span>
+          <AttentionIcon reasons={attention} />
+          {busy && (
+            <span role="img" aria-label={busy} title={busy} className="shrink-0">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-300" />
+            </span>
+          )}
+          <span className="shrink-0 text-zinc-500 @2xl:hidden">{box.size}</span>
+        </div>
+        <div className="mt-0.5 hidden truncate pl-4 text-[11px] text-zinc-500 @2xl:block">
+          {box.size} · {box.status === "ready" ? `up ${shortDuration(box.uptimeMs)}` : st.label.toLowerCase()}
+          {box.keepAlive && <span className="text-yard-300"> · keep-alive</span>}
+        </div>
+      </div>
+
+      <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-3 @2xl:contents">
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={`${box.runningTurns} of ${box.slots} agent slots busy`}>
+          <span className={cx("tabular-nums", over ? "font-medium text-amber-300" : box.runningTurns ? "text-zinc-200" : "text-zinc-500")}>
+            {box.runningTurns}/{box.slots}
+            <span className="@2xl:hidden"> agents</span>
+          </span>
+          <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="w-8 @2xl:w-full" />
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={disk ? `${disk.label}${box.diskCheckedAt ? ` · ${measuredAgo(box.diskCheckedAt)}` : ""}` : "Free space not measured yet"}>
+          <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[tone])}>{disk ? `${formatBytes(disk.free)} free` : "disk —"}</span>
+          {disk && <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="w-8 @2xl:w-full" />}
+        </div>
+        <div className="hidden min-w-0 items-center gap-1 @2xl:flex">
+          {box.projects.length === 0 ? (
+            <span className="text-zinc-600">—</span>
+          ) : (
+            <>
+              <span className="truncate rounded-md bg-zinc-800/80 px-1.5 py-0.5 text-zinc-300" title={box.projects.join(", ")}>
+                {box.projects[0]}
+              </span>
+              {box.projects.length > 1 && (
+                <span className="shrink-0 rounded-md bg-zinc-800/80 px-1.5 py-0.5 text-zinc-400" title={box.projects.join(", ")}>
+                  +{box.projects.length - 1}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        <RunningNow now={now} />
+      </div>
+
+      <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-6">
+        <BoxMenu box={box} tasks={tasks} onOpen={() => onOpen(box.id)} onAction={(kind) => onAction(box.id, kind)} />
+      </div>
+    </div>
+  )
+}
+
+/** One icon for everything wrong with a box; the reasons are in its tooltip and in the details. */
+function AttentionIcon({ reasons }: { reasons: AttentionReason[] }) {
+  if (!reasons.length) return null
+  const error = reasons.some((r) => r.level === "error")
+  const text = reasons.map((r) => r.short).join("\n")
+  return (
+    <span role="img" aria-label={`Needs attention: ${reasons.map((r) => r.short).join("; ")}`} title={text} data-testid="box-attention" className="shrink-0">
+      <AlertTriangle className={cx("h-3.5 w-3.5", error ? "text-red-400" : "text-amber-300")} />
+    </span>
+  )
+}
+
+function RunningNow({ now }: { now: ReturnType<typeof nowRunning> }) {
+  if (!now) return <span className="min-w-0 truncate text-zinc-600">idle</span>
+  const s = STATUS[now.task.status]
+  return (
+    <div className="min-w-0 flex-1">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", s.dot)} />
+        <Link href={`/tasks/${now.task.id}`} className="truncate text-zinc-200 hover:underline" title={`${now.task.title} · ${s.label}`}>
+          {now.task.title}
+        </Link>
+        {now.more > 0 && <span className="shrink-0 text-zinc-500">+{now.more}</span>}
+      </div>
+      <div className="mt-0.5 hidden truncate pl-3 text-[11px] text-zinc-500 @2xl:block">{s.label}</div>
+    </div>
+  )
+}
+
+/** ⋯ on a row: details, Clean up now, and a shortcut to each active task and preview. */
+function BoxMenu({ box, tasks, onOpen, onAction }: { box: BoxInfo; tasks: Task[]; onOpen: () => void; onAction: (kind: BoxAction) => void }) {
+  const { open, setOpen, root, trigger } = usePopover()
+  const clean = useCleanBox()
+  const panel = useRef<HTMLDivElement>(null)
+  const { active } = splitBoxTasks(tasks)
+  const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
+  const cleaning = box.cleanup?.status === "running" || clean.isPending
+  const busy = boxBusyReason(box)
+  const act = (kind: BoxAction) => {
+    setOpen(false)
+    onAction(kind)
+  }
+  useEffect(() => {
+    if (open) panel.current?.querySelector<HTMLElement>("button, a")?.focus()
+  }, [open])
+  return (
+    <div ref={root} className="relative">
+      <button
+        ref={trigger}
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-label={`Actions for ${box.id}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Actions"
+        className="grid h-11 w-11 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 @2xl:h-7 @2xl:w-7"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open && (
+        <div ref={panel} role="menu" className="absolute top-full right-0 z-30 mt-1 w-72 max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 text-sm shadow-2xl">
+          <button
+            role="menuitem"
+            className={menuItem}
+            onClick={() => {
+              setOpen(false)
+              onOpen()
+            }}
+          >
+            <PanelTopOpen className="h-4 w-4 text-zinc-500" /> Details
+          </button>
+          {box.status === "ready" && (
+            <>
+              <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={cleaning || Boolean(busy)} title={busy ?? undefined} onClick={() => clean.mutate(box.id, { onSettled: () => setOpen(false) })}>
+                <Sparkles className="h-4 w-4 text-zinc-500" /> {cleaning ? "Cleaning up…" : "Clean up now"}
+              </button>
+              <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it; keep the box"} onClick={() => act("clear")}>
+                <Eraser className="h-4 w-4 text-zinc-500" /> Clear box…
+              </button>
+            </>
+          )}
+          <button
+            role="menuitem"
+            className={cx(menuItemBase, "text-red-300 hover:bg-red-500/10 hover:text-red-200 focus-visible:bg-red-500/10 disabled:opacity-50")}
+            disabled={Boolean(busy)}
+            title={busy ?? "Archive every workspace, then destroy the box"}
+            onClick={() => act("delete")}
+          >
+            <Trash2 className="h-4 w-4" /> Delete box…
+          </button>
+          {active.length > 0 && <div className="mx-2 mt-1.5 mb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Open task</div>}
+          {active.map((t) => (
+            <Link key={t.id} role="menuitem" href={`/tasks/${t.id}`} className={menuItem} onClick={() => setOpen(false)}>
+              <span className={cx("h-1.5 w-1.5 shrink-0 rounded-full", STATUS[t.status].dot)} />
+              <span className="truncate">{t.title}</span>
+            </Link>
+          ))}
+          {previews.length > 0 && <div className="mx-2 mt-1.5 mb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Previews</div>}
+          {previews.map((p) => (
+            <NewTabLink key={`${p.port}-${p.url}`} role="menuitem" href={p.url} title={p.taskTitle} className={menuItem} onClick={() => setOpen(false)}>
+              <Globe className="h-4 w-4 shrink-0 text-sky-400" />
+              <span className="truncate">{p.label}</span>
+              <ExternalLink className="ml-auto h-3 w-3 shrink-0 text-zinc-500" />
+            </NewTabLink>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------- details modal
+
+type DetailTab = "running" | "finished" | "disk" | "previews"
+
+function BoxDetails({
+  box,
+  tasks,
+  projectName,
+  onClose,
+  onAction,
+}: {
+  box: BoxInfo
+  tasks: Task[]
+  projectName: (id: string) => string
+  onClose: () => void
+  onAction: (boxId: string, kind: BoxAction) => void
+}) {
+  const busy = boxBusyReason(box)
+  const st = BOX_STATUS[box.status]
+  const attention = boxAttention(box)
+  const { active, finished } = splitBoxTasks(tasks)
+  const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
+  const [tab, setTab] = useState<DetailTab>(() => (attention.some((r) => r.key === "disk" || r.key === "cleanup") ? "disk" : active.length || !finished.length ? "running" : "finished"))
+  const tabs: { key: DetailTab; label: string; count?: number }[] = [
+    { key: "running", label: "Running", count: active.length },
+    { key: "finished", label: "Finished", count: finished.length },
+    { key: "disk", label: "Disk & cleanup" },
+    ...(previews.length ? [{ key: "previews" as const, label: "Previews", count: previews.length }] : []),
+  ]
+  return (
+    <Modal
+      onClose={onClose}
+      size="xl"
+      title={
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-mono">{box.id}</span>
+          <span className={cx("shrink-0 rounded-full px-2 py-0.5 text-xs font-medium", st.chip)}>{st.label}</span>
+        </span>
+      }
+      description={
+        <>
+          {box.provider} · {box.size}
+          {box.keepAlive && " · keep-alive"}
+        </>
+      }
+      className="sm:h-[min(40rem,calc(100dvh-2rem))]"
+      footer={
+        <>
+          {busy && <span className="mr-auto text-xs text-amber-300">{busy}…</span>}
+          {box.status === "ready" && (
+            <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it from the box; the box stays"} onClick={() => onAction(box.id, "clear")}>
+              <Eraser className="h-4 w-4" /> Clear box…
+            </Button>
+          )}
+          <Button type="button" variant="danger" disabled={Boolean(busy)} title={busy ?? "Archive every workspace, then destroy the box"} onClick={() => onAction(box.id, "delete")}>
+            <Trash2 className="h-4 w-4" /> Delete box…
+          </Button>
+        </>
+      }
+    >
+      {attention.length > 0 && (
+        <ul className="space-y-1.5" data-testid="box-attention-list">
+          {attention.map((r) => (
+            <li key={r.key} className={cx("flex gap-2 rounded-lg px-3 py-2 text-xs", r.level === "error" ? "bg-red-500/10 text-red-200" : "bg-amber-500/10 text-amber-200")}>
+              <AlertTriangle className={cx("mt-px h-3.5 w-3.5 shrink-0", r.level === "error" ? "text-red-400" : "text-amber-300")} />
+              <span>{r.detail}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+        <Fact label="Agents busy">
+          <span className={box.runningTurns > box.slots ? "text-amber-300" : undefined}>
+            {box.runningTurns} of {box.slots}
+          </span>
+          <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="mt-1.5" />
+        </Fact>
+        <Fact label="Disk">
+          <DiskSummary box={box} />
+        </Fact>
+        <Fact label="Projects">
+          {box.projects.length ? (
+            <div className="flex flex-wrap gap-1">
+              {box.projects.map((p) => (
+                <span key={p} className="rounded-md bg-zinc-800/80 px-1.5 py-0.5 text-zinc-300">
+                  {p}
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="text-zinc-500">none</span>
+          )}
+        </Fact>
+        <Fact label="Uptime">
+          <BoxTimes createdAt={box.createdAt} lastUsedAt={box.lastUsedAt} />
+        </Fact>
+        <Fact label="Active hours">
+          <span title="Estimated active CPU time tracked by Box Yard">{hours(box.activeMs)}</span>
+        </Fact>
+        <Fact label="Cost">
+          <span title={box.usageSource === "actual" ? "Provider usage data was available." : "Estimated from Box Yard runtime and disk probes."}>
+            {money(box.estimatedCostUsd)} <span className="text-zinc-500">{box.usageSource}</span>
+          </span>
+        </Fact>
+      </dl>
+
+      <div>
+        <div role="tablist" aria-label="Box details" className="scroll-thin -mb-px flex gap-1 overflow-x-auto border-b border-zinc-800">
+          {tabs.map((t) => {
+            const on = t.key === tab
+            return (
+              <button
+                key={t.key}
+                role="tab"
+                aria-selected={on}
+                onClick={() => setTab(t.key)}
+                className={cx(
+                  "inline-flex min-h-11 shrink-0 items-center gap-1.5 border-b-2 px-2.5 text-xs font-medium whitespace-nowrap transition sm:min-h-9",
+                  on ? "border-yard-500 text-zinc-50" : "border-transparent text-zinc-400 hover:text-zinc-200",
+                )}
+              >
+                {t.label}
+                {t.count !== undefined && <span className={cx("rounded-full px-1.5 text-[11px] tabular-nums", on ? "bg-yard-500/20 text-yard-300" : "bg-zinc-800 text-zinc-400")}>{t.count}</span>}
+              </button>
+            )
+          })}
+        </div>
+        <div role="tabpanel" className="pt-3">
+          {tab === "running" && <TaskList tasks={active} projectName={projectName} empty="No agents running on this box." />}
+          {tab === "finished" && <TaskList tasks={finished} projectName={projectName} muted empty="No finished tasks on this box." />}
+          {tab === "disk" && <DiskPanel box={box} />}
+          {tab === "previews" && (
+            <div className="flex flex-wrap gap-1.5 text-xs">
+              {previews.map((p) => (
+                <NewTabLink
+                  key={`${p.port}-${p.url}`}
+                  href={p.url}
+                  title={p.taskTitle}
+                  className="inline-flex min-h-11 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300 sm:min-h-0"
+                >
+                  <Globe className="h-3.5 w-3.5" /> {p.label}
+                  <ExternalLink className="h-3 w-3" />
+                </NewTabLink>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+function Fact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-zinc-800/70 bg-zinc-900/40 px-3 py-2">
+      <dt className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase">{label}</dt>
+      <dd className="mt-0.5 text-zinc-200">{children}</dd>
+    </div>
+  )
+}
+
+function TaskList({ tasks, projectName, muted, empty }: { tasks: Task[]; projectName: (id: string) => string; muted?: boolean; empty: string }) {
+  if (!tasks.length) return <p className="text-xs text-zinc-500">{empty}</p>
+  return (
+    <div className="divide-y divide-zinc-800/80 overflow-hidden rounded-lg border border-zinc-800/80">
+      {tasks.map((t) => (
+        <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} muted={muted} />
+      ))}
     </div>
   )
 }
@@ -199,165 +742,13 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
 }
 
 function BoxTimes({ createdAt, lastUsedAt }: { createdAt: number; lastUsedAt: number }) {
-  const [, tick] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => tick((n) => n + 1), 30_000)
-    return () => clearInterval(t)
-  }, [])
+  const now = useNow(30_000)
   return (
-    <span className="whitespace-nowrap text-xs text-zinc-500">
-      <span title={`Up since ${new Date(createdAt).toLocaleString()}`}>up {shortDuration(Date.now() - createdAt)}</span>
-      {" · "}
-      <span title={`Last active ${new Date(lastUsedAt).toLocaleString()}`}>active {timeAgo(lastUsedAt)}</span>
-    </span>
-  )
-}
-
-function BoxCard({ box, tasks, projectName, highlighted }: { box: BoxInfo; tasks: Task[]; projectName: (id: string) => string; highlighted: boolean }) {
-  const st = BOX_STATUS[box.status]
-  const [showFinished, setShowFinished] = useState(false)
-  const { active, finished } = splitBoxTasks(tasks)
-  const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
-  const over = box.runningTurns > box.slots
-  return (
-    <div
-      id={`box-${box.id}`}
-      className={cx(
-        "scroll-mt-6 rounded-xl border bg-zinc-900/40 p-4 transition",
-        highlighted ? "border-yard-500/60 ring-2 ring-yard-500/20" : "border-zinc-800/80",
-      )}
-    >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5">
-          <span className="truncate font-mono text-sm font-medium text-zinc-100" title={box.id}>
-            {box.id}
-          </span>
-          <span className="text-xs text-zinc-500">{box.provider}</span>
-          <span className="text-xs text-zinc-500">{box.size}</span>
-          <span className={cx("rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", st.chip)}>{st.label}</span>
-          <span className="flex items-center gap-2 text-xs whitespace-nowrap">
-            <span className={over ? "font-medium text-amber-300" : "text-zinc-300"}>
-              {box.runningTurns}/{box.slots} agents busy
-            </span>
-            <Meter used={box.runningTurns} total={box.slots} className="w-16" />
-          </span>
-        </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 sm:ml-auto">
-          {box.projects.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {box.projects.map((p) => (
-                <span key={p} className="rounded-md bg-zinc-800/80 px-1.5 py-0.5 text-xs text-zinc-300">
-                  {p}
-                </span>
-              ))}
-            </div>
-          )}
-          <BoxTimes createdAt={box.createdAt} lastUsedAt={box.lastUsedAt} />
-        </div>
-      </div>
-
-      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-zinc-800/70 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-500">
-        <span title="Estimated active CPU time tracked by Box Yard">
-          active {hours(box.activeMs)}
-        </span>
-        <DiskUse box={box} />
-        <span title={box.usageSource === "actual" ? "Provider usage data was available." : "Estimated from Box Yard runtime and disk probes."}>
-          {money(box.estimatedCostUsd)} {box.usageSource}
-        </span>
-        {box.keepAlive && <span className="text-yard-300">keep-alive</span>}
-      </div>
-
-      {box.diskLow && box.status === "ready" && (
-        <div role="status" className="mt-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-300" />
-          <span>Low on disk. New tasks go to other boxes while it cleans up; they wait here only when no other box has room.</span>
-        </div>
-      )}
-      {(box.cleanup || box.status === "ready") && <CleanupReport box={box} />}
-
-      <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/80">
-        {active.length === 0 ? (
-          <div className="px-3 py-2 text-xs text-zinc-500">No agents running</div>
-        ) : (
-          <div className="divide-y divide-zinc-800/80">
-            {active.map((t) => (
-              <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} />
-            ))}
-          </div>
-        )}
-        {finished.length > 0 && (
-          <>
-            <button
-              onClick={() => setShowFinished((v) => !v)}
-              aria-expanded={showFinished}
-            className="flex min-h-11 w-full items-center gap-1.5 border-t border-zinc-800/80 bg-zinc-950/30 px-3 py-2 text-xs text-zinc-500 hover:text-zinc-300 sm:min-h-0 sm:py-1.5"
-            >
-              <ChevronRight className={cx("h-3.5 w-3.5 transition", showFinished && "rotate-90")} />
-              {finished.length} finished
-            </button>
-            {showFinished && (
-              <div className="divide-y divide-zinc-800/80 border-t border-zinc-800/80">
-                {finished.map((t) => (
-                  <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} muted />
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {previews.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1.5 text-xs">
-          {previews.map((p) => (
-            <NewTabLink
-              key={`${p.port}-${p.url}`}
-              href={p.url}
-              title={p.taskTitle}
-              className="inline-flex min-h-11 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300 sm:min-h-0"
-            >
-              <Globe className="h-3.5 w-3.5" /> {p.label}
-              <ExternalLink className="h-3 w-3" />
-            </NewTabLink>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** Free and total space on the box's work disk, from its last df. */
-/**
- * Free and total space on the box's work disk (df), the same numbers pool_status and the low-disk
- * notice give. The folder total (du) is only in the tooltip: it leaves out files the provider keeps on
- * that disk, so it never matches df's "used".
- */
-function DiskUse({ box }: { box: BoxInfo }) {
-  const now = useNow(5_000)
-  const disk = diskMeter(box)
-  const folders = box.diskBytes ? ` Box Yard's folders on it use ${bytes(box.diskBytes)} (du); the rest is the provider's own files.` : ""
-  if (!disk)
-    return (
-      <span className="flex items-center gap-2 whitespace-nowrap" title={`Free space is measured with df when Box Yard next places a task or checks the box.${folders}`} data-testid="disk-use">
-        <HardDrive className="h-3.5 w-3.5" />
-        free space not measured yet
+    <span className="text-zinc-200">
+      <span title={`Up since ${new Date(createdAt).toLocaleString()}`}>up {shortDuration(now - createdAt)}</span>
+      <span className="block text-zinc-500" title={`Last active ${new Date(lastUsedAt).toLocaleString()}`}>
+        active {timeAgo(lastUsedAt, now)}
       </span>
-    )
-  return (
-    <span
-      className={cx("flex flex-wrap items-center gap-x-2 gap-y-1", disk.low && "font-medium text-amber-300")}
-      title={`df on the box's work disk: ${formatBytes(disk.used)} used.${folders}`}
-      data-testid="disk-use"
-    >
-      <span className="flex items-center gap-2 whitespace-nowrap">
-        <HardDrive className="h-3.5 w-3.5" />
-        {disk.label}
-        <Meter used={disk.used} total={disk.total} warn={disk.low} label="Disk used" className="w-16" />
-      </span>
-      {box.diskCheckedAt && (
-        <span className="font-normal whitespace-nowrap text-zinc-600" title={new Date(box.diskCheckedAt).toLocaleString()}>
-          {measuredAgo(box.diskCheckedAt, now)}
-        </span>
-      )}
     </span>
   )
 }
@@ -372,63 +763,147 @@ function useNow(ms: number) {
   return now
 }
 
+/**
+ * Free and total space on the box's work disk (df), the same numbers pool_status and the low-disk
+ * notice give, with when it was measured.
+ */
+function DiskSummary({ box }: { box: BoxInfo }) {
+  const now = useNow(5_000)
+  const disk = diskMeter(box)
+  const tone = diskTone(box)
+  if (!disk)
+    return (
+      <span className="text-zinc-500" title="Free space is measured with df when Box Yard next places a task or checks the box." data-testid="disk-use">
+        not measured yet
+      </span>
+    )
+  return (
+    <div data-testid="disk-use">
+      <span className={TONE_TEXT[tone]}>{disk.label}</span>
+      <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="mt-1.5" />
+      {box.diskCheckedAt && (
+        <div className="mt-1 text-[11px] text-zinc-500" title={new Date(box.diskCheckedAt).toLocaleString()}>
+          {measuredAgo(box.diskCheckedAt, now)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Where the disk goes (df, with Box Yard's own folders from du split out) and the last cleanup step by step.
+ * The folder total leaves out files the provider keeps on that disk, so it never matches df's "used".
+ */
+function DiskPanel({ box }: { box: BoxInfo }) {
+  const now = useNow(5_000)
+  const disk = diskMeter(box)
+  const tone = diskTone(box)
+  const ours = disk && box.diskBytes !== null ? Math.min(box.diskBytes, disk.used) : null
+  const parts = disk
+    ? ours !== null
+      ? [
+          { label: "Box Yard's folders", bytes: ours, bar: "bg-yard-500", title: "Task workspaces and repo mirrors (du)" },
+          { label: "Provider's own files", bytes: disk.used - ours, bar: "bg-zinc-500", title: "df's used minus Box Yard's folders" },
+        ]
+      : [{ label: "Used", bytes: disk.used, bar: "bg-zinc-500", title: "df on the box's work disk" }]
+    : []
+  return (
+    <div className="space-y-4 text-xs">
+      {disk ? (
+        <div data-testid="disk-breakdown">
+          <div className="flex items-baseline justify-between gap-3">
+            <span className={TONE_TEXT[tone]}>{disk.label}</span>
+            {box.diskCheckedAt && <span className="text-zinc-500">{measuredAgo(box.diskCheckedAt, now)}</span>}
+          </div>
+          <div className="mt-2 flex h-2.5 overflow-hidden rounded-sm bg-zinc-800" role="img" aria-label={`Disk: ${parts.map((p) => `${p.label} ${formatBytes(p.bytes)}`).join(", ")}, ${formatBytes(disk.free)} free`}>
+            {parts.map((p) => (
+              <div key={p.label} className={p.bar} style={{ width: `${(p.bytes / disk.total) * 100}%` }} title={`${p.label}: ${formatBytes(p.bytes)}`} />
+            ))}
+          </div>
+          <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-zinc-400">
+            {parts.map((p) => (
+              <li key={p.label} className="flex items-center gap-1.5" title={p.title}>
+                <span className={cx("h-2 w-2 rounded-sm", p.bar)} />
+                {p.label} <span className="text-zinc-200 tabular-nums">{formatBytes(p.bytes)}</span>
+              </li>
+            ))}
+            <li className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-sm bg-zinc-800 ring-1 ring-zinc-700" />
+              Free <span className={cx("tabular-nums", tone === "ok" ? "text-zinc-200" : TONE_TEXT[tone])}>{formatBytes(disk.free)}</span>
+            </li>
+          </ul>
+        </div>
+      ) : (
+        <p className="text-zinc-500">Free space is measured with df when Box Yard next places a task or checks the box.</p>
+      )}
+      <CleanupReport box={box} />
+    </div>
+  )
+}
+
 function CleanUpButton({ box }: { box: BoxInfo }) {
   const clean = useCleanBox()
   const running = box.cleanup?.status === "running"
+  const busy = running ? null : boxBusyReason(box)
   return (
     <Button
       size="sm"
-      variant="ghost"
+      variant="subtle"
       loading={running || clean.isPending}
+      disabled={Boolean(busy)}
       onClick={() => clean.mutate(box.id)}
-      className="shrink-0 sm:-my-1"
-      title="Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."
+      className="shrink-0"
+      title={busy ?? "Free disk in safe steps: partial clones, caches, ignored build output of resting tasks, git gc. Done workspaces are parked only if the box is still low. Uncommitted work is never touched."}
     >
       {!running && !clean.isPending && <Sparkles className="h-3.5 w-3.5" />}
-      {running ? "Cleaning up…" : "Clean up now"}
+      {running ? (box.cleanup?.reason === "clear" ? "Clearing…" : "Cleaning up…") : "Clean up now"}
     </Button>
   )
 }
 
-/** The running cleanup, or the last one, with what each step freed, and the Clean up now button. */
+/** The running cleanup, or the last one, with each step's result, and the Clean up now button. */
 function CleanupReport({ box }: { box: BoxInfo }) {
-  const [open, setOpen] = useState(false)
   const cleanup: BoxCleanup | null = box.cleanup
-  const ran = cleanup?.steps.filter((s) => s.freedBytes > 0 || s.removed.length > 0 || (s.skipped && s.skipped !== "enough room already")) ?? []
-  const when = !cleanup || cleanup.status === "running" ? null : timeAgo(cleanup.finishedAt ?? cleanup.startedAt)
+  const when = !cleanup ? null : cleanup.status === "running" ? `started ${timeAgo(cleanup.startedAt)}` : timeAgo(cleanup.finishedAt ?? cleanup.startedAt)
   const tone = !cleanup
     ? "text-zinc-500"
     : cleanup.status === "failed" || (cleanup.status === "done" && cleanup.targetFreeBytes !== null && !cleanup.enough)
       ? "text-amber-300"
       : cleanup.status === "running"
         ? "text-sky-300"
-        : "text-zinc-400"
+        : "text-zinc-300"
   return (
-    <div className="mt-2 rounded-lg border border-zinc-800/70 bg-zinc-950/30 text-xs" data-testid="cleanup-report">
-      <div className="flex items-center gap-2 pr-2">
-        <button
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          disabled={!ran.length}
-          className="flex min-h-11 min-w-0 flex-1 items-center gap-1.5 py-2 pl-3 text-left disabled:cursor-default sm:min-h-0"
-        >
-          {ran.length > 0 ? <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-500 transition", open && "rotate-90")} /> : <Sparkles className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
-          <span className={cx("min-w-0 flex-1", tone)}>
+    <div className="rounded-lg border border-zinc-800/70 bg-zinc-950/30" data-testid="cleanup-report">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Last cleanup</div>
+          <div className={cx("mt-0.5", tone)}>
             {cleanup ? cleanupLine(cleanup) : "No disk cleanup has run here yet."}
-            {when && <span className="text-zinc-600"> · {when}</span>}
-          </span>
-        </button>
+            {when && <span className="text-zinc-500"> · {when}</span>}
+          </div>
+          {cleanup && cleanup.freeBefore !== null && cleanup.freeAfter !== null && (
+            <div className="mt-0.5 text-zinc-500">
+              {formatBytes(cleanup.freeBefore)} → {formatBytes(cleanup.freeAfter)} free
+            </div>
+          )}
+        </div>
         {box.status === "ready" && <CleanUpButton box={box} />}
       </div>
-      {open && cleanup && ran.length > 0 && (
+      {cleanup && cleanup.steps.length > 0 && (
         <ol className="space-y-1 border-t border-zinc-800/70 px-3 py-2">
-          {ran.map((s) => (
-            <li key={s.key} className="flex gap-3">
-              <span className="w-16 shrink-0 text-right text-zinc-300 tabular-nums">{formatBytes(s.freedBytes)}</span>
+          {cleanup.steps.map((s, i) => (
+            <li key={s.key} className="grid grid-cols-[1rem_minmax(0,1fr)] gap-x-3 sm:grid-cols-[1rem_minmax(0,1fr)_auto]">
+              <span className="text-right text-zinc-600 tabular-nums">{i + 1}</span>
               <span className="min-w-0 flex-1 text-zinc-400">
                 {s.label}
-                {s.skipped && <span className="text-zinc-600"> · {s.skipped}</span>}
-                {s.removed.length > 0 && <span className="block truncate text-zinc-600" title={s.removed.join("\n")}>{s.removed.join(", ")}</span>}
+                {s.removed.length > 0 && (
+                  <span className="block truncate text-zinc-600" title={s.removed.join("\n")}>
+                    {s.removed.join(", ")}
+                  </span>
+                )}
+              </span>
+              <span className={cx("col-start-2 tabular-nums sm:col-start-3 sm:text-right", s.freedBytes > 0 ? "text-emerald-300" : "text-zinc-500")}>
+                {s.freedBytes > 0 ? `freed ${formatBytes(s.freedBytes)}` : (s.skipped ?? "freed nothing")}
               </span>
             </li>
           ))}
