@@ -257,7 +257,7 @@ describe("shared git objects", () => {
     const listing = execFileSync("tar", ["tzf", archive]).toString().split("\n")
     expect(listing).toContain(`${t.id}/git-keep.pack`)
     expect(listing.some((f) => f.startsWith(`${t.id}/work/.git/objects/pack/`))).toBe(true)
-    expect(fs.existsSync(path.join(dir, "git-keep.pack"))).toBe(false)
+    expect(fs.existsSync(`/tmp/boxyard-archive-keep-${t.id}`)).toBe(false)
 
     // Another box: no task folder and no mirror yet (this one is fetched fresh from origin, without "feature").
     r.yard.store.updateTask(t.id, { boxId: null, portBase: null, previews: [] }, { touch: false })

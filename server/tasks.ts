@@ -35,7 +35,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
-import { GIT_MARK, MIRROR_MARK, KEEP_PACK, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
+import { GIT_MARK, MIRROR_MARK, KEEP_PACK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
   compareSizes,
@@ -2434,9 +2434,11 @@ export class TaskManager {
       const max = this.c.archiveMaxMb * 1024 * 1024
       // A clone that borrows the mirror's objects: pack the borrowed ones GitHub may not have, so the archive
       // restores anywhere (server/gitShare.ts).
-      const keep = await this.provider.exec(boxId, keepPackScript(`${root}/${taskId}`))
+      const keep = await this.provider.exec(boxId, keepPackScript(`${root}/${taskId}`, taskId))
       if (keep.exitCode !== 0) console.warn(`[box-yard] keep pack for ${taskId} failed: ${keep.stderr.slice(-300)}`)
-      let res = await this.provider.exec(boxId, `cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId)} 2>/dev/null; wc -c < ${tmp}`)
+      const stage = keepPackStage(taskId)
+      const keepPack = `$( [ -f ${q(`${stage}/${taskId}/${KEEP_PACK}`)} ] && echo -C ${q(stage)} ${q(`${taskId}/${KEEP_PACK}`)})`
+      let res = await this.provider.exec(boxId, `cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId)} ${keepPack} 2>/dev/null; wc -c < ${tmp}`)
       let size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
       let partial = false
       if (!Number.isFinite(size)) throw new Error(`tar failed: ${res.stderr.slice(-300)}`)
@@ -2446,7 +2448,7 @@ export class TaskManager {
         partial = true
         res = await this.provider.exec(
           boxId,
-          `cd ${q(root + "/" + taskId + "/work")} 2>/dev/null && [ -d .git ] && (git add -A && git -c user.name=box-yard -c user.email=box-yard@local commit -qm "box-yard: wip snapshot" --no-verify && git update-ref refs/boxyard/wip HEAD && git reset -q HEAD~1) >/dev/null 2>&1; cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId + "/claude")} ${q(taskId + "/events.jsonl")} $( [ -d ${q(taskId + "/work/.git")} ] && echo ${q(taskId + "/work/.git")}) $( [ -f ${q(`${taskId}/${KEEP_PACK}`)} ] && echo ${q(`${taskId}/${KEEP_PACK}`)}) 2>/dev/null; wc -c < ${tmp}`,
+          `cd ${q(root + "/" + taskId + "/work")} 2>/dev/null && [ -d .git ] && (git add -A && git -c user.name=box-yard -c user.email=box-yard@local commit -qm "box-yard: wip snapshot" --no-verify && git update-ref refs/boxyard/wip HEAD && git reset -q HEAD~1) >/dev/null 2>&1; cd ${q(root)} && tar czf ${tmp} ${excludes} ${q(taskId + "/claude")} ${q(taskId + "/events.jsonl")} $( [ -d ${q(taskId + "/work/.git")} ] && echo ${q(taskId + "/work/.git")}) ${keepPack} 2>/dev/null; wc -c < ${tmp}`,
         )
         size = Number.parseInt(res.stdout.trim().split("\n").pop() ?? "", 10)
         if (!Number.isFinite(size) || size > max) throw new Error(`workspace is too large to archive (${Math.round(size / 1e6)} MB)`)
@@ -2462,7 +2464,7 @@ export class TaskManager {
     } catch (err) {
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
-      await this.provider.exec(boxId, `rm -f ${tmp} ${q(`${this.provider.root(boxId)}/tasks/${taskId}/${KEEP_PACK}`)}`).catch(() => {})
+      await this.provider.exec(boxId, `rm -rf ${tmp} ${q(keepPackStage(taskId))}`).catch(() => {})
       this.archiving.delete(taskId)
     }
   }

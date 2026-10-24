@@ -9,13 +9,18 @@
 // - The mirror never prunes unreachable objects while a task folder borrows from it (gc.pruneExpire=never, and
 //   the janitor only prunes a mirror nobody uses). A fetch that fails never deletes a mirror in use.
 // - Archives stay self-contained: before tar, archive() packs the borrowed objects that GitHub no longer has
-//   reachable (KEEP_PACK). The rest of the history comes back from a fresh mirror when the archive is restored.
+//   reachable (KEEP_PACK, staged on /tmp). The rest of the history comes back from a fresh mirror on restore.
 // - Removing a task folder only drops that task's own objects: nothing in the mirror points at a task.
 
 import { q } from "./providers/types.js"
 
-/** Next to work/ in a task folder while it is being archived: borrowed objects only the mirror still had. */
+/** In an archive, next to work/: borrowed objects only the mirror still had. */
 export const KEEP_PACK = "git-keep.pack"
+/**
+ * Where archive() stages a task's keep pack: on /tmp, the box's other disk, so archiving writes nothing to a
+ * full /workspace. tar adds it as `<taskId>/git-keep.pack` with `-C <stage>`.
+ */
+export const keepPackStage = (taskId: string) => `/tmp/boxyard-archive-keep-${taskId}`
 /** Echoed by the mirror sync when it re-created a mirror (its mode changed and no task used it). */
 export const MIRROR_MARK = "boxyard-mirror="
 /** Echoed after a restore: `ok`, or `broken` when HEAD's commit can't be read even with the mirror. */
@@ -117,24 +122,25 @@ export function withMirrorLock(mirror: string, body: string): string {
  * Before tar: pack the objects the task reaches from its own refs (HEAD, branches, refs/boxyard/*, the stash)
  * that only the mirror has and that GitHub's refs no longer reach. Usually empty; a few commits after a
  * force-push or a deleted branch. The task's own objects are already in its .git, and everything else comes
- * from a fresh mirror on restore. Removes a stale pack when the task borrows nothing.
+ * from a fresh mirror on restore. Leaves no stage when there is nothing to keep.
  */
-export function keepPackScript(taskDir: string): string {
+export function keepPackScript(taskDir: string, taskId: string): string {
   const w = q(`${taskDir}/work`)
-  const out = q(`${taskDir}/${KEEP_PACK}`)
+  const stage = q(keepPackStage(taskId))
+  const out = q(`${keepPackStage(taskId)}/${taskId}/${KEEP_PACK}`)
   return [
-    `rm -f ${out}`,
+    `rm -rf ${stage}`,
     `bya=${w}/.git/objects/info/alternates`,
     `if [ -f "$bya" ]; then`,
     `  byo=$(head -n 1 "$bya")`,
     `  byv=$(mktemp -d)`,
     // A plain repo that sees only the mirror's objects: asking it about a missing object never fetches.
-    `  if [ -d "$byo" ] && git init -q --bare "$byv" && echo "$byo" > "$byv/objects/info/alternates"; then`,
+    `  if [ -d "$byo" ] && git init -q --bare "$byv" && echo "$byo" > "$byv/objects/info/alternates" && mkdir -p ${q(`${keepPackStage(taskId)}/${taskId}`)}; then`,
     `    bytips=$(cd ${w} && { git rev-parse -q --verify HEAD; git for-each-ref --format='%(objectname)' refs/heads refs/boxyard refs/stash; } 2>/dev/null | sort -u)`,
     `    [ -n "$bytips" ] && git -C ${w} -c core.alternateRefsPrefixes=${q(ORIGIN_REF_PREFIXES)} rev-list --objects --missing=allow-any $bytips --not --alternate-refs 2>/dev/null \\`,
     `      | cut -d' ' -f1 | git -C "$byv" cat-file --batch-check='%(objectname) %(objecttype)' | awk '$2 != "missing" { print $1 }' \\`,
     `      | git -C "$byv" pack-objects -q --stdout > ${out}`,
-    `    [ "$(wc -c < ${out} 2>/dev/null || echo 0)" -gt ${EMPTY_PACK_BYTES} ] || rm -f ${out}`,
+    `    [ "$(wc -c < ${out} 2>/dev/null || echo 0)" -gt ${EMPTY_PACK_BYTES} ] || rm -rf ${stage}`,
     `  fi`,
     `  rm -rf "$byv"`,
     `fi`,
