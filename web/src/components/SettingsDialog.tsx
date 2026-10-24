@@ -20,6 +20,7 @@ import { VoicePanel } from "./VoiceSettings"
 import { HooksPanel } from "./Hooks"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
+import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
@@ -40,8 +41,6 @@ import {
   type WorkerSize,
 } from "../../../shared/types"
 
-const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
-const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
 const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 

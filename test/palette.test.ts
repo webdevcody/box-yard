@@ -274,7 +274,7 @@ describe("prefixes", () => {
   it("> shows only commands and pages", () => {
     const groups = search(items, ">new task")
     expect(groups.map((g) => g.key)).toEqual(["command"])
-    expect(titles(groups[0])).toEqual(["New task in box-yard…", "New task in Notes app…"])
+    expect(titles(groups[0])).toEqual(["New task…", "New task in box-yard…", "New task in Notes app…"])
     expect(search(items, ">settings")[0]!.items[0]!.command).toBe("settings")
     expect(search(items, ">")[0]!.total).toBeGreaterThan(5)
   })
