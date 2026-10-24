@@ -146,6 +146,25 @@ describe("Captain: a message sent mid-turn", () => {
   })
 })
 
+describe("Captain: an agent's message_captain mid-turn", () => {
+  it("is queued too, and lands after the reply it arrived during", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "queued-agent" })
+    const path = `/api/projects/${p.id}/captain/messages`
+    await call(r, "POST", path, { id: "cap_first00002", content: "status [slow:2]" })
+    await waitFor(async () => (await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy || null, "Captain busy")
+    const { message } = r.yard.captains.fromAgent(p.id, { taskId: "task_agent0001", taskTitle: "Agent", message: "FYI: tests pass", agentMessageId: "am_1", waitSeconds: 0 })
+    expect(message.meta?.queued).toBe(true)
+
+    await waitFor(async () => (await call<CaptainMessage[]>(r, "GET", path)).filter((m) => m.role === "assistant").length >= 2 || null, "second Captain reply")
+    await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy || null, "Captain idle")
+    const list = await call<CaptainMessage[]>(r, "GET", path)
+    const order = list.filter((m) => m.role === "user" || m.role === "assistant").map((m) => (m.role === "user" ? m.id : m.role))
+    expect(order).toEqual(["cap_first00002", "assistant", message.id, "assistant"])
+    expect(list.find((m) => m.id === message.id)?.meta).toMatchObject({ source: "agent", queuedAt: message.createdAt })
+  })
+})
+
 describe("Task: feedback sent while the agent works", () => {
   it("waits in the task's queue, then lands in the transcript right before the turn that reads it", async () => {
     const r = await start()

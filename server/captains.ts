@@ -463,6 +463,8 @@ class Captain {
     const key = `agent ${input.taskId}: ${input.message}`
     const decision = this.loopGuard.check([key])
     if (!decision.wake) meta.heldUntil = decision.until
+    // Mid-turn it waits for the next turn, like send(): queued (see Store.deliverQueued).
+    if (this.running) meta.queued = true
     const msg = this.store.addCaptainMessage(this.project.id, "user", input.message.trim(), meta)
     this.hub.broadcast({ type: "captain.message", message: msg })
     if (!decision.wake) {
