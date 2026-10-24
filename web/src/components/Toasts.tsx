@@ -15,7 +15,7 @@ const TONE: Record<ToastTone, string> = {
 /**
  * The one toast stack, bottom right of the main pane. Only this component subscribes to the toast store,
  * so a toast coming or going re-renders nothing else. Hovering the stack holds every toast.
- * `quiet` (Zen mode) shows only critical toasts, top right under the chat header, clear of the composer.
+ * `quiet` (Zen mode) shows only critical toasts, top right below the chat header and meter, clear of the composer.
  */
 export function Toasts({ className, quiet = false }: { className?: string; quiet?: boolean }) {
   const all = useToasts()
@@ -30,7 +30,7 @@ export function Toasts({ className, quiet = false }: { className?: string; quiet
       data-quiet={quiet || undefined}
       className={cx(
         "pointer-events-none z-50 flex w-[22rem] max-w-[calc(100%-2rem)] flex-col items-end gap-2",
-        quiet ? "fixed top-[calc(env(safe-area-inset-top)+4.5rem)] right-[max(1rem,env(safe-area-inset-right))]" : "absolute right-4 bottom-4",
+        quiet ? "fixed top-[calc(env(safe-area-inset-top)+7.5rem)] right-[max(1rem,env(safe-area-inset-right))]" : "absolute right-4 bottom-4",
         className,
       )}
     >
