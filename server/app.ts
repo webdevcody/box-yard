@@ -33,7 +33,7 @@ import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, type Health } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, type Health } from "../shared/types.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
 const idSchema = z
@@ -108,6 +108,9 @@ const schemas = {
     title: z.string().trim().min(1).max(120),
     prompt: z.string().trim().min(1).max(50_000),
     env: envSchema.optional(),
+    model: z.string().trim().max(100).nullish(),
+    effort: z.enum(EFFORTS).nullish(),
+    attachments: attachmentIds,
   }),
   message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
@@ -459,7 +462,8 @@ export function createBoxYard(
     res.json(store.listTasks({ projectId }))
   })
   api.post("/tasks", (req, res) => {
-    res.status(201).json(tasks.createTask(parse(schemas.task, req.body)))
+    const { attachments, model, ...body } = parse(schemas.task, req.body)
+    res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
     const task = store.getTask(req.params.id!)

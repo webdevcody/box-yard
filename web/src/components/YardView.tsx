@@ -18,6 +18,7 @@ import {
 } from "../lib/yardTasks"
 import { Empty, STATUS, Select, cx } from "./ui"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
+import { NewTaskButton } from "./NewTask"
 import { QuietToggle, SearchBox, SortSelect, TabBar, isTyping, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 
 const TAB_ICONS: Record<YardTab, typeof Activity> = { active: Activity, needs_you: InboxIcon, recent: History, all: Layers }
@@ -46,6 +47,15 @@ export function YardView() {
   const [query, onQuery] = useUrlQuery()
   const [showQuiet] = useShowQuiet()
   const now = useNow()
+  const [newOpen, setNewOpen] = useState(false)
+
+  // `?new=task` (the command palette's "New task…") opens the new task popover once.
+  const wantsNew = params.get("new") === "task"
+  useEffect(() => {
+    if (!wantsNew) return
+    setNewOpen(true)
+    setParams((p) => withParam(p, "new", null), { replace: true })
+  }, [wantsNew, setParams])
 
   const tab = parseYardTab(params.get("tab"))
   const sort = parseSort(params.get("sort"))
@@ -91,6 +101,7 @@ export function YardView() {
   const working = list.filter((t) => t.status === "working" || t.status === "starting").length
   const setParam = (key: string, value: string | null, replace = false) => setParams((p) => withParam(p, key, value), { replace })
   const projectName = projectId ? names.get(projectId) : undefined
+  const hasProjects = (projects.data ?? []).length > 0
 
   return (
     // pb-6: the page container's own padding is lost once the list overflows it (it is h-full for the task view).
@@ -122,11 +133,13 @@ export function YardView() {
               ))}
           </Select>
         )}
+        {hasProjects && <NewTaskButton defaultProjectId={projectId} open={newOpen} onOpenChange={setNewOpen} className="w-full shrink-0 sm:w-auto" />}
       </header>
 
       {list.length === 0 ? (
         <Empty icon={<Boxes className="h-8 w-8" />} title="Nothing in the yard yet">
-          Tell the Coordinator what you want built, researched or written. It creates projects and routes work to project Captains for you.
+          <p>Tell the Coordinator what you want built, researched or written. It creates projects and routes work to project Captains for you.</p>
+          {hasProjects && <NewTaskButton variant="subtle" size="sm" className="mt-3" />}
         </Empty>
       ) : (
         <>
