@@ -35,6 +35,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { HEAVY_TASKS } from "../shared/memory.js"
 import { BOX_SIZES, EFFORTS, type Health } from "../shared/types.js"
+import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
 const idSchema = z
@@ -767,6 +768,23 @@ export function createBoxYard(
   })
   api.get("/boxes", (_req, res) => {
     res.json(tasks.boxes())
+  })
+  /** The box history log, newest first: filter by box (deleted ones too), event type and actor; page with ?before=<id>. */
+  api.get("/box-history", (req, res) => {
+    const f = parse(
+      z.object({
+        boxId: z.string().trim().min(1).optional(),
+        type: z.enum(BOX_EVENT_TYPES.map((t) => t.key) as [BoxEventType, ...BoxEventType[]]).optional(),
+        actor: z.enum(BOX_ACTORS.map((a) => a.key) as [BoxActorKind, ...BoxActorKind[]]).optional(),
+        before: z.coerce.number().int().positive().optional(),
+        limit: z.coerce.number().int().min(1).max(200).optional(),
+      }),
+      req.query,
+    )
+    const limit = f.limit ?? 50
+    // One extra row says whether there are older ones.
+    const events = tasks.history.list({ ...f, limit: limit + 1 })
+    res.json({ events: events.slice(0, limit), more: events.length > limit, boxIds: tasks.history.boxIds() })
   })
   /** Start a graduated disk cleanup on a box; answers right away with the running report (SSE box.cleanup follows). */
   api.post("/boxes/:id/cleanup", async (req, res) => {
