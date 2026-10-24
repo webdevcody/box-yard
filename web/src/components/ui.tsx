@@ -35,9 +35,9 @@ export const MERGED_BADGE = { label: "Merged", dot: "bg-merged", chip: "bg-merge
  * line tall (`h-lh`: the line-height it inherits), so use it in an `items-start` row that sets the text's font size
  * and leading, and keep that leading on the text's first line.
  */
-export function LineIcon({ icon: Icon, className, label }: { icon: LucideIcon; className?: string; label?: string }) {
+export function LineIcon({ icon: Icon, className, box, label }: { icon: LucideIcon; className?: string; box?: string; label?: string }) {
   return (
-    <span className="flex h-lh shrink-0 items-center">
+    <span className={cx("flex h-lh shrink-0 items-center", box)}>
       <Icon className={className} aria-label={label} aria-hidden={label ? undefined : true} />
     </span>
   )

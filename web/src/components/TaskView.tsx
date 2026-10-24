@@ -181,9 +181,10 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
     case "assistant":
       return (
         // The reply's first block drops its top margin (pt-1.5 keeps the gap) and the row sets one leading,
-        // so the icon's one-line box sits on the first line whatever the reply starts with.
-        <div className="flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed">
-          <LineIcon icon={Bot} className="h-4 w-4 text-zinc-500" />
+        // so the icon's one-line box sits on the first line. A reply opening with a code block: the box
+        // skips the block's p-3 and is one 16px code line tall.
+        <div className="group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed">
+          <LineIcon icon={Bot} className="h-4 w-4 text-zinc-500" box="group-has-[>div>.prose-chat>pre:first-child]:mt-3 group-has-[>div>.prose-chat>pre:first-child]:h-4" />
           <div className="min-w-0 text-zinc-200 [&>.prose-chat>:first-child]:mt-0!">
             <Markdown>{m.content}</Markdown>
             <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
