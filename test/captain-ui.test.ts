@@ -120,7 +120,6 @@ describe("Captain tab: an agent's message_captain", () => {
     expect(rows.map((r) => r.dataset.source)).toEqual(["agent", "agent", "agent"])
     expect(rows[0]!.textContent).toContain("From task")
     expect(rows[0]!.textContent).toContain("Fix login")
-    expect(rows[0]!.textContent).toContain("message_captain")
     expect(rows[0]!.textContent).toContain("waits 30s")
     expect(rows[0]!.querySelector("a")?.getAttribute("href")).toBe("/tasks/task_abc123def")
     expect(rows[1]!.textContent).not.toContain("waits")

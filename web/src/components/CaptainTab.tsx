@@ -233,7 +233,8 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   const source = captainSourceOf(m)
   const s = INBOUND[source]
   const Icon = s.icon
-  const tool = typeof m.meta?.tool === "string" ? m.meta.tool : null
+  // An agent's message is always message_captain, and "From task" says so: the room goes to the task title.
+  const tool = source !== "agent" && typeof m.meta?.tool === "string" ? m.meta.tool : null
   return (
     <div id={`captain-${m.id}`} data-testid="captain-inbound" data-source={source} className={cx("flex", source === "cody" && "justify-end")}>
       <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
@@ -241,7 +242,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
           <Icon className="h-3 w-3 shrink-0" />{" "}
           {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
           {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
-          <span className="ml-auto pl-2 font-normal tracking-normal normal-case text-zinc-500">
+          <span className="ml-auto shrink-0 pl-2 font-normal tracking-normal whitespace-nowrap normal-case text-zinc-500">
             <TimeAgo ts={m.createdAt} />
           </span>
         </div>
