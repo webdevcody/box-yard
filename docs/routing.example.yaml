@@ -1,5 +1,7 @@
 # Copy this to <data-dir>/routing.yaml, or paste it into Settings -> Box agents -> Routing YAML.
-# The orchestrator reads these rules when it calls create_task or send_to_task.
+# The Coordinator and Captains read these rules when they call create_task or send_to_task.
+# Each turn, the first match wins: a task's own model/effort > its project's entry under `projects`
+# > Settings -> Box agents (when saved or set by WORKER_MODEL) > `defaults` > `fallback` > claude-opus-5-5 at high.
 
 fallback:
   model: claude-opus-5-5
