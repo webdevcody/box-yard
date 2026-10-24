@@ -18,6 +18,7 @@
   Don't use `MIGRATIONS.length - 1`.
 - **Notices.** `TaskManager.notice()` text has the shape `<emoji> **Title** verb: detail`, which `parseNotice` in `web/src/lib/captainTranscript.ts` reads. If you change the format or add an emoji, update `EMOJI_KIND` and `test/captain-transcript.test.ts` too.
 - **Box sizes.** Per-size CPU, RAM, disk and price live only in `BOX_SIZE_SPECS` (`shared/boxSizes.ts`).
+- **Box history.** Every code path that creates, resizes, deletes, loses, cleans up or sweeps a box must record it with `TaskManager.recordBoxEvent` (`server/tasks.ts`, types in `server/boxHistory.ts`), with an actor and a reason, so the box history log (#107, `box_history` MCP tool, Boxes › History) has no gaps.
 
 ### Web UI: shared pieces
 

@@ -191,6 +191,9 @@ export function useServerEvents(enabled: boolean): Connection {
           qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withResize(list, ev.resize))
           announceResize(ev.resize)
           break
+        case "box.event":
+          void qc.invalidateQueries({ queryKey: keys.boxHistory })
+          break
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))
           break
