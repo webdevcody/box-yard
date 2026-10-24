@@ -1,7 +1,11 @@
 // Disk-space helpers shared by the server (placement, cleanup) and the web app (Boxes page, toasts).
 
-/** One step of a box cleanup, run in this order. Each step stops the run once there is enough room. */
+/**
+ * One step of a box cleanup, run in this order. Each step stops the run once there is enough room, except "tmp":
+ * it frees the root disk (/tmp and HOME on Upstash), not the work disk, and needs no room to run.
+ */
 export const CLEANUP_STEPS = [
+  { key: "tmp", label: "Stale temp folders on the root disk (/tmp)" },
   { key: "partials", label: "Partial clones and failed task folders" },
   { key: "caches", label: "npm, pip and tmp caches" },
   { key: "builds", label: "node_modules and build output in resting tasks" },
@@ -27,6 +31,7 @@ export type CleanupStepKey = (typeof CLEANUP_STEPS)[number]["key"] | (typeof EME
 export const CLEAR_STEPS: readonly { key: CleanupStepKey; label: string }[] = [
   { key: "archive", label: "Archive every workspace, then remove it from the box" },
   { key: "partials", label: "Leftover task folders and temp files" },
+  { key: "tmp", label: "Stale temp folders on the root disk (/tmp)" },
   { key: "caches", label: "npm, pip and tmp caches" },
   { key: "git", label: "Repo mirrors" },
 ]
@@ -59,6 +64,10 @@ export interface BoxCleanup {
   freeBefore: number | null
   freeAfter: number | null
   totalBytes: number | null
+  /** The root disk (/tmp, HOME) before and after, when it isn't the work disk. */
+  rootFreeBefore?: number | null
+  rootFreeAfter?: number | null
+  rootTotalBytes?: number | null
   freedBytes: number
   steps: CleanupStepReport[]
   /** Free space reached the target. */
@@ -69,20 +78,52 @@ export interface BoxCleanup {
 export interface DiskSpace {
   freeBytes: number
   totalBytes: number
+  /** The root disk (/, holding /tmp and HOME on Upstash) when it's another filesystem than the work disk. */
+  root?: { freeBytes: number; totalBytes: number } | null
 }
 
-/** `df -Pk <path>` for the folder a box keeps its work in. */
-export const dfCommand = (dir: string) => `df -Pk '${dir.replace(/'/g, `'\\''`)}' | tail -n 1`
+/** Separates the work disk's df line from the root disk's in dfCommand's output. */
+const ROOT_DF_MARK = "@@boxyard-root-df"
 
-/** Free and total bytes from the last line of `df -Pk` (POSIX format, 1K blocks), or null if it doesn't parse. */
-export function parseDf(stdout: string): DiskSpace | null {
-  const line = stdout.trim().split("\n").pop() ?? ""
+/** `df -Pk` for the folder a box keeps its work in, then for /tmp (the root disk on Upstash). */
+export const dfCommand = (dir: string) => `df -Pk '${dir.replace(/'/g, `'\\''`)}' | tail -n 1; echo ${ROOT_DF_MARK}; df -Pk /tmp 2>/dev/null | tail -n 1`
+
+/** Free, total and mount point from the last line of a `df -Pk` (POSIX format, 1K blocks). */
+function dfLine(text: string): { freeBytes: number; totalBytes: number; mount: string } | null {
+  const line = text.trim().split("\n").pop() ?? ""
   // Filesystem 1024-blocks Used Available Capacity Mounted-on; the filesystem name can hold spaces, so read from the right.
-  const m = line.match(/(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+\S.*$/)
+  const m = line.match(/(\d+)\s+(\d+)\s+(\d+)\s+\d+%\s+(\S.*)$/)
   if (!m) return null
   const total = Number(m[1]) * 1024
   const free = Number(m[3]) * 1024
-  return Number.isFinite(total) && Number.isFinite(free) && total > 0 ? { freeBytes: free, totalBytes: total } : null
+  return Number.isFinite(total) && Number.isFinite(free) && total > 0 ? { freeBytes: free, totalBytes: total, mount: m[4]!.trim() } : null
+}
+
+/**
+ * The work disk from dfCommand's output (or a single `df -Pk` line), or null if it doesn't parse. `root` is set
+ * when /tmp is on another filesystem.
+ */
+export function parseDf(stdout: string): DiskSpace | null {
+  const [workPart, rootPart] = stdout.split(ROOT_DF_MARK)
+  const work = dfLine(workPart ?? "")
+  if (!work) return null
+  const root = rootPart === undefined ? null : dfLine(rootPart)
+  return { freeBytes: work.freeBytes, totalBytes: work.totalBytes, root: root && root.mount !== work.mount ? { freeBytes: root.freeBytes, totalBytes: root.totalBytes } : null }
+}
+
+/** A root disk with less free than this (or than LOW_DISK_RATIO of it) gets its stale temp folders swept. */
+export const ROOT_MIN_FREE_BYTES = 512 * 1024 * 1024
+
+/** Is the root disk (/tmp, HOME) getting full? */
+export function rootLow(root: { freeBytes: number | null; totalBytes: number | null } | null | undefined): boolean {
+  if (!root || root.freeBytes === null || root.totalBytes === null) return false
+  return root.freeBytes < Math.max(ROOT_MIN_FREE_BYTES, root.totalBytes * LOW_DISK_RATIO)
+}
+
+/** "1.2 GB free of 20 GB on the root disk (/tmp, home)", or null when it's the work disk or unmeasured. */
+export function rootDiskLine(d: { rootFreeBytes?: number | null; rootTotalBytes?: number | null }): string | null {
+  if (d.rootFreeBytes === null || d.rootFreeBytes === undefined || d.rootTotalBytes === null || d.rootTotalBytes === undefined) return null
+  return `${formatBytes(d.rootFreeBytes)} free of ${formatBytes(d.rootTotalBytes)} on the root disk (/tmp, home)`
 }
 
 /**

@@ -471,7 +471,7 @@ describe("emergency cleanup at 0 bytes free", () => {
 
     const report = await r.yard.tasks.janitor.run(box, { reason: "out-of-space", target: 100 * MB, parkBelow: 100 * MB })
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
-    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "tmp", "partials", "caches", "builds", "git", "archive"])
     expect(step(report, "temp").removed).toEqual(["session temp files of 1 task"])
     expect(fs.existsSync(path.join(dir(idle), "claude", "shell-snapshots"))).toBe(false)
     expect(fs.existsSync(path.join(dir(idle), "claude", "projects", "p", "s.jsonl"))).toBe(true)
@@ -514,7 +514,7 @@ describe("emergency cleanup at 0 bytes free", () => {
     r.yard.store.updateTask(t.id, { prUrl: "https://github.com/o/r/pull/1", prState: "merged" })
     r.provider.fill(t.boxId!, 300 * MB)
     const report = await r.yard.tasks.janitor.run(t.boxId!, { reason: "low-disk", target: 400 * MB, parkBelow: 400 * MB })
-    expect(report.steps.map((s) => s.key)).toEqual(["partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
     // Parked with its archive (the session stays), not dropped.
     expect(r.yard.store.getTaskRow(t.id)!.archive_path).toBeTruthy()
   })
