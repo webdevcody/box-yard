@@ -107,10 +107,11 @@ export const loadLine = (mem: Pick<BoxMemory, "load1" | "cpus">) => `load ${mem.
 export const HEAVY_TASKS = ["off", "one-per-box", "whole-box"] as const
 export type HeavyTasks = (typeof HEAVY_TASKS)[number]
 
+/** Short enough for the project settings dropdown; the field's hint explains them. */
 export const HEAVY_TASKS_LABEL: Record<HeavyTasks, string> = {
-  off: "Off: agents share boxes up to the slot limit",
-  "one-per-box": "One per box: at most one of its agents per box",
-  "whole-box": "Whole box: each of its agents runs alone on a box",
+  off: "Off: share boxes",
+  "one-per-box": "One of its agents per box",
+  "whole-box": "Whole box: each agent alone",
 }
 
 export const normalizeHeavyTasks = (v: unknown): HeavyTasks => (HEAVY_TASKS.includes(v as HeavyTasks) ? (v as HeavyTasks) : "off")

@@ -375,7 +375,8 @@ function BoxRow({
         </div>
         <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={mem?.title ?? "Memory not measured yet"} data-testid="box-row-memory">
           <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[mem?.tone ?? "unknown"])}>{mem ? memoryShort(mem) : "mem —"}</span>
-          {mem && <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="w-8 @2xl:w-full" />}
+          {/* On the two-line phone row the text alone says it, leaving room for "running now". */}
+          {mem && <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="hidden @2xl:block @2xl:w-full" />}
         </div>
         <div className="hidden min-w-0 items-center gap-1 @2xl:flex">
           {box.projects.length === 0 ? (
@@ -396,7 +397,7 @@ function BoxRow({
         <RunningNow now={now} />
       </div>
 
-      <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-6">
+      <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-7">
         <BoxMenu box={box} tasks={tasks} onOpen={() => onOpen(box.id)} onAction={(kind) => onAction(box.id, kind)} />
       </div>
     </div>
