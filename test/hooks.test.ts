@@ -10,7 +10,7 @@ import {
   type HookFilters,
   type HookSubject,
 } from "../shared/hooks.js"
-import { fireKey, taskSource } from "../server/hooks.js"
+import { fireKey, hookLabel, taskSource } from "../server/hooks.js"
 
 const hook = (over: Partial<Hook> = {}, filters: HookFilters = {}): Pick<Hook, "enabled" | "trigger" | "projectId" | "filters"> => ({
   enabled: true,
@@ -135,6 +135,12 @@ describe("fire keys and task sources", () => {
   it("keys pr.merged by PR and the rest by the turn that ended", () => {
     expect(fireKey(ev("pr.merged"), { pr_head_sha: "abc", pr_url: "u" })).toBe("merged:u")
     expect(fireKey(ev("task.finished"), { pr_head_sha: null, pr_url: null })).toBe("turn:turn1")
+  })
+
+  it("labels a hook's messages as the hook's, by the owner's configured name", () => {
+    const h = { name: "Auto-merge", trigger: "task.pr_ready" as const, createdBy: "Sam" }
+    expect(hookLabel(h)).toBe('Message from the Box Yard hook "Auto-merge" (an automation that runs on "PR ready", set up by Sam; not a new message from Cody)')
+    expect(hookLabel(h, "Sam")).toMatch(/not a new message from Sam\)$/)
   })
 
   it("reads who started a task from its source column", () => {

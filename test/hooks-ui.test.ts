@@ -186,6 +186,7 @@ describe("the Hooks panel", () => {
     qc.setQueryData(keys.projects, [{ id: "prj_demo01", name: "demo", notes: [] } as unknown as Project])
     qc.setQueryData(keys.tasks, [task])
     qc.setQueryData(keys.hookTemplates, [template])
+    qc.setQueryData(keys.agentSettings, { settings: { ownerName: "Sam" } })
     qc.setQueryData(keys.hookRuns("prj_demo01"), [run(), run({ status: "skipped", guard: "loop", result: "Skipped by the loop guard: this hook's own prompt started this work." })])
     host = document.createElement("div")
     document.body.append(host)
@@ -214,7 +215,8 @@ describe("the Hooks panel", () => {
     expect(rows).toHaveLength(2)
     expect(rows[0]!.textContent).toContain("PR ready → Send to the task")
     expect(rows[0]!.textContent).toContain("Not no-automerge")
-    expect(rows[0]!.textContent).toContain("Started by Cody or Captain")
+    // "cody" is the owner, by the configured name.
+    expect(rows[0]!.textContent).toContain("Started by Sam or Captain")
     expect(rows[0]!.textContent).toContain("Add dark mode")
     expect(rows[1]!.textContent).toContain("Task finished → Create a task")
     expect(rows[1]!.textContent).toContain("Hasn't fired yet")
