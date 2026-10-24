@@ -3,7 +3,10 @@ import type { Server } from "node:http"
 import fs from "node:fs"
 import { execFileSync } from "node:child_process"
 import path from "node:path"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
+import { buildMcpServer } from "../server/mcp.js"
 import type { Config } from "../server/config.js"
 import type { BoxCleanup, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
@@ -27,7 +30,10 @@ async function start(overrides: Partial<Config> = {}): Promise<Running> {
   return r
 }
 
+const closers: (() => Promise<unknown>)[] = []
+
 afterEach(async () => {
+  for (const close of closers.splice(0)) await close()
   for (const r of running.splice(0)) {
     r.yard.stop()
     await new Promise((res) => r.server.close(() => res(null)))
@@ -48,6 +54,19 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
 const project = (r: Running, name: string) => call<Project>(r, "POST", "/api/projects", { name })
 const task = (r: Running, projectId: string, title: string, prompt = "write a haiku") => call<Task>(r, "POST", "/api/tasks", { projectId, title, prompt })
 const send = (r: Running, taskId: string, content: string) => call<Task>(r, "POST", `/api/tasks/${taskId}/messages`, { content })
+/** The Coordinator's send_to_task, which also says how the message will be delivered. */
+async function sendToTask(r: Running, taskId: string, message: string) {
+  const y = r.yard
+  const mcp = buildMcpServer({ store: y.store, tasks: y.tasks, hub: y.hub, artifacts: null as never, publicUrl: () => "", scheduler: y.scheduler, captains: y.captains, settings: y.settings, uploads: { resolveAll: () => [] } } as never, { kind: "coordinator" })
+  const [a, b] = InMemoryTransport.createLinkedPair()
+  await mcp.connect(a)
+  const client = new Client({ name: "test", version: "0" })
+  await client.connect(b)
+  closers.push(async () => (await client.close(), await mcp.close()))
+  const res = (await client.callTool({ name: "send_to_task", arguments: { task: taskId, message } })) as { content: { text: string }[]; isError?: boolean }
+  if (res.isError) throw new Error(res.content[0]!.text)
+  return JSON.parse(res.content[0]!.text) as { delivery: string }
+}
 const getTask = (r: Running, id: string) => call<Task>(r, "GET", `/api/tasks/${id}`)
 const put = (file: string, content = "x\n") => {
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -62,6 +81,7 @@ const archivedDone = (r: Running, id: string, turnCount = 1) =>
   }, `task ${id} to finish and archive`)
 
 const DAY = 24 * 60 * 60_000
+const listing = (archive: string) => execFileSync("tar", ["tzf", archive]).toString().split("\n").filter(Boolean)
 
 /** Make a task (and optionally its archive file) look untouched since `at`. */
 function age(r: Running, id: string, at: number, archive = true) {
@@ -132,7 +152,8 @@ describe("resuming after retention", () => {
     expect(fs.existsSync(oldDir)).toBe(false)
     expect(r.yard.tasks.resumeMode(done.id)).toBe("archive")
 
-    await send(r, done.id, "one more thing")
+    const sent = await sendToTask(r, done.id, "one more thing")
+    expect(sent.delivery).toMatch(/^resuming: the workspace and Claude session are restored from the archive/)
     const resumed = await archivedDone(r, done.id, 2)
     const turn = turnJson(r, resumed)
     expect(turn.resume).toBe(true)
@@ -171,7 +192,10 @@ describe("resuming after retention", () => {
       expect(r.yard.tasks.resumeMode(t.id)).toBe("recap")
     }
 
-    await send(r, pushed.id, "please also update the docs")
+    // The Coordinator hears that the old session is gone, not that it resumes.
+    const sent = await sendToTask(r, pushed.id, "please also update the docs")
+    expect(sent.delivery).toMatch(/^resuming from a recap: this task's workspace archive has expired/)
+    expect(sent.delivery).toContain(`fresh checkout of branch ${pushed.branch}`)
     const after = await archivedDone(r, pushed.id, 2)
     const turn = turnJson(r, after)
     expect(turn.resume).toBe(false)
@@ -194,6 +218,27 @@ describe("resuming after retention", () => {
     expect(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: localWork }).toString().trim()).toBe(local.branch)
     expect(fs.existsSync(path.join(localWork, "README.md"))).toBe(true)
     expect(events(r, local.id).some((e) => e.startsWith("Resumed from a recap") && e.includes("recreated from main"))).toBe(true)
+  })
+})
+
+describe("archiving", () => {
+  it("a second archive request waits for the one running and then archives again, instead of being dropped", async () => {
+    const r = await start()
+    const p = await project(r, "alpha")
+    const done = await archivedDone(r, (await task(r, p.id, "twice")).id)
+    await waitFor(() => !(r.yard.tasks as unknown as { archiving: Set<string> }).archiving.has(done.id), "the turn's archive to wind down")
+    const saved: number[] = []
+    const update = r.yard.store.updateTask.bind(r.yard.store)
+    r.yard.store.updateTask = ((id, patch, opts) => {
+      if (id === done.id && patch.lastArchivedAt) saved.push(patch.lastArchivedAt)
+      return update(id, patch, opts)
+    }) as typeof r.yard.store.updateTask
+    const first = r.yard.tasks.archive(done.id)
+    // Written while the first archive runs: only an archive that starts after it can be sure to have it.
+    put(path.join(r.yard.tasks.taskDir(done.boxId!, done.id), "work", "late.md"), "late\n")
+    await Promise.all([first, r.yard.tasks.archive(done.id, { closing: true })])
+    expect(saved).toHaveLength(2)
+    expect(listing(r.yard.store.getTaskRow(done.id)!.archive_path!)).toContain(`${done.id}/work/late.md`)
   })
 })
 
@@ -360,12 +405,19 @@ describe("workspace retention", () => {
     expect(r.yard.tasks.resumeMode(t["no pr"].id)).toBe("box") // its folder is still on the box (workspace retention is off)
   })
 
-  it("keeps every archive when archive retention is 0", async () => {
-    const r = await start({ archiveRetentionDays: 0, workspaceRetentionDays: 0, archiveKeepTouchedDays: 0 })
+  it.each([0, -1])("keeps every workspace and archive when retention is %i (off)", async (days) => {
+    const r = await start({ archiveRetentionDays: days, workspaceRetentionDays: days, archiveKeepTouchedDays: 0 })
     const p = await project(r, "alpha")
     const done = await archivedDone(r, (await task(r, p.id, "keep")).id)
+    const dir = r.yard.tasks.taskDir(done.boxId!, done.id)
     age(r, done.id, Date.now() - 400 * DAY)
     await r.yard.tasks.maintain()
-    expect(r.yard.store.getTaskRow(done.id)!.archive_path).toBeTruthy()
+    const row = r.yard.store.getTaskRow(done.id)!
+    expect(row.archive_path).toBeTruthy()
+    expect(fs.existsSync(row.archive_path!)).toBe(true)
+    expect(row.box_id).toBe(done.boxId)
+    expect(fs.existsSync(dir)).toBe(true)
+    expect(r.yard.tasks.resumeMode(done.id)).toBe("box")
+    expect(events(r, done.id).some((e) => e.startsWith("Workspace parked"))).toBe(false)
   })
 })

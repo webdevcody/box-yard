@@ -2982,6 +2982,8 @@ export class TaskManager {
     this.publishDirectory()
     void this.archive(row.id)
       .then(() => {
+        // stop() may have closed the database while the archive ran.
+        if (this.stopped) return
         const fresh = this.store.getTaskRow(row.id)
         if (!fresh?.archive_path) return
         const available = fs.existsSync(fresh.archive_path)
@@ -3187,7 +3189,9 @@ export class TaskManager {
    * `closing`: the task is done, so its WIP ref is removed from origin once an archive has the work.
    */
   async archive(taskId: string, opts: { closing?: boolean } = {}) {
-    if (this.archiving.has(taskId)) return
+    // One at a time per task. Wait rather than return: the one running may predate the work this call is for.
+    while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
+    if (this.stopped) return
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id) return
     const project = this.store.getProject(row.project_id)
