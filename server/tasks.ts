@@ -305,6 +305,7 @@ export class TaskManager {
   private reconciling: Promise<void> | null = null
   /** Boxes the last probe couldn't reach, since when (the next probe that reaches one clears it). */
   private unreachable = new Map<string, number>()
+  private checkingReach = new Set<string>()
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
@@ -2021,7 +2022,7 @@ export class TaskManager {
     try {
       res = await this.provider.exec(boxId, dfCommand(this.provider.root(boxId)))
     } catch {
-      this.markUnreachable(boxId)
+      void this.markUnreachable(boxId)
       return null
     }
     this.markReachable(boxId)
@@ -3893,7 +3894,7 @@ export class TaskManager {
     try {
       probe = await provider.usage(boxId)
     } catch {
-      this.markUnreachable(boxId)
+      void this.markUnreachable(boxId)
       return
     }
     const patch: Parameters<Store["meterBox"]>[1] = {
@@ -4198,16 +4199,18 @@ export class TaskManager {
         if (!(await this.goneAtProvider(id))) continue
         const box = this.store.getBox(id)
         if (this.stopped || box?.status !== "ready" || this.boxOps.has(id)) continue
-        console.log(`[box-yard] box ${id} no longer exists at the provider; dropping it`)
-        await this.loseBox(id, `Box ${id} no longer exists at the provider.`, false, {
-          type: "lost",
-          actor: { kind: "provider" },
-          reason: live
-            ? "Missing from the provider's box list, and the provider says it's gone (deleted outside Box Yard, e.g. in the provider's console)."
-            : "The provider says the box is gone (deleted outside Box Yard, e.g. in the provider's console).",
-        })
+        await this.loseVanished(id, live ? "Missing from the provider's box list, and the provider says it's gone" : "The provider says the box is gone")
       }
     }
+  }
+
+  private async loseVanished(boxId: string, why: string) {
+    console.log(`[box-yard] box ${boxId} no longer exists at the provider; dropping it`)
+    await this.loseBox(boxId, `Box ${boxId} no longer exists at the provider.`, false, {
+      type: "lost",
+      actor: { kind: "provider" },
+      reason: `${why} (deleted outside Box Yard, e.g. in the provider's console).`,
+    })
   }
 
   /** The provider says the box doesn't exist. Errors and every other answer count as "still there". */
@@ -4225,12 +4228,23 @@ export class TaskManager {
     })
   }
 
-  /** A probe couldn't reach the box: its numbers go stale on the Boxes page, and the provider is asked whether it still has it. */
-  private markUnreachable(boxId: string) {
-    if (!this.store.getBox(boxId) || this.unreachable.has(boxId)) return
-    this.unreachable.set(boxId, Date.now())
-    this.emitBoxes()
-    void this.reconcileBoxes()
+  /**
+   * A probe couldn't reach the box: ask the provider about it. Gone: it's dropped. Paused: that's why, and nothing is
+   * wrong. Anything else: the Boxes page says it isn't answering and shows its numbers as stale.
+   */
+  private async markUnreachable(boxId: string) {
+    if (!this.store.getBox(boxId) || this.unreachable.has(boxId) || this.checkingReach.has(boxId)) return
+    this.checkingReach.add(boxId)
+    try {
+      const h = await providerOf(this.provider, boxId).health(boxId).catch(() => "unknown" as const)
+      const box = this.store.getBox(boxId)
+      if (this.stopped || box?.status !== "ready" || h === "paused") return
+      if (h === "gone" && !this.boxOps.has(boxId)) return await this.loseVanished(boxId, "A probe couldn't reach the box, and the provider says it's gone")
+      this.unreachable.set(boxId, Date.now())
+      this.emitBoxes()
+    } finally {
+      this.checkingReach.delete(boxId)
+    }
   }
 
   private markReachable(boxId: string) {
