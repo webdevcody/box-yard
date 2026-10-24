@@ -6,7 +6,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { Check as CheckIcon, KeyRound, Play, RefreshCw, Search, Square, X } from "lucide-react"
 import { useOwnerName, useSaveTts, useTtsSettings } from "../lib/queries"
 import { playPreview, stopPreview, usePreviewing, useVoiceList } from "../lib/tts"
-import { filterVoices, voiceMeta, voiceUnavailable } from "../lib/ttsVoices"
+import { filterVoices, voiceMeta } from "../lib/ttsVoices"
 import { stopSpeech, useVoiceSettings } from "../lib/speech"
 import {
   ELEVENLABS_MODELS,
@@ -18,7 +18,6 @@ import {
   TTS_KEY_ENV,
   TTS_PROVIDERS,
   TTS_PROVIDER_LABEL,
-  openAiSupportsInstructions,
   previewLine,
   type CloudProvider,
   type TtsInfo,
@@ -259,7 +258,6 @@ function VoicePicker({
   provider,
   voices,
   selected,
-  model,
   onPick,
   preview,
   loading,
@@ -270,7 +268,6 @@ function VoicePicker({
   provider: CloudProvider
   voices: TtsVoice[]
   selected: string
-  model: string
   onPick: (v: TtsVoice) => void
   preview: (v: TtsVoice) => Promise<void>
   loading?: boolean
@@ -330,17 +327,15 @@ function VoicePicker({
         <ul role="radiogroup" aria-label="Voice" className="scroll-thin max-h-72 divide-y divide-zinc-900 overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950/40">
           {shown.map((v) => {
             const on = v.id === selected
-            const unavailable = voiceUnavailable(v, provider, model)
-            const meta = unavailable ?? voiceMeta(v)
+            const meta = voiceMeta(v)
             return (
               <li key={v.id} className={cx("flex items-center gap-1", on && "bg-yard-500/10")}>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={on}
-                  disabled={Boolean(unavailable)}
                   onClick={() => onPick(v)}
-                  className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left disabled:opacity-50 sm:min-h-0"
+                  className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left sm:min-h-0"
                 >
                   <span className={cx("grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border", on ? "border-yard-400" : "border-zinc-600")}>
                     {on && <span className="h-1.5 w-1.5 rounded-full bg-yard-400" />}
@@ -418,7 +413,6 @@ function ElevenLabsSettings({ info, fid, save }: { info: TtsInfo; fid: (k: strin
             provider="elevenlabs"
             voices={voices}
             selected={s.voiceId}
-            model={s.model}
             loading={list.loading}
             error={list.error}
             onRefresh={list.refresh}
@@ -450,8 +444,7 @@ function OpenAiSettings({ info, fid, save }: { info: TtsInfo; fid: (k: string) =
   const keySet = info.keys.openai.state === "set"
   const [speed, setSpeed] = useDebounced(s.speed, (v) => save({ openai: { speed: v } }))
   const [instructions, setInstructions] = useDebounced(s.instructions, (v) => save({ openai: { instructions: v } }), 800)
-  const voices: TtsVoice[] = OPENAI_VOICES.map((v) => ({ id: v.id, name: v.name, category: "built-in", allModels: v.allModels }))
-  const instructable = openAiSupportsInstructions(s.model)
+  const voices: TtsVoice[] = OPENAI_VOICES.map((v) => ({ id: v.id, name: v.name, category: "built-in" }))
   return (
     <>
       <KeyRow provider="openai" info={info} fid={fid} />
@@ -460,7 +453,6 @@ function OpenAiSettings({ info, fid, save }: { info: TtsInfo; fid: (k: string) =
           provider="openai"
           voices={voices}
           selected={s.voice}
-          model={s.model}
           disabled={!keySet}
           onPick={(v) => save({ openai: { voice: v.id } })}
           preview={(v) =>
@@ -471,7 +463,7 @@ function OpenAiSettings({ info, fid, save }: { info: TtsInfo; fid: (k: string) =
                   text: previewLine(v.name, owner),
                   provider: "openai",
                   voice: v.id,
-                  model: voiceUnavailable(v, "openai", s.model) ? "gpt-4o-mini-tts" : s.model,
+                  model: s.model,
                   instructions,
                   speed,
                 },
@@ -485,29 +477,23 @@ function OpenAiSettings({ info, fid, save }: { info: TtsInfo; fid: (k: string) =
         id={fid("oa-model")}
         models={OPENAI_TTS_MODELS}
         value={s.model}
-        onChange={(model) => {
-          const patch: Record<string, unknown> = { model }
-          // tts-1 and tts-1-hd have fewer voices: move to one they have.
-          if (/^tts-1/.test(model) && !OPENAI_VOICES.find((v) => v.id === s.voice)?.allModels) patch.voice = "coral"
-          save({ openai: patch })
-        }}
+        onChange={(model) => save({ openai: { model } })}
       />
       <Row
         id={fid("oa-instr")}
         label="Voice instructions"
-        help={instructable ? "Optional: tone, accent, pace or emotion, e.g. “Calm and brisk, like a radio traffic update.”" : "Only gpt-4o-mini-tts reads instructions."}
+        help="Optional: tone, accent, pace or emotion, e.g. “Calm and brisk, like a radio traffic update.”"
       >
         <textarea
           id={fid("oa-instr")}
-          className={cx(inputClass, "min-h-20 resize-y disabled:opacity-50")}
-          disabled={!instructable}
+          className={cx(inputClass, "min-h-20 resize-y")}
           maxLength={MAX_INSTRUCTIONS}
           placeholder="Calm and brisk."
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
         />
       </Row>
-      <Row id={fid("oa-speed")} label="Speed" help="OpenAI's speed setting (0.25× to 4×), applied when the audio is made.">
+      <Row id={fid("oa-speed")} label="Speed" help="OpenAI's speed setting (0.25× to 1.5×), applied when the audio is made.">
         <Slider id={fid("oa-speed")} label="Speed" value={speed} min={OPENAI_SPEED.min} max={OPENAI_SPEED.max} step={0.05} onChange={setSpeed} format={(v) => `${v.toFixed(2)}×`} />
       </Row>
     </>

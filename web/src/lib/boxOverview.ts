@@ -3,11 +3,12 @@ import { formatBytes } from "../../../shared/disk"
 import { TASK_STATUSES, type BoxInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { splitBoxTasks } from "./boxTasks"
 import { cleanupLine, diskMeter, rootMeter, type DiskMeter } from "./diskCleanup"
+import { memoryMeter, memoryShort } from "./memoryMeter"
 
 export type AttentionLevel = "error" | "warn"
 
 export interface AttentionReason {
-  key: "lost" | "deleting" | "disk" | "root" | "cleanup" | "over"
+  key: "lost" | "deleting" | "disk" | "root" | "memory" | "cleanup" | "over"
   level: AttentionLevel
   /** A few words for the row tooltip. */
   short: string
@@ -15,7 +16,8 @@ export interface AttentionReason {
   detail: string
 }
 
-type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "rootFreeBytes" | "rootTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots">
+type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "rootFreeBytes" | "rootTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots"> &
+  Partial<Pick<BoxInfo, "memUsedBytes" | "memTotalBytes" | "loadAvg" | "cpuCount" | "memoryPressure">>
 
 /** Why a box needs Cody's eye, worst first; empty when it's fine. */
 export function boxAttention(box: AttentionBox): AttentionReason[] {
@@ -46,6 +48,15 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
       level: root.free / root.total < CRITICAL_DISK_RATIO ? "error" : "warn",
       short: `Root disk low: ${formatBytes(root.free)} free`,
       detail: `Low on the root disk, where /tmp and home live (${root.label}). Box Yard removes stale temp folders there by itself while it stays low, and stages archives on whichever disk has more room.`,
+    })
+  const mem = memoryMeter(box)
+  // Only while agents run: that's when placement skips the box for it.
+  if (mem?.busy && box.runningTurns > 0 && box.status === "ready")
+    out.push({
+      key: "memory",
+      level: mem.tone === "error" ? "error" : "warn",
+      short: `Busy: ${memoryShort(mem)}${mem.load ? `, ${mem.load}` : ""}`,
+      detail: `Busy: ${mem.busy}. New agents go to other boxes (or wait) until it calms down; running agents keep going.`,
     })
   if (box.cleanup?.status === "failed") out.push({ key: "cleanup", level: "warn", short: "Last cleanup failed", detail: cleanupLine(box.cleanup) })
   if (box.runningTurns > box.slots)

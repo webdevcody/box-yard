@@ -24,12 +24,14 @@ import {
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
+import { DEFAULT_MEMORY_POLICY } from "../shared/memory.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
   OPENAI_SPEED,
   TTS_DEFAULTS,
   TTS_PROVIDERS,
+  migrateOpenAiTts,
   type CloudProvider,
   type ElevenLabsTts,
   type KeyStatus,
@@ -72,6 +74,9 @@ export const DEFAULT_SETTINGS: Settings = {
   archiveKeepTouchedDays: 30,
   diskMinFreeMb: 1024,
   diskCloneFactor: 2,
+  memoryMaxUsedPercent: DEFAULT_MEMORY_POLICY.maxUsedPercent,
+  memoryMinFreeMb: DEFAULT_MEMORY_POLICY.minFreeMb,
+  loadMaxPerCpu: DEFAULT_MEMORY_POLICY.maxLoadPerCpu,
   gitPartialClone: true,
   gitPushAtTurnEnd: true,
   buildCleanupIdleMinutes: 15,
@@ -108,6 +113,9 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
   diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
+  memoryMaxUsedPercent: "BOXYARD_MEMORY_MAX_USED_PERCENT",
+  memoryMinFreeMb: "BOXYARD_MEMORY_MIN_FREE_MB",
+  loadMaxPerCpu: "BOXYARD_LOAD_MAX_PER_CPU",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
   gitPushAtTurnEnd: "BOXYARD_GIT_PUSH_AT_TURN_END",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
@@ -161,6 +169,9 @@ export const settingsPatch = z
     archiveKeepTouchedDays: z.number().int().min(0).max(3650),
     diskMinFreeMb: z.number().int().min(0).max(1_000_000),
     diskCloneFactor: z.number().min(1).max(20),
+    memoryMaxUsedPercent: z.number().int().min(0).max(100),
+    memoryMinFreeMb: z.number().int().min(0).max(1_000_000),
+    loadMaxPerCpu: z.number().min(0).max(100),
     gitPartialClone: z.boolean(),
     gitPushAtTurnEnd: z.boolean(),
     buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
@@ -198,6 +209,9 @@ export class SettingsStore {
       | "archiveKeepTouchedDays"
       | "diskMinFreeMb"
       | "diskCloneFactor"
+      | "memoryMaxUsedPercent"
+      | "memoryMinFreeMb"
+      | "loadMaxPerCpu"
       | "gitPartialClone"
       | "gitPushAtTurnEnd"
       | "buildCleanupIdleMinutes"
@@ -247,6 +261,9 @@ export class SettingsStore {
       archiveKeepTouchedDays: this.c.archiveKeepTouchedDays ?? DEFAULT_SETTINGS.archiveKeepTouchedDays,
       diskMinFreeMb: this.c.diskMinFreeMb ?? DEFAULT_SETTINGS.diskMinFreeMb,
       diskCloneFactor: this.c.diskCloneFactor ?? DEFAULT_SETTINGS.diskCloneFactor,
+      memoryMaxUsedPercent: this.c.memoryMaxUsedPercent ?? DEFAULT_SETTINGS.memoryMaxUsedPercent,
+      memoryMinFreeMb: this.c.memoryMinFreeMb ?? DEFAULT_SETTINGS.memoryMinFreeMb,
+      loadMaxPerCpu: this.c.loadMaxPerCpu ?? DEFAULT_SETTINGS.loadMaxPerCpu,
       gitPartialClone: this.c.gitPartialClone ?? DEFAULT_SETTINGS.gitPartialClone,
       gitPushAtTurnEnd: this.c.gitPushAtTurnEnd ?? DEFAULT_SETTINGS.gitPushAtTurnEnd,
       buildCleanupIdleMinutes: this.c.buildCleanupIdleMinutes ?? DEFAULT_SETTINGS.buildCleanupIdleMinutes,
@@ -395,7 +412,17 @@ export class TtsSettingsStore {
   }
 
   private saved(): SavedTts {
-    const parsed = ttsPatch.safeParse(this.json(TTS_KEY))
+    const raw = this.json<Record<string, unknown>>(TTS_KEY)
+    // Choices saved for OpenAI's retired speech models (tts-1, gpt-4o-mini-tts, fable/nova/onyx,
+    // speeds over 1.5×) move to their Realtime equivalents, once, so the rest still parses.
+    if (raw.openai && typeof raw.openai === "object") {
+      const migrated = migrateOpenAiTts(raw.openai as Partial<OpenAiTts>)
+      if (JSON.stringify(migrated) !== JSON.stringify(raw.openai)) {
+        raw.openai = migrated
+        this.store.setKv(TTS_KEY, JSON.stringify(raw))
+      }
+    }
+    const parsed = ttsPatch.safeParse(raw)
     return parsed.success ? (parsed.data as SavedTts) : {}
   }
 
@@ -455,7 +482,7 @@ export class TtsSettingsStore {
         ...saved,
         ...(prefs.provider ? { provider: prefs.provider } : {}),
         ...(prefs.elevenlabs ? { elevenlabs: { ...saved.elevenlabs, ...prefs.elevenlabs } } : {}),
-        ...(prefs.openai ? { openai: { ...saved.openai, ...prefs.openai } } : {}),
+        ...(prefs.openai ? { openai: { ...saved.openai, ...migrateOpenAiTts(prefs.openai) } } : {}),
       }),
     )
     if (elevenlabsApiKey !== undefined || openaiApiKey !== undefined) {

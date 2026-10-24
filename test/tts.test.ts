@@ -3,9 +3,10 @@ import type { Server } from "node:http"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
 import { TtsSettingsStore } from "../server/settings.js"
-import { AudioCache, TtsService, providerMessage } from "../server/tts.js"
+import { AudioCache, READ_ALOUD_INSTRUCTIONS, TtsService, providerMessage } from "../server/tts.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
-import { TTS_DEFAULTS, previewLine, type TtsInfo, type TtsVoiceList } from "../shared/tts.js"
+import { OPENAI_VOICES, PCM_CONTENT_TYPE, TTS_DEFAULTS, previewLine, type TtsInfo, type TtsVoiceList } from "../shared/tts.js"
+import { fakeRealtime, gate, speak, type Behave } from "./fakeRealtime.js"
 import { freePort, testConfig, tmpDir } from "./helpers.js"
 
 const memStore = () => new Store(openDb(tmpDir(), ":memory:"))
@@ -58,7 +59,8 @@ describe("TTS settings", () => {
     expect(info.settings).toEqual(TTS_DEFAULTS)
     expect(info.settings.provider).toBe("browser")
     expect(info.settings.elevenlabs.model).toBe("eleven_flash_v2_5")
-    expect(info.settings.openai.model).toBe("gpt-4o-mini-tts")
+    expect(info.settings.openai.model).toBe("gpt-realtime-2.1-mini")
+    expect(info.settings.openai.voice).toBe("marin")
     expect(info.keys).toEqual({ elevenlabs: { state: "unset", source: "default" }, openai: { state: "unset", source: "default" } })
     expect(info.sources.provider).toBe("default")
   })
@@ -103,8 +105,34 @@ describe("TTS settings", () => {
     expect(() => tts.update({ openaiApiKey: "has a space in it" })).toThrow()
     expect(() => tts.update({ openaiApiKey: "short" })).toThrow()
     expect(() => tts.update({ openai: { speed: 9 } })).toThrow()
+    // The Realtime API tops out at 1.5×.
+    expect(() => tts.update({ openai: { speed: 2 } })).toThrow()
     expect(() => tts.update({ elevenlabs: { voiceId: "../../v1/user" } })).toThrow()
     expect(() => tts.update({ secret: "x" })).toThrow()
+  })
+
+  it("move choices saved for the retired speech models to the Realtime model and its voices", () => {
+    const store = memStore()
+    const old = {
+      provider: "openai",
+      elevenlabs: { voiceId: "abc123", voiceName: "Rachel" },
+      openai: { model: "tts-1-hd", voice: "nova", speed: 3, instructions: "Calm." },
+    }
+    store.setKv("tts_settings", JSON.stringify(old))
+    const tts = new TtsSettingsStore(store, {})
+    const info = tts.info()
+    expect(info.settings.provider).toBe("openai")
+    expect(info.settings.openai).toEqual({ model: "gpt-realtime-2.1-mini", voice: "coral", speed: 1.5, instructions: "Calm." })
+    expect(info.settings.elevenlabs).toMatchObject({ voiceId: "abc123", voiceName: "Rachel" })
+    // Written back once, so the saved row is current from now on.
+    expect(JSON.parse(store.getKv("tts_settings")!).openai).toEqual({ model: "gpt-realtime-2.1-mini", voice: "coral", speed: 1.5, instructions: "Calm." })
+
+    // Every retired voice has a Realtime counterpart; current ones stay put.
+    for (const [from, to] of [["fable", "ballad"], ["onyx", "cedar"], ["nova", "coral"], ["ash", "ash"], ["marin", "marin"]]) {
+      expect(tts.update({ openai: { voice: from, model: "gpt-4o-mini-tts-2025-12-15" } }).settings.openai).toMatchObject({ voice: to, model: "gpt-realtime-2.1-mini" })
+      expect(OPENAI_VOICES.map((v) => v.id)).toContain(to)
+    }
+    expect(tts.update({ openai: { model: "gpt-realtime-2.1" } }).settings.openai.model).toBe("gpt-realtime-2.1")
   })
 
   it("preview lines use the owner's name", () => {
@@ -114,10 +142,24 @@ describe("TTS settings", () => {
 })
 
 describe("TTS proxy (service)", () => {
-  const service = (fetch: typeof globalThis.fetch, opts: { timeoutMs?: number; voicesTtlMs?: number; now?: () => number } = {}) => {
+  const fakes: { close(): Promise<void> }[] = []
+  afterEach(async () => {
+    await Promise.all(fakes.splice(0).map((f) => f.close()))
+  })
+  const service = (fetch: typeof globalThis.fetch, opts: { timeoutMs?: number; voicesTtlMs?: number; now?: () => number; openai?: string } = {}) => {
     const settings = new TtsSettingsStore(memStore(), {})
     settings.update({ elevenlabsApiKey: EL_KEY, openaiApiKey: OA_KEY })
-    return { settings, tts: new TtsService({ settings, baseUrls: { elevenlabs: "https://el.test", openai: "https://oa.test" }, fetch, ...opts }) }
+    const { openai = "https://oa.test", ...rest } = opts
+    return { settings, tts: new TtsService({ settings, baseUrls: { elevenlabs: "https://el.test", openai }, fetch, ...rest }) }
+  }
+  /** OpenAI on a fake Realtime server, the settings' provider set to it. */
+  const realtime = async (behave?: Behave, reject?: Parameters<typeof fakeRealtime>[1], opts: { timeoutMs?: number } = {}) => {
+    const rt = await fakeRealtime(behave, reject)
+    fakes.push(rt)
+    const p = fakeProviders()
+    const { settings, tts } = service(p.fetch, { ...opts, openai: rt.baseUrl })
+    settings.update({ provider: "openai" })
+    return { rt, settings, tts, p }
   }
   const drain = async (it: AsyncIterable<Uint8Array>) => {
     const parts: Buffer[] = []
@@ -139,44 +181,88 @@ describe("TTS proxy (service)", () => {
     expect(call!.body).toEqual({ text: "Task Login finished.", model_id: "eleven_flash_v2_5", voice_settings: { speed: 1.1 } })
   })
 
-  it("calls OpenAI's speech endpoint; instructions only for models that read them", async () => {
-    const p = fakeProviders()
-    const { settings, tts } = service(p.fetch)
-    settings.update({ provider: "openai", openai: { voice: "coral", instructions: "Calm and quick." } })
-    await drain((await tts.synthesize({ text: "Hello." })).chunks)
-    expect(p.calls[0]!.url).toBe("https://oa.test/v1/audio/speech")
-    expect(p.calls[0]!.headers.authorization).toBe(`Bearer ${OA_KEY}`)
-    expect(p.calls[0]!.body).toEqual({ model: "gpt-4o-mini-tts", input: "Hello.", voice: "coral", response_format: "mp3", instructions: "Calm and quick." })
-    await drain((await tts.synthesize({ text: "Hello.", model: "tts-1", speed: 1.5 })).chunks)
-    expect(p.calls[1]!.body).toEqual({ model: "tts-1", input: "Hello.", voice: "coral", response_format: "mp3", speed: 1.5 })
+  it("speaks OpenAI lines over a Realtime socket: key in the header, read-aloud instructions, text in, PCM out", async () => {
+    const { rt, settings, tts, p } = await realtime()
+    settings.update({ openai: { voice: "coral", instructions: "Calm and quick.", speed: 1.25 } })
+    const out = await tts.synthesize({ text: "  Hello.  " })
+    expect(out.contentType).toBe(PCM_CONTENT_TYPE)
+    expect(await drain(out.chunks)).toBe("PCM-AUDIO")
+    expect(p.calls).toHaveLength(0)
+    const [s] = rt.sessions
+    expect(s!.url).toBe("/v1/realtime?model=gpt-realtime-2.1-mini")
+    expect(s!.headers.authorization).toBe(`Bearer ${OA_KEY}`)
+    expect(s!.url).not.toContain(OA_KEY)
+    expect(s!.events.map((e) => e.type)).toEqual(["session.update", "conversation.item.create", "response.create"])
+    expect(s!.events[0].session).toEqual({
+      type: "realtime",
+      output_modalities: ["audio"],
+      instructions: `${READ_ALOUD_INSTRUCTIONS}\n\nVoice and delivery: Calm and quick.`,
+      max_output_tokens: 4096,
+      audio: { output: { format: { type: "audio/pcm", rate: 24000 }, voice: "coral", speed: 1.25 } },
+    })
+    expect(s!.events[1].item).toEqual({ type: "message", role: "user", content: [{ type: "input_text", text: "Hello." }] })
+    expect(s!.events[2].response).toEqual({ output_modalities: ["audio"] })
+    // Done with the line: the socket is closed, not left open.
+    await expect.poll(() => s!.closed).toBe(true)
+  })
+
+  it("maps a retired model or voice in a request (an old open tab) to the Realtime ones", async () => {
+    const { rt, tts } = await realtime()
+    await drain((await tts.synthesize({ text: "Hi.", model: "tts-1", voice: "onyx", speed: 4 })).chunks)
+    expect(rt.sessions[0]!.url).toBe("/v1/realtime?model=gpt-realtime-2.1-mini")
+    expect(rt.sessions[0]!.events[0].session.audio.output).toMatchObject({ voice: "cedar", speed: 1.5 })
+    expect(rt.sessions[0]!.events[0].session.instructions).toBe(READ_ALOUD_INSTRUCTIONS)
+  })
+
+  it("streams each audio delta as it arrives, without waiting for the whole clip", async () => {
+    const hold = gate()
+    const { rt, tts } = await realtime(speak(["first", "-second"], { before: (i) => (i === 1 ? hold.wait : undefined) }))
+    const out = await tts.synthesize({ text: "A longer line." })
+    const it = out.chunks[Symbol.asyncIterator]()
+    // The first chunk is out while OpenAI is still holding the rest back.
+    expect(Buffer.from((await it.next()).value!).toString()).toBe("first")
+    expect(rt.sessions[0]!.closed).toBe(false)
+    hold.open()
+    expect(Buffer.from((await it.next()).value!).toString()).toBe("-second")
+    expect((await it.next()).done).toBe(true)
+    // Complete, so it's cached for next time.
+    expect((await tts.synthesize({ text: "A longer line." })).cache).toBe("hit")
   })
 
   it("serves a repeated line from the cache, keyed by provider, voice, model, settings and text", async () => {
-    const p = fakeProviders()
-    const { settings, tts } = service(p.fetch)
-    settings.update({ provider: "openai" })
-    expect(await drain((await tts.synthesize({ text: "Voice on." })).chunks)).toBe("MP3DATA")
+    const { rt, tts, p } = await realtime()
+    expect(await drain((await tts.synthesize({ text: "Voice on." })).chunks)).toBe("PCM-AUDIO")
     const again = await tts.synthesize({ text: "Voice on." })
     expect(again.cache).toBe("hit")
-    expect(await drain(again.chunks)).toBe("MP3DATA")
-    expect(p.calls).toHaveLength(1)
+    expect(again.contentType).toBe(PCM_CONTENT_TYPE)
+    expect(await drain(again.chunks)).toBe("PCM-AUDIO")
+    expect(rt.sessions).toHaveLength(1)
     // Anything that changes the audio is a different entry.
-    for (const req of [{ voice: "ash" }, { model: "tts-1" }, { speed: 1.25 }, { instructions: "Whisper." }, { provider: "elevenlabs" as const }, { text: "Voice off." }]) {
+    for (const req of [{ voice: "ash" }, { model: "gpt-realtime-2.1" }, { speed: 1.25 }, { instructions: "Whisper." }, { provider: "elevenlabs" as const }, { text: "Voice off." }]) {
       const out = await tts.synthesize({ text: "Voice on.", ...req })
       expect(out.cache).toBe("miss")
       await drain(out.chunks)
     }
-    expect(p.calls).toHaveLength(7)
+    expect(rt.sessions).toHaveLength(6)
+    expect(p.calls).toHaveLength(1)
     expect(tts.cache.hits).toBe(1)
   })
 
-  it("doesn't cache a stream the browser walked away from", async () => {
-    const p = fakeProviders()
-    const { settings, tts } = service(p.fetch)
-    settings.update({ provider: "openai" })
+  it("doesn't cache a stream the browser walked away from, and hangs up on OpenAI", async () => {
+    const hold = gate()
+    const { rt, tts } = await realtime(speak(["one", "two"], { before: (i) => (i === 1 ? hold.wait : undefined) }))
     const out = await tts.synthesize({ text: "Cut short." })
     out.cancel()
+    await expect.poll(() => rt.sessions[0]!.closed).toBe(true)
+    hold.open()
     expect((await tts.synthesize({ text: "Cut short." })).cache).toBe("miss")
+
+    // ElevenLabs too.
+    const p = fakeProviders()
+    const el = service(p.fetch)
+    el.settings.update({ provider: "elevenlabs" })
+    ;(await el.tts.synthesize({ text: "Cut short." })).cancel()
+    expect((await el.tts.synthesize({ text: "Cut short." })).cache).toBe("miss")
   })
 
   it("passes the provider's error message through", async () => {
@@ -185,20 +271,55 @@ describe("TTS proxy (service)", () => {
     a.settings.update({ provider: "elevenlabs" })
     await expect(a.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, upstreamStatus: 401, message: "ElevenLabs: Invalid API key (HTTP 401)" })
 
-    const oa = fakeProviders(() => new Response(JSON.stringify({ error: { message: "You exceeded your current quota.", type: "insufficient_quota" } }), { status: 429 }))
-    const b = service(oa.fetch)
-    b.settings.update({ provider: "openai" })
-    await expect(b.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, upstreamStatus: 429, message: "OpenAI: You exceeded your current quota. (HTTP 429)" })
 
     expect(providerMessage(JSON.stringify({ detail: [{ msg: "text too long" }, { msg: "bad voice" }] }))).toBe("text too long; bad voice")
     expect(providerMessage("<html> Bad gateway </html>")).toBe("<html> Bad gateway </html>")
   })
 
+  it("passes OpenAI's Realtime errors through: a refused handshake, an error event, a failed response, a cut-off stream", async () => {
+    const refused = await realtime(undefined, () => ({ status: 401, body: { error: { message: "Incorrect API key provided.", type: "invalid_request_error", code: "invalid_api_key" } } }))
+    await expect(refused.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, upstreamStatus: 401, provider: "openai", message: "OpenAI: Incorrect API key provided. (HTTP 401)" })
+
+    const badVoice = await realtime((_s, send) => send({ type: "error", error: { type: "invalid_request_error", code: "invalid_value", message: "Invalid value: 'nova'." } }))
+    await expect(badVoice.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, message: "OpenAI: Invalid value: 'nova'." })
+    await expect.poll(() => badVoice.rt.sessions[0]!.closed).toBe(true)
+
+    const quota = await realtime((_s, send) =>
+      send({ type: "response.done", response: { status: "failed", status_details: { type: "failed", error: { type: "insufficient_quota", message: "You exceeded your current quota." } } } }),
+    )
+    await expect(quota.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, message: "OpenAI: You exceeded your current quota." })
+
+    const cancelled = await realtime((_s, send) => send({ type: "response.done", response: { status: "cancelled", status_details: { type: "cancelled", reason: "client_cancelled" } } }))
+    await expect(cancelled.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ message: "OpenAI: the response was cancelled (client_cancelled)." })
+
+    const silent = await realtime((_s, send) => send({ type: "response.done", response: { status: "completed", output: [] } }))
+    await expect(silent.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, message: "OpenAI sent no audio." })
+
+    // After the first chunk the response is already streaming: the iterator throws, nothing is cached.
+    const cut = await realtime(async (_s, send, ws) => {
+      send({ type: "response.output_audio.delta", delta: Buffer.from("half").toString("base64") })
+      await new Promise((r) => setTimeout(r, 20))
+      ws.close(1011, "server error")
+    })
+    const out = await cut.tts.synthesize({ text: "Hi." })
+    await expect(drain(out.chunks)).rejects.toMatchObject({ message: "OpenAI closed the connection before the audio finished (1011: server error)." })
+    expect(cut.tts.cache.count).toBe(0)
+  })
+
   it("times out, and reports network failures", async () => {
-    const slow = fakeProviders(() => new Promise<Response>(() => {}))
-    const a = service(slow.fetch, { timeoutMs: 50 })
-    a.settings.update({ provider: "openai" })
+    const a = await realtime(() => {}, undefined, { timeoutMs: 50 })
     await expect(a.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 504, message: "OpenAI didn't answer within 1 s." })
+    await expect.poll(() => a.rt.sessions[0]!.closed).toBe(true)
+
+    const port = await freePort()
+    const off = service(fakeProviders().fetch, { openai: `http://127.0.0.1:${port}` })
+    off.settings.update({ provider: "openai" })
+    await expect(off.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 502, message: "Can't reach OpenAI: ECONNREFUSED" })
+
+    const slow = fakeProviders(() => new Promise<Response>(() => {}))
+    const c = service(slow.fetch, { timeoutMs: 50 })
+    c.settings.update({ provider: "elevenlabs" })
+    await expect(c.tts.synthesize({ text: "Hi." })).rejects.toMatchObject({ status: 504, message: "ElevenLabs didn't answer within 1 s." })
 
     const down = fakeProviders(() => Promise.reject(Object.assign(new TypeError("fetch failed"), { cause: { code: "ENOTFOUND" } })))
     const b = service(down.fetch)
@@ -247,10 +368,9 @@ describe("TTS proxy (service)", () => {
     await tts.voices("elevenlabs", true)
     expect(p.calls).toHaveLength(6)
 
-    // OpenAI's voices are a fixed list; nothing is fetched.
+    // OpenAI's voices are the Realtime API's fixed list; nothing is fetched.
     const oa = await tts.voices("openai")
-    expect(oa.voices.map((v) => v.id)).toContain("marin")
-    expect(oa.voices.find((v) => v.id === "ballad")!.allModels).toBe(false)
+    expect(oa.voices.map((v) => v.id)).toEqual(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"])
     expect(p.calls).toHaveLength(6)
   })
 
@@ -279,7 +399,7 @@ describe("TTS HTTP routes", () => {
     yard = null
   })
 
-  async function boot(fetch: typeof globalThis.fetch, env: { elevenlabsApiKey?: string } = {}) {
+  async function boot(fetch: typeof globalThis.fetch, env: { elevenlabsApiKey?: string; openaiBaseUrl?: string } = {}) {
     const port = await freePort()
     yard = createBoxYard(testConfig({ port, ...env }), { webDir: "/nonexistent", tts: { fetch } })
     server = await new Promise<Server>((resolve) => {
@@ -345,6 +465,57 @@ describe("TTS HTTP routes", () => {
     expect(res.status).toBe(400)
     res = await call("POST", "/api/tts", { text: "Hi.", provider: "polly" })
     expect(res.status).toBe(400)
+  })
+
+  it("POST /api/tts streams OpenAI's Realtime PCM as it arrives; errors are JSON; the key is never in a response", async () => {
+    const hold = gate()
+    let mode: "speak" | "refuse" | "error" = "speak"
+    const rt = await fakeRealtime(
+      (s, send) =>
+        mode === "error"
+          ? send({ type: "error", error: { message: "You do not have access to gpt-realtime-2.1-mini." } })
+          : speak(["PCM-1", "PCM-2"], { before: (i) => (i === 1 && s.events[1].item.content[0].text === "Slow line." ? hold.wait : undefined) })(s, send, null as never),
+      () => (mode === "refuse" ? { status: 401, body: { error: { message: `Incorrect API key provided: ${OA_KEY.slice(0, 6)}****` } } } : null),
+    )
+    try {
+      const call = await boot(fakeProviders().fetch, { openaiBaseUrl: rt.baseUrl })
+      await call("PUT", "/api/tts/settings", { provider: "openai", openaiApiKey: OA_KEY })
+
+      // The first chunk reaches the browser while OpenAI is still holding the second.
+      let res = await call("POST", "/api/tts", { text: "Slow line." })
+      expect(res.status).toBe(200)
+      expect(res.headers.get("content-type")).toBe("audio/pcm;rate=24000")
+      expect(res.headers.get("x-tts-cache")).toBe("miss")
+      const reader = res.body!.getReader()
+      expect(Buffer.from((await reader.read()).value!).toString()).toBe("PCM-1")
+      hold.open()
+      let rest = ""
+      for (let r = await reader.read(); !r.done; r = await reader.read()) rest += Buffer.from(r.value).toString()
+      expect(rest).toBe("PCM-2")
+      expect(rt.sessions[0]!.headers.authorization).toBe(`Bearer ${OA_KEY}`)
+
+      res = await call("POST", "/api/tts", { text: "Slow line." })
+      expect(res.headers.get("x-tts-cache")).toBe("hit")
+      expect(await res.text()).toBe("PCM-1PCM-2")
+
+      const texts: string[] = []
+      mode = "refuse"
+      res = await call("POST", "/api/tts", { text: "Refused." })
+      expect(res.status).toBe(502)
+      texts.push(JSON.stringify([...res.headers]), await res.text())
+      expect(JSON.parse(texts[1]!)).toEqual({ error: "OpenAI: Incorrect API key provided: sk-ope**** (HTTP 401)", provider: "openai", upstreamStatus: 401 })
+      mode = "error"
+      res = await call("POST", "/api/tts", { text: "Bad voice.", voice: "nova" })
+      texts.push(await res.text())
+      expect(JSON.parse(texts[2]!)).toEqual({ error: "OpenAI: You do not have access to gpt-realtime-2.1-mini.", provider: "openai", upstreamStatus: null })
+      // The old voice name was mapped before it went out.
+      expect(rt.sessions.at(-1)!.events[0].session.audio.output.voice).toBe("coral")
+      texts.push(await (await call("GET", "/api/tts/settings")).text(), await (await call("GET", "/api/tts/voices?provider=openai")).text())
+      for (const t of texts) expect(t).not.toContain(OA_KEY)
+      expect(JSON.parse(texts[3]!).settings.openai.model).toBe("gpt-realtime-2.1-mini")
+    } finally {
+      await rt.close()
+    }
   })
 
   it("GET /api/tts/voices lists and caches voices", async () => {

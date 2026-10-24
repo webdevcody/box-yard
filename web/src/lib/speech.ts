@@ -16,6 +16,7 @@ import {
   type VoiceSettings,
 } from "./voice"
 import { CloudSynth, activeProvider, audioElement, fetchTts, primeAudio, reportFallback, subscribeTtsInfo } from "./tts"
+import { PcmPlayer, audioContext } from "./pcm"
 
 // ------------------------------------------------------------------ speech queue
 
@@ -425,6 +426,8 @@ export const useVoiceStatus = () => useSyncExternalStore(subscribeStatus, getSta
 
 let queueInstance: SpeechQueue | null = null
 let cloudSynth: CloudSynth | null = null
+let player: PcmPlayer | null = null
+const pcmPlayer = () => (audioContext() ? (player ??= new PcmPlayer(audioContext)) : null)
 function queue(): SpeechQueue | null {
   if (!voiceSupported()) return null
   const sy = synth()
@@ -435,6 +438,7 @@ function queue(): SpeechQueue | null {
     osUtter: (text) => new SpeechSynthesisUtterance(text) as unknown as UtteranceLike,
     audio: audioElement,
     fetchAudio: (text, signal) => fetchTts({ text }, signal),
+    pcm: pcmPlayer,
     onFallback: reportFallback,
   })
   const utter = (text: string): UtteranceLike => ({ text, voice: null, lang: "", rate: 1, pitch: 1, volume: 1, onstart: null, onend: null, onerror: null })

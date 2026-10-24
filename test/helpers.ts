@@ -51,6 +51,10 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     selfBoxId: "",
     // Local boxes live on this machine's disk; don't let a nearly full dev disk hold tasks back.
     diskMinFreeMb: 0,
+    // ...nor this machine's memory and load (a busy test box is over any threshold): tests that want them set them.
+    memoryMaxUsedPercent: 0,
+    memoryMinFreeMb: 0,
+    loadMaxPerCpu: 0,
     ...overrides,
   }
 }
