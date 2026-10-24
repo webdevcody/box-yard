@@ -44,7 +44,8 @@ import type {
 
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
 
-const json = <T>(text: string | null | undefined, fallback: T): T => {
+/** Parse JSON text, or return the fallback when it's empty or invalid. */
+export const json = <T>(text: string | null | undefined, fallback: T): T => {
   if (!text) return fallback
   try {
     return JSON.parse(text) as T
@@ -54,7 +55,7 @@ const json = <T>(text: string | null | undefined, fallback: T): T => {
 }
 
 const publicMergeRequest = (req: StoredMergeRequest | null): MergeRequest | null =>
-  req ? { prNumber: req.prNumber, prUrl: req.prUrl, requestedAt: req.requestedAt, deliveredAt: req.deliveredAt } : null
+  req ? { prNumber: req.prNumber, prUrl: req.prUrl, requestedAt: req.requestedAt, deliveredAt: req.deliveredAt, requestedBy: req.requestedBy ?? null } : null
 
 /** What happened during the turn that is running now. Reset at turn start. */
 export interface TurnFlags {
@@ -66,6 +67,10 @@ export interface TurnFlags {
   noop?: { commits: number | null }
   /** How many times in a row a turn died and was retried. */
   interrupts?: number
+  /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
+  hookIds?: string[]
+  /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
+  lastHookIds?: string[]
 }
 
 export interface TaskRow {
@@ -109,6 +114,10 @@ export interface TaskRow {
   effort: Effort | null
   routing_rule: string | null
   routing_reason: string | null
+  /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
+  source: string | null
+  pr_head_sha: string | null
+  pr_labels_json: string | null
   merge_request_json: string | null
 }
 
@@ -309,6 +318,8 @@ type TaskPatch = Partial<{
   effort: Effort | null
   routingRule: string | null
   routingReason: string | null
+  prHeadSha: string | null
+  prLabels: string[]
   mergeRequest: StoredMergeRequest | null
 }>
 
@@ -346,6 +357,8 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   effort: "effort",
   routingRule: "routing_rule",
   routingReason: "routing_reason",
+  prHeadSha: "pr_head_sha",
+  prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
 }
 
@@ -674,6 +687,8 @@ export class Store {
     effort?: Effort | null
     routingRule?: string | null
     routingReason?: string | null
+    /** Who started it (TaskRow.source). */
+    startedBy?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -699,6 +714,8 @@ export class Store {
         now,
         now,
       )
+    // Its own statement, so the insert above also works on schemas from before the column (migration tests).
+    if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     return this.getTask(id)!
   }
 
@@ -760,7 +777,7 @@ export class Store {
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
-      if (key === "previews" || key === "turnFlags") args.push(JSON.stringify(value))
+      if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
       else if (key === "mergeRequest") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)

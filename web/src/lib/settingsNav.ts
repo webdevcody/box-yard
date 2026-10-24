@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -23,6 +23,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "Box agents",
     description: "Defaults for the Claude Code agents that work on tasks inside boxes.",
     fields: ["ownerName", "agentModel", "agentEffort", "agentRoutingConfig", "agentAutoCompact"],
+  },
+  {
+    key: "hooks",
+    label: "Hooks",
+    description:
+      "Global hooks: automations the Coordinator runs on every project's task events, like asking an agent to merge its PR once it's ready. Project hooks live on each project's Hooks tab. Changes here save right away.",
+    fields: [],
   },
   {
     key: "limits",
@@ -69,7 +76,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice" }
+const ALIASES: Record<string, SettingsSection> = { hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

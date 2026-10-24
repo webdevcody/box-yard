@@ -482,6 +482,62 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX notifications_recent ON notifications(created_at);
   CREATE INDEX notifications_task ON notifications(task_id);
   `,
+  `
+  -- Hooks (shared/hooks.ts, server/hooks.ts): automations on task events. project_id NULL is a global
+  -- (Coordinator) hook; otherwise the project's Captain owns it.
+  CREATE TABLE hooks (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    filters_json TEXT NOT NULL DEFAULT '{}',
+    action TEXT NOT NULL,
+    task_title TEXT,
+    prompt TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    allow_self_trigger INTEGER NOT NULL DEFAULT 0,
+    max_fires_per_task INTEGER NOT NULL DEFAULT 3,
+    template TEXT,
+    created_by TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX hooks_project ON hooks(project_id, created_at);
+
+  -- The audit log: every time a hook matched an event, what it sent and what happened. fire_key makes a
+  -- fire happen once per (hook, task, event, head commit or turn).
+  CREATE TABLE hook_runs (
+    id TEXT PRIMARY KEY,
+    hook_id TEXT REFERENCES hooks(id) ON DELETE SET NULL,
+    hook_name TEXT NOT NULL,
+    -- The hook's own scope when it ran (NULL: a global hook), so a Captain only reads its own hooks' runs.
+    hook_project_id TEXT,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    task_title TEXT,
+    event TEXT NOT NULL,
+    fire_key TEXT NOT NULL,
+    head_sha TEXT,
+    action TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL,
+    -- Set when a guard (loop, hook_cap, task_cap, rate_limit) held a fire back; a later event may still fire.
+    guard TEXT,
+    result TEXT NOT NULL,
+    target_task_id TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX hook_runs_hook ON hook_runs(hook_id, task_id, event, fire_key);
+  CREATE INDEX hook_runs_project ON hook_runs(project_id, created_at);
+  CREATE INDEX hook_runs_created ON hook_runs(created_at);
+  CREATE INDEX hook_runs_target ON hook_runs(target_task_id);
+
+  -- Who started a task (cody, orchestrator, captain:<project>, schedule, hook:<hook>), for hook filters,
+  -- and its PR's head commit and labels, for hook idempotency and label filters.
+  ALTER TABLE tasks ADD COLUMN source TEXT;
+  ALTER TABLE tasks ADD COLUMN pr_head_sha TEXT;
+  ALTER TABLE tasks ADD COLUMN pr_labels_json TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

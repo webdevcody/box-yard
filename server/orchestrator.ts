@@ -156,6 +156,18 @@ export class Orchestrator {
   }
 
   /**
+   * A hook's message (server/hooks.ts message_coordinator): a chat line labelled with the hook, answered
+   * on the next turn. Unlike Cody's messages it doesn't reset the automatic-turn count: it's an automation.
+   */
+  hookMessage(content: string, meta: Record<string, unknown>): ChatMessage {
+    const msg = this.store.addChat("user", content.trim(), meta)
+    this.hub.broadcast({ type: "chat.message", message: msg })
+    this.pending = true
+    void this.drain()
+    return msg
+  }
+
+  /**
    * Queue a scheduled prompt (a `queued` schedule_runs row). It is injected into
    * the chat once no turn is running, so two orchestrator turns never overlap.
    */
@@ -480,7 +492,11 @@ export class Orchestrator {
     return this.store
       .listChat(200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content + attachmentNote(m.meta?.attachments, this.owner()))
+      .map((m) =>
+        m.meta?.source === "hook" && typeof m.meta.hookName === "string"
+          ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
+          : m.content + attachmentNote(m.meta?.attachments, this.owner()),
+      )
       .filter((text) => text.trim())
   }
 

@@ -3,7 +3,7 @@
 import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
 import type { EntityIndex, EntityRef } from "./linkify"
 
-export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "artifact" | "message" | "warning" | "compaction" | "info"
+export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "info"
 
 /** A piece of a notice's one-line summary: plain text, or a link (artifact, PR, page). */
 export type NoticeSegment = { text: string } | { href: string; label: string }
@@ -22,6 +22,7 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
   "🙋": "needs_input",
   "🔀": "pr",
   "🚢": "merge",
+  "🪝": "hook",
   "📎": "artifact",
   "💬": "message",
   "⚠": "warning",
@@ -110,6 +111,8 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
       // "opened a pull request: https://…/pull/16" → "opened PR #16".
       else if (kind === "pr") text = `opened ${detail}`
       else if (kind === "message" && /^says$/.test(verb)) text = detail
+      // `hook "Auto-merge" (PR ready) sent to the agent: Please merge…` keeps the hook's name.
+      else if (kind === "hook") text = `${verb}: ${detail}`
       else text = detail || verb
     }
   }
