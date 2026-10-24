@@ -33,10 +33,11 @@ import {
   useSendCaptainMessage,
 } from "../lib/queries"
 import { useTail } from "../lib/tail"
+import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
 import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
-import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
+import { ChatLine, CollapsibleMarkdown, QueuedLabel } from "./ChatLine"
 import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
@@ -94,7 +95,9 @@ export function CaptainTab({ project }: { project: Project }) {
   )
 
   const list = messages.data ?? NO_MESSAGES
-  const rows = useMemo(() => captainRows(list), [list])
+  // Messages sent mid-turn wait at the bottom until the turn that reads them starts.
+  const { settled, queued } = useMemo(() => splitQueued(list), [list])
+  const rows = useMemo(() => captainRows(settled), [settled])
   const tail = useTail(rows, project.id)
 
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
@@ -144,6 +147,9 @@ export function CaptainTab({ project }: { project: Project }) {
             Captain is working…
           </div>
         )}
+        {queued.map((m) => (
+          <InboundMessage key={m.id} m={m} />
+        ))}
       </StickyScroll>
 
       <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} />
@@ -216,6 +222,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
         </div>
         {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
         <AttachmentList files={m.meta?.attachments} />
+        {m.meta?.queued === true && <QueuedLabel who="the Captain" className="mt-1" />}
       </div>
     </div>
   )

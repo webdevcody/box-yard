@@ -9,6 +9,7 @@ import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
+import { settleOptimistic } from "./queued"
 import type {
   BoxCleanup,
   BoxContents,
@@ -512,7 +513,14 @@ export function useSendTaskMessage(taskId: string) {
       patchTask(qc, taskId, running ? { pendingCount: (task?.pendingCount ?? 0) + 1 } : { status: "queued", question: null })
       qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => [
         ...(list ?? []),
-        { id: `tmp-${Date.now()}`, taskId, role: "user", content, meta: { pending: true, ...(attachments?.length ? { attachments } : {}) }, createdAt: Date.now() },
+        {
+          id: `tmp-${Date.now()}`,
+          taskId,
+          role: "user",
+          content,
+          meta: { pending: true, ...(attachments?.length ? { attachments } : {}), ...(running ? { queued: true } : {}) },
+          createdAt: Date.now(),
+        },
       ])
       return { undo: () => (undoTasks(), undoMsgs()) }
     },
@@ -752,12 +760,14 @@ export function useSendChat() {
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.chat })
       const undo = snapshot<ChatMessage[]>(qc, keys.chat)
+      // Mid-turn it shows as queued right away; the server's answer says for sure.
+      const queued = Boolean(qc.getQueryData<boolean>(keys.chatBusy))
       qc.setQueryData<ChatMessage[]>(keys.chat, (list) =>
         upsert(list, {
           id: input.id,
           role: "user",
           content: input.content,
-          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}), ...(queued ? { queued: true } : {}) },
           createdAt: Date.now(),
         }),
       )
@@ -769,7 +779,7 @@ export function useSendChat() {
       qc.setQueryData(keys.chatBusy, false)
       fail("Couldn't send to the Coordinator")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<ChatMessage[]>(keys.chat, (list) => upsert(list, msg)),
+    onSuccess: (msg) => qc.setQueryData<ChatMessage[]>(keys.chat, (list) => settleOptimistic(list, msg)),
   })
 }
 
@@ -781,13 +791,14 @@ export function useSendCaptainMessage(projectId: string) {
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.captainMessages(projectId) })
       const undo = snapshot<CaptainMessage[]>(qc, keys.captainMessages(projectId))
+      const queued = Boolean(qc.getQueryData<CaptainState>(keys.captain(projectId))?.busy)
       qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) =>
         upsert(list, {
           id: input.id,
           projectId,
           role: "user",
           content: input.content,
-          meta: { pending: true, source: "cody", ...(input.attachments?.length ? { attachments: input.attachments } : {}) },
+          meta: { pending: true, source: "cody", ...(input.attachments?.length ? { attachments: input.attachments } : {}), ...(queued ? { queued: true } : {}) },
           createdAt: Date.now(),
         }),
       )
@@ -797,7 +808,7 @@ export function useSendCaptainMessage(projectId: string) {
       ctx?.undo()
       fail("Couldn't message the Captain")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => upsert(list, msg)),
+    onSuccess: (msg) => qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => settleOptimistic(list, msg)),
   })
 }
 
