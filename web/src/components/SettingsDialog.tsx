@@ -476,7 +476,7 @@ export function SettingsDialog({
             >
               <input id={fid("on")} className={inputClass} value={s.ownerName} maxLength={40} onChange={(e) => set("ownerName", e.target.value)} />
             </Row>
-            <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on." hint={hint("agentModel")}>
+            <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on, unless the task or its project's Routing YAML entry picks one. Once saved here or set by an env var, it wins over the YAML's defaults and fallback." hint={hint("agentModel")}>
               <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
             </Row>
             <Row
@@ -484,8 +484,8 @@ export function SettingsDialog({
               label="Effort"
               help={
                 s.agentEffort === "orchestrator"
-                  ? "The Coordinator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding."
-                  : "Every agent turn uses this effort."
+                  ? "The Coordinator picks an effort in create_task and send_to_task: low for one-command chores, high for real coding. Without one, Routing YAML or high applies."
+                  : "Every agent turn uses this effort, unless the task or its project's Routing YAML entry picks one. Once saved here or set by an env var, it wins over the YAML's defaults and fallback."
               }
               hint={hint("agentEffort")}
             >
@@ -497,7 +497,7 @@ export function SettingsDialog({
             <Row
               id={fid("arc")}
               label="Routing YAML"
-              help="Optional rules the orchestrator reads when choosing a task model and effort. Also works from routing.yaml in the data directory."
+              help="Optional rules for task model and effort, also read from routing.yaml in the data directory. Each turn the first match wins: the task's own choice, then its project's entry, then Model and Effort above when saved or set by an env var, then defaults, then fallback, then claude-opus-5-5 at high."
               hint={hint("agentRoutingConfig")}
             >
               <textarea
