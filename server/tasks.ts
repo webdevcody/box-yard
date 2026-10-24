@@ -7,7 +7,7 @@ import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
-import { providerOf, q } from "./providers/types.js"
+import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { deleteWipScript, gitPrepScript, gitRestoreScript, gitStages, parseGitPrep, parseGitRestore, wipRef, type GitPrepResult } from "./gitFirst.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
@@ -1002,7 +1002,7 @@ export class TaskManager {
     const changed = new Map<string, number>()
     if (box.status === "ready" && rows.length) {
       // One exec for the whole box: "<taskId> <changed files>" per workspace that is a git repo.
-      const root = `${this.provider.root(boxId)}/tasks`
+      const root = tasksRootOf(this.provider, boxId)
       const script = rows
         .map((r) => `[ -d ${q(`${root}/${r.id}/work/.git`)} ] && echo ${q(r.id)} $(git -C ${q(`${root}/${r.id}/work`)} status --porcelain 2>/dev/null | wc -l)`)
         .join("; ")
@@ -2341,7 +2341,7 @@ export class TaskManager {
   // ------------------------------------------------------------------ turns
 
   taskDir(boxId: string, taskId: string) {
-    return `${this.provider.root(boxId)}/tasks/${taskId}`
+    return `${tasksRootOf(this.provider, boxId)}/${taskId}`
   }
 
   private async launch(taskId: string, boxId: string, turnId: string) {
@@ -2693,6 +2693,7 @@ export class TaskManager {
   /** Unpack the task's archive into its folder and rebuild work/. Throws (leaving no folder) when that fails. */
   private async restoreArchive(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null): Promise<PreparedWorkspace> {
     const root = this.provider.root(boxId)
+    const tasks = tasksRootOf(this.provider, boxId)
     const remote = `${root}/.boxyard/restore-${row.id}.tgz`
     let from: "git" | "partial" | null = null
     try {
@@ -2700,7 +2701,7 @@ export class TaskManager {
       await putFile(this.provider, boxId, row.archive_path!, remote)
       const res = await this.provider.exec(
         boxId,
-        `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
+        `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
       // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
@@ -2857,6 +2858,7 @@ export class TaskManager {
     const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
     const spec: MirrorSpec = {
       root: this.provider.root(boxId),
+      tasks: tasksRootOf(this.provider, boxId),
       mirror: `${this.provider.root(boxId)}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`,
       url: cloneUrl(project.repo!),
       partial: this.partialClone(project),
@@ -3744,7 +3746,7 @@ export class TaskManager {
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
     const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
     const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
+    const script = archiveScript({ root: tasksRootOf(this.provider, boxId), boxRoot: this.provider.root(boxId), taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {

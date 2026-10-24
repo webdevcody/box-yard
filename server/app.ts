@@ -20,7 +20,7 @@ import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
-import { LocalProvider } from "./providers/local.js"
+import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
 import { AutoProvider } from "./providers/auto.js"
 import type { BoxProvider } from "./providers/types.js"
@@ -195,6 +195,11 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
  * boxes are folders on this machine until an Upstash key is saved in Settings › Credentials, then Upstash boxes,
  * with no restart. Without `credentials` (scripts), only the env counts.
  */
+/** The local runner: agents of "Runs on: This computer" projects, in `<data>/local-workspaces/<task_id>`. */
+export function localRunner(c: Config): LocalRunnerProvider {
+  return new LocalRunnerProvider(path.join(c.dataDir, "local-workspaces"), c.claudeBin)
+}
+
 export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvider {
   if (c.provider === "upstash") return new UpstashProvider(c, credentials)
   const local = new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
@@ -228,6 +233,8 @@ export function createBoxYard(
   c: Config,
   opts: {
     provider?: BoxProvider
+    /** Stands in for the local runner (tests); it is always routed LOCAL_BOX_ID. */
+    localRunner?: BoxProvider
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -245,7 +252,8 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
-  const provider = opts.provider ?? makeProvider(c, settings.credentials)
+  // Every box provider gets the local runner beside it, for projects that run on this computer (shared/runner.ts).
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c))
   const setup = new Setup({ c, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
