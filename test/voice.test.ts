@@ -191,13 +191,21 @@ describe("task event lines", () => {
 })
 
 describe("voice settings", () => {
-  it("defaults: off, both sources and every event on, system voice, normal speed", () => {
+  it("defaults: on, both sources and every event on, system voice, normal speed", () => {
     expect(parseVoiceSettings(null)).toEqual(VOICE_DEFAULTS)
-    expect(VOICE_DEFAULTS.enabled).toBe(false)
+    expect(VOICE_DEFAULTS.enabled).toBe(true)
     expect(VOICE_DEFAULTS.orchestrator && VOICE_DEFAULTS.taskEvents).toBe(true)
     expect(Object.values(VOICE_DEFAULTS.events).every(Boolean)).toBe(true)
     expect(VOICE_DEFAULTS).toMatchObject({ voiceURI: "", rate: 1, pitch: 1, volume: 1, backgroundOnly: false })
     expect(VOICE_DEFAULTS.quietHours.enabled).toBe(false)
+  })
+
+  it("a saved choice wins over the default, on or off", () => {
+    expect(parseVoiceSettings(JSON.stringify({ ...VOICE_DEFAULTS, enabled: false })).enabled).toBe(false)
+    expect(parseVoiceSettings(JSON.stringify({ enabled: false })).enabled).toBe(false)
+    expect(parseVoiceSettings(JSON.stringify({ enabled: true, rate: 1.5 }))).toMatchObject({ enabled: true, rate: 1.5 })
+    // Saved settings from before the default changed, with no `enabled` at all, get the new default.
+    expect(parseVoiceSettings(JSON.stringify({ rate: 1.5 })).enabled).toBe(true)
   })
 
   it("survives garbage and clamps values", () => {
@@ -225,7 +233,8 @@ describe("voice settings", () => {
 
   it("voiceAllowed: enabled, outside quiet hours, background-only respected", () => {
     const noon = new Date(2026, 9, 22, 12)
-    expect(voiceAllowed(VOICE_DEFAULTS, noon, true)).toBe(false)
+    expect(voiceAllowed({ ...VOICE_DEFAULTS, enabled: false }, noon, true)).toBe(false)
+    expect(voiceAllowed(VOICE_DEFAULTS, noon, false)).toBe(true)
     expect(voiceAllowed(on(), noon, false)).toBe(true)
     expect(voiceAllowed(on({ backgroundOnly: true }), noon, false)).toBe(false)
     expect(voiceAllowed(on({ backgroundOnly: true }), noon, true)).toBe(true)
@@ -382,6 +391,14 @@ function setup(settings: VoiceSettings = on()) {
 }
 
 describe("Announcer", () => {
+  it("with the defaults (a fresh browser), reads the Coordinator's first reply aloud", () => {
+    const { a, said, done } = setup(parseVoiceSettings(null))
+    a.chatMessage(reply("c1", "Project added. Three open issues."))
+    a.chatTurn({ startedAt: 0, replyId: "c1" })
+    expect(said).toEqual(["Project added. Three open issues."])
+    done()
+  })
+
   it("speaks a turn's final reply once, and nothing for silent turns", () => {
     const { a, said, done } = setup()
     a.chatMessage(reply("c1", "PR #30 merged. Cards are equal height now."))
@@ -392,7 +409,7 @@ describe("Announcer", () => {
   })
 
   it("respects the orchestrator toggle and the master switch", () => {
-    for (const s of [on({ orchestrator: false }), VOICE_DEFAULTS]) {
+    for (const s of [on({ orchestrator: false }), on({ enabled: false })]) {
       const { a, said, done } = setup(s)
       a.chatMessage(reply("c1", "Hello there."))
       a.chatTurn({ startedAt: 0, replyId: "c1" })

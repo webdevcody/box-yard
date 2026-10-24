@@ -35,8 +35,14 @@ export interface VoiceSettings {
   quietHours: { enabled: boolean; start: string; end: string }
 }
 
+/**
+ * A browser with no saved voice settings starts with voice on, so a new install reads the Coordinator's replies
+ * aloud from the first one. It speaks with the TTS provider the server is set to, which is the browser's own
+ * voice until a cloud voice and its key are saved. A saved choice (the speaker button, Settings › Voice) always
+ * stores `enabled`, so it wins from then on.
+ */
 export const VOICE_DEFAULTS: VoiceSettings = {
-  enabled: false,
+  enabled: true,
   orchestrator: true,
   taskEvents: true,
   events: { done: true, pr_ready: true, merged: true, needs_input: true, failed: true },
