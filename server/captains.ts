@@ -9,6 +9,7 @@ import { BadRequestError } from "./store.js"
 import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
+import { updatesBlock } from "./noticeBatch.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
@@ -507,7 +508,7 @@ class Captain {
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
-    const prompt = [notices.length ? `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "", messages.join("\n\n")]
+    const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
     const result = await this.runPrompt(prompt)
@@ -567,7 +568,7 @@ class Captain {
     const notices = entries.map((n) => n.content)
     const result = await this.runPrompt(
       [
-        `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        updatesBlock("Project updates since your last turn", notices),
         withOwner(
           `(Automatic wake-up: there is no new message from Cody or the Coordinator. Decide whether a project-local next step is needed. If Cody or the Coordinator should hear about it, say so in a line or two. If nothing needs reporting, reply with exactly ${NO_UPDATE} and nothing else.)`,
           this.owner(),

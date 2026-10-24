@@ -12,6 +12,8 @@ import { ContextMeter } from "./ContextMeter"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import { ChatLine } from "./ChatLine"
+import { PublishedCard } from "./PublishedNotices"
+import { groupPublished } from "../lib/publishedNotices"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -173,8 +175,10 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   )
 })
 
+/** The thread, with back-to-back "published" file notices folded into one card per task. */
 const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {
-  return messages.map((m) => <ChatLine key={m.id} m={m} onFollowUp={onFollowUp} />)
+  const rows = useMemo(() => groupPublished(messages), [messages])
+  return rows.map((r) => (r.type === "files" ? <PublishedCard key={r.id} group={r.group} /> : <ChatLine key={r.id} m={r.message} onFollowUp={onFollowUp} />))
 })
 
 /** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */
