@@ -24,7 +24,7 @@ import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask 
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
+import { Button, LineIcon, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
 import { FilesChip } from "./TaskFiles"
 import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
@@ -109,27 +109,36 @@ export function TaskHeader({
  */
 export function TaskMetaRow({ task, files, local = false }: { task: Task; files: Artifact[]; local?: boolean }) {
   const hasChips = local || Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
+  const [why, setWhy] = useState(false)
   return (
-    <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
-      <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
-        {task.pendingCount > 0 && (
-          <span className="font-normal text-zinc-500">
-            · <QueuedLink taskId={task.id} count={task.pendingCount} />
-          </span>
+    <>
+      <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+        <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
+          {task.pendingCount > 0 && (
+            <span className="font-normal text-zinc-500">
+              · <QueuedLink taskId={task.id} count={task.pendingCount} />
+            </span>
+          )}
+        </StatusDot>
+        {hasChips && (
+          <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
+            {local && <LocalChip open={why} onToggle={() => setWhy((v) => !v)} />}
+            <MergePrChip task={task} className={META_CHIP} />
+            <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
+            {task.previews.map((p) => (
+              <PreviewChip key={p.port} preview={p} />
+            ))}
+          </div>
         )}
-      </StatusDot>
-      {hasChips && (
-        <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
-          {local && <LocalChip />}
-          <MergePrChip task={task} className={META_CHIP} />
-          <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
-          {task.previews.map((p) => (
-            <PreviewChip key={p.port} preview={p} />
-          ))}
+        <ContextSlot task={task} />
+      </div>
+      {local && why && (
+        <div id="local-warning-note" role="note" className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 sm:max-w-xl">
+          <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+          <span>{LOCAL_UNSANDBOXED}</span>
         </div>
       )}
-      <ContextSlot task={task} />
-    </div>
+    </>
   )
 }
 
@@ -138,13 +147,15 @@ export function runsLocally(task: Task, project: Project | undefined): boolean {
   return isLocalRunnerBox(task.boxId) || (project?.runner === "local" && !task.boxId)
 }
 
-/** The unsandboxed warning on a local task's header; a tap shows it in full (phones have no hover title). */
-function LocalChip() {
+/** The unsandboxed warning on a local task's header; a tap shows it in full under the row (phones have no hover title). */
+function LocalChip({ open, onToggle }: { open: boolean; onToggle: () => void }) {
   return (
     <button
       type="button"
       title={LOCAL_UNSANDBOXED}
-      onClick={() => toast.info("Runs on this computer, unsandboxed", LOCAL_UNSANDBOXED, { duration: 10_000 })}
+      aria-expanded={open}
+      aria-controls="local-warning-note"
+      onClick={onToggle}
       className={cx(META_CHIP, "border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20")}
       data-testid="local-warning"
     >
