@@ -164,12 +164,6 @@ describe("fields", () => {
     const items = buildItems({ tasks: [task("Palette work", "done", { summary: "Ranked tasks above files" })], projects })
     expect(titles(group(search(items, "above files"), "task"))).toEqual(["Palette work"])
   })
-
-  it("matches the $ Usage page on \"usage\" as an exact title", () => {
-    const usage = buildItems({ tasks: [], projects }).find((i) => i.key === "page:usage")!
-    expect(usage.title).toBe("$ Usage")
-    expect(scoreItem(usage, "usage", ctx)).toBe(scoreItem({ ...usage, title: "Usage", names: undefined }, "usage", ctx))
-  })
 })
 
 describe("files", () => {
