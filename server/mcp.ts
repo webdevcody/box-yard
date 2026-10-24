@@ -350,7 +350,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_projects",
-    { description: "List all projects with their repo, env var names, notes and tasks." },
+    { description: owner("List all projects, in the order Cody keeps them in the sidebar, with their repo, env var names, notes and tasks.") },
     safe(async () => ok(scopeId ? [projectView(ownProject())] : store.listProjects().map(projectView))),
   )
 

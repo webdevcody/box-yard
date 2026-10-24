@@ -579,6 +579,15 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN root_free_bytes INTEGER;
   ALTER TABLE boxes ADD COLUMN root_total_bytes INTEGER;
   `,
+  `
+  -- The owner's project order (drag-to-reorder in the sidebar). Existing projects keep their creation order;
+  -- new ones go last (Store.createProject).
+  ALTER TABLE projects ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+  UPDATE projects SET sort_order = (
+    SELECT COUNT(*) FROM projects AS p
+    WHERE p.created_at < projects.created_at OR (p.created_at = projects.created_at AND p.rowid < projects.rowid)
+  );
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
