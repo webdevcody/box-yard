@@ -183,8 +183,8 @@ export function createBoxYard(
   tasks.onNotice = (content, meta, opts) => {
     const wake = opts.wake !== false
     const handled = captains.notice(content, meta, { wake })
-    // A notice for both still lands in the Coordinator's "[Box Yard updates]" (TaskManager.notice leaves it unseen).
-    if (wake && (!handled || opts.both)) orchestrator.nudge()
+    // With opts.coordinator the Coordinator still reads it with its next updates (TaskManager.notice leaves it unseen).
+    if (wake && !handled) orchestrator.nudge()
     return handled
   }
   const hooks = new HookEngine({
@@ -372,6 +372,10 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/close", async (req, res) => {
     res.json(await tasks.closeTask(req.params.id!))
+  })
+  // The "Merge PR" button: the standard merge message to the task's session (409 while one is pending for the PR).
+  api.post("/tasks/:id/merge", (req, res) => {
+    res.json(tasks.requestMerge(req.params.id!))
   })
   api.post("/tasks/:id/retry", (req, res) => {
     res.json(tasks.retryTask(req.params.id!))

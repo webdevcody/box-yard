@@ -81,6 +81,10 @@ export interface Hook {
 
 export type HookRunStatus = "fired" | "skipped" | "failed"
 
+/** The guards that hold a fire back (server/hooks.ts). A guarded event can still fire later; other skips are final. */
+export const HOOK_GUARDS = ["loop", "hook_cap", "task_cap", "rate_limit"] as const
+export type HookGuard = (typeof HOOK_GUARDS)[number]
+
 /** One audit-log row: a hook matched an event, and what it did about it. */
 export interface HookRun {
   id: string
@@ -98,6 +102,8 @@ export interface HookRun {
   /** The rendered prompt. */
   prompt: string
   status: HookRunStatus
+  /** The guard behind a skip, or null (fired, failed, or skipped for good, like a merge already pending). */
+  guard: HookGuard | null
   /** What happened, in a sentence. */
   result: string
   /** The task that got the prompt (send_to_task) or was created (create_task). */

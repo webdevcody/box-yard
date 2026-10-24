@@ -2,6 +2,7 @@ import type { DB } from "./db.js"
 import { BadRequestError, NotFoundError, newId } from "./store.js"
 import {
   HOOK_ACTIONS,
+  HOOK_GUARDS,
   HOOK_TEMPLATES,
   HOOK_TRIGGERS,
   hookProblems,
@@ -9,6 +10,7 @@ import {
   type Hook,
   type HookAction,
   type HookFilters,
+  type HookGuard,
   type HookRun,
   type HookRunStatus,
   type HookTemplate,
@@ -47,6 +49,7 @@ interface HookRunRow {
   action: string
   prompt: string
   status: string
+  guard: string | null
   result: string
   target_task_id: string | null
   created_at: number
@@ -114,6 +117,7 @@ function runFromRow(r: HookRunRow): HookRun {
     action: r.action as HookAction,
     prompt: r.prompt,
     status: r.status as HookRunStatus,
+    guard: (HOOK_GUARDS as readonly string[]).includes(r.guard ?? "") ? (r.guard as HookGuard) : null,
     result: r.result,
     targetTaskId: r.target_task_id,
     createdAt: r.created_at,
@@ -224,12 +228,12 @@ export class HookStore {
 
   // ---------- the audit log
 
-  addRun(input: Omit<HookRun, "id" | "createdAt"> & { fireKey: string }): HookRun {
+  addRun(input: Omit<HookRun, "id" | "createdAt" | "guard"> & { fireKey: string; guard?: HookGuard | null }): HookRun {
     const id = newId("hrun")
     this.db
       .prepare(
-        `INSERT INTO hook_runs (id, hook_id, hook_name, hook_project_id, project_id, task_id, task_title, event, fire_key, head_sha, action, prompt, status, result, target_task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO hook_runs (id, hook_id, hook_name, hook_project_id, project_id, task_id, task_title, event, fire_key, head_sha, action, prompt, status, guard, result, target_task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -245,6 +249,7 @@ export class HookStore {
         input.action,
         input.prompt,
         input.status,
+        input.guard ?? null,
         input.result,
         input.targetTaskId,
         Date.now(),
@@ -296,7 +301,7 @@ export class HookStore {
     return rows.map(runFromRow)
   }
 
-  /** The run already logged for this fire key, if any (a fire, or a skip for the same reason). */
+  /** The runs already logged for this fire key, oldest first. */
   runFor(hookId: string, taskId: string, event: HookTrigger, fireKey: string): HookRun[] {
     const rows = this.db
       .prepare("SELECT * FROM hook_runs WHERE hook_id = ? AND task_id = ? AND event = ? AND fire_key = ? ORDER BY created_at ASC, rowid ASC")

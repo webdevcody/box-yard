@@ -3,7 +3,7 @@ import type { Store, TaskRow } from "./store.js"
 import type { TaskEvent, TaskManager } from "./tasks.js"
 import type { HookInput, HookPatch, HookStore } from "./hookStore.js"
 import { hookTemplate, hookTemplates } from "./hookTemplates.js"
-import { BadRequestError, NotFoundError } from "./store.js"
+import { BadRequestError, ConflictError, NotFoundError } from "./store.js"
 import { prNumber } from "./prs.js"
 import { preview } from "./replies.js"
 import { isQuietRun } from "../shared/quiet.js"
@@ -14,6 +14,7 @@ import {
   renderHookTemplate,
   shortSha,
   type Hook,
+  type HookGuard,
   type HookRun,
   type HookSubject,
   type HookTemplateView,
@@ -255,12 +256,14 @@ export class HookEngine {
     const runs: HookRun[] = []
     for (const hook of candidates) {
       if (hookMismatch(hook, subject)) continue
+      // Fire once: anything but a guard's skip settles this event for this hook.
       const prior = hooks.runFor(hook.id, row.id, event.type, key)
-      if (prior.some((r) => r.status === "fired")) continue
+      if (prior.some((r) => r.status !== "skipped" || !r.guard)) continue
       const prompt = renderHookTemplate(hook.prompt, hookVars(task, row, project))
       const blocked = this.blocked(hook, row.id, origin)
       if (blocked) {
-        if (prior.some((r) => r.status === "skipped" && r.result === blocked)) continue
+        // The same guard again for the same event isn't logged twice.
+        if (prior.some((r) => r.guard === blocked.guard)) continue
         runs.push(this.skip(hook, task, row, event, key, prompt, blocked))
         continue
       }
@@ -269,18 +272,22 @@ export class HookEngine {
     return runs
   }
 
-  /** Why a guard stops this fire, or null. The reasons are stable sentences, so a repeat isn't logged twice. */
-  private blocked(hook: Hook, taskId: string, origin: Set<string>): string | null {
+  /** Which guard stops this fire and why, or null. */
+  private blocked(hook: Hook, taskId: string, origin: Set<string>): { guard: HookGuard; reason: string } | null {
     const { hooks } = this.deps
     const now = this.now()
-    if (origin.has(hook.id) && !hook.allowSelfTrigger) return "Skipped by the loop guard: this hook's own prompt started this work."
+    if (origin.has(hook.id) && !hook.allowSelfTrigger) return { guard: "loop", reason: "Skipped by the loop guard: this hook's own prompt started this work." }
     if (hooks.firesFor(hook.id, taskId) >= hook.maxFiresPerTask) {
-      return `Skipped: this hook already fired ${hook.maxFiresPerTask} time${hook.maxFiresPerTask === 1 ? "" : "s"} for this task, its limit.`
+      return { guard: "hook_cap", reason: `Skipped: this hook already fired ${hook.maxFiresPerTask} time${hook.maxFiresPerTask === 1 ? "" : "s"} for this task, its limit.` }
     }
     const cap = this.tuning.taskCap
-    if (hooks.taskFiresSince(taskId, now - cap.windowMs) >= cap.max) return `Skipped: hooks already fired ${cap.max} times for this task in ${windowLabel(cap.windowMs)}.`
+    if (hooks.taskFiresSince(taskId, now - cap.windowMs) >= cap.max) {
+      return { guard: "task_cap", reason: `Skipped: hooks already fired ${cap.max} times for this task in ${windowLabel(cap.windowMs)}.` }
+    }
     const rate = this.tuning.rateLimit
-    if (hooks.firesSince(now - rate.windowMs) >= rate.max) return `Skipped by the rate limit: hooks fired ${rate.max} times across the yard in ${windowLabel(rate.windowMs)}.`
+    if (hooks.firesSince(now - rate.windowMs) >= rate.max) {
+      return { guard: "rate_limit", reason: `Skipped by the rate limit: hooks fired ${rate.max} times across the yard in ${windowLabel(rate.windowMs)}.` }
+    }
     return null
   }
 
@@ -301,9 +308,9 @@ export class HookEngine {
     }
   }
 
-  private skip(hook: Hook, task: Task, row: TaskRow, event: TaskEvent, key: string, prompt: string, reason: string): HookRun {
-    const run = this.deps.hooks.addRun({ ...this.base(hook, task, row, event, key, prompt), status: "skipped", result: reason })
-    this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) didn't fire. ${reason}`, hook, run)
+  private skip(hook: Hook, task: Task, row: TaskRow, event: TaskEvent, key: string, prompt: string, blocked: { guard: HookGuard; reason: string }): HookRun {
+    const run = this.deps.hooks.addRun({ ...this.base(hook, task, row, event, key, prompt), status: "skipped", guard: blocked.guard, result: blocked.reason })
+    this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) didn't fire. ${blocked.reason}`, hook, run)
     this.deps.hub.broadcast({ type: "hook.run", run })
     return run
   }
@@ -318,7 +325,21 @@ export class HookEngine {
     try {
       let result: string
       let target: string | null = null
-      if (hook.action === "send_to_task") {
+      if (hook.action === "send_to_task" && hook.template === "pr_merge") {
+        // The merge template takes the Merge PR button's path: its pending guard, merge_requested event and 🚢 notices.
+        const by = { source: `hook:${hook.id}` as const, who: `hook "${hook.name}"`, prompt, hook: { queued: labelled, meta } }
+        try {
+          tasks.requestMerge(task.id, by)
+        } catch (err) {
+          if (!(err instanceof ConflictError || err instanceof BadRequestError)) throw err
+          run = hooks.updateRun(run.id, { status: "skipped", result: `Skipped: ${err.message}` })
+          this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) didn't ask for a merge: ${err.message}`, hook, run)
+          hub.broadcast({ type: "hook.run", run })
+          return run
+        }
+        target = task.id
+        result = `Asked the agent to merge${pr}.`
+      } else if (hook.action === "send_to_task") {
         // Like send_to_task: queued while the agent is busy, resumed (from its archive if needed) when it rests.
         tasks.sendInput(task.id, prompt, `hook:${hook.id}`, [], null, { queued: labelled, meta })
         target = task.id
@@ -360,7 +381,7 @@ export class HookEngine {
 
   /** "[Box Yard updates]" for both the Captain and the Coordinator. It doesn't wake either: they read it on their next turn. */
   private notice(hook: Hook, task: Task, what: string, meta: HookMeta) {
-    this.deps.tasks.notice(`🪝 **${task.title}** hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) ${what}`, { ...meta, kind: "hook" }, { both: true, wake: false })
+    this.deps.tasks.notice(`🪝 **${task.title}** hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) ${what}`, { ...meta, kind: "hook" }, { coordinator: true, wake: false })
   }
 }
 

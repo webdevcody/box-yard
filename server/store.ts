@@ -18,6 +18,7 @@ import type {
   CostRates,
   CompactionTaskSnapshot,
   Effort,
+  MergeRequest,
   OrchestratorCompactionRecord,
   PrState,
   PreviewLink,
@@ -51,6 +52,9 @@ const json = <T>(text: string | null | undefined, fallback: T): T => {
     return fallback
   }
 }
+
+const publicMergeRequest = (req: StoredMergeRequest | null): MergeRequest | null =>
+  req ? { prNumber: req.prNumber, prUrl: req.prUrl, requestedAt: req.requestedAt, deliveredAt: req.deliveredAt, requestedBy: req.requestedBy ?? null } : null
 
 /** What happened during the turn that is running now. Reset at turn start. */
 export interface TurnFlags {
@@ -113,6 +117,12 @@ export interface TaskRow {
   source: string | null
   pr_head_sha: string | null
   pr_labels_json: string | null
+  merge_request_json: string | null
+}
+
+/** A pending merge request as stored: the public fields plus the queued input that carries the message. */
+export interface StoredMergeRequest extends MergeRequest {
+  inputId: string
 }
 
 export interface TaskTurnRow {
@@ -308,6 +318,7 @@ type TaskPatch = Partial<{
   routingReason: string | null
   prHeadSha: string | null
   prLabels: string[]
+  mergeRequest: StoredMergeRequest | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -346,6 +357,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   routingReason: "routing_reason",
   prHeadSha: "pr_head_sha",
   prLabels: "pr_labels_json",
+  mergeRequest: "merge_request_json",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -584,9 +596,21 @@ export class Store {
       claudeTokens: usage.totalTokens,
       routingRule: row.routing_rule ?? null,
       routingReason: row.routing_reason ?? null,
+      mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
+  }
+
+  /**
+   * The task's merge request while it is still pending: for the PR the task has now, and either delivered in a
+   * turn or still queued (Stop and Close drop queued messages, and the request with them).
+   */
+  mergeRequestOf(row: TaskRow): StoredMergeRequest | null {
+    const req = json<StoredMergeRequest | null>(row.merge_request_json, null)
+    if (!req || req.prUrl !== row.pr_url) return null
+    if (req.deliveredAt === null && !this.db.prepare("SELECT 1 FROM task_inputs WHERE id = ?").get(req.inputId)) return null
+    return req
   }
 
   /** The latest assistant or tool message that makes a card line (see shared/activity.ts). */
@@ -660,8 +684,8 @@ export class Store {
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, source, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -676,11 +700,12 @@ export class Store {
         input.effort ?? null,
         input.routingRule ?? null,
         input.routingReason ?? null,
-        input.startedBy ?? null,
         now,
         now,
         now,
       )
+    // Its own statement, so the insert above also works on schemas from before the column (migration tests).
+    if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     return this.getTask(id)!
   }
 
@@ -743,6 +768,7 @@ export class Store {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
       if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
+      else if (key === "mergeRequest") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
     }
@@ -977,10 +1003,13 @@ export class Store {
 
   // pending inputs: messages for a task that wait for its next turn
 
-  queueInput(taskId: string, source: string, content: string, attachments: string[] = []) {
+  /** Returns the input's id. */
+  queueInput(taskId: string, source: string, content: string, attachments: string[] = []): string {
+    const id = newId("in")
     this.db
       .prepare("INSERT INTO task_inputs (id, task_id, source, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(newId("in"), taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, Date.now())
+      .run(id, taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, Date.now())
+    return id
   }
 
   /** Queued inputs, oldest first. Delete them with deleteInputs once a turn has started. */
@@ -2007,6 +2036,10 @@ export class NotFoundError extends Error {
 
 export class BadRequestError extends Error {
   status = 400
+}
+
+export class ConflictError extends Error {
+  status = 409
 }
 
 /** Accept `owner/name`, `github.com/owner/name`, or a full URL. Returns null for empty. */

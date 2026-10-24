@@ -1,9 +1,9 @@
 import type { HookInput } from "./hookStore.js"
 import type { HookTemplate } from "../shared/hooks.js"
+import { MERGE_REQUEST_PROMPT } from "./prompts.js"
 
-// TODO(task_22ebcf600041): use the Merge PR button's standard merge message constant here, not a copy.
-const STANDARD_MERGE_MESSAGE =
-  "Please merge your pull request {pr_url} now. Merge the latest {branch} base into it first if it's behind, fix any conflicts, make sure the checks and tests pass, then merge it on GitHub (no force-push). Report back the merge commit, or exactly what blocked the merge."
+/** The Merge PR button's standard message as a hook template: its PR number becomes {pr_number}. */
+export const MERGE_HOOK_PROMPT = MERGE_REQUEST_PROMPT.replaceAll("{N}", "{pr_number}")
 
 export interface HookTemplateInfo {
   key: HookTemplate
@@ -18,13 +18,13 @@ export function hookTemplates(): HookTemplateInfo[] {
     {
       key: "pr_merge",
       description:
-        "When an agent's PR is ready (opened or pushed, turn ended, not a draft), send it the Merge PR button's standard merge request. PRs labelled no-automerge are skipped. Edit the prompt to customize it.",
+        "When an agent's PR is ready (opened or pushed, its turn over, not a draft), send it the Merge PR button's standard merge request, once per head commit. It takes the button's path, so it never runs while another merge of that PR is pending. PRs labelled no-automerge are skipped. Edit the prompt to make it your own.",
       draft: {
         name: "On PR ready → merge",
         trigger: "task.pr_ready",
         filters: { excludeLabels: ["no-automerge"] },
         action: "send_to_task",
-        prompt: STANDARD_MERGE_MESSAGE,
+        prompt: MERGE_HOOK_PROMPT,
         enabled: false,
         allowSelfTrigger: false,
         maxFiresPerTask: 3,

@@ -455,6 +455,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN disk_checked_at INTEGER;
   `,
   `
+  -- "Merge PR" button: the pending merge request (JSON: prNumber, prUrl, requestedAt, deliveredAt, inputId).
+  ALTER TABLE tasks ADD COLUMN merge_request_json TEXT;
+  `,
+  `
   -- Hooks (shared/hooks.ts, server/hooks.ts): automations on task events. project_id NULL is a global
   -- (Coordinator) hook; otherwise the project's Captain owns it.
   CREATE TABLE hooks (
@@ -493,6 +497,8 @@ export const MIGRATIONS: string[] = [
     action TEXT NOT NULL,
     prompt TEXT NOT NULL,
     status TEXT NOT NULL,
+    -- Set when a guard (loop, hook_cap, task_cap, rate_limit) held a fire back; a later event may still fire.
+    guard TEXT,
     result TEXT NOT NULL,
     target_task_id TEXT,
     created_at INTEGER NOT NULL

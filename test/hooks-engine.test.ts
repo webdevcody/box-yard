@@ -3,6 +3,7 @@ import { createBoxYard, type BoxYard } from "../server/app.js"
 import { HookStore, type HookInput } from "../server/hookStore.js"
 import { HookEngine, type HookMeta } from "../server/hooks.js"
 import type { TaskEvent } from "../server/tasks.js"
+import { mergeRequestPrompt } from "../server/prompts.js"
 import type { Project, Task } from "../shared/types.js"
 import { testConfig } from "./helpers.js"
 
@@ -283,6 +284,52 @@ describe("hook engine: loop guards and limits", () => {
     const engine = new HookEngine({ ...(s.engine as unknown as { deps: ConstructorParameters<typeof HookEngine>[0] }).deps, messageCaptain: () => { throw new Error("Captain is gone") } })
     const [run] = engine.handle(ev(prTask(s, s.alpha).id))
     expect(run).toMatchObject({ status: "failed", result: "Failed: Captain is gone" })
+  })
+})
+
+describe("the On PR ready → merge template", () => {
+  function mergeHook(s: Setup) {
+    const h = s.engine.fromTemplate("pr_merge", { projectId: s.alpha.id, createdBy: "Cody" })
+    return s.engine.update(h.id, { enabled: true })
+  }
+
+  it("sends the Merge PR button's standard message through the button's path, labelled as the hook", () => {
+    const s = setup()
+    const h = mergeHook(s)
+    const t = prTask(s, s.alpha)
+    const [run] = s.engine.handle(ev(t.id))
+    expect(run).toMatchObject({ status: "fired", result: "Asked the agent to merge (PR #7 at aaaaaaa).", targetTaskId: t.id })
+    // The same message the button sends, with the PR number filled in.
+    expect(run!.prompt).toBe(mergeRequestPrompt(7))
+    const [queued] = inputs(s, t.id)
+    expect(queued!.source).toBe(`hook:${h.id}`)
+    expect(queued!.content).toContain(mergeRequestPrompt(7))
+    // The button's pending guard, merge_requested event and notices, naming the hook instead of Cody.
+    expect(s.yard.store.getTask(t.id)!.mergeRequest).toMatchObject({ prNumber: 7, deliveredAt: null, requestedBy: 'hook "On PR ready → merge"' })
+    const msgs = s.yard.store.listTaskMessages(t.id)
+    expect(msgs.find((m) => m.role === "user")).toMatchObject({ content: mergeRequestPrompt(7), meta: expect.objectContaining({ source: "hook", hookName: "On PR ready → merge" }) })
+    expect(msgs.find((m) => m.meta?.kind === "merge_requested")!.content).toBe('The hook "On PR ready → merge" asked for a merge of PR #7.')
+    const n = notices(s, t.id)
+    expect(n.captain.map((x) => x.content)).toEqual(['🚢 The hook "On PR ready → merge" asked **Add dark mode** to merge PR #7: https://github.com/acme/alpha/pull/7'])
+    expect(n.coordinator.map((x) => [x.content, x.seen])).toEqual([[n.captain[0]!.content, 0]])
+  })
+
+  it("doesn't ask while a merge of the PR is pending, and an edited prompt is sent as written", () => {
+    const s = setup()
+    const h = mergeHook(s)
+    const t = prTask(s, s.alpha)
+    s.yard.tasks.requestMerge(t.id) // Cody pressed Merge PR first
+    const [run] = s.engine.handle(ev(t.id))
+    expect(run).toMatchObject({ status: "skipped", guard: null })
+    expect(run!.result).toMatch(/^Skipped: A merge of PR #7 was already requested/)
+    expect(inputs(s, t.id)).toHaveLength(1) // only the button's message
+    // Settled for this commit: the same commit won't ask again.
+    expect(s.engine.handle(ev(t.id))).toEqual([])
+
+    s.engine.update(h.id, { prompt: "Squash-merge #{pr_number} once CI is green." })
+    const other = prTask(s, s.alpha, { title: "Other" })
+    expect(s.engine.handle(ev(other.id))[0]!.prompt).toBe("Squash-merge #7 once CI is green.")
+    expect(s.yard.store.getTask(other.id)!.mergeRequest?.requestedBy).toBe('hook "On PR ready → merge"')
   })
 })
 

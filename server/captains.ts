@@ -76,7 +76,8 @@ function sourceLabel(m: CaptainMessage) {
 const TOOL_REPLY_MAX = 20_000
 
 function briefTask(t: Task) {
-  return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}`
+  const merge = t.mergeRequest ? ` (merge requested by ${t.mergeRequest.requestedBy ?? "Cody with the Merge button"}: pending, don't start another merge of this PR)` : ""
+  return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}${merge}`
 }
 
 export interface CaptainTuning {
