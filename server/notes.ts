@@ -43,9 +43,9 @@ export class ProjectNotes {
     return this.deps.store
   }
 
-  /** Where the project's notes stand against Settings' budget. */
+  /** Where the project's notes stand against its budget (the project's own, else Settings'). */
   budget(projectId: string): NoteBudgetReport<ProjectNote> {
-    return budgetNotes(this.store.listNotes(projectId), noteBudgetOf(this.deps.settings.get()))
+    return budgetNotes(this.store.listNotes(projectId), noteBudgetOf(this.deps.settings.get(), this.store.getProject(projectId)))
   }
 
   /** "18 of 25 notes, ~2.9k of 4k tokens", plus what to do when that's over. */

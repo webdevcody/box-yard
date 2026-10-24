@@ -115,6 +115,8 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
+  notesMaxCount: "BOXYARD_NOTES_MAX",
+  notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
 /** Settings whose draft value differs from the one in effect. */

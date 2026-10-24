@@ -16,6 +16,7 @@ import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
+import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
@@ -286,7 +287,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     envKeys: p.envKeys,
     ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
     notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
-    ...(p.pendingSuggestions ? { pendingNoteSuggestions: p.pendingSuggestions } : {}),
+    ...(p.notesMaxCount !== null || p.notesMaxTokens !== null ? { notesBudget: notes.budgetStatus(p.id).line } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
 
@@ -379,7 +380,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     server.registerTool(
       "update_project",
       {
-        description: "Change a project's name, description, repo, base branch or env vars.",
+        description: "Change a project's name, description, repo, base branch, env vars or its own notes budget.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           name: z.string().optional(),
@@ -388,20 +389,51 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch: z.string().optional(),
           env: envSchema,
           remove_env: z.array(z.string()).optional(),
+          notes_max: z
+            .number()
+            .int()
+            .min(NOTE_BUDGET_LIMITS.maxNotes.min)
+            .max(NOTE_BUDGET_LIMITS.maxNotes.max)
+            .nullable()
+            .optional()
+            .describe("This project's max notes; null goes back to Settings › Max notes."),
+          notes_max_tokens: z
+            .number()
+            .int()
+            .min(NOTE_BUDGET_LIMITS.maxTokens.min)
+            .max(NOTE_BUDGET_LIMITS.maxTokens.max)
+            .nullable()
+            .optional()
+            .describe("This project's notes token budget; null goes back to the one in Settings."),
         },
       },
-      safe(async (a: { project: string; name?: string; description?: string; repo?: string | null; base_branch?: string; env?: Record<string, string>; remove_env?: string[] }) => {
-        const p = store.updateProject(project(a.project).id, {
-          name: a.name,
-          description: a.description,
-          repo: a.repo,
-          baseBranch: a.base_branch,
-          env: a.env,
-          removeEnv: a.remove_env,
-        })
-        hub.broadcast({ type: "project", project: p })
-        return ok(projectView(p))
-      }),
+      safe(
+        async (a: {
+          project: string
+          name?: string
+          description?: string
+          repo?: string | null
+          base_branch?: string
+          env?: Record<string, string>
+          remove_env?: string[]
+          notes_max?: number | null
+          notes_max_tokens?: number | null
+        }) => {
+          const p = store.updateProject(project(a.project).id, {
+            name: a.name,
+            description: a.description,
+            repo: a.repo,
+            baseBranch: a.base_branch,
+            env: a.env,
+            removeEnv: a.remove_env,
+            notesMaxCount: a.notes_max,
+            notesMaxTokens: a.notes_max_tokens,
+          })
+          hub.broadcast({ type: "project", project: p })
+          notes.checkBudget(p.id)
+          return ok(projectView(p))
+        },
+      ),
     ),
   )
 

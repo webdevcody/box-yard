@@ -488,7 +488,7 @@ class Captain {
   }
 
   private notesNow(): { text: string; hash: string } {
-    const r = budgetNotes(this.store.listNotes(this.project.id), noteBudgetOf(this.settings.get()))
+    const r = budgetNotes(this.store.listNotes(this.project.id), noteBudgetOf(this.settings.get(), this.store.getProject(this.project.id)))
     const listed = r.shown.map(noteLine)
     const hash = createHash("sha1").update(`${budgetLine(r)}\n${listed.join("\n")}`).digest("hex").slice(0, 16)
     const lines: string[] = []
@@ -609,7 +609,7 @@ class Captain {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
+      `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
       ...session,
       ...model,
       "--effort",

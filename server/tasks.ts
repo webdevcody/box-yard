@@ -1674,7 +1674,7 @@ export class TaskManager {
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
       // The prompt gets the notes that fit the budget and says how many didn't; read_notes still has them all.
-      const budgeted = budgetNotes(notes, noteBudgetOf(this.settings.get()))
+      const budgeted = budgetNotes(notes, noteBudgetOf(this.settings.get(), project))
       const projectName = (id: string) => this.store.getProject(id)?.name
       const ownerName = this.owner()
       const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)

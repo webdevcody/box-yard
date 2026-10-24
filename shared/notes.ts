@@ -1,7 +1,7 @@
 // Project notes are a small, curated set of lasting rules. Agents only suggest notes; the project's Captain
-// (or the owner, on the Notes tab) decides what becomes one. This file holds the pure parts the server
-// and the web app share: the injection budget and how notes and their authors read.
-import type { ProjectNote } from "./types.js"
+// decides what becomes one. This file holds the pure parts the server and the web app share: the injection
+// budget and how notes and their authors read.
+import type { Project, ProjectNote, Settings } from "./types.js"
 
 export interface NoteBudget {
   /** At most this many notes go into a prompt... */
@@ -15,6 +15,20 @@ export const MAX_NOTE_CHARS = 4000
 
 /** Settings' defaults: about 25 notes or 4k tokens. */
 export const DEFAULT_NOTE_BUDGET: NoteBudget = { maxNotes: 25, maxTokens: 4000 }
+
+/** The range Settings and a project's override accept. */
+export const NOTE_BUDGET_LIMITS = { maxNotes: { min: 1, max: 200 }, maxTokens: { min: 200, max: 50_000 } } as const
+
+/** The budget a project's notes get: the project's own where it sets one, else Settings', else the defaults. */
+export function projectNoteBudget(
+  settings: Pick<Settings, "notesMaxCount" | "notesMaxTokens"> | null | undefined,
+  project?: Pick<Project, "notesMaxCount" | "notesMaxTokens"> | null,
+): NoteBudget {
+  return {
+    maxNotes: project?.notesMaxCount ?? settings?.notesMaxCount ?? DEFAULT_NOTE_BUDGET.maxNotes,
+    maxTokens: project?.notesMaxTokens ?? settings?.notesMaxTokens ?? DEFAULT_NOTE_BUDGET.maxTokens,
+  }
+}
 
 /** A rough token count (about 4 characters a token), the same everywhere so the meter and the cap agree. */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 4)

@@ -546,9 +546,12 @@ export const MIGRATIONS: string[] = [
   -- Curated project notes (server/notes.ts): who last edited a note and when.
   ALTER TABLE project_notes ADD COLUMN updated_at INTEGER;
   ALTER TABLE project_notes ADD COLUMN updated_by TEXT;
+  -- A project's own notes budget; NULL uses Settings' (notesMaxCount / notesMaxTokens).
+  ALTER TABLE projects ADD COLUMN notes_max_count INTEGER;
+  ALTER TABLE projects ADD COLUMN notes_max_tokens INTEGER;
 
   -- Notes agents suggest with suggest_note. They never reach a prompt by themselves: the project's Captain
-  -- (in a notes retro) or the owner accepts one as a note, merges it into one, or rejects it.
+  -- accepts one as a note, merges it into one, or rejects it in the notes retro after the task.
   CREATE TABLE note_suggestions (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

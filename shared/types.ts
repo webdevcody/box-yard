@@ -38,10 +38,12 @@ export interface Project {
   baseBranch: string
   /** Env var names only; values never leave the server. */
   envKeys: string[]
-  /** The curated notes every agent in the project starts with (the Captain keeps them within Settings' budget). */
+  /** The curated notes every agent in the project starts with (the Captain keeps them within the notes budget). */
   notes: ProjectNote[]
-  /** Note suggestions from agents that nobody accepted or rejected yet. */
-  pendingSuggestions: number
+  /** This project's own notes budget (most notes in a prompt); null uses Settings › Max notes. */
+  notesMaxCount: number | null
+  /** This project's own notes token budget; null uses Settings › Notes token budget. */
+  notesMaxTokens: number | null
   /** Size for new boxes made for this project; null uses Settings → Worker size. */
   boxSize: BoxSize | null
   /** Box mirrors of its repo are partial clones (blob:none); null uses Settings → Partial clone mirrors. */
@@ -520,7 +522,7 @@ export interface Settings {
   buildCleanupIdleMinutes: number
   /** Notes retro: when a task's PR merges, or a task without a PR ends done, its Captain curates the agent's note suggestions. */
   notesRetroEnabled: boolean
-  /** The notes budget: at most this many notes go into each agent's prompt... */
+  /** Max notes: at most this many notes go into each agent's prompt (a project can set its own)... */
   notesMaxCount: number
   /** ...and at most about this many tokens of them. Over either, the Captain is told to prune. */
   notesMaxTokens: number

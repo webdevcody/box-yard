@@ -219,6 +219,8 @@ interface ProjectRow {
   env_json: string
   box_size: string | null
   partial_clone: number | null
+  notes_max_count?: number | null
+  notes_max_tokens?: number | null
   created_at: number
   updated_at: number
 }
@@ -500,7 +502,8 @@ export class Store {
       baseBranch: row.base_branch,
       envKeys: Object.keys(json<Record<string, string>>(row.env_json, {})),
       notes: this.listNotes(row.id),
-      pendingSuggestions: this.pendingSuggestionCount(row.id),
+      notesMaxCount: row.notes_max_count ?? null,
+      notesMaxTokens: row.notes_max_tokens ?? null,
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       createdAt: row.created_at,
@@ -539,6 +542,8 @@ export class Store {
     env?: Record<string, string>
     boxSize?: BoxSize | null
     partialClone?: boolean | null
+    notesMaxCount?: number | null
+    notesMaxTokens?: number | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -559,6 +564,7 @@ export class Store {
       )
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
+    this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
   }
 
@@ -575,6 +581,10 @@ export class Store {
       boxSize?: BoxSize | null
       /** null clears it (Settings → Partial clone mirrors applies). */
       partialClone?: boolean | null
+      /** null clears it (Settings › Max notes applies). */
+      notesMaxCount?: number | null
+      /** null clears it (Settings › Notes token budget applies). */
+      notesMaxTokens?: number | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -597,7 +607,14 @@ export class Store {
         Date.now(),
         id,
       )
+    this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
+  private setProjectNotesBudget(id: string, b: { notesMaxCount?: number | null; notesMaxTokens?: number | null }) {
+    if (b.notesMaxCount !== undefined) this.db.prepare("UPDATE projects SET notes_max_count = ? WHERE id = ?").run(b.notesMaxCount, id)
+    if (b.notesMaxTokens !== undefined) this.db.prepare("UPDATE projects SET notes_max_tokens = ? WHERE id = ?").run(b.notesMaxTokens, id)
   }
 
   deleteProject(id: string) {
@@ -680,13 +697,7 @@ export class Store {
   }
 
   pendingSuggestionCount(projectId: string): number {
-    try {
-      return (this.db.prepare("SELECT COUNT(*) AS n FROM note_suggestions WHERE project_id = ? AND status = 'pending'").get(projectId) as { n: number }).n
-    } catch (err) {
-      // A database stopped before the notes migration (tests that pin MIGRATIONS) has no suggestions to count.
-      if (err instanceof Error && err.message.includes("no such table")) return 0
-      throw err
-    }
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM note_suggestions WHERE project_id = ? AND status = 'pending'").get(projectId) as { n: number }).n
   }
 
   /** Settle a pending suggestion. Throws a ConflictError when someone already did. */
