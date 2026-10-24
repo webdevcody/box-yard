@@ -78,7 +78,15 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 
 `list_tasks` takes a `query`, so even a fresh Captain session finds the agent that did related work. For quick work the Captain calls `wait_for_tasks` and answers in the same reply. For long work it ends its turn. When an agent finishes, fails, asks something or opens a PR, the project's Captain wakes up, checks whether a project-local next step is needed, and reports a concise result upward when Cody or the Coordinator should hear it.
 
-**Model/effort routing.** Box agent model and effort can be routed per task without adding UI controls. Put YAML in `<data-dir>/routing.yaml` (or `routing.yml`), or paste the same YAML into Settings → Box agents → Routing YAML. See [`docs/routing.example.yaml`](docs/routing.example.yaml) for a starter config with `fallback`, optional `defaults`, per-project defaults and semantic rules. The orchestrator reads the merged rules in its system prompt and passes `model`, `effort`, `routing_rule` and `routing_reason` to `create_task` or `send_to_task`. A task shows its current route as a small read-only label, and Box Yard records the model/effort/rule on the task plus every turn in `task_turns` so cost tracking can attribute usage later.
+**Model/effort routing.** Box agent model and effort can be routed per task without adding UI controls. Put YAML in `<data-dir>/routing.yaml` (or `routing.yml`), or paste the same YAML into Settings → Box agents → Routing YAML. See [`docs/routing.example.yaml`](docs/routing.example.yaml) for a starter config with `fallback`, optional `defaults`, per-project defaults and semantic rules. The Coordinator and Captains read the merged rules in their system prompt and pass `model`, `effort`, `routing_rule` and `routing_reason` to `create_task` or `send_to_task` only when a `rules` entry matches or you ask for a specific model. A task shows its own route as a small read-only label, and Box Yard records the model/effort/rule of every turn in `task_turns` so cost tracking can attribute usage later.
+
+Box Yard resolves each turn's model and effort when the turn starts (model and effort separately, first match wins), so a change to Settings or the YAML reaches existing tasks from their next turn:
+
+1. The task's own choice: `model`/`effort` passed to `create_task`, `send_to_task` or `set_task_model`. Only these are stored on the task.
+2. The routing YAML's `projects` entry for the task's project (by id, name or repo).
+3. Settings → Box agents → Model and Effort, when saved there or set by `WORKER_MODEL`. Effort "Let the Coordinator decide" sets none.
+4. The routing YAML's `defaults`, then its `fallback`.
+5. The built-in default: `claude-opus-5-5` at `high`.
 
 A task is not stuck on its first route. `send_to_task` accepts a new model and effort for the next turn, so a Haiku/low task can resume the same Claude session with Sonnet or Opus. `set_task_model` changes the next-turn route without sending a message. The orchestrator prompt tells it to escalate failed or looping tasks when the routing rules call for it.
 
