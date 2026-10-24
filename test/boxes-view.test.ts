@@ -227,6 +227,42 @@ describe("Boxes overview", () => {
     expect(d.querySelector("[data-testid=disk-breakdown]")!.textContent).not.toContain("Work disk")
   })
 
+  it("shows memory and load next to disk on the row and in the details, as text with a title", () => {
+    const memBox = box("mem-box", {
+      runningTurns: 2,
+      memUsedBytes: 3.5 * GB,
+      memTotalBytes: 4 * GB,
+      loadAvg: 1.25,
+      cpuCount: 2,
+      memoryPressure: "3.5 GB of 4.0 GB memory in use (88%), over 80%",
+    })
+    render("/boxes", [...BOXES, memBox])
+    const cell = row("mem-box").querySelector("[data-testid=box-row-memory]")!
+    expect(cell.textContent).toBe("88% mem")
+    expect(cell.getAttribute("title")).toBe(
+      "Memory: 3.5 GB of 4.0 GB memory in use (88%)\nload 1.25 on 2 CPUs\nNew agents go to other boxes while agents run here: 3.5 GB of 4.0 GB memory in use (88%), over 80%",
+    )
+    const meter = cell.querySelector("[role=meter]")!
+    expect(meter.getAttribute("aria-label")).toBe("Memory used")
+    expect(meter.getAttribute("aria-valuenow")).toBe(String(3.5 * GB))
+    expect(row("mem-box").querySelector("[data-testid=box-attention]")!.getAttribute("title")).toBe("Busy: 88% mem, load 1.25 on 2 CPUs")
+    // Not measured yet: a dash, still with a title.
+    const idle = row("idle-box").querySelector("[data-testid=box-row-memory]")!
+    expect(idle.textContent).toBe("mem —")
+    expect(idle.getAttribute("title")).toBe("Memory not measured yet")
+
+    click(row("mem-box"))
+    act(() => void window.dispatchEvent(new HashChangeEvent("hashchange")))
+    const use = dialog()!.querySelector("[data-testid=memory-use]")!
+    expect(use.textContent).toContain("3.5 GB of 4.0 GB memory in use (88%)")
+    expect(use.textContent).toContain("load 1.25 on 2 CPUs")
+    expect(use.textContent).toContain("new agents go elsewhere")
+    expect(use.querySelector("[role=meter]")!.getAttribute("aria-label")).toBe("Memory used")
+    expect(dialog()!.querySelector("[data-testid=box-attention-list]")!.textContent).toContain(
+      "Busy: 3.5 GB of 4.0 GB memory in use (88%), over 80%. New agents go to other boxes (or wait) until it calms down",
+    )
+  })
+
   it("opens details straight from a /boxes#<id> link and drops the hash on close", () => {
     render("/boxes#idle-box")
     expect(dialog()!.textContent).toContain("idle-box")

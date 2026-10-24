@@ -617,6 +617,15 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX box_events_box ON box_events(box_id, at);
   `,
   `
+  -- Memory-aware placement: each box's memory in use and load from its last probe (the df script), and a project's
+  -- "heavy tasks" choice: NULL or 'off', 'one-per-box', 'whole-box'.
+  ALTER TABLE boxes ADD COLUMN mem_used_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN mem_total_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN load_avg REAL;
+  ALTER TABLE boxes ADD COLUMN cpu_count INTEGER;
+  ALTER TABLE projects ADD COLUMN heavy_tasks TEXT;
+  `,
+  `
   -- Size-aware placement: the box size a queued task waits for (its project's box size), shown with wait_reason.
   ALTER TABLE tasks ADD COLUMN wait_box_size TEXT;
   `,

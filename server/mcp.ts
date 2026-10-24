@@ -22,6 +22,7 @@ import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
+import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 
 export interface McpDeps {
@@ -155,6 +156,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const coordinatorOnly = (tool: RegisteredTool) => {
     if (scopeId) tool.remove()
   }
+  /** Tools only a project's Captain has (agents message their Captain, never the Coordinator). */
+  const captainOnly = (tool: RegisteredTool) => {
+    if (!scopeId) tool.remove()
+  }
   /** How worker messages from this caller are labelled (#51). */
   const inputSource = scopeId ? (`captain:${scopeId}` as const) : ("orchestrator" as const)
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
@@ -226,6 +231,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const BUSY = new Set(["queued", "starting", "working"])
   /** What happens to a message sent to this task right now. */
   const delivery = (t: Task) => {
+    // Only the task's own Captain reaches an agent waiting in message_captain (TaskManager.handToWaitingAgent).
+    if (scopeId && t.projectId === scopeId && tasks.agentWaitingOnCaptain(t.id))
+      return "mid-turn: the agent is waiting on its message_captain, so it gets this right away, in its current turn"
     if (t.status === "working" || t.status === "starting")
       return "queued: the agent is mid-turn; the message is delivered (with any others) as soon as this turn ends, in the same session"
     if (t.status === "queued") return "queued: the task is waiting for a box slot; the message goes out with its next turn"
@@ -287,6 +295,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
     ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
+    ...(p.heavyTasks !== "off" ? { heavyTasks: p.heavyTasks } : {}),
     notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
     ...(p.notesMaxCount !== null || p.notesMaxTokens !== null ? { notesBudget: notes.budgetStatus(p.id).line } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
@@ -382,7 +391,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     server.registerTool(
       "update_project",
       {
-        description: "Change a project's name, description, repo, base branch, env vars or its own notes budget.",
+        description: "Change a project's name, description, repo, base branch, env vars, heavy-tasks placement or its own notes budget.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           name: z.string().optional(),
@@ -391,6 +400,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch: z.string().optional(),
           env: envSchema,
           remove_env: z.array(z.string()).optional(),
+          heavy_tasks: z
+            .enum(HEAVY_TASKS)
+            .optional()
+            .describe(
+              "How its running agents share boxes, for test suites and headless browsers that run a box out of memory: off, one-per-box (at most one of its agents per box) or whole-box (each of its agents runs alone on a box).",
+            ),
           notes_max: z
             .number()
             .int()
@@ -418,6 +433,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch?: string
           env?: Record<string, string>
           remove_env?: string[]
+          heavy_tasks?: HeavyTasks
           notes_max?: number | null
           notes_max_tokens?: number | null
         }) => {
@@ -428,6 +444,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             baseBranch: a.base_branch,
             env: a.env,
             removeEnv: a.remove_env,
+            heavyTasks: a.heavy_tasks,
             notesMaxCount: a.notes_max,
             notesMaxTokens: a.notes_max_tokens,
           })
@@ -651,6 +668,28 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
       return ok({ ...brief(t), delivery: how })
     }),
+  )
+
+  captainOnly(
+    server.registerTool(
+      "reply_to_agent",
+      {
+        description:
+          'Captain tool: answer an agent in this project that messaged you with message_captain (labelled "From task "<title>" (task_…)"). ' +
+          "If the agent is still waiting mid-turn, it gets the reply right away in its current turn; otherwise the reply is queued and arrives as its next message, like send_to_task (which also reaches a waiting agent). " +
+          "Keep it short and actionable. The delivery field says which happened.",
+        inputSchema: {
+          task: z.string().describe("The task id from the message label (task_…)."),
+          message: z.string().min(1).describe("Your answer to the agent."),
+        },
+      },
+      safe(async (a: { task: string; message: string }) => {
+        const before = task(a.task)
+        const how = delivery(before)
+        const t = tasks.sendInput(before.id, a.message, inputSource)
+        return ok({ ...brief(t), delivery: how })
+      }),
+    ),
   )
 
   server.registerTool(
@@ -1108,6 +1147,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             b.diskFreeBytes !== null && b.diskTotalBytes !== null
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
               : null,
+          ...(b.memUsedBytes != null && b.memTotalBytes != null
+            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new agents go elsewhere)" : ""}` }
+            : {}),
           ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
           ...(b.resize && (b.resize.status === "running" || Date.now() - (b.resize.finishedAt ?? 0) < 24 * 3600_000)
