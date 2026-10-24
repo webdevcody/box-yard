@@ -74,6 +74,21 @@ export const DEFAULT_SETTINGS: Settings = {
   buildCleanupIdleMinutes: 15,
 }
 
+/** Settings that each box takes from its own size unless set on purpose (see SettingsStore.boxLimitInfo). */
+export const BOX_LIMIT_KEYS = ["slotsPerBox", "maxResidentPerBox"] as const
+export type BoxLimitKey = (typeof BOX_LIMIT_KEYS)[number]
+/** Why a box limit replaces the size defaults: saved in the UI, an env var, or a config value off the size default. */
+export type BoxLimitSource = "ui" | "env" | "config"
+
+/** Settings keys a reset may name: `?keys=slotsPerBox,maxResidentPerBox`, or repeated `keys`. Anything else is a 400. */
+export function parseSettingKeys(raw: unknown): (keyof Settings)[] {
+  const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((v) => (typeof v === "string" ? v.split(",") : [])).map((k) => k.trim()).filter(Boolean)
+  if (parts.length === 0) throw new BadRequestError("Name at least one setting to reset, e.g. ?keys=slotsPerBox")
+  const unknown = parts.filter((k) => !Object.hasOwn(DEFAULT_SETTINGS, k))
+  if (unknown.length) throw new BadRequestError(`Unknown setting${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`)
+  return [...new Set(parts)] as (keyof Settings)[]
+}
+
 /** Env vars that seed box/pool settings; saved settings win over them. */
 const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   workerSize: "WORKER_SIZE",
@@ -234,18 +249,28 @@ export class SettingsStore {
   }
 
   /**
-   * Agents per box and task folders per box when set on purpose (saved in the UI, BOX_SLOTS / BOX_MAX_RESIDENT,
-   * or a config value that isn't the worker size's default); null means each box uses its own size's default.
+   * Agents per box and task folders per box when set on purpose, and why: saved in the UI, BOX_SLOTS /
+   * BOX_MAX_RESIDENT, or a config value that isn't the worker size's default. A null value means each
+   * box uses its own size's default.
    */
-  boxLimitOverrides(): { slotsPerBox: number | null; maxResidentPerBox: number | null } {
+  boxLimitInfo(): Record<BoxLimitKey, { value: number | null; source: BoxLimitSource | null }> {
     const saved = this.saved()
-    const configWorkerSize = this.c.workerSize ?? DEFAULT_SETTINGS.workerSize
-    const d = SIZE_DEFAULTS[configWorkerSize]
-    const configSlots = this.c.slotsPerBox ?? d.slotsPerBox
-    const configResidents = this.c.maxResidentPerBox ?? d.maxResidentPerBox
-    const slots = saved.slotsPerBox ?? (process.env.BOX_SLOTS !== undefined || configSlots !== d.slotsPerBox ? configSlots : null)
-    const residents = saved.maxResidentPerBox ?? (process.env.BOX_MAX_RESIDENT !== undefined || configResidents !== d.maxResidentPerBox ? configResidents : null)
-    return { slotsPerBox: slots ?? null, maxResidentPerBox: residents ?? null }
+    const d = SIZE_DEFAULTS[this.c.workerSize ?? DEFAULT_SETTINGS.workerSize]
+    const one = (k: BoxLimitKey) => {
+      const fromSaved = saved[k]
+      if (fromSaved !== undefined) return { value: fromSaved, source: "ui" as const }
+      const configured = this.c[k] ?? d[k]
+      if (process.env[BOX_ENV[k]!] !== undefined) return { value: configured, source: "env" as const }
+      if (configured !== d[k]) return { value: configured, source: "config" as const }
+      return { value: null, source: null }
+    }
+    return { slotsPerBox: one("slotsPerBox"), maxResidentPerBox: one("maxResidentPerBox") }
+  }
+
+  /** The values of boxLimitInfo(); null means each box uses its own size's default. */
+  boxLimitOverrides(): Record<BoxLimitKey, number | null> {
+    const info = this.boxLimitInfo()
+    return { slotsPerBox: info.slotsPerBox.value, maxResidentPerBox: info.maxResidentPerBox.value }
   }
 
   update(patch: unknown): SettingsInfo {

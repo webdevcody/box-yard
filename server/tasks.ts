@@ -652,12 +652,24 @@ export class TaskManager {
     return this.store.listTaskRows().filter((r) => r.current_turn_id).length
   }
 
+  /**
+   * Pool limits for pool_status. Agents and task folders per box are per box size (each box follows its own
+   * size unless Settings or env override it for every box), so they're reported by size, plus what overrides them.
+   */
   poolLimits() {
     const l = this.limits()
+    const info = this.settings.boxLimitInfo()
+    const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => Object.fromEntries(BOX_SIZES.map((s) => [s, this.sizeLimits(s)[k]])) as Record<BoxSize, number>
+    const why = (k: "slotsPerBox" | "maxResidentPerBox", env: string) => {
+      const source = info[k].source
+      return source === "ui" ? "saved in Settings › Boxes & limits" : source === "env" ? `${env} env var` : source === "config" ? "server config" : null
+    }
     return {
       maxBoxes: l.maxBoxes,
-      agentsPerBox: l.slotsPerBox,
       maxAgents: l.maxAgents,
+      agentsPerBox: bySize("slotsPerBox"),
+      tasksPerBox: bySize("maxResidentPerBox"),
+      overridden: { agentsPerBox: why("slotsPerBox", "BOX_SLOTS"), tasksPerBox: why("maxResidentPerBox", "BOX_MAX_RESIDENT") },
       boxes: this.store.listBoxes().length,
       agentsRunning: this.runningTotal(),
     }

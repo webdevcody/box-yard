@@ -173,7 +173,10 @@ export function SettingsDialog({
   const info = useAgentSettings()
   const save = useSaveSettings()
   const reset = useResetSettings()
+  const resetFields = useResetSettings()
   const [draft, setDraft] = useState<Settings | null>(null)
+  // Box limits typed in while the size defaults apply: saved even when the number matches the default.
+  const [pinned, setPinned] = useState<(keyof Settings)[]>([])
   const [savedAt, setSavedAt] = useState(0)
   const ids = useId()
   const navRef = useRef<HTMLDivElement>(null)
@@ -181,11 +184,20 @@ export function SettingsDialog({
 
   const current = info.data
   const s = draft ?? current?.settings
-  const changed = changedKeys(draft, current?.settings)
+  const changed = draft ? [...new Set([...changedKeys(draft, current?.settings), ...pinned])] : []
   const dirty = changed.length > 0
   const dirtySections = changedSections(changed)
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => s && setDraft({ ...s, [k]: v })
+  const pin = (k: keyof Settings, on: boolean) => setPinned((p) => (on ? (p.includes(k) ? p : [...p, k]) : p.filter((x) => x !== k)))
+  // Forget just these saved values; the rest of the draft stays as edited.
+  const resetKeys = (keys: (keyof Settings)[]) =>
+    resetFields.mutate(keys, {
+      onSuccess: (next) => {
+        setDraft((d) => d && { ...d, ...Object.fromEntries(keys.map((k) => [k, next.settings[k]])) })
+        setPinned((p) => p.filter((k) => !keys.includes(k)))
+      },
+    })
   const hint = (k: keyof Settings) => <SourceHint source={current?.sources[k]} env={SETTING_ENV[k]} changed={changed.includes(k)} />
   const fid = (k: string) => `${ids}-${k}`
 
@@ -227,9 +239,10 @@ export function SettingsDialog({
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!s || !dirty) return
-    save.mutate(savePatch(s, current?.settings), {
+    save.mutate(savePatch(s, current?.settings, pinned), {
       onSuccess: () => {
         setDraft(null)
+        setPinned([])
         setSavedAt(Date.now())
       },
     })
@@ -258,7 +271,12 @@ export function SettingsDialog({
                 body: "Forget every value saved here? Env vars and defaults apply again.",
                 confirmLabel: "Reset",
                 danger: true,
-              }).then((ok) => ok && reset.mutate(undefined, { onSuccess: () => setDraft(null) }))
+              }).then((ok) => ok && reset.mutate(undefined, {
+                    onSuccess: () => {
+                      setDraft(null)
+                      setPinned([])
+                    },
+                  }))
             }}
             title="Forget saved values: env vars and defaults apply again"
           >
@@ -456,7 +474,18 @@ export function SettingsDialog({
             </Row>
           </Panel>
         ) : section === "limits" ? (
-          <LimitsPanel s={s} set={set} hint={hint} fid={fid} sources={current?.sources} changed={changed} />
+          <LimitsPanel
+            s={s}
+            set={set}
+            hint={hint}
+            fid={fid}
+            sources={current?.sources}
+            changed={changed}
+            current={current?.settings}
+            pin={pin}
+            resetKeys={resetKeys}
+            resetting={resetFields.isPending ? (resetFields.variables ?? null) : null}
+          />
         ) : (
           <CostsPanel s={s} set={set} hint={hint} fid={fid} />
         )}
@@ -480,6 +509,10 @@ function LimitsPanel({
   fid,
   sources,
   changed,
+  current,
+  pin,
+  resetKeys,
+  resetting,
 }: {
   s: Settings
   set: <K extends keyof Settings>(k: K, v: Settings[K]) => void
@@ -487,13 +520,28 @@ function LimitsPanel({
   fid: (k: string) => string
   sources?: Record<keyof Settings, SettingSource>
   changed: (keyof Settings)[]
+  current?: Settings
+  pin: (k: keyof Settings, on: boolean) => void
+  resetKeys: (keys: (keyof Settings)[]) => void
+  resetting: (keyof Settings)[] | null
 }) {
   const health = useHealth()
   const int =
-    (k: "maxBoxes" | "slotsPerBox" | "maxAgents" | "maxResidentPerBox" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "buildCleanupIdleMinutes") =>
+    (k: "maxBoxes" | "maxAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "buildCleanupIdleMinutes") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
+  const limitField = (k: BoxLimitKey) => ({
+    k,
+    value: s[k],
+    current: current?.[k],
+    source: sources?.[k],
+    changed: changed.includes(k),
+    onValue: (v: number) => set(k, v),
+    pin: (on: boolean) => pin(k, on),
+    onReset: () => resetKeys([k]),
+    resetting: resetting?.includes(k) ?? false,
+  })
   const upstash = health.data?.provider === "upstash"
   return (
     <Panel section="limits">
@@ -548,7 +596,7 @@ function LimitsPanel({
         help={`Claude turns that may run at the same time inside one box. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
         hint={hint("slotsPerBox")}
       >
-        <input id={fid("spb")} type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
+        <BoxLimitInput id={fid("spb")} max={20} {...limitField("slotsPerBox")} />
       </Row>
       <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
@@ -559,7 +607,7 @@ function LimitsPanel({
         help={`Task folders kept on one box before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
         hint={hint("maxResidentPerBox")}
       >
-        <input id={fid("mr")} type="number" min={1} max={200} className={inputClass} value={s.maxResidentPerBox} onChange={int("maxResidentPerBox")} />
+        <BoxLimitInput id={fid("mr")} max={200} {...limitField("maxResidentPerBox")} />
       </Row>
       <Row id={fid("bid")} label="Idle box deletion" help="Delete an idle worker box after this many minutes, but only when every resident workspace has a fresh archive. 0 keeps boxes." hint={hint("boxIdleDeleteMinutes")}>
         <input id={fid("bid")} type="number" min={0} max={43_200} className={inputClass} value={s.boxIdleDeleteMinutes} onChange={int("boxIdleDeleteMinutes")} />
@@ -653,6 +701,93 @@ function LimitsPanel({
 }
 
 /** Agents and resident folders per box for each worker size, so a small box's lower capacity is visible. */
+type BoxLimitKey = "slotsPerBox" | "maxResidentPerBox"
+
+/**
+ * Agents or task folders per box. While each box follows its own size, the field shows every size's default
+ * instead of one number; typing a number overrides it for every box. A value saved here gets a "Use size default"
+ * button, and one set by env says how to remove it.
+ */
+export function BoxLimitInput({
+  id,
+  k,
+  max,
+  value,
+  current,
+  source,
+  changed,
+  onValue,
+  pin,
+  onReset,
+  resetting,
+}: {
+  id: string
+  k: BoxLimitKey
+  max: number
+  value: number
+  current?: number
+  source?: SettingSource
+  changed: boolean
+  onValue: (v: number) => void
+  pin: (on: boolean) => void
+  onReset: () => void
+  resetting: boolean
+}) {
+  // What's typed while focused, so the field can be empty mid-edit without the number snapping back.
+  const [text, setText] = useState<string | null>(null)
+  const atDefault = source === "default" && !changed
+  const sizes = boxLimitDefaults(k)
+  const env = SETTING_ENV[k]
+  const shown = text ?? (atDefault ? "" : String(value))
+  return (
+    <>
+      <input
+        id={id}
+        type="number"
+        min={1}
+        max={max}
+        className={cx(inputClass, atDefault && "placeholder:text-zinc-300!")}
+        value={shown}
+        placeholder={atDefault ? sizes : undefined}
+        aria-description={atDefault ? `Each box uses its size's default: ${sizes}` : undefined}
+        data-testid={`limit-${k}`}
+        onChange={(e) => {
+          const t = e.target.value
+          setText(t)
+          const n = Number(t)
+          if (t === "" || !Number.isInteger(n) || n < 1 || n > max) return
+          onValue(n)
+          if (source === "default") pin(true)
+        }}
+        onBlur={() => {
+          // An emptied field drops the edit: back to the saved value, or to the size defaults.
+          if (text === "" && current !== undefined) {
+            onValue(current)
+            pin(false)
+          }
+          setText(null)
+        }}
+      />
+      {source === "ui" && !changed && (
+        <Button type="button" variant="subtle" size="sm" className="w-full sm:w-auto" loading={resetting} onClick={onReset} data-testid={`use-size-default-${k}`}>
+          Use size default
+        </Button>
+      )}
+      {source === "env" && !changed && env && (
+        <p className="text-xs leading-relaxed text-zinc-500" data-testid={`env-note-${k}`}>
+          To use each box's size default ({sizes}), remove <code className="font-mono text-zinc-400">{env}</code> from .env (and from the shell or deploy env) and
+          restart Box Yard.
+        </p>
+      )}
+    </>
+  )
+}
+
+/** "small 1 · medium 2 · large 4" */
+export function boxLimitDefaults(k: BoxLimitKey) {
+  return WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z][k]}`).join(" · ")
+}
+
 function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Record<keyof Settings, SettingSource>; changed: (keyof Settings)[] }) {
   const rows = sizeCapacities(s, sources, { slotsPerBox: changed.includes("slotsPerBox"), maxResidentPerBox: changed.includes("maxResidentPerBox") })
   const overridden = rows[0]!.slotsOverridden || rows[0]!.residentOverridden

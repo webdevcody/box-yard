@@ -13,7 +13,7 @@ import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
-import { SettingsStore, TtsSettingsStore } from "./settings.js"
+import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
 import { TtsError, TtsService } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { Auth } from "./auth.js"
@@ -650,8 +650,9 @@ export function createBoxYard(
     applyPoolChange()
     res.json(info)
   })
-  api.delete("/agent-settings", (_req, res) => {
-    const info = settings.reset()
+  // No `keys`: forget every saved value. `?keys=slotsPerBox,maxResidentPerBox`: forget only those (unknown keys are a 400).
+  api.delete("/agent-settings", (req, res) => {
+    const info = settings.reset(req.query.keys === undefined ? undefined : parseSettingKeys(req.query.keys))
     hub.broadcast({ type: "settings", info })
     applyPoolChange()
     res.json(info)

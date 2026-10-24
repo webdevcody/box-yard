@@ -146,9 +146,13 @@ const POOL_KEYS = [
   "gitPartialClone",
 ] as const
 
-/** What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them over env changes. */
-export function savePatch(draft: Settings, current: Settings | null | undefined): Partial<Settings> {
+/**
+ * What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them
+ * over env changes. `keep` names fields typed in on purpose even if the value matches what's in effect (a box limit
+ * typed over the size default).
+ */
+export function savePatch(draft: Settings, current: Settings | null | undefined, keep: readonly (keyof Settings)[] = []): Partial<Settings> {
   const patch: Partial<Settings> = { ...draft }
-  for (const k of POOL_KEYS) if (current && draft[k] === current[k]) delete patch[k]
+  for (const k of POOL_KEYS) if (current && draft[k] === current[k] && !keep.includes(k)) delete patch[k]
   return patch
 }

@@ -59,4 +59,9 @@ describe("settings nav", () => {
     expect(untouched).toHaveProperty("orchestratorModel", "claude-opus-5-5")
     expect(savePatch({ ...base, slotsPerBox: 3 }, base)).toMatchObject({ slotsPerBox: 3 })
   })
+
+  it("sends a box limit typed over the size default even when the number matches it", () => {
+    expect(savePatch(base, base)).not.toHaveProperty("slotsPerBox")
+    expect(savePatch(base, base, ["slotsPerBox"])).toHaveProperty("slotsPerBox", base.slotsPerBox)
+  })
 })
