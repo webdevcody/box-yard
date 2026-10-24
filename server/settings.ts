@@ -22,6 +22,20 @@ import {
 } from "../shared/types.js"
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import {
+  ELEVENLABS_SPEED,
+  MAX_INSTRUCTIONS,
+  OPENAI_SPEED,
+  TTS_DEFAULTS,
+  TTS_PROVIDERS,
+  type CloudProvider,
+  type ElevenLabsTts,
+  type KeyStatus,
+  type OpenAiTts,
+  type TtsInfo,
+  type TtsProvider,
+  type TtsSettings,
+} from "../shared/tts.js"
 
 const KEY = "settings"
 
@@ -252,4 +266,150 @@ export function autocompactFlag(ac: AutoCompact, window: number | null): string 
   const t = compactThreshold(ac, window)
   if (t === null) return null
   return String(Math.min(AUTOCOMPACT_MAX_TOKENS, Math.max(AUTOCOMPACT_MIN_TOKENS, t)))
+}
+
+// ------------------------------------------------------------------ text-to-speech (Settings › Voice)
+
+const TTS_KEY = "tts_settings"
+/** API keys live in their own kv entry, so nothing that returns settings can include them by accident. */
+const TTS_SECRETS_KEY = "tts_keys"
+
+const apiKey = z
+  .string()
+  .trim()
+  .min(8, "That key looks too short")
+  .max(500)
+  .regex(/^[\x21-\x7e]+$/, "API keys have no spaces or special characters")
+const ttsModel = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/, "Model names are letters, digits, dots and dashes")
+
+export const ttsPatch = z
+  .object({
+    provider: z.enum(TTS_PROVIDERS),
+    elevenlabs: z
+      .object({
+        voiceId: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/, "Not an ElevenLabs voice id"),
+        voiceName: z.string().trim().max(100),
+        model: ttsModel,
+        speed: z.number().min(ELEVENLABS_SPEED.min).max(ELEVENLABS_SPEED.max),
+      })
+      .partial()
+      .strict(),
+    openai: z
+      .object({
+        voice: z.string().trim().min(1).max(64).regex(/^[a-z0-9_-]+$/, "Not an OpenAI voice"),
+        model: ttsModel,
+        instructions: z.string().max(MAX_INSTRUCTIONS),
+        speed: z.number().min(OPENAI_SPEED.min).max(OPENAI_SPEED.max),
+      })
+      .partial()
+      .strict(),
+    /** A new key, or null to forget the saved one (an env var then applies again). */
+    elevenlabsApiKey: apiKey.nullable(),
+    openaiApiKey: apiKey.nullable(),
+  })
+  .partial()
+  .strict()
+
+type SavedTts = { provider?: TtsProvider; elevenlabs?: Partial<ElevenLabsTts>; openai?: Partial<OpenAiTts> }
+
+/**
+ * Text-to-speech settings: the provider, each provider's voice/model/speed, and the API keys.
+ * Same precedence as the rest of Settings: saved in the UI > TTS_PROVIDER / ELEVENLABS_API_KEY /
+ * OPENAI_API_KEY env vars > built-in defaults. info() reports keys as set/unset only.
+ */
+export class TtsSettingsStore {
+  constructor(
+    private readonly store: Store,
+    private readonly c: Partial<Pick<Config, "elevenlabsApiKey" | "openaiApiKey" | "ttsProvider">>,
+  ) {}
+
+  private json<T>(key: string): T {
+    try {
+      const v = JSON.parse(this.store.getKv(key) ?? "{}")
+      return v && typeof v === "object" ? v : ({} as T)
+    } catch {
+      return {} as T
+    }
+  }
+
+  private saved(): SavedTts {
+    const parsed = ttsPatch.safeParse(this.json(TTS_KEY))
+    return parsed.success ? (parsed.data as SavedTts) : {}
+  }
+
+  private secrets(): Partial<Record<CloudProvider, string>> {
+    return this.json(TTS_SECRETS_KEY)
+  }
+
+  private envKey(p: CloudProvider): string {
+    return (p === "elevenlabs" ? this.c.elevenlabsApiKey : this.c.openaiApiKey) ?? ""
+  }
+
+  private envProvider(): TtsProvider | null {
+    const v = this.c.ttsProvider
+    return v && (TTS_PROVIDERS as readonly string[]).includes(v) ? (v as TtsProvider) : null
+  }
+
+  /** The key to call a provider with (server-side only), or "" when none is set. */
+  apiKey(p: CloudProvider): string {
+    return this.secrets()[p] || this.envKey(p)
+  }
+
+  info(): TtsInfo {
+    const saved = this.saved()
+    const envProvider = this.envProvider()
+    const secrets = this.secrets()
+    const settings: TtsSettings = {
+      provider: saved.provider ?? envProvider ?? TTS_DEFAULTS.provider,
+      elevenlabs: { ...TTS_DEFAULTS.elevenlabs, ...saved.elevenlabs },
+      openai: { ...TTS_DEFAULTS.openai, ...saved.openai },
+    }
+    const keyStatus = (p: CloudProvider): KeyStatus =>
+      secrets[p] ? { state: "set", source: "ui" } : this.envKey(p) ? { state: "set", source: "env" } : { state: "unset", source: "default" }
+    return {
+      settings,
+      sources: {
+        provider: saved.provider ? "ui" : envProvider ? "env" : "default",
+        elevenlabs: saved.elevenlabs && Object.keys(saved.elevenlabs).length ? "ui" : "default",
+        openai: saved.openai && Object.keys(saved.openai).length ? "ui" : "default",
+      },
+      keys: { elevenlabs: keyStatus("elevenlabs"), openai: keyStatus("openai") },
+      defaults: TTS_DEFAULTS,
+    }
+  }
+
+  get(): TtsSettings {
+    return this.info().settings
+  }
+
+  update(patch: unknown): TtsInfo {
+    const parsed = ttsPatch.safeParse(patch)
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues.map((i) => i.message).join("; "))
+    const { elevenlabsApiKey, openaiApiKey, ...prefs } = parsed.data
+    const saved = this.saved()
+    this.store.setKv(
+      TTS_KEY,
+      JSON.stringify({
+        ...saved,
+        ...(prefs.provider ? { provider: prefs.provider } : {}),
+        ...(prefs.elevenlabs ? { elevenlabs: { ...saved.elevenlabs, ...prefs.elevenlabs } } : {}),
+        ...(prefs.openai ? { openai: { ...saved.openai, ...prefs.openai } } : {}),
+      }),
+    )
+    if (elevenlabsApiKey !== undefined || openaiApiKey !== undefined) {
+      const secrets = this.secrets()
+      for (const [p, v] of [["elevenlabs", elevenlabsApiKey], ["openai", openaiApiKey]] as const) {
+        if (v === null) delete secrets[p]
+        else if (v !== undefined) secrets[p] = v
+      }
+      this.store.setKv(TTS_SECRETS_KEY, JSON.stringify(secrets))
+    }
+    return this.info()
+  }
+
+  /** Forget saved choices (not keys) so env vars and defaults apply again. */
+  reset(): TtsInfo {
+    this.store.setKv(TTS_KEY, null)
+    return this.info()
+  }
 }

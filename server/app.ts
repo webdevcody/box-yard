@@ -13,7 +13,8 @@ import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
-import { SettingsStore } from "./settings.js"
+import { SettingsStore, TtsSettingsStore } from "./settings.js"
+import { TtsError, TtsService } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
@@ -26,6 +27,7 @@ import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
 import { BOX_SIZES, type Health } from "../shared/types.js"
+import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
 const idSchema = z
   .string()
@@ -36,6 +38,16 @@ const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var
 const attachmentIds = z.array(z.string()).max(20).optional()
 
 const schemas = {
+  tts: z
+    .object({
+      text: z.string().max(MAX_TTS_CHARS * 2),
+      provider: z.enum(CLOUD_PROVIDERS as [string, ...string[]]).optional(),
+      voice: z.string().max(64).optional(),
+      model: z.string().max(80).optional(),
+      speed: z.number().optional(),
+      instructions: z.string().max(2000).optional(),
+    })
+    .strict(),
   notificationsRead: z
     .object({ ids: z.array(z.string().max(64)).max(500).optional(), taskId: z.string().max(64).optional(), all: z.boolean().optional() })
     .refine((b) => b.all || b.taskId || b.ids?.length, "Pass ids, taskId or all"),
@@ -114,6 +126,8 @@ export interface BoxYard {
   captains: CaptainManager
   scheduler: Scheduler
   settings: SettingsStore
+  ttsSettings: TtsSettingsStore
+  tts: TtsService
   start(): Promise<void>
   stop(): void
 }
@@ -121,7 +135,14 @@ export interface BoxYard {
 /** Wire up the database, task manager, orchestrator and HTTP routes. */
 export function createBoxYard(
   c: Config,
-  opts: { provider?: BoxProvider; webDir?: string; qstash?: QStash | null; now?: () => number } = {},
+  opts: {
+    provider?: BoxProvider
+    webDir?: string
+    qstash?: QStash | null
+    now?: () => number
+    /** Stand-ins for the ElevenLabs / OpenAI HTTP APIs (tests). */
+    tts?: { fetch?: typeof fetch; timeoutMs?: number; voicesTtlMs?: number }
+  } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
   const store = new Store(db)
@@ -131,6 +152,12 @@ export function createBoxYard(
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const provider = opts.provider ?? makeProvider(c)
   const settings = new SettingsStore(store, c)
+  const ttsSettings = new TtsSettingsStore(store, c)
+  const tts = new TtsService({
+    settings: ttsSettings,
+    baseUrls: { elevenlabs: c.elevenlabsBaseUrl.replace(/\/+$/, ""), openai: c.openaiBaseUrl.replace(/\/+$/, "") },
+    ...opts.tts,
+  })
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
@@ -375,7 +402,60 @@ export function createBoxYard(
     res.json({ ok: true })
   })
   api.get("/settings", (_req, res) => {
-    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb })
+    // Text-to-speech keys appear only as set/unset plus where they come from.
+    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys })
+  })
+
+  // ---- text-to-speech (Settings › Voice): settings, the provider proxy and voice lists
+  api.get("/tts/settings", (_req, res) => {
+    res.json(ttsSettings.info())
+  })
+  api.put("/tts/settings", (req, res) => {
+    const info = ttsSettings.update(req.body)
+    hub.broadcast({ type: "tts", info })
+    res.json(info)
+  })
+  const ttsFailed = (res: Response, err: unknown) => {
+    if (!(err instanceof TtsError)) throw err
+    res.removeHeader("Content-Type")
+    res.removeHeader("X-TTS-Cache")
+    res.status(err.status).json({ error: err.message, provider: err.provider, upstreamStatus: err.upstreamStatus })
+  }
+  api.get("/tts/voices", async (req, res) => {
+    const provider = String(req.query.provider ?? "")
+    if (!(CLOUD_PROVIDERS as readonly string[]).includes(provider)) throw new BadRequestError("provider must be elevenlabs or openai")
+    try {
+      res.json(await tts.voices(provider as (typeof CLOUD_PROVIDERS)[number], req.query.refresh === "1"))
+    } catch (err) {
+      ttsFailed(res, err)
+    }
+  })
+  /** Synthesize `text` with the saved provider (or the one given) and stream the mp3 back. */
+  api.post("/tts", async (req, res) => {
+    const body = parse(schemas.tts, req.body) as Parameters<TtsService["synthesize"]>[0]
+    let audio: Awaited<ReturnType<TtsService["synthesize"]>>
+    try {
+      audio = await tts.synthesize(body)
+    } catch (err) {
+      return ttsFailed(res, err)
+    }
+    res.on("close", () => {
+      if (!res.writableFinished) audio.cancel()
+    })
+    res.setHeader("Content-Type", audio.contentType)
+    res.setHeader("Cache-Control", "no-store")
+    res.setHeader("X-TTS-Cache", audio.cache)
+    try {
+      for await (const chunk of audio.chunks) {
+        if (res.destroyed) break
+        if (!res.write(chunk)) await new Promise((r) => res.once("drain", r))
+      }
+      res.end()
+    } catch (err) {
+      // Failed before any audio went out: a normal JSON error. After that, cut the response short.
+      if (!res.headersSent) return ttsFailed(res, err)
+      res.destroy(err as Error)
+    }
   })
 
   // ---- file attachments. One file per request, sent as the raw body: POST /api/uploads?name=shot.png
@@ -584,6 +664,8 @@ export function createBoxYard(
     captains,
     scheduler,
     settings,
+    ttsSettings,
+    tts,
     async start() {
       await tasks.start()
       scheduler.start()
