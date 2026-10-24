@@ -86,8 +86,9 @@ function origin(commits: number, size: number) {
   return { url: `file://${bare}`, bare, pushHeavy }
 }
 
+// Push at turn end off: these tests are about the full-archive chain that a task without a pushed branch falls back to.
 async function repoProject(r: Running, name: string, url: string) {
-  const p = await call<Project>(r, "POST", "/api/projects", { name })
+  const p = await call<Project>(r, "POST", "/api/projects", { name, pushAtTurnEnd: false })
   r.yard.store.db.prepare("UPDATE projects SET repo = ? WHERE id = ?").run(url, p.id)
   return p
 }
