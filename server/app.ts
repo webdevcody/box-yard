@@ -28,6 +28,7 @@ import { redact, type CredentialStore } from "./credentials.js"
 import { Setup, type SetupDeps } from "./setup.js"
 import { CREDENTIAL_KEYS, type CredentialKey } from "../shared/setup.js"
 import { startSelfHold, startSelfSnapshots } from "./backup.js"
+import { buildInfo } from "./build.js"
 import { Scheduler } from "./scheduler.js"
 import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
@@ -250,6 +251,8 @@ export function createBoxYard(
     ...opts.tts,
   })
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
+  // Read the running commit now, before a `git pull` can move HEAD under this process.
+  buildInfo()
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
@@ -382,6 +385,7 @@ export function createBoxYard(
       pool: tasks.limits(),
       orchestratorBusy: orchestrator.busy,
       scheduler: scheduler.mode,
+      build: buildInfo(),
     }
     res.json(body)
   })

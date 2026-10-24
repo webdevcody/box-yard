@@ -354,6 +354,11 @@ export interface BoxInfo {
   keepAlive: boolean
   slots: number
   runningTurns: number
+  /**
+   * Over its slots because the limit was lowered while these agents ran: the limit they started under
+   * (null when that's not why, or not known since a restart).
+   */
+  limitLoweredFrom?: number | null
   residentTasks: string[]
   /** Names of the projects whose tasks live on this box. */
   projects: string[]
@@ -424,6 +429,8 @@ export interface Health {
   orchestratorBusy: boolean
   /** How schedules are triggered: the server's own timer, or QStash plus the timer. */
   scheduler: "local" | "qstash"
+  /** The build this server runs: its git commit (null when it isn't a checkout) and when the process started. */
+  build: { commit: string | null; commitDate: string | null; startedAt: number }
 }
 
 /** Server-sent events pushed to the UI. */

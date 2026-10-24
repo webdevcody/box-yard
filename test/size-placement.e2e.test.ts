@@ -317,6 +317,6 @@ describe("placement by project box size", () => {
     await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "carry on" })
     const back = await status(r, t.id, (x) => x.status === "done" && x.pendingCount === 0 && x.turnCount === 2, "the second turn")
     expect(back.boxId).toBe(small)
-    expect(messages(r, t.id)).toContain(`Running on ${small} (small) though its project needs large boxes: its workspace has no fresh archive to move.`)
+    expect(messages(r, t.id)).toContain(`Running on ${small} (small) though its project needs large boxes: it can't move safely (its workspace has no archive from after its last turn).`)
   })
 })

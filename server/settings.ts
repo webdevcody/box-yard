@@ -241,13 +241,34 @@ export class SettingsStore {
   private saved(): Partial<Settings> {
     const raw = this.store.getKv(KEY)
     if (!raw) return {}
+    let json: unknown
     try {
-      const parsed = settingsPatch.safeParse(JSON.parse(raw))
-      return parsed.success ? (parsed.data as Partial<Settings>) : {}
+      json = JSON.parse(raw)
     } catch {
       return {}
     }
+    const parsed = settingsPatch.safeParse(json)
+    if (parsed.success) return parsed.data as Partial<Settings>
+    if (!json || typeof json !== "object") return {}
+    // One unknown or out-of-range value (written by another build) mustn't drop the rest: a lost "Agents per
+    // box" would quietly bring back each size's default (4 on a large box). Keep every value that's still valid.
+    const shape = settingsPatch.shape as Record<string, z.ZodType>
+    const kept: Record<string, unknown> = {}
+    const dropped: string[] = []
+    for (const [k, v] of Object.entries(json)) {
+      const one = Object.hasOwn(shape, k) ? shape[k]!.safeParse(v) : null
+      if (one?.success) kept[k] = one.data
+      else dropped.push(k)
+    }
+    const note = dropped.sort().join(", ")
+    if (note !== this.droppedNote) {
+      this.droppedNote = note
+      console.warn(`[box-yard] saved settings: ignoring ${note} (unknown to this build or out of range); the rest still apply`)
+    }
+    return kept as Partial<Settings>
   }
+
+  private droppedNote = ""
 
   info(): SettingsInfo {
     const saved = this.saved()
