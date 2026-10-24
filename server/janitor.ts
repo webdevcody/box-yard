@@ -30,6 +30,9 @@ export const STALE_TMP_PATTERNS = [
   "thin-*",
   "archive-*",
   "boxes-*",
+  "unpacked-*",
+  "pushed-*",
+  "full-disk-shims-*",
 ]
 export const STALE_TMP_MINUTES = 30
 
