@@ -632,6 +632,17 @@ function LimitsPanel({
           {s.gitPartialClone ? "On: blob:none mirrors" : "Off: full mirrors"}
         </label>
       </Row>
+      <Row
+        id={fid("gpt")}
+        label="Push at turn end"
+        help="After every agent turn in a repo project, Box Yard pushes the task's branch and saves uncommitted work (untracked files too) to a hidden ref on origin, refs/boxyard/wip/<task>, without committing in the task's repo. Archives then carry only what git can't, so a box can go at any time without losing code. Without write access it quietly keeps full archives. A project can override it."
+        hint={hint("gitPushAtTurnEnd")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("gpt")} type="checkbox" checked={s.gitPushAtTurnEnd} onChange={(e) => set("gitPushAtTurnEnd", e.target.checked)} data-testid="git-push-at-turn-end" />
+          {s.gitPushAtTurnEnd ? "On: branch and WIP pushed, small archives" : "Off: full archives"}
+        </label>
+      </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
           With these limits, up to <span className="font-medium text-zinc-100 tabular-nums">{capacity}</span> {capacity === 1 ? "agent runs" : "agents run"} at once on up to{" "}

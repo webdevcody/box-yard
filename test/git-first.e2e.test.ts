@@ -366,6 +366,37 @@ describe("push at turn end", () => {
   })
 })
 
+describe("push at turn end setting", () => {
+  it("is on by default, follows the project's override, then Settings, and pushes nothing when off", async () => {
+    const o = origin()
+    const r = await start()
+    const off = await start({ gitPushAtTurnEnd: false })
+    expect(r.yard.tasks.pushAtTurnEnd({ repo: o.url, pushAtTurnEnd: null })).toBe(true)
+    expect(r.yard.tasks.pushAtTurnEnd({ repo: null, pushAtTurnEnd: true })).toBe(false)
+    expect(off.yard.tasks.pushAtTurnEnd({ repo: o.url, pushAtTurnEnd: null })).toBe(false)
+    expect(off.yard.tasks.pushAtTurnEnd({ repo: o.url, pushAtTurnEnd: true })).toBe(true)
+
+    const p = await repoProject(r, "alpha", o.url, { pushAtTurnEnd: false })
+    expect(p.pushAtTurnEnd).toBe(false)
+    const t = await startTask(r, p.id, "kept here")
+    expect(o.ref(wip(t))).toBeNull()
+    expect(t.pushState ?? null).toBeNull()
+    expect(listing(r.yard.store.getTaskRow(t.id)!.archive_path!)).toContain(`${t.id}/work/.git/HEAD`)
+
+    // Back to the default (Settings: on): the next turn pushes.
+    const cleared = await call<Project>(r, "PATCH", `/api/projects/${p.id}`, { pushAtTurnEnd: null })
+    expect(cleared.pushAtTurnEnd).toBeNull()
+    const pushed = await turn(r, t.id, "now push", 2)
+    expect(git(o.bare, "show", `${wip(t)}:box-yard-demo.md`)).toContain("now push")
+    expect(pushed.pushState).toMatchObject({ status: "pushed" })
+
+    // Settings off: the project follows it again.
+    const saved = await call<{ settings: { gitPushAtTurnEnd: boolean } }>(r, "PUT", "/api/agent-settings", { gitPushAtTurnEnd: false })
+    expect(saved.settings.gitPushAtTurnEnd).toBe(false)
+    expect(r.yard.tasks.pushAtTurnEnd(cleared)).toBe(false)
+  })
+})
+
 describe("box operations with small archives", () => {
   it("resizes a box of heavy-repo tasks through archives of a few KB, and each task gets its work back", async () => {
     const o = origin({ heavy: 3 })
