@@ -126,10 +126,10 @@ describe("placement by project box size", () => {
     // The small box has a free slot (2 per box here), but it's too small: the task waits, and says why.
     const t = await task(r, big.id, "needs ram")
     const waiting = await status(r, t.id, (x) => x.status === "queued" && Boolean(x.waitReason), "the big task to wait with a reason")
-    expect(waiting.waitReason).toBe("Waiting for a large box: the pool is full (1 of 1 boxes) and no box is idle to resize")
+    expect(waiting.waitReason).toBe("Waiting for a large box: the pool is full and no box is idle to resize")
     expect(waiting.waitBoxSize).toBe("large")
     expect(waiting.boxId).toBeNull()
-    expect(messages(r, t.id)).toContain("Waiting for a large box: the pool is full (1 of 1 boxes) and no box is idle to resize.")
+    expect(messages(r, t.id)).toContain("Waiting for a large box: the pool is full and no box is idle to resize.")
     // The task list the Yard queue reads (GET /api/tasks) carries the same reason.
     const queue = await call<Task[]>(r, "GET", "/api/tasks")
     expect(queue.find((x) => x.id === t.id)).toMatchObject({ waitReason: waiting.waitReason, waitBoxSize: "large" })

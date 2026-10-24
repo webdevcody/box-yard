@@ -82,8 +82,10 @@ export function QuietPill({ className }: { className?: string }) {
 }
 
 /** The icon for why a queued task waits: a box when it waits for a box of its project's size, else a disk. */
+export const waitIconOf = (task: { waitBoxSize?: BoxSize | null }): LucideIcon => (task.waitBoxSize ? Box : HardDrive)
+
 export function WaitIcon({ task, className }: { task: { waitBoxSize?: BoxSize | null }; className?: string }) {
-  const Icon = task.waitBoxSize ? Box : HardDrive
+  const Icon = waitIconOf(task)
   return <Icon className={className} aria-hidden />
 }
 

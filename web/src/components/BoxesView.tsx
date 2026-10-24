@@ -9,7 +9,7 @@ import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, fi
 import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, WaitIcon } from "./ui"
+import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
@@ -771,9 +771,9 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
           <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
         </div>
         {note && (
-          <div className="mt-0.5 flex items-center gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
-            <WaitIcon task={task} className="h-3 w-3 shrink-0" />
-            <span className="truncate" title={note}>
+          <div className="mt-0.5 flex items-start gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
+            <LineIcon icon={waitIconOf(task)} className="h-3 w-3" />
+            <span className="line-clamp-2 min-w-0 wrap-anywhere sm:truncate" title={note}>
               {note}
             </span>
           </div>

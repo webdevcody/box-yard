@@ -1510,8 +1510,7 @@ export class TaskManager {
       }
       return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
     }
-    const n = this.store.listBoxes().length
-    this.setWaitReason(row.id, `${waitFor}: the pool is full (${n} of ${this.limits().maxBoxes} boxes) and no box is idle to resize`, min)
+    this.setWaitReason(row.id, `${waitFor}: the pool is full and no box is idle to resize`, min)
   }
 
   /** A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. */
