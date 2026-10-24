@@ -142,7 +142,7 @@ describe("delete box", () => {
     const t = await status(r, (await task(r, p.id, "first")).id, (x) => x.status === "done" && x.pendingCount === 0, "the task to finish")
     const res = await send(r, "DELETE", `/api/boxes/${t.boxId}`)
     expect(res.status).toBe(409)
-    expect(res.data.error).toContain(`Couldn't archive ${t.id}, so ${t.boxId} was not deleted.`)
+    expect(res.data.error).toBe(`Couldn't archive ${t.id}, so ${t.boxId} was not deleted: archive ${t.id}: workspace archiving is off (BOXYARD_ARCHIVE=0)`)
     expect((await boxes(r)).find((b) => b.id === t.boxId)?.operation).toBeNull()
     expect(fs.existsSync(workDir(r, t.boxId!, t.id))).toBe(true)
   })

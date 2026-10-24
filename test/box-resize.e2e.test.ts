@@ -210,7 +210,7 @@ describe("resize by migration (no provider support)", () => {
     await call(r, "POST", `/api/boxes/${t.boxId}/resize`, { size: "large" })
     const rep = await finished(r, t.boxId!)
     expect(rep.status).toBe("failed")
-    expect(rep.error).toContain(`Couldn't archive ${t.id}, so nothing moved and ${t.boxId} keeps its work.`)
+    expect(rep.error).toBe(`archive step failed: Couldn't archive ${t.id}, so nothing moved and ${t.boxId} keeps its work: archive ${t.id}: workspace archiving is off (BOXYARD_ARCHIVE=0)`)
     expect(rep.steps.find((s) => s.key === "archive")?.status).toBe("failed")
     const list = await boxes(r)
     expect(list.map((b) => [b.id, b.size, b.operation])).toEqual([[t.boxId, "small", null]])

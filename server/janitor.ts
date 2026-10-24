@@ -22,6 +22,8 @@ export interface JanitorHost {
   installRunner(boxId: string): Promise<string>
   hasFreshArchive(row: TaskRow): boolean
   archive(taskId: string): Promise<void>
+  /** Why a task has no fresh archive: "archive task_x: <reason>". */
+  archiveProblem(taskId: string): string
   /** Remove a resting task's folder from its box; it comes back from the archive on its next message. */
   park(taskId: string, boxId: string, note: string): Promise<void>
   /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs; with `owner`, also the box's own project's. */
@@ -367,6 +369,6 @@ export class BoxJanitor {
         this.busy.delete(candidate.id)
       }
     }
-    return kept.length ? `kept ${kept.join(", ")}: couldn't archive ${kept.length === 1 ? "it" : "them"}` : null
+    return kept.length ? `kept ${kept.join(", ")}: couldn't archive ${kept.length === 1 ? "it" : "them"} (${kept.map((id) => this.host.archiveProblem(id)).join("; ")})` : null
   }
 }
