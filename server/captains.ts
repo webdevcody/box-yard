@@ -60,15 +60,25 @@ export interface CaptainSendOptions {
   source?: CaptainSource
   /** The Coordinator tool that sent it (send_to_captain or ask_captain). */
   tool?: string
+  /** Extra meta to keep on the message (a hook's id and name). */
+  meta?: Record<string, unknown>
 }
 
-const SOURCE_LABEL: Record<CaptainSource, string> = { cody: "From Cody", coordinator: "From the Coordinator", schedule: "From a schedule" }
+const SOURCE_LABEL: Record<CaptainSource, string> = { cody: "From Cody", coordinator: "From the Coordinator", schedule: "From a schedule", hook: "From a hook" }
+
+/** "[From Cody]", or the hook's name for a hook's message. */
+function sourceLabel(m: CaptainMessage) {
+  const source = captainSourceOf(m)
+  if (source === "hook" && typeof m.meta?.hookName === "string") return `From the hook "${m.meta.hookName}" (an automation, not a new message from Cody)`
+  return SOURCE_LABEL[source]
+}
 
 /** Up to this much of a Captain's reply is kept on the Coordinator's tool line. */
 const TOOL_REPLY_MAX = 20_000
 
 function briefTask(t: Task, ownerName?: string) {
-  const merge = t.mergeRequest ? ` (merge requested by ${ownerName?.trim() || DEFAULT_OWNER_NAME} with the Merge button: pending, don't start another merge of this PR)` : ""
+  const by = t.mergeRequest?.requestedBy ?? `${ownerName?.trim() || DEFAULT_OWNER_NAME} with the Merge button`
+  const merge = t.mergeRequest ? ` (merge requested by ${by}: pending, don't start another merge of this PR)` : ""
   return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}${merge}`
 }
 
@@ -171,8 +181,8 @@ export class CaptainManager {
     })
   }
 
-  /** Route a task notice to its project's Captain. Returns true when handled. */
-  notice(content: string, meta: Record<string, unknown> | null = null): boolean {
+  /** Route a task notice to its project's Captain. Returns true when handled. `wake: false` waits for the Captain's next turn. */
+  notice(content: string, meta: Record<string, unknown> | null = null, { wake = true }: { wake?: boolean } = {}): boolean {
     // A box notice (e.g. a resize) goes to the Captain of every project on the box, and the Coordinator still
     // reads it: only the Captain that started it is woken; the others see it with their next update.
     if (Array.isArray(meta?.projectIds) && !meta.taskId) {
@@ -180,7 +190,7 @@ export class CaptainManager {
         if (typeof projectId !== "string" || !this.store.getProject(projectId)) continue
         const msg = this.store.addCaptainMessage(projectId, "notice", content, meta)
         this.hub.broadcast({ type: "captain.message", message: msg })
-        if (meta.captainProjectId === projectId) this.get(projectId).nudge()
+        if (wake && meta.captainProjectId === projectId) this.get(projectId).nudge()
       }
       return false
     }
@@ -189,7 +199,7 @@ export class CaptainManager {
     if (!task) return false
     const msg = this.store.addCaptainMessage(task.projectId, "notice", content, meta)
     this.hub.broadcast({ type: "captain.message", message: msg })
-    this.get(task.projectId).nudge()
+    if (wake) this.get(task.projectId).nudge()
     return true
   }
 
@@ -253,14 +263,17 @@ class Captain {
     fs.writeFileSync(this.mcpConfigPath, this.mcpConfig, { mode: 0o600 })
   }
 
-  send(content: string, { id, attachments = [], source = "coordinator", tool }: CaptainSendOptions = {}): CaptainMessage {
-    const meta = { source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}) }
+  send(content: string, { id, attachments = [], source = "coordinator", tool, meta: extra }: CaptainSendOptions = {}): CaptainMessage {
+    const meta = { ...extra, source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}) }
     const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), meta, id)
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
-    this.autoTurns = 0
-    this.loopGuard.reset()
-    this.clearThrottleTimer()
+    // A hook is an automation, not Cody or the Coordinator stepping in: the loop guard keeps counting.
+    if (source !== "hook") {
+      this.autoTurns = 0
+      this.loopGuard.reset()
+      this.clearThrottleTimer()
+    }
     this.publishState()
     void this.drain()
     return msg
@@ -377,7 +390,7 @@ class Captain {
     return this.store
       .listCaptainMessages(this.project.id, 200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => `[${withOwner(SOURCE_LABEL[captainSourceOf(m)], this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
+      .map((m) => `[${withOwner(sourceLabel(m), this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
   }
 

@@ -18,6 +18,7 @@ import {
   MoreHorizontal,
   Paperclip,
   UserRound,
+  Webhook,
   XCircle,
   type LucideIcon,
 } from "lucide-react"
@@ -53,6 +54,7 @@ const NOTICE_ICON: Record<NoticeKind, { icon: LucideIcon; className: string; lab
   needs_input: { icon: MessageCircleQuestion, className: "text-amber-400", label: "Needs you" },
   pr: { icon: GitPullRequest, className: "text-emerald-400", label: "Pull request" },
   merge: { icon: GitMerge, className: "text-merged-fg", label: "Merge requested" },
+  hook: { icon: Webhook, className: "text-teal-300", label: "Hook fired" },
   artifact: { icon: Paperclip, className: "text-zinc-400", label: "File published" },
   message: { icon: MessageSquare, className: "text-sky-400", label: "Update" },
   warning: { icon: AlertTriangle, className: "text-amber-400", label: "Warning" },
@@ -189,6 +191,7 @@ const INBOUND: Record<CaptainSource, { label: string; icon: LucideIcon; box: str
   cody: { label: "You", icon: UserRound, box: "rounded-br-md bg-yard-500/15", head: "text-yard-300" },
   coordinator: { label: "From Coordinator", icon: Bot, box: "rounded-bl-md border border-sky-500/25 bg-sky-500/5", head: "text-sky-300" },
   schedule: { label: "Scheduled", icon: AlarmClock, box: "rounded-bl-md border border-violet-500/25 bg-violet-500/5", head: "text-violet-300" },
+  hook: { label: "Hook", icon: Webhook, box: "rounded-bl-md border border-teal-500/25 bg-teal-500/5", head: "text-teal-300" },
 }
 
 /** A message to the Captain, labelled by who sent it: Cody (right), the Coordinator or a schedule (left). Long ones fold. */
@@ -201,7 +204,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
     <div id={`captain-${m.id}`} data-testid="captain-inbound" data-source={source} className={cx("flex", source === "cody" && "justify-end")}>
       <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
         <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
-          <Icon className="h-3 w-3" /> {s.label}
+          <Icon className="h-3 w-3" /> {source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
           {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
           <span className="ml-auto pl-2 font-normal tracking-normal normal-case text-zinc-500">
             <TimeAgo ts={m.createdAt} />
