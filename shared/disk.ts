@@ -10,6 +10,14 @@ export const CLEANUP_STEPS = [
 ] as const
 export type CleanupStepKey = (typeof CLEANUP_STEPS)[number]["key"]
 
+/** Clear box: every workspace is archived and leaves the box first, then the leftovers, caches and repo mirrors go. */
+export const CLEAR_STEPS: readonly { key: CleanupStepKey; label: string }[] = [
+  { key: "archive", label: "Archive every workspace, then remove it from the box" },
+  { key: "partials", label: "Leftover task folders and temp files" },
+  { key: "caches", label: "npm, pip and tmp caches" },
+  { key: "git", label: "Repo mirrors" },
+]
+
 export interface CleanupStepReport {
   key: CleanupStepKey
   label: string
@@ -21,7 +29,8 @@ export interface CleanupStepReport {
   skipped: string | null
 }
 
-export type CleanupReason = "low-disk" | "out-of-space" | "manual"
+/** "clear" is Clear box: archive and remove every workspace, keep the box. */
+export type CleanupReason = "low-disk" | "out-of-space" | "manual" | "clear"
 
 export interface BoxCleanup {
   boxId: string

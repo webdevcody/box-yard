@@ -7,6 +7,7 @@ import { withCleanup } from "./diskCleanup"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type {
   BoxCleanup,
+  BoxContents,
   AppNotification,
   Artifact,
   Attachment,
@@ -481,6 +482,38 @@ export function useCleanBox() {
     mutationFn: (boxId: string) => api<BoxCleanup>(`/api/boxes/${boxId}/cleanup`, { method: "POST" }),
     onError: fail("Couldn't start the cleanup"),
     onSuccess: (cleanup) => qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, cleanup)),
+  })
+}
+
+/** What Clear box / Delete box would touch, fetched fresh each time a confirmation opens. */
+export const useBoxContents = (boxId: string) =>
+  useQuery({ queryKey: ["box-contents", boxId], queryFn: () => api<BoxContents>(`/api/boxes/${encodeURIComponent(boxId)}/contents`), staleTime: 0, gcTime: 0 })
+
+/** Archive every workspace and take it off the box. Resolves with the finished report (SSE box.cleanup toasts it). */
+export function useClearBox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { boxId: string; stopAgents: boolean }) => api<BoxCleanup>(`/api/boxes/${encodeURIComponent(input.boxId)}/clear`, { body: { stopAgents: input.stopAgents } }),
+    onSuccess: (cleanup) => qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, cleanup)),
+    // Not awaited: the dialog closes as soon as the server answers.
+    onSettled: () => void qc.invalidateQueries({ queryKey: keys.boxes }),
+  })
+}
+
+/** Archive every workspace, then destroy the box at the provider. */
+export function useDeleteBox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { boxId: string; stopAgents: boolean }) =>
+      api<{ ok: true }>(`/api/boxes/${encodeURIComponent(input.boxId)}${input.stopAgents ? "?stopAgents=1" : ""}`, { method: "DELETE" }),
+    onSuccess: (_res, input) => {
+      qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => list?.filter((b) => b.id !== input.boxId))
+      toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: keys.boxes })
+      void qc.invalidateQueries({ queryKey: keys.tasks })
+    },
   })
 }
 
