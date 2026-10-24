@@ -146,7 +146,7 @@ describe("placement by project box size", () => {
     expect(r.provider.created).toEqual(["small", "large"])
     expect(r.provider.destroyed).toEqual([small])
     const rep = r.yard.tasks.resizeReport(done.boxId!)!
-    expect(rep).toMatchObject({ status: "done", from: "small", to: "large", by: { kind: "placement", projectId: big.id, taskId: t.id } })
+    expect(rep).toMatchObject({ status: "done", from: "small", to: "large", by: { kind: "scheduler", projectId: big.id, taskId: t.id } })
     expect((await getTask(r, hang.id)).boxId).toBe(done.boxId)
   })
 

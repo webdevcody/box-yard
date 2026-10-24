@@ -1240,7 +1240,7 @@ export class TaskManager {
     const captainProject = r.by.kind === "captain" ? r.by.projectId : null
     const who = initiatorLabel(r.by, captainProject ? this.store.getProject(captainProject)?.name : undefined)
     const boxId = r.newBoxId && r.status === "done" ? r.newBoxId : r.boxId
-    const forProject = r.by.kind === "placement" ? [r.by.projectId] : []
+    const forProject = r.by.kind === "scheduler" ? [r.by.projectId] : []
     const projectIds = [...new Set(this.store.listTaskRows({ boxId }).map((t) => t.project_id).concat(this.store.getKv(boxOwnerKey(boxId)) ?? [], forProject))].filter(
       (id) => this.store.getProject(id),
     )
@@ -1501,7 +1501,7 @@ export class TaskManager {
       const project = this.store.getProject(row.project_id)
       try {
         await this.resizeBox(box.id, min, {
-          by: { kind: "placement", projectId: row.project_id, taskId: row.id },
+          by: { kind: "scheduler", projectId: row.project_id, taskId: row.id },
           reason: `${project?.name ?? row.project_id} needs ${min} boxes, the pool is at its limit and ${box.id} was idle`,
         })
       } catch (err) {
@@ -1532,7 +1532,7 @@ export class TaskManager {
       .filter((b) => b.status === "ready" && !sizeFits(b.size, size) && !this.boxOps.has(b.id) && !this.janitor.isRunning(b.id))
       .filter((b) => {
         const last = this.resizeReport(b.id)
-        return !(last?.status === "failed" && last.by.kind === "placement" && now - (last.finishedAt ?? 0) < AUTO_RESIZE_RETRY_MS)
+        return !(last?.status === "failed" && last.by.kind === "scheduler" && now - (last.finishedAt ?? 0) < AUTO_RESIZE_RETRY_MS)
       })
       .map((b) => ({ box: b, rows: this.store.listTaskRows({ boxId: b.id }) }))
       .filter(({ rows }) => rows.every((r) => !r.current_turn_id && r.status !== "starting" && r.status !== "working"))

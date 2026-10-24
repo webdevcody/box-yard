@@ -93,8 +93,8 @@ export type ResizeInitiator =
   | { kind: "cody" }
   | { kind: "coordinator" }
   | { kind: "captain"; projectId: string }
-  /** Placement grew an idle box for a task whose project needs a bigger box (the pool was full). */
-  | { kind: "placement"; projectId: string; taskId: string }
+  /** Box Yard itself: placement grew an idle box for a task whose project needs a bigger box (the pool was full). */
+  | { kind: "scheduler"; projectId: string; taskId: string }
 
 export interface ResizeStep {
   key: "stop" | "resize" | "create" | "archive" | "move" | "delete"
@@ -168,7 +168,7 @@ export function initiatorLabel(by: ResizeInitiator, projectName?: string): strin
     ? "Cody"
     : by.kind === "coordinator"
     ? "The Coordinator"
-    : by.kind === "placement"
+    : by.kind === "scheduler"
     ? "Box Yard"
     : `The ${projectName ?? by.projectId} Captain`
 }
