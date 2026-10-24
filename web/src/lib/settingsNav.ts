@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "credentials" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -16,13 +16,20 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "orchestrator",
     label: "Coordinator",
     description: "The model behind the chat that runs the yard, the per-project Captains and the project notes they curate, and when they compact their context.",
-    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort", "notesRetroEnabled", "notesMaxCount", "notesMaxTokens"],
+    fields: ["startInZen", "orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort", "notesRetroEnabled", "notesMaxCount", "notesMaxTokens"],
   },
   {
     key: "agents",
     label: "Box agents",
     description: "Defaults for the Claude Code agents that work on tasks inside boxes.",
     fields: ["ownerName", "agentModel", "agentEffort", "agentRoutingConfig", "agentAutoCompact"],
+  },
+  {
+    key: "credentials",
+    label: "Credentials",
+    description:
+      "The keys Box Yard works with: Upstash boxes, Claude and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Changes here save right away and apply from the next turn, no restart needed.",
+    fields: [],
   },
   {
     key: "hooks",
@@ -80,7 +87,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice" }
+const ALIASES: Record<string, SettingsSection> = { keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

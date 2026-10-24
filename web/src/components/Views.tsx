@@ -5,6 +5,7 @@ import { useHealth, useMarkDoneFromInbox, useProjects, useTasks, keys } from "..
 import { inInbox, usePendingCloses } from "../lib/inbox"
 import { api } from "../lib/api"
 import { Button, Empty, inputClass } from "./ui"
+import { useOpenSettings } from "./SettingsDialog"
 import { TaskCard } from "./TaskCard"
 import { ResortPill } from "./ResortPill"
 import { useStableOrder } from "../lib/useStableOrder"
@@ -110,8 +111,10 @@ export function InboxView() {
 
 export function HealthBanner() {
   const health = useHealth()
+  const openSettings = useOpenSettings()
   const [hidden, setHidden] = useState(false)
   if (hidden || !health.data || health.data.problems.length === 0) return null
+  const credentials = health.data.problems.some((p) => p.includes("Settings › Credentials"))
   return (
     <div className="flex items-start gap-3 border-b border-amber-900/40 bg-amber-950/30 px-4 py-2 text-xs text-amber-200">
       <div className="flex-1 space-y-0.5">
@@ -119,6 +122,11 @@ export function HealthBanner() {
           <div key={p}>⚠ {p}</div>
         ))}
       </div>
+      {credentials && (
+        <button className="-my-3 grid min-h-11 place-items-center rounded-lg px-2 font-medium text-amber-200 hover:text-amber-100 sm:-my-1 sm:min-h-0" onClick={() => openSettings("credentials")}>
+          set up
+        </button>
+      )}
       <button className="-my-3 grid min-h-11 place-items-center rounded-lg px-2 text-amber-400/70 hover:text-amber-200 sm:-my-1 sm:min-h-0" onClick={() => setHidden(true)}>
         dismiss
       </button>

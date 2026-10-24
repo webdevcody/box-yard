@@ -18,6 +18,7 @@ import { groupPublished } from "../lib/publishedNotices"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
+import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
 import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -25,6 +26,9 @@ const SUGGESTIONS = [
   "Create a project for webdevcody/box-yard and add a dark mode toggle",
   "Spin up 3 agents to research Upstash Box pricing, write a summary, and draft a tweet",
 ]
+
+/** Zen's first chat, once setup is done. */
+const WELCOME_CHIPS = ["Create your first project from a GitHub repo", "What can you do?"]
 
 const NO_MESSAGES: ChatMessage[] = []
 
@@ -47,6 +51,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
   const panel = useRef<HTMLElement>(null)
+  // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
+  // composer stay mounted behind it, so a draft survives.
+  const setup = useSetupNeeded()
+  const skipped = useSetupSkipped()
+  const showSetup = zen && setup.needed && !skipped
+  const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
 
   const submit = useCallback(
     (text: string, attachments: Attachment[] = []) => {
@@ -148,39 +158,80 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         />
       )}
 
-      <SelectionToTask source={selectionSource} onPrompt={submit}>
-        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
-          {messages.length === 0 && !chat.isLoading && (
-            <div className="space-y-3 pt-6 text-center">
-              <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
-              <div className="space-y-2">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => submit(s)}
-                    className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <ChatLines messages={tail.visible} onFollowUp={submit} />
-          <StreamingReply busy={Boolean(busy.data)} />
-        </StickyScroll>
-      </SelectionToTask>
+      {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
+      {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
 
-      <Composer
-        onSubmit={submit}
-        placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
-        textareaRef={box}
-        panelRef={panel}
-        className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
-      />
+      <div className={showSetup ? "hidden" : "contents"}>
+        <SelectionToTask source={selectionSource} onPrompt={submit}>
+          <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+            {messages.length === 0 && !chat.isLoading && zen && (
+              <ZenWelcome onPick={submit} needsGithub={setup.status?.github.state === "unset" && !setup.status.mock} onGithub={() => openSettings("credentials")} />
+            )}
+            {messages.length === 0 && !chat.isLoading && !zen && (
+              <div className="space-y-3 pt-6 text-center">
+                <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
+                <div className="space-y-2">
+                  {SUGGESTIONS.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => submit(s)}
+                      className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <ChatLines messages={tail.visible} onFollowUp={submit} />
+            <StreamingReply busy={Boolean(busy.data)} />
+          </StickyScroll>
+        </SelectionToTask>
+
+        <Composer
+          onSubmit={submit}
+          placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
+          textareaRef={box}
+          panelRef={panel}
+          className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
+        />
+      </div>
     </section>
   )
 })
+
+/** An empty Zen chat: a short welcome and two ways to start. */
+function ZenWelcome({ onPick, needsGithub, onGithub }: { onPick: (text: string) => void; needsGithub: boolean; onGithub: () => void }) {
+  return (
+    <div className="flex flex-col items-center pt-[12dvh] text-center" data-testid="zen-welcome">
+      <Bot className="h-6 w-6 text-yard-400" aria-hidden />
+      <h2 className="mt-3 text-lg font-semibold text-zinc-50">Welcome to Box Yard</h2>
+      <p className="mt-1.5 max-w-md text-sm leading-relaxed text-zinc-400">
+        Ask the Coordinator for work in plain words. It sets up projects, starts agents in their own boxes and reports back here.
+      </p>
+      <div className="mt-6 flex flex-wrap justify-center gap-2">
+        {WELCOME_CHIPS.map((c) => (
+          <button
+            key={c}
+            type="button"
+            onClick={() => onPick(c)}
+            className="min-h-11 rounded-full border border-zinc-800 px-4 text-sm text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-900 sm:min-h-9"
+          >
+            {c}
+          </button>
+        ))}
+      </div>
+      {needsGithub && (
+        <p className="mt-6 text-xs text-zinc-500">
+          Agents need a GitHub token to push branches and open PRs.{" "}
+          <button type="button" onClick={onGithub} className="text-yard-300 hover:underline">
+            Add one
+          </button>
+        </p>
+      )}
+    </div>
+  )
+}
 
 const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
 
