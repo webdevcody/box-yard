@@ -25,7 +25,7 @@ export function pushedCheck(work: string): string {
   const no = (why: string) => `{ echo "${PUSHED_MARK}no ${why}"; exit 0; }`
   return [
     `cd ${q(work)} 2>/dev/null || ${no("no work folder")}`,
-    `[ -d .git ] || ${no("not a git repo")}`,
+    `[ -e .git ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || ${no("not a git repo")}`,
     `[ -z "$(find . -mindepth 2 -maxdepth 6 -name .git -print -quit 2>/dev/null)" ] || ${no("it holds more than one repo")}`,
     `s=$(git --no-optional-locks status --porcelain 2>/dev/null) || ${no("git status failed")}`,
     `[ -z "$s" ] || ${no("uncommitted changes")}`,

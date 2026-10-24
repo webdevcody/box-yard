@@ -45,7 +45,7 @@ export function archiveScript(o: ArchiveScript): string {
   if (o.partial) {
     lines.push(
       `  m=(); for f in claude events.jsonl work/.git; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
-      `  if [ -d ${id}/work/.git ]; then`,
+      `  if [ -e ${id}/work/.git ]; then`,
       `    stage=$(mktemp -d /tmp/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${wipSnapshot(o.taskId)}) || wip=failed`,
       `  fi`,
       `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
@@ -77,8 +77,10 @@ function wipSnapshot(taskId: string): string {
     `s=$(git --no-optional-locks status --porcelain 2>>"$err") || exit 1`,
     `if [ -z "$s" ]; then echo clean; exit 0; fi`,
     `mkdir -p ${g}/objects ${g}/refs/boxyard 2>>"$err" || exit 1`,
-    `export GIT_INDEX_FILE="$stage/index" GIT_OBJECT_DIRECTORY=${g}/objects GIT_ALTERNATE_OBJECT_DIRECTORIES="$PWD/.git/objects"`,
-    `{ cp .git/index "$GIT_INDEX_FILE" 2>/dev/null || git read-tree HEAD 2>/dev/null || true; }`,
+    // Paths from git, not ./.git: a worktree's .git is a file, and objects may sit in a shared or alternate store.
+    `i=$(git rev-parse --git-path index 2>>"$err") && o=$(cd "$(git rev-parse --git-path objects 2>>"$err")" && pwd) || exit 1`,
+    `export GIT_INDEX_FILE="$stage/index" GIT_OBJECT_DIRECTORY=${g}/objects GIT_ALTERNATE_OBJECT_DIRECTORIES="$o"`,
+    `{ cp "$i" "$GIT_INDEX_FILE" 2>/dev/null || git read-tree HEAD 2>/dev/null || true; }`,
     `git add -A 2>>"$err" || exit 1`,
     `t=$(git write-tree 2>>"$err") || exit 1`,
     `p=$(git rev-parse -q --verify HEAD) && p="-p $p" || p=`,

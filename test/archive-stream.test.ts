@@ -93,6 +93,26 @@ describe("archive stream", () => {
     expect(git(repo, "fsck", "--no-progress")).toBe("")
   })
 
+  it("partial: snapshots a worktree checkout too (its .git is a file, its objects live in the main repo)", () => {
+    const root = path.join(tmpDir("archive-"), "tasks")
+    const main = path.join(root, "..", "mirror")
+    fs.mkdirSync(path.join(root, "task_a"), { recursive: true })
+    git(path.dirname(root), "init", "-q", "-b", "main", main)
+    fs.writeFileSync(path.join(main, "README.md"), "v1\n")
+    git(main, "add", ".")
+    git(main, "commit", "-qm", "init")
+    const work = path.join(root, "task_a", "work")
+    git(main, "worktree", "add", "-q", "-b", "task", work)
+    fs.writeFileSync(path.join(work, "README.md"), "v2 in the worktree\n")
+    const before = git(main, "count-objects", "-v")
+    const { outcome, data } = run(root, true)
+    expect(outcome.ok && outcome.wip).toMatch(/^[0-9a-f]{40}$/)
+    expect(git(main, "count-objects", "-v")).toBe(before)
+    // The snapshot's own objects and ref are in the archive; the rest is the shared store's (another task makes that self-contained).
+    const out = extract(data)
+    expect(fs.readFileSync(path.join(out, "work", ".git", "refs", "boxyard", "wip"), "utf8").trim()).toBe(outcome.ok ? outcome.wip : "")
+  })
+
   it("partial with nothing uncommitted makes no snapshot", () => {
     const { root } = taskFolder()
     const { outcome } = run(root, true)
@@ -211,5 +231,14 @@ describe("pushed check", () => {
     const work = clone()
     git(work, "init", "-q", "nested")
     expect(check(work)).toBe("boxyard-pushed=no it holds more than one repo")
+  })
+
+  it("works in a worktree checkout", () => {
+    const work = clone()
+    const wt = path.join(path.dirname(work), "wt")
+    git(work, "worktree", "add", "-q", "-b", "boxyard/wt", wt, "origin/main")
+    expect(check(wt)).toBe("boxyard-pushed=yes")
+    fs.writeFileSync(path.join(wt, "x.txt"), "x\n")
+    expect(check(wt)).toBe("boxyard-pushed=no uncommitted changes")
   })
 })
