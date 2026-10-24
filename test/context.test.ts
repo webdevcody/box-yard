@@ -124,9 +124,22 @@ describe("compaction log", () => {
     expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\ntask_ids: task_abc123\n---/)
     expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tokensAfter).toBe(38_000)
     for (const h of ["## Decisions and preferences", "## Projects and repos", "## Ongoing work", "## Open threads and next steps"]) expect(text).toContain(h)
-    expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05Z-2.md", "2026-10-22T18-40-05Z.md"].sort())
+    expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05Z.md", "2026-10-22T18-40-05Z-2.md"])
     expect(fs.readdirSync(dir).some((f) => f.endsWith(".tmp"))).toBe(false)
     expect(lastCompaction(dir)).toMatchObject({ trigger: "auto", tokensBefore: 412_000 })
+  })
+  it("orders compactions from the same second by their suffix, so the newest comes last (#50)", () => {
+    const dir = path.join(tmpDir(), "orchestrator", "compactions")
+    const summary = "## Decisions and preferences\n- a"
+    const at = Date.UTC(2026, 9, 22, 18, 40, 5)
+    for (let n = 1; n <= 11; n++) writeCompaction(dir, { at, sessionId: "s", model: "m", trigger: "button", tokensBefore: n }, summary)
+    writeCompaction(dir, { at: at - 1000, sessionId: "s", model: "m", trigger: "button", tokensBefore: 0 }, summary)
+    const names = listCompactions(dir)
+    expect(names[0]).toBe("2026-10-22T18-40-04Z.md")
+    expect(names.slice(1, 4)).toEqual(["2026-10-22T18-40-05Z.md", "2026-10-22T18-40-05Z-2.md", "2026-10-22T18-40-05Z-3.md"])
+    expect(names.at(-1)).toBe("2026-10-22T18-40-05Z-11.md")
+    expect(lastCompaction(dir)).toMatchObject({ tokensBefore: 11 })
+    expect(compactionsPrompt(dir)).toContain(`The newest: ${dir}/2026-10-22T18-40-05Z-11.md, ${dir}/2026-10-22T18-40-05Z-10.md,`)
   })
   it("cleans and validates summaries", () => {
     expect(cleanSummary("Sure!\n\n## Decisions and preferences\n- a")).toBe("## Decisions and preferences\n- a")
