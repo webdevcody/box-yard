@@ -1,5 +1,5 @@
 import { q } from "./providers/types.js"
-import { KEEP_PACK } from "./gitShare.js"
+import { KEEP_PACK, cloneTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 
 /**
  * Workspace archives stream off the box: tar writes to stdout, base64 makes it text the exec stream can carry, and
@@ -15,6 +15,8 @@ import { KEEP_PACK } from "./gitShare.js"
 export const ARCHIVE_END = "@@boxyard-archive-end"
 /** Commit message of the WIP snapshot on refs/boxyard/wip. */
 const WIP_MESSAGE = "box-yard: wip snapshot"
+/** Commit message of the staged part of a thin archive's snapshot (the snapshot's parent). */
+const INDEX_MESSAGE = "box-yard: staged changes"
 
 export interface ArchiveScript {
   /** The box's tasks folder. */
@@ -35,7 +37,21 @@ export interface ArchiveScript {
    * `<keepStage>/<taskId>/git-keep.pack` exists, it goes into the archive as `<taskId>/git-keep.pack`.
    */
   keepStage?: string
+  /**
+   * Too big even without the files (a repo cloned before tasks shared the box mirror carries its whole history):
+   * instead of work/.git, `<taskId>/git-thin/` holds HEAD, the refs, a bundle of only the commits GitHub doesn't
+   * have (not reachable from the mirror's refs, or from the remote-tracking refs without a mirror) and the WIP
+   * snapshot. Restore clones from the mirror or GitHub and puts them back (thinRestoreScript). Implies `partial`.
+   */
+  thin?: boolean
+  /** The box's mirror of the task's repo (`.boxyard/repos/<name>.git`), whose refs say what GitHub has. */
+  mirror?: string
 }
+
+/** In a thin archive, next to work/'s place: what restore needs to rebuild the repo (see ArchiveScript.thin). */
+export const THIN_DIR = "git-thin"
+/** Echoed by thinRestoreScript: `ok`, or `fail <why>`. */
+export const THIN_MARK = "boxyard-thin="
 
 /** The bash script that streams a task's archive to stdout. */
 export function archiveScript(o: ArchiveScript): string {
@@ -49,7 +65,16 @@ export function archiveScript(o: ArchiveScript): string {
     `if cd ${q(o.root)} 2>>"$err"; then`,
     o.keepStage ? `  [ -f ${q(`${o.keepStage}/${o.taskId}/${KEEP_PACK}`)} ] && k=(-C ${q(o.keepStage)} ${q(`${o.taskId}/${KEEP_PACK}`)}) || k=()` : `  k=()`,
   ]
-  if (o.partial) {
+  if (o.thin) {
+    lines.push(
+      `  m=(); for f in claude events.jsonl events.seq; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
+      `  if [ -e ${id}/work/.git ]; then`,
+      `    stage=$(mktemp -d /tmp/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${thinSnapshot(o.taskId, o.mirror)}) || wip=failed`,
+      `  else echo "no git repo in work/ to archive thin" >>"$err"; wip=failed; fi`,
+      `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
+      `  tar czf - ${excludes} "\${m[@]}" "\${x[@]}" "\${k[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
+    )
+  } else if (o.partial) {
     lines.push(
       `  m=(); for f in claude events.jsonl events.seq work/.git; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
       `  if [ -e ${id}/work/.git ]; then`,
@@ -95,6 +120,78 @@ function wipSnapshot(taskId: string): string {
     `echo "$c" > ${g}/refs/boxyard/wip 2>>"$err" || exit 1`,
     `echo "$c"`,
   ].join("; ")
+}
+
+/**
+ * The git part of a thin archive, built in $stage without writing to the repo: a throwaway bare repo in $stage
+ * sees the task's objects (and the mirror's) through alternates, gets the WIP commit written straight into it,
+ * holds the refs to keep under refs/keep/ and what GitHub has under refs/excl/, and bundles the difference.
+ * Leaves `<taskId>/git-thin/{HEAD,refs,unpushed.bundle}` in $stage; prints the WIP commit or "clean".
+ */
+function thinSnapshot(taskId: string, mirror?: string): string {
+  const g = `"$stage"/${q(taskId)}/${THIN_DIR}`
+  const m = mirror ? q(mirror) : '""'
+  return [
+    `mkdir -p ${g} 2>>"$err" || exit 1`,
+    `o=$(cd "$(git rev-parse --git-path objects 2>>"$err")" && pwd) || exit 1`,
+    `T="$stage/t.git"; git init -q --bare "$T" 2>>"$err" || exit 1`,
+    `echo "$o" > "$T/objects/info/alternates"`,
+    `bm=${m}; [ -n "$bm" ] && [ -d "$bm/objects" ] && echo "$bm/objects" >> "$T/objects/info/alternates" || bm=`,
+    // Uncommitted work: a commit made with a copy of the index, its objects written into T only.
+    `s=$(git --no-optional-locks status --porcelain 2>>"$err") || exit 1`,
+    `w=clean`,
+    `if [ -n "$s" ]; then`,
+    `  i=$(git rev-parse --git-path index 2>>"$err") || exit 1`,
+    `  { cp "$i" "$stage/index" 2>/dev/null || GIT_INDEX_FILE="$stage/index" git read-tree HEAD 2>/dev/null || true; }`,
+    `  export GIT_OBJECT_DIRECTORY="$T/objects" GIT_ALTERNATE_OBJECT_DIRECTORIES="$o"`,
+    `  p=$(git rev-parse -q --verify HEAD) && p="-p $p" || p=`,
+    // What was staged, as its own commit under the snapshot (like git stash), so restore can stage it again.
+    // An index git can't write as a tree (a merge in progress) just isn't kept apart.
+    `  x=$(GIT_INDEX_FILE="$stage/index" git write-tree 2>/dev/null) && ix=$(git -c user.name=box-yard -c user.email=box-yard@local commit-tree "$x" $p -m ${q(INDEX_MESSAGE)} 2>>"$err") && echo "$ix" > ${g}/index && p="-p $ix"`,
+    `  t=$(GIT_INDEX_FILE="$stage/index" sh -c 'git add -A && git write-tree' 2>>"$err") || exit 1`,
+    `  w=$(git -c user.name=box-yard -c user.email=box-yard@local commit-tree "$t" $p -m ${q(WIP_MESSAGE)} 2>>"$err") || exit 1`,
+    `  unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+    `fi`,
+    // HEAD: the branch it's on, or the commit when detached (empty for a repo with no commits).
+    `git symbolic-ref -q HEAD > ${g}/HEAD || git rev-parse -q --verify HEAD > ${g}/HEAD || : > ${g}/HEAD`,
+    `git for-each-ref --format='%(objectname) %(refname)' refs/heads refs/boxyard refs/stash 2>>"$err" | grep -v ' refs/boxyard/wip$' > ${g}/refs`,
+    `[ "$w" = clean ] || echo "$w refs/boxyard/wip" >> ${g}/refs`,
+    `h=$(git rev-parse -q --verify HEAD) && echo "$h refs/boxyard/head" > "$stage/head" || : > "$stage/head"`,
+    `cat ${g}/refs "$stage/head" | awk 'NF == 2 { print "update refs/keep/" $2 " " $1 }' | git -C "$T" update-ref --stdin 2>>"$err" || exit 1`,
+    // What GitHub has: the mirror's refs (GitHub's heads, tags and PR refs at its last fetch), else the clone's own remote-tracking refs.
+    `if [ -n "$bm" ]; then git -C "$bm" for-each-ref --format='%(objectname)' refs/heads refs/tags refs/pull; else git for-each-ref --format='%(objectname)' refs/remotes; fi 2>/dev/null | awk '{ print "update refs/excl/" NR " " $1 }' | git -C "$T" update-ref --stdin 2>>"$err" || exit 1`,
+    `n=$(git -C "$T" rev-list --count --glob='refs/keep/*' --not --glob='refs/excl/*' 2>>"$err") || exit 1`,
+    `if [ "$n" != 0 ]; then git -C "$T" bundle create -q ${g}/unpushed.bundle --glob='refs/keep/*' --not --glob='refs/excl/*' 2>>"$err" || exit 1; fi`,
+    `echo "$w"`,
+  ].join("\n")
+}
+
+/**
+ * Restore the git part of a thin archive in `<taskDir>`: clone work/ from the box mirror (or GitHub), add the
+ * keep pack and the bundle of unpushed commits, put every ref and HEAD back, check out, and lay the WIP snapshot
+ * over the working tree (uncommitted again). Echoes THIN_MARK ok, or `fail <why>` and exits non-zero, leaving no
+ * work/ behind: a ref whose commit can't be found fails the restore instead of losing it.
+ */
+export function thinRestoreScript(taskDir: string, s: MirrorSpec, git: { helper: string; userName: string; userEmail: string }): string {
+  const t = q(`${taskDir}/${THIN_DIR}`)
+  const fail = (why: string) => `{ echo "${THIN_MARK}fail ${why}"; cd ${q(taskDir)}; rm -rf work; exit 1; }`
+  return [
+    `cd ${q(taskDir)} && rm -rf work`,
+    `ue=$(mktemp 2>/dev/null || echo /dev/null)`,
+    withMirrorLock(s.mirror, [syncMirrorScript(s), `cd ${q(taskDir)}`, cloneTaskScript(s)].join("\n")) + ` || ${fail(`couldn't clone ${s.url}`)}`,
+    `cd work || ${fail(`couldn't clone ${s.url}`)}`,
+    `git config credential.helper ${q(git.helper)} && git config user.name ${q(git.userName)} && git config user.email ${q(git.userEmail)}`,
+    `[ ! -f ../${KEEP_PACK} ] || { git index-pack -q --stdin < ../${KEEP_PACK} >/dev/null && rm -f ../${KEEP_PACK}; } || ${fail("the keep pack didn't apply")}`,
+    `[ ! -f ${t}/unpushed.bundle ] || git bundle unbundle ${t}/unpushed.bundle >/dev/null 2>"$ue" || ${fail(`the unpushed commits need history the mirror and GitHub don't have: $(tail -n 2 "$ue" | tr '\\n' ' ')`)}`,
+    `while read -r sha ref; do [ -n "$ref" ] || continue; git cat-file -e "$sha" 2>/dev/null || ${fail("commit $sha of $ref is missing")}; git update-ref "$ref" "$sha" || ${fail("couldn't set $ref")}; done < ${t}/refs`,
+    `h=$(cat ${t}/HEAD)`,
+    `case "$h" in refs/*) git symbolic-ref HEAD "$h";; "") ;; *) git update-ref --no-deref HEAD "$h";; esac || ${fail("couldn't set HEAD")}`,
+    `if git rev-parse -q --verify HEAD >/dev/null; then git cat-file -e "HEAD^{tree}" 2>/dev/null && git read-tree -u --reset HEAD || ${fail("HEAD's files couldn't be checked out")}; fi`,
+    // The snapshot's files go back into the working tree, then the index is what was staged (or HEAD).
+    `if grep -q ' refs/boxyard/wip$' ${t}/refs; then git read-tree -u --reset refs/boxyard/wip && if [ -s ${t}/index ]; then git read-tree "$(cat ${t}/index)"; else git reset -q; fi || ${fail("the uncommitted work couldn't be put back")}; fi`,
+    `rm -rf ${t}`,
+    `echo "${THIN_MARK}ok"`,
+  ].join("\n")
 }
 
 export interface ArchiveTrailer {

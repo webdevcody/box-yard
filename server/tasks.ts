@@ -8,7 +8,7 @@ import type { Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
-import { archiveOutcome, archiveScript, ArchiveDecoder, type ArchiveOutcome } from "./archive.js"
+import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
 import type { Redis } from "./redis.js"
 import type { Artifacts } from "./artifacts.js"
@@ -1934,6 +1934,7 @@ export class TaskManager {
         `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      if (mirror) await this.restoreThinGit(boxId, dir, mirror)
       if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
       await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`, mirror?.env ?? "")
       // The restored events log keeps its own seq numbers; restart the byte offset.
@@ -2000,6 +2001,22 @@ export class TaskManager {
       git: `git -c credential.helper=${q(helper)}`,
     }
     return { spec, helper, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0` }
+  }
+
+  /**
+   * A thin archive (server/archive.ts) carries the branch, refs, unpushed commits and uncommitted work but not the
+   * history GitHub has: clone that again from the mirror or GitHub and put the rest back. Fails loudly when a ref's
+   * commit can't be found (the archive stays as it was for another try), never with commits silently gone.
+   */
+  private async restoreThinGit(boxId: string, dir: string, { spec, env, helper }: { spec: MirrorSpec; env: string; helper: string }) {
+    const check = await this.provider.exec(boxId, `[ -d ${q(`${dir}/${THIN_DIR}`)} ] && echo thin`)
+    if (!check.stdout.includes("thin")) return
+    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
+    const mark = res.stdout.split("\n").find((l) => l.startsWith(THIN_MARK))?.slice(THIN_MARK.length)
+    if (mark !== "ok") {
+      const why = mark?.replace(/^fail /, "") || errorTail(res.stderr || res.stdout) || `exit ${res.exitCode}`
+      throw new Error(`restoring workspace failed: rebuilding its git history from ${spec.url} and the archived commits didn't work (${why})`)
+    }
   }
 
   /**
@@ -2533,18 +2550,32 @@ export class TaskManager {
       // archive restores anywhere (server/gitShare.ts). Nothing is written to the work disk.
       const keep = await this.provider.exec(boxId, keepPackScript(this.taskDir(boxId, taskId), taskId))
       if (keep.exitCode !== 0) console.warn(`[box-yard] keep pack for ${taskId} failed: ${keep.stderr.slice(-300)}`)
-      let res = await this.streamArchive(boxId, taskId, part, false)
+      let res = await this.streamArchive(boxId, taskId, part, "whole")
       // Too big: keep the Claude session, the log and git history, with any uncommitted work as a WIP commit on a side ref.
       const partial = !res.ok && res.tooBig
-      if (partial) res = await this.streamArchive(boxId, taskId, part, true)
+      if (partial) res = await this.streamArchive(boxId, taskId, part, "partial")
+      // Still too big (a heavy history, e.g. a clone from before tasks shared the box mirror): leave out what GitHub has.
+      const project = this.store.getProject(row.project_id)
+      const thin = partial && !res.ok && res.tooBig && Boolean(project?.repo)
+      if (thin) res = await this.streamArchive(boxId, taskId, part, "thin")
       if (!res.ok && res.tooBig)
-        throw new Error(`workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`)
-      if (!res.ok) throw new Error(res.error)
+        throw new Error(
+          thin
+            ? `workspace is too large to archive even without its files and the history GitHub has (Claude session, log, unpushed commits and uncommitted work are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`
+            : `workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`,
+        )
+      if (!res.ok) throw new Error(thin ? `archiving without the history GitHub has failed: ${res.error}` : res.error)
       fs.renameSync(part, file)
       this.archiveErrors.delete(taskId)
       if (this.store.getTaskRow(taskId)) {
         this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: Date.now() })
-        if (partial) {
+        if (thin) {
+          const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work comes back as uncommitted changes"
+          this.addEvent(
+            taskId,
+            `Workspace and git history were too big to archive; saved the Claude session, the branch and the commits GitHub doesn't have. The rest of the history is fetched again on restore (${wip}).`,
+          )
+        } else if (partial) {
           const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work is on refs/boxyard/wip"
           this.addEvent(taskId, `Workspace was too big to archive whole; saved the Claude session and git history (${wip}).`)
         }
@@ -2560,10 +2591,13 @@ export class TaskManager {
   }
 
   /** Stream one archive of a task folder into `dest` on this machine. */
-  private async streamArchive(boxId: string, taskId: string, dest: string, partial: boolean): Promise<ArchiveOutcome> {
+  private async streamArchive(boxId: string, taskId: string, dest: string, mode: "whole" | "partial" | "thin"): Promise<ArchiveOutcome> {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, keepStage: keepPackStage(taskId) })
+    const partial = mode !== "whole"
+    const project = mode === "thin" ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
+    const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
+    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, thin: mode === "thin", mirror, keepStage: keepPackStage(taskId) })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {
