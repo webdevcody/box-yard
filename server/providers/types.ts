@@ -50,7 +50,10 @@ export interface BoxProvider {
   hold(boxId: string, command: string, signal: AbortSignal): Promise<void>
   writeFile(boxId: string, filePath: string, content: string | Buffer): Promise<void>
   readFile(boxId: string, filePath: string): Promise<Buffer>
+  /** One upload; callers go through putFile (server/upload.ts), which splits files over `maxUploadBytes`. */
   uploadFile(boxId: string, localPath: string, destination: string): Promise<void>
+  /** The largest file one uploadFile call may send (Upstash Box: 100 MB). Unset: no limit. */
+  readonly maxUploadBytes?: number
   publicUrl(boxId: string, port: number): Promise<string>
   destroy(boxId: string): Promise<void>
   /**

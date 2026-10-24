@@ -36,6 +36,7 @@ import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WIND
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
+import { isUploadTooBig, putFile } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
@@ -111,8 +112,14 @@ const MIRROR_GC_MS = 6 * 60 * 60_000
 const ROOT_SWEEP_MS = 10 * 60_000
 /** A df reading this fresh is good enough for placement. */
 const DISK_CACHE_MS = 20_000
+/** Tries at restoring an archive before the task restarts from a recap instead (prepareWorkspace). */
+const RESTORE_ATTEMPTS = 2
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
-const ARCHIVE_EXCLUDED_DIRS = ["node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target"]
+const ARCHIVE_EXCLUDED_DIRS = [
+  "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
+  // Test reports, framework output and tool caches: never source, and they get big (Playwright traces, videos).
+  "playwright-report", "test-results", ".svelte-kit", ".nuxt", ".output", ".angular", ".gradle", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".npm", ".pnpm-store",
+]
 
 export interface TaskManagerDeps {
   config: Config
@@ -125,6 +132,13 @@ export interface TaskManagerDeps {
   uploads: Uploads
   /** Tests: a fake GitHub for the PR tracker, and the token it gets (even in mock mode). */
   github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
+}
+
+/** How prepareWorkspace set a task's folder up. `fallback`: its archive couldn't be restored, so it was cloned fresh. */
+interface PreparedWorkspace {
+  restored: boolean
+  branch?: "origin" | "base"
+  fallback?: { reason: string; wip: boolean }
 }
 
 /** What clients see of an upload: no server paths. */
@@ -2317,7 +2331,11 @@ export class TaskManager {
       // never made, or lost with its box): its Claude session is gone too. Start a
       // fresh session that carries a recap instead of resuming a missing one.
       const recapped = Boolean(prepared && !prepared.restored && row.session_started)
-      if (recapped && row.compact_pending) throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
+      if (recapped && row.compact_pending) {
+        // No folder left behind: the next turn must find the session gone too and start from a recap, not resume it.
+        await this.removeTaskDir(boxId, taskId).catch(() => {})
+        throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
+      }
       const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
       // A compaction is a turn of its own; queued messages wait for the next one. The rest are claimed for this
       // turn: locked against edits and cancels, delivered (deleted) once it starts, released if it can't.
@@ -2336,14 +2354,14 @@ export class TaskManager {
       const ownerName = this.owner()
       const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
       if (recapped) {
-        row = this.recapSession(row, prepared!.branch, project.baseBranch)
+        row = this.recapSession(row, prepared!, project.baseBranch)
       }
       const prompt = compact
         ? "/compact"
         : firstTurn
         ? firstTurnPrompt({ task: row, notes: budgeted.shown, hiddenNotes: budgeted.hidden.length, directory, extraInputs: inputs.length ? [followup] : [], ownerName })
         : recapped
-        ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
+        ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch, prepared!.fallback) })}\n\n---\n\n${followup}`
         : followup
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
@@ -2512,10 +2530,11 @@ export class TaskManager {
   }
 
   /** A resumed task whose session is gone gets a new session id; say so in its thread. */
-  private recapSession(row: TaskRow, branch: "origin" | "base" | undefined, baseBranch: string): TaskRow {
+  private recapSession(row: TaskRow, { branch, fallback }: PreparedWorkspace, baseBranch: string): TaskRow {
     this.store.updateTask(row.id, { sessionId: randomUUID() })
     const checkout = !row.branch ? "a fresh workspace" : branch === "base" ? `branch ${row.branch} recreated from ${baseBranch} (it is gone from origin)` : `a fresh checkout of branch ${row.branch}`
-    this.addEvent(row.id, `Resumed from a recap: no workspace archive was left, so a new Claude session started on ${checkout} with the task's summary, PR and recent messages.`)
+    const why = fallback ? "its workspace archive couldn't be restored" : "no workspace archive was left"
+    this.addEvent(row.id, `Resumed from a recap: ${why}, so a new Claude session started on ${checkout} with the task's summary, PR and recent messages.`)
     return this.requireRow(row.id)
   }
 
@@ -2559,8 +2578,8 @@ export class TaskManager {
         if (used.has(name)) name = `${id}-${name}`
         used.add(name)
         // Upload, not writeFile: Upstash rejects a base64 write body over ~10 MB,
-        // so any attachment over ~7.5 MB failed with "invalid request body".
-        await this.provider.uploadFile(boxId, file.path, `${folder}/${name}`)
+        // so any attachment over ~7.5 MB failed with "invalid request body". putFile splits one over 100 MB.
+        await putFile(this.provider, boxId, file.path, `${folder}/${name}`)
         lines.push(`- ${folder}/${name} (${file.mime}, ${file.size} bytes)`)
       }
       const note = lines.length ? `\n\nAttached files (open images and other files with the Read tool):\n${lines.join("\n")}` : ""
@@ -2612,42 +2631,148 @@ export class TaskManager {
   /**
    * Fresh folder for a task: restore its archive, or clone its repo. `branch`
    * says how a clone got the task's branch: from origin, or recreated from the
-   * base branch because it no longer exists there.
+   * base branch because it no longer exists there. A restore that fails is tried once more (not when the box refused
+   * the upload for its size: that fails the same way every time); then the task restarts from a recap on a fresh
+   * checkout (`fallback`), so a broken archive can't fail every start.
    */
-  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string): Promise<{ restored: boolean; branch?: "origin" | "base" }> {
-    const root = this.provider.root(boxId)
+  private async prepareWorkspace(row: TaskRow, boxId: string, dir: string): Promise<PreparedWorkspace> {
     const project = this.store.getProject(row.project_id)!
     const mirror = project.repo ? this.mirrorSpec(boxId, project) : null
     if (row.archive_path && fs.existsSync(row.archive_path)) {
-      const remote = `${root}/.boxyard/restore-${row.id}.tgz`
-      let from: "git" | "partial" | null = null
-      try {
-        await this.provider.uploadFile(boxId, row.archive_path, remote)
-        const res = await this.provider.exec(
-          boxId,
-          `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
-        )
-        if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
-        // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
-        if (mirror) await this.restoreThinGit(boxId, dir, mirror)
-        if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
-        // A git-first archive has no repo: clone it and put the branch, HEAD and WIP back. A partial one has only
-        // .git: check its working tree out.
-        from = await this.restoreGit(row, project, boxId, dir, mirror)
-        await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`, mirror?.env ?? "")
-      } catch (err) {
-        // Leave no half-built folder: the next try starts from the archive again (it stays as it was).
-        await this.provider.exec(boxId, `rm -rf ${q(dir)} ${q(remote)} ${q(`${dir}/.boxyard-clone`)}`).catch(() => {})
-        throw err
+      let failure: unknown = null
+      for (let attempt = 1; attempt <= RESTORE_ATTEMPTS; attempt++) {
+        try {
+          return await this.restoreArchive(row, project, boxId, dir, mirror)
+        } catch (err) {
+          failure = err
+          // Out of disk has its own retry once the box is cleaned up (retryAfterOutOfSpace); shutting down isn't the archive's fault.
+          if (this.stopped || isOutOfSpace(errorMessage(err))) throw err
+          console.warn(`[box-yard] restoring ${row.id} on ${boxId} failed (attempt ${attempt} of ${RESTORE_ATTEMPTS}): ${errorMessage(err)}`)
+          if (isUploadTooBig(err)) break
+        }
       }
-      // The restored events log keeps its own seq numbers; restart the byte offset.
-      const cursor = parseCursor(row.event_cursor)
-      const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
-      this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
-      this.addEvent(row.id, from === "git" ? `Workspace restored on box ${boxId}: its session from the archive, its code from git.` : `Workspace restored on box ${boxId}.`)
-      return { restored: true }
+      return this.recapAfterFailedRestore(row, project, boxId, dir, mirror, failure)
     }
+    return this.cloneWorkspace(row, project, boxId, dir, mirror)
+  }
 
+  /** Unpack the task's archive into its folder and rebuild work/. Throws (leaving no folder) when that fails. */
+  private async restoreArchive(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null): Promise<PreparedWorkspace> {
+    const root = this.provider.root(boxId)
+    const remote = `${root}/.boxyard/restore-${row.id}.tgz`
+    let from: "git" | "partial" | null = null
+    try {
+      // In parts when it's over the box's upload limit (Upstash: 100 MB per file).
+      await putFile(this.provider, boxId, row.archive_path!, remote)
+      const res = await this.provider.exec(
+        boxId,
+        `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
+      )
+      if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
+      if (mirror) await this.restoreThinGit(boxId, dir, mirror)
+      if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
+      // A git-first archive has no repo: clone it and put the branch, HEAD and WIP back. A partial one has only
+      // .git: check its working tree out.
+      from = await this.restoreGit(row, project, boxId, dir, mirror)
+      await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`, mirror?.env ?? "")
+    } catch (err) {
+      // Leave no half-built folder: the next try starts from the archive again (it stays as it was).
+      await this.provider.exec(boxId, `rm -rf ${q(dir)} ${q(remote)} ${q(`${dir}/.boxyard-clone`)}`).catch(() => {})
+      throw err
+    }
+    // The restored events log keeps its own seq numbers; restart the byte offset.
+    const cursor = parseCursor(row.event_cursor)
+    const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
+    this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
+    this.addEvent(row.id, from === "git" ? `Workspace restored on box ${boxId}: its session from the archive, its code from git.` : `Workspace restored on box ${boxId}.`)
+    return { restored: true }
+  }
+
+  /**
+   * The archive couldn't be restored: start over like a task whose archive expired, on a fresh checkout of its
+   * branch with the uncommitted work its last turn pushed (refs/boxyard/wip/<task>) laid over it when origin has
+   * that, and a recap. The archive is set aside on the server, not deleted, and the Captain gets a notice.
+   */
+  private async recapAfterFailedRestore(
+    row: TaskRow,
+    project: NonNullable<ReturnType<Store["getProject"]>>,
+    boxId: string,
+    dir: string,
+    mirror: ReturnType<TaskManager["mirrorSpec"]> | null,
+    failure: unknown,
+  ): Promise<PreparedWorkspace> {
+    const reason = errorMessage(failure).replace(/^restoring workspace failed: /, "").trim().slice(0, 500) || "unknown error"
+    let prepared: PreparedWorkspace
+    try {
+      prepared = await this.cloneWorkspace(row, project, boxId, dir, mirror)
+    } catch (err) {
+      // No half-built folder, and the archive stays as it was (origin may only be unreachable for now): the next start tries it again.
+      await this.provider.exec(boxId, `rm -rf ${q(dir)}`).catch(() => {})
+      throw new Error(`restoring workspace failed: ${reason}; the fresh checkout to restart from a recap failed too: ${errorMessage(err)}`)
+    }
+    const wip = mirror ? await this.applyPushedWip(row, boxId, dir, mirror) : false
+    const kept = this.setAsideArchive(row, reason)
+    const checkout = !row.branch ? "a fresh workspace" : prepared.branch === "base" ? `branch ${row.branch} recreated from ${project.baseBranch}` : `a fresh checkout of branch ${row.branch}`
+    const work = wip ? ", with the uncommitted work its last turn pushed" : ""
+    const where = kept ? ` The archive is kept on the server as ${kept} (removed after ${this.settings.get().archiveRetentionDays || "no"} days).` : ""
+    this.addEvent(row.id, `Couldn't restore the workspace archive on box ${boxId} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
+    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored on box ${boxId} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
+    return { ...prepared, fallback: { reason, wip } }
+  }
+
+  /**
+   * After a fresh checkout: put back the uncommitted work the task's last turn pushed to origin (gitFirst.ts), as
+   * uncommitted changes, when the checkout is at the commit that snapshot was made on. Best effort: false when
+   * there is none or it doesn't fit.
+   */
+  private async applyPushedWip(row: TaskRow, boxId: string, dir: string, { env }: { env: string }): Promise<boolean> {
+    const push = this.store.getTask(row.id)?.pushState
+    if (!push?.wip) return false
+    const mark = "boxyard-wip="
+    const res = await this.provider
+      .exec(
+        boxId,
+        [
+          env,
+          `cd ${q(`${dir}/work`)} || exit 1`,
+          `git fetch -q origin ${q(wipRef(row.id))} >/dev/null 2>&1 && w=$(git rev-parse -q --verify FETCH_HEAD) || { echo ${mark}none; exit 0; }`,
+          // The snapshot's first parent is HEAD when it was made; on any other commit its files would undo commits.
+          `[ "$(git rev-parse -q --verify HEAD)" = "$(git rev-parse -q --verify "$w^1")" ] || { echo ${mark}moved; exit 0; }`,
+          `git read-tree -u --reset "$w^{tree}" && git reset -q && echo ${mark}applied`,
+        ].join("\n"),
+      )
+      .catch(() => null)
+    const state = res?.stdout.match(new RegExp(`${mark}(\\w+)`))?.[1]
+    if (state !== "applied") console.warn(`[box-yard] ${row.id}: pushed uncommitted work not put back after a failed restore (${state ?? (errorTail(res?.stderr ?? "") || "no result")})`)
+    return state === "applied"
+  }
+
+  /**
+   * Move an archive that couldn't be restored out of the next archive's way, as `<task>.unrestored.tgz`. Archive
+   * retention removes it as an orphan after archiveRetentionDays. The task no longer points at it either way, so a
+   * later restore doesn't try it again. Returns where it is, or null when it couldn't be moved.
+   */
+  private setAsideArchive(row: TaskRow, reason: string): string | null {
+    const from = row.archive_path!
+    const to = path.join(path.dirname(from), `${row.id}.unrestored.tgz`)
+    let kept: string | null = to
+    try {
+      fs.renameSync(from, to)
+      // Retention goes by age, and this one only now stopped being the task's archive.
+      const now = new Date()
+      fs.utimesSync(to, now, now)
+    } catch (err) {
+      console.warn(`[box-yard] couldn't set aside ${from}: ${errorMessage(err)}`)
+      kept = null
+    }
+    this.store.updateTask(row.id, { archivePath: null, lastArchivedAt: null }, { touch: false })
+    this.store.noteTaskArchiveUnavailable(row.id, from, `couldn't be restored (${reason.slice(0, 200)})${kept ? `; kept as ${kept}` : ""}`)
+    return kept
+  }
+
+  /** A fresh folder with the task's repo cloned (or an empty work/ without one). */
+  private async cloneWorkspace(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null): Promise<PreparedWorkspace> {
     const steps = [`mkdir -p ${q(dir)}`, `rm -rf ${q(dir + "/work")}`]
     if (mirror) {
       const { spec, env, helper } = mirror
@@ -3798,6 +3923,7 @@ export class TaskManager {
     const cutoff = now - days * 24 * 60 * 60_000
     const dir = path.join(this.c.dataDir, "archives")
     if (!fs.existsSync(dir)) return
+    // `<task>.unrestored.tgz` (setAsideArchive) has no task of that id, so it goes as an orphan.
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith(".tgz")) continue
       const file = path.join(dir, name)

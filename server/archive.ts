@@ -55,6 +55,15 @@ export interface ArchiveScript {
   mirror?: string
 }
 
+/**
+ * Scratch folders whose ignored files a git-first archive leaves out, on top of the excluded build dirs: perf and
+ * test captures (shots/perf/*.jsonl, traces) and temp space, the names the runner's workspace cleanup treats as
+ * regenerable. Only ignored files: a tracked or not-ignored `perf/` is work and stays (git carries it).
+ */
+export const ARCHIVE_SCRATCH_DIRS = ["tmp", ".tmp", "shots", "perf", "traces"]
+/** tar --exclude patterns for a task's scratch dirs in work/, at any depth (tar's `*` matches `/` in exclusions). */
+const scratchExcludes = (taskId: string) => ARCHIVE_SCRATCH_DIRS.flatMap((d) => [`--exclude=${q(`${taskId}/work/${d}`)}`, `--exclude=${q(`${taskId}/work/*/${d}`)}`]).join(" ")
+
 /** In a thin archive, next to work/'s place: what restore needs to rebuild the repo (see ArchiveScript.thin). */
 export const THIN_DIR = "git-thin"
 /** Echoed by thinRestoreScript: `ok`, or `fail <why>`. */
@@ -81,8 +90,9 @@ export function archiveScript(o: ArchiveScript): string {
       o.git.ignored
         ? `  if (cd ${id}/work 2>/dev/null && git ls-files -z -o -i --exclude-standard --directory 2>/dev/null) | while IFS= read -r -d '' f; do printf '%s\\0' ${id}/work/"$f"; done > "$il" 2>>"$err" && [ -s "$il" ]; then i=(--null -T "$il"); fi`
         : `  :`,
-      // The excludes come first: they apply to the listed ignored folders too (node_modules/, dist/…).
-      `  tar czf - ${excludes} "\${m[@]}" "\${i[@]}" "\${g[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
+      // The excludes come first: they apply to the listed ignored folders too (node_modules/, dist/…). Everything
+      // from work/ here is ignored by git, so its scratch dirs can go too.
+      `  tar czf - ${excludes} ${o.git.ignored ? scratchExcludes(o.taskId) : ""} "\${m[@]}" "\${i[@]}" "\${g[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
     )
   } else if (o.thin) {
     lines.push(
