@@ -245,7 +245,7 @@ describe("workspace retention", () => {
     const first = await archivedDone(r, (await task(r, p.id, "cleanup repo")).id)
     const work = path.join(r.yard.tasks.taskDir(first.boxId!, first.id), "work")
     const repo = path.join(work, "app") // a repo cloned into a subfolder of a scratch work/
-    put(path.join(repo, ".gitignore"), "node_modules/\ndist/\n.next/\n")
+    put(path.join(repo, ".gitignore"), "node_modules/\ndist/\n.next/\nshots/\ntmp/\n")
     put(path.join(repo, "build", "index.html"), "<h1>committed</h1>\n")
     put(path.join(repo, "dist", "lib.js"), "committed despite .gitignore\n")
     put(path.join(repo, "packages", "ui", "build", "out.css"))
@@ -257,6 +257,9 @@ describe("workspace retention", () => {
     put(path.join(repo, "node_modules", "left-pad", "index.js"))
     put(path.join(repo, "packages", "ui", "node_modules", "x", "index.js"))
     put(path.join(repo, ".next", "cache", "a"))
+    put(path.join(repo, "shots", "perf", "memcross.jsonl")) // perf captures
+    put(path.join(repo, "tmp", "scratch.txt"))
+    put(path.join(repo, "build", "index.html"), "<h1>edited, not committed</h1>\n")
     put(path.join(repo, "coverage", "lcov.info")) // untracked but not ignored: maybe the agent's work
     put(path.join(work, "notes", "build", "draft.md")) // outside any repo: not clearly generated
     put(path.join(work, "notes", "node_modules", "y", "index.js"))
@@ -276,8 +279,11 @@ describe("workspace retention", () => {
     expect(exists("app/node_modules")).toBe(false)
     expect(exists("app/packages/ui/node_modules")).toBe(false)
     expect(exists("app/.next")).toBe(false)
+    expect(exists("app/shots")).toBe(false)
+    expect(exists("app/tmp")).toBe(false)
+    expect(fs.readFileSync(path.join(repo, "build", "index.html"), "utf8")).toBe("<h1>edited, not committed</h1>\n")
     expect(exists("notes/node_modules")).toBe(false)
-    expect(git(repo, "status", "--porcelain").toString()).toBe("?? coverage/\n")
+    expect(git(repo, "status", "--porcelain").toString()).toBe(" M build/index.html\n?? coverage/\n")
   })
 
   it("parks old resting workspaces only when a fresh archive exists", async () => {
