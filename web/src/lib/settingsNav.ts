@@ -34,7 +34,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "Worker box size and resizing, capacity, disk headroom and cleanup retention.",
+    description: "Worker box size and resizing, capacity, disk headroom, cleanup retention and repo mirrors.",
     fields: [
       "workerSize",
       "autoResizeEnabled",
@@ -49,6 +49,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "archiveKeepTouchedDays",
       "diskMinFreeMb",
       "diskCloneFactor",
+      "buildCleanupIdleMinutes",
+      "gitPartialClone",
     ],
   },
   {
@@ -111,6 +113,8 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
   diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
+  buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
+  gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
 }
 
 /** Settings whose draft value differs from the one in effect. */
@@ -138,6 +142,8 @@ const POOL_KEYS = [
   "archiveKeepTouchedDays",
   "diskMinFreeMb",
   "diskCloneFactor",
+  "buildCleanupIdleMinutes",
+  "gitPartialClone",
 ] as const
 
 /** What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them over env changes. */

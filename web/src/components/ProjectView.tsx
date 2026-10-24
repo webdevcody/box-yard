@@ -500,6 +500,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [env, setEnv] = useState("")
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
+  const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const settings = useAgentSettings()
 
   return (
@@ -507,7 +508,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={(e) => {
         e.preventDefault()
-        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys, boxSize: boxSize || null })
+        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys, boxSize: boxSize || null, partialClone: partialClone ? partialClone === "on" : null })
         onDone()
       }}
     >
@@ -537,6 +538,16 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
               {BOX_SIZE_SPECS[size].label}: {sizeSpecLine(size)}
             </option>
           ))}
+        </Select>
+      </Field>
+      <Field
+        label="Partial clone mirror"
+        hint="On: each box's mirror of the repo skips old file versions (blob:none) and fetches them from GitHub when git log -p, blame or a checkout needs them. Off: full mirror, for repos where agents dig through history a lot. Applies to mirrors made from now on; a mirror no task uses is re-made to match."
+      >
+        <Select className="w-full sm:w-80" value={partialClone} onChange={(e) => setPartialClone(e.target.value as "" | "on" | "off")} data-testid="project-partial-clone">
+          <option value="">Default ({settings.data?.settings.gitPartialClone === false ? "off" : "on"}: Settings → Partial clone mirrors)</option>
+          <option value="on">On: blob:none mirror</option>
+          <option value="off">Off: full mirror</option>
         </Select>
       </Field>
       <Field label="Env vars" hint="Values are write-only. Add KEY=value lines to set or replace.">

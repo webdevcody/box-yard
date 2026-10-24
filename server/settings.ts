@@ -70,6 +70,8 @@ export const DEFAULT_SETTINGS: Settings = {
   archiveKeepTouchedDays: 30,
   diskMinFreeMb: 1024,
   diskCloneFactor: 2,
+  gitPartialClone: true,
+  buildCleanupIdleMinutes: 15,
 }
 
 /** Env vars that seed box/pool settings; saved settings win over them. */
@@ -85,6 +87,8 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   archiveKeepTouchedDays: "BOXYARD_ARCHIVE_KEEP_TOUCHED_DAYS",
   diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
+  gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
+  buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
 }
 
 const autoCompact = z
@@ -133,6 +137,8 @@ export const settingsPatch = z
     archiveKeepTouchedDays: z.number().int().min(0).max(3650),
     diskMinFreeMb: z.number().int().min(0).max(1_000_000),
     diskCloneFactor: z.number().min(1).max(20),
+    gitPartialClone: z.boolean(),
+    buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
   })
   .partial()
   .strict()
@@ -164,6 +170,8 @@ export class SettingsStore {
       | "archiveKeepTouchedDays"
       | "diskMinFreeMb"
       | "diskCloneFactor"
+      | "gitPartialClone"
+      | "buildCleanupIdleMinutes"
       >
     >,
   ) {}
@@ -208,6 +216,8 @@ export class SettingsStore {
       archiveKeepTouchedDays: this.c.archiveKeepTouchedDays ?? DEFAULT_SETTINGS.archiveKeepTouchedDays,
       diskMinFreeMb: this.c.diskMinFreeMb ?? DEFAULT_SETTINGS.diskMinFreeMb,
       diskCloneFactor: this.c.diskCloneFactor ?? DEFAULT_SETTINGS.diskCloneFactor,
+      gitPartialClone: this.c.gitPartialClone ?? DEFAULT_SETTINGS.gitPartialClone,
+      buildCleanupIdleMinutes: this.c.buildCleanupIdleMinutes ?? DEFAULT_SETTINGS.buildCleanupIdleMinutes,
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings

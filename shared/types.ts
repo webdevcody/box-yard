@@ -41,6 +41,8 @@ export interface Project {
   notes: ProjectNote[]
   /** Size for new boxes made for this project; null uses Settings → Worker size. */
   boxSize: BoxSize | null
+  /** Box mirrors of its repo are partial clones (blob:none); null uses Settings → Partial clone mirrors. */
+  partialClone: boolean | null
   createdAt: number
   updatedAt: number
 }
@@ -474,6 +476,10 @@ export interface Settings {
   diskMinFreeMb: number
   /** ...and at least this many times the repo's last clone size. */
   diskCloneFactor: number
+  /** Box repo mirrors are partial clones (blob:none): old blobs are fetched when something reads them. A project can override it. */
+  gitPartialClone: boolean
+  /** Remove a resting task's git-ignored build output (node_modules, dist, caches…) after this many idle minutes. 0 = off. */
+  buildCleanupIdleMinutes: number
 }
 
 /** Agents that can run at once under a set of limits. */

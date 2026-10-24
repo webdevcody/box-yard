@@ -94,6 +94,10 @@ export const config = {
   diskMinFreeMb: int("BOXYARD_DISK_MIN_FREE_MB", 1024),
   /** ...and at least this many times its repo's last clone size. */
   diskCloneFactor: num("BOXYARD_DISK_CLONE_FACTOR", 2),
+  /** Box repo mirrors are partial clones (blob:none) unless a project says otherwise. */
+  gitPartialClone: (env.BOXYARD_GIT_PARTIAL_CLONE ?? "1") !== "0",
+  /** Remove a resting task's git-ignored build output once it has been idle this many minutes. 0 = off. */
+  buildCleanupIdleMinutes: int("BOXYARD_BUILD_CLEANUP_IDLE_MINUTES", 15),
 
   redisUrl: env.UPSTASH_REDIS_REST_URL ?? "",
   redisToken: env.UPSTASH_REDIS_REST_TOKEN ?? "",

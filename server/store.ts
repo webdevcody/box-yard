@@ -216,6 +216,7 @@ interface ProjectRow {
   base_branch: string
   env_json: string
   box_size: string | null
+  partial_clone: number | null
   created_at: number
   updated_at: number
 }
@@ -448,6 +449,7 @@ export class Store {
       envKeys: Object.keys(json<Record<string, string>>(row.env_json, {})),
       notes: this.listNotes(row.id),
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
+      partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -483,6 +485,7 @@ export class Store {
     baseBranch?: string
     env?: Record<string, string>
     boxSize?: BoxSize | null
+    partialClone?: boolean | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -502,6 +505,7 @@ export class Store {
         now,
       )
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
+    if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     return this.getProject(id)!
   }
 
@@ -516,6 +520,8 @@ export class Store {
       removeEnv?: string[]
       /** null clears it (Settings → Worker size applies). */
       boxSize?: BoxSize | null
+      /** null clears it (Settings → Partial clone mirrors applies). */
+      partialClone?: boolean | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -525,7 +531,7 @@ export class Store {
     for (const k of patch.removeEnv ?? []) delete env[k]
     this.db
       .prepare(
-        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, partial_clone = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         patch.name?.trim() || current.name,
@@ -534,6 +540,7 @@ export class Store {
         patch.baseBranch?.trim() || current.base_branch,
         JSON.stringify(env),
         patch.boxSize === undefined ? current.box_size : patch.boxSize,
+        patch.partialClone === undefined ? current.partial_clone : patch.partialClone === null ? null : patch.partialClone ? 1 : 0,
         Date.now(),
         id,
       )
