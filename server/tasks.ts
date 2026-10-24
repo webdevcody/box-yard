@@ -8,7 +8,7 @@ import type { Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
-import { archiveOutcome, archiveScript, ArchiveDecoder, type ArchiveOutcome } from "./archive.js"
+import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { deleteWipScript, gitPrepScript, gitRestoreScript, gitStages, parseGitPrep, parseGitRestore, wipRef, type GitPrepResult } from "./gitFirst.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
 import type { Redis } from "./redis.js"
@@ -38,7 +38,7 @@ import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
-import { BoxJanitor } from "./janitor.js"
+import { BoxJanitor, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
@@ -301,6 +301,7 @@ export class TaskManager {
       archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, withOwner(note, this.owner())),
       dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
+      pushedOnGitHub: (taskId, boxId) => this.pushedOnGitHub(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
@@ -834,6 +835,7 @@ export class TaskManager {
         while (this.janitor.isRunning(boxId)) await new Promise((r) => setTimeout(r, 200))
         const kept: string[] = []
         for (const row of this.store.listTaskRows({ boxId })) {
+          if (await this.skipArchiveIfPushed(row.id, boxId, `delete box ${boxId}`)) continue
           await this.archiveFresh(row.id)
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
@@ -1068,14 +1070,25 @@ export class TaskManager {
       })
       await this.resizeStep(r, "archive", async () => {
         const kept: string[] = []
+        const fromGitHub: string[] = []
         const rows = this.store.listTaskRows({ boxId: r.boxId })
         for (const row of rows) {
+          if (await this.skipArchiveIfPushed(row.id, r.boxId, `move to the ${r.to} box`)) {
+            fromGitHub.push(row.id)
+            continue
+          }
           await this.archiveFresh(row.id)
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === r.boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
         }
         if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so nothing moved and ${r.boxId} keeps its work: ${this.archiveProblems(kept)}`)
-        return rows.length ? `${rows.length} ${rows.length === 1 ? "workspace" : "workspaces"} archived` : "no workspaces on the box"
+        if (!rows.length) return "no workspaces on the box"
+        const archived = rows.length - fromGitHub.length
+        const parts = [
+          ...(archived ? [`${archived} ${archived === 1 ? "workspace" : "workspaces"} archived`] : []),
+          ...(fromGitHub.length ? [`${fromGitHub.length} restorable from GitHub (PR merged, nothing unpushed)`] : []),
+        ]
+        return parts.join(", ")
       })
     } catch (err) {
       // Nothing moved to it, so it must not sit there empty (and billed).
@@ -1088,7 +1101,12 @@ export class TaskManager {
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
         this.assign(row.id, to, { touch: false })
         r.movedTasks.push(row.id)
-        this.addEvent(row.id, `Moved to box ${to} (${r.to}) while ${r.boxId} was resized. The workspace comes back from its archive on the next turn.`)
+        const back = row.archive_path
+          ? "The workspace comes back from its archive on the next turn."
+          : row.session_started
+          ? "The next turn starts from a recap, on a fresh checkout of its branch."
+          : "Its workspace is set up there on its first turn."
+        this.addEvent(row.id, `Moved to box ${to} (${r.to}) while ${r.boxId} was resized. ${back}`)
         this.emitTask(row.id)
       }
       if (owner) this.store.setKv(boxOwnerKey(to), owner)
@@ -1585,6 +1603,36 @@ export class TaskManager {
     this.emitTask(taskId)
   }
 
+  /**
+   * A done task whose PR is merged and whose folder holds nothing GitHub lacks (the janitor's pushedCheck): it
+   * needs no archive to leave its box.
+   */
+  private async pushedOnGitHub(taskId: string, boxId: string): Promise<boolean> {
+    const row = this.store.getTaskRow(taskId)
+    if (!row || row.box_id !== boxId || row.status !== "done" || row.pr_state !== "merged" || row.current_turn_id || this.store.hasInputs(row.id)) return false
+    const res = await this.provider.exec(boxId, pushedCheck(`${this.taskDir(boxId, taskId)}/work`)).catch(() => null)
+    return res ? pushedVerdict(res.stdout) === "yes" : false
+  }
+
+  /**
+   * Before a box operation that needs every workspace archived (resize, Delete box): a merged and fully pushed
+   * task skips the archive. It's recorded as restorable from GitHub — no archive, so its next message starts from
+   * a recap — like the emergency cleanup does, and doesn't hold the operation up. True when it did.
+   */
+  private async skipArchiveIfPushed(taskId: string, boxId: string, operation: string): Promise<boolean> {
+    const row = this.store.getTaskRow(taskId)
+    if (!row || this.hasFreshArchive(row) || !(await this.pushedOnGitHub(taskId, boxId))) return false
+    this.store.updateTask(taskId, { archivePath: null, lastArchivedAt: null }, { touch: false })
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; GitHub has the merged work")
+    const pr = prNumber(row.pr_url)
+    console.log(`[box-yard] ${taskId} needs no archive to ${operation}: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    this.addEvent(
+      taskId,
+      `No archive needed to ${operation}: its PR${pr ? ` #${pr}` : ""} is merged and nothing in the workspace was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+    )
+    return true
+  }
+
   /** Room to create another box (and box creation isn't failing right now). */
   private poolHasRoom() {
     const recentlyFailed = this.lastBoxError && Date.now() - this.lastBoxError.at < BOX_RETRY_MS
@@ -1988,9 +2036,11 @@ export class TaskManager {
           `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
         )
         if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+        // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
+        if (mirror) await this.restoreThinGit(boxId, dir, mirror)
         if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
-        // A git-first or thin archive has no repo: clone it and put the branch, HEAD and WIP back. A partial one
-        // has only .git: check its working tree out.
+        // A git-first archive has no repo: clone it and put the branch, HEAD and WIP back. A partial one has only
+        // .git: check its working tree out.
         from = await this.restoreGit(row, project, boxId, dir, mirror)
         await this.restoreExcludedTrackedFiles(boxId, `${dir}/work`, mirror?.env ?? "")
       } catch (err) {
@@ -2065,6 +2115,22 @@ export class TaskManager {
   }
 
   /**
+   * A thin archive (server/archive.ts) carries the branch, refs, unpushed commits and uncommitted work but not the
+   * history GitHub has: clone that again from the mirror or GitHub and put the rest back. Fails loudly when a ref's
+   * commit can't be found (the archive stays as it was for another try), never with commits silently gone.
+   */
+  private async restoreThinGit(boxId: string, dir: string, { spec, env, helper }: { spec: MirrorSpec; env: string; helper: string }) {
+    const check = await this.provider.exec(boxId, `[ -d ${q(`${dir}/${THIN_DIR}`)} ] && echo thin`)
+    if (!check.stdout.includes("thin")) return
+    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
+    const mark = res.stdout.split("\n").find((l) => l.startsWith(THIN_MARK))?.slice(THIN_MARK.length)
+    if (mark !== "ok") {
+      const why = mark?.replace(/^fail /, "") || errorTail(res.stderr || res.stdout) || `exit ${res.exitCode}`
+      throw new Error(`restoring workspace failed: rebuilding its git history from ${spec.url} and the archived commits didn't work (${why})`)
+    }
+  }
+
+  /**
    * A restored work/ that borrows objects from a mirror: make sure this box has the mirror, point the clone at
    * it (the archive may come from another box), and add the archive's keep pack. Fails when HEAD still can't
    * be read, rather than handing the agent a broken repo.
@@ -2082,7 +2148,8 @@ export class TaskManager {
 
   /**
    * Rebuild work/ from git after unpacking an archive (server/gitFirst.ts gitRestoreScript): from git.manifest
-   * (git-first and thin archives), or the working tree of a partial archive. Throws when that fails.
+   * (a git-first archive), or the working tree of a partial archive. A thin archive's git-thin/ is restored before
+   * this, by restoreThinGit. Throws when that fails.
    */
   private async restoreGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null) {
     const refs = [`refs/heads/${project.baseBranch}`, ...(row.branch ? [`refs/heads/${row.branch}`] : [])]
@@ -2619,7 +2686,7 @@ export class TaskManager {
    * orchestrator's disk. Git-first (server/gitFirst.ts): once origin has the branch and the WIP ref, the archive
    * holds the Claude session, the log, runner state and gitignored files, with a manifest and a pack of the
    * task's own objects. Otherwise the whole folder, then (too big) only .git and a WIP snapshot, then a thin
-   * archive (manifest and a pack of everything origin's base branch lacks). Archives stream off the box
+   * archive (HEAD, the refs and a bundle of the commits GitHub lacks; server/archive.ts). Archives stream off the box
    * (server/archive.ts), so this works on a box whose work disk is full. A failure is kept for `archiveProblem`.
    * `closing`: the task is done, so its WIP ref is removed from origin once an archive has the work.
    */
@@ -2638,7 +2705,7 @@ export class TaskManager {
     let pushed: GitPrepResult | null = null
     try {
       if (push) {
-        pushed = await this.prepGit(row, project!, boxId, { push: true, packMaxBytes: this.c.archiveWorkspaces ? Math.floor(maxBytes / 2) : 0 })
+        pushed = await this.prepGit(row, project!, boxId, { packMaxBytes: this.c.archiveWorkspaces ? Math.floor(maxBytes / 2) : 0 })
         this.recordPush(taskId, pushed)
       }
       if (!this.c.archiveWorkspaces) return
@@ -2668,33 +2735,32 @@ export class TaskManager {
           kind = "partial"
           res = await this.streamArchive(boxId, taskId, part, { partial: true, keepStage })
         }
-        // Still too big: a thin archive, git's view of the work without its history (what origin's base lacks).
-        let thinError: string | null = null
-        if (!res.ok && res.tooBig && project?.repo) {
-          const thin = await this.prepGit(row, project, boxId, { push: false, packMaxBytes: Math.floor(maxBytes * 0.9) })
-          if (thin.status === "local" && thin.stage && packOk(thin)) {
-            kind = "thin"
-            res = await this.streamArchive(boxId, taskId, part, { git: { stage: thin.stage, ignored: false } })
-            if (!res.ok && !res.tooBig) thinError = res.error
-          } else {
-            thinError = thin.pack === "toobig" ? null : (thin.reason ?? `its git pack ${thin.pack === "failed" ? "couldn't be built" : "is missing"}`)
-          }
+        // Still too big (a heavy history, e.g. a clone from before tasks shared the box mirror): leave out what GitHub has.
+        if (kind === "partial" && !res.ok && res.tooBig) {
+          kind = "thin"
+          res = await this.streamArchive(boxId, taskId, part, { thin: true, keepStage })
         }
         if (!res.ok && res.tooBig)
           throw new Error(
-            `workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)${thinError ? `; a thin archive failed too: ${thinError}` : ""}`,
+            kind === "thin"
+              ? `workspace is too large to archive even without its files and the history GitHub has (Claude session, log, unpushed commits and uncommitted work are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`
+              : `workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`,
           )
-        if (!res.ok) throw new Error(res.error)
+        if (!res.ok) throw new Error(kind === "thin" ? `archiving without the history GitHub has failed: ${res.error}` : res.error)
       }
       fs.renameSync(part, file)
       this.archiveErrors.delete(taskId)
       if (this.store.getTaskRow(taskId)) {
         this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: Date.now() })
-        if (kind === "partial") {
+        if (kind === "thin") {
+          const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work comes back as uncommitted changes"
+          this.addEvent(
+            taskId,
+            `Workspace and git history were too big to archive; saved the Claude session, the branch and the commits GitHub doesn't have. The rest of the history is fetched again on restore (${wip}).`,
+          )
+        } else if (kind === "partial") {
           const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work is on refs/boxyard/wip"
           this.addEvent(taskId, `Workspace was too big to archive whole; saved the Claude session and git history (${wip}).`)
-        } else if (kind === "thin") {
-          this.addEvent(taskId, "Workspace was too big to archive whole or with its git history; saved the Claude session, the log, and its commits and uncommitted work as a git pack on top of origin's base branch.")
         }
         if (note) this.addEvent(taskId, note)
       }
@@ -2723,8 +2789,8 @@ export class TaskManager {
     return project.pushAtTurnEnd ?? this.settings.get().gitPushAtTurnEnd
   }
 
-  /** Snapshot a task's git work on its box, pushing it to origin with `push` (server/gitFirst.ts). */
-  private async prepGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, o: { push: boolean; packMaxBytes: number }): Promise<GitPrepResult> {
+  /** Snapshot a task's git work on its box and push it to origin (server/gitFirst.ts). */
+  private async prepGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, o: { packMaxBytes: number }): Promise<GitPrepResult> {
     const { spec, env } = this.mirrorSpec(boxId, project)
     const last = this.store.getTask(row.id)?.pushState?.wip ?? null
     const script = gitPrepScript({
@@ -2733,7 +2799,6 @@ export class TaskManager {
       taskId: row.id,
       branch: row.branch,
       baseBranch: project.baseBranch,
-      push: o.push,
       lastWip: last,
       packMaxBytes: o.packMaxBytes,
       git: spec.git,
@@ -2753,10 +2818,9 @@ export class TaskManager {
    */
   private recordPush(taskId: string, r: GitPrepResult) {
     const prev = this.store.getTask(taskId)?.pushState ?? null
-    const status = r.status === "local" ? "skipped" : r.status
     // A push that didn't happen leaves origin's WIP ref as it was; remember it, so it's still deleted later.
     const wip = r.status === "pushed" ? r.pushedWip : (r.pushedWip ?? prev?.wip ?? null)
-    const state: PushState = { status, at: Date.now(), branch: r.branch, head: r.head, wip, reason: r.reason }
+    const state: PushState = { status: r.status, at: Date.now(), branch: r.branch, head: r.head, wip, reason: r.reason }
     this.store.updateTask(taskId, { pushState: state }, { touch: false })
     this.emitTask(taskId)
     // The same problem with other commits in its message is still the same problem.
@@ -2782,12 +2846,15 @@ export class TaskManager {
     boxId: string,
     taskId: string,
     dest: string,
-    mode: { partial?: boolean; git?: { stage: string; ignored: boolean }; keepStage?: string },
+    mode: { partial?: boolean; thin?: boolean; git?: { stage: string; ignored: boolean }; keepStage?: string },
   ): Promise<ArchiveOutcome> {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
-    const partial = Boolean(mode.partial)
+    // A thin archive is a partial one that also leaves out the history GitHub has.
+    const partial = Boolean(mode.partial || mode.thin)
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, git: mode.git, keepStage: mode.keepStage })
+    const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
+    const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
+    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {
