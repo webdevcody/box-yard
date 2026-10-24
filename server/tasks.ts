@@ -1672,7 +1672,19 @@ export class TaskManager {
    */
   private canMove(row: TaskRow): boolean {
     if (this.archiving.has(row.id)) return false
-    return !row.session_started || this.hasFreshArchive(row)
+    return !row.session_started || this.archiveHoldsWorkspace(row)
+  }
+
+  /**
+   * Its archive has everything its workspace has: written after its last turn ended. Unlike `hasFreshArchive`
+   * this ignores `last_active_at`, which a queued message bumps without touching the workspace (so a follow-up
+   * would otherwise always pin a resting task to its box).
+   */
+  private archiveHoldsWorkspace(row: TaskRow): boolean {
+    if (this.hasFreshArchive(row)) return true
+    if (!row.archive_path || !row.last_archived_at || !fs.existsSync(row.archive_path)) return false
+    const ended = this.store.lastTurnFinishedAt(row.id)
+    return ended !== null && row.last_archived_at >= ended
   }
 
   /**
@@ -1684,7 +1696,7 @@ export class TaskManager {
   private async leaveSmallBox(row: TaskRow, boxId: string, min: BoxSize): Promise<string | null | "stay"> {
     // Its turn-end archive is being written right now; it's fresh in a moment.
     if (this.archiving.has(row.id)) return null
-    if (row.session_started && !this.hasFreshArchive(row)) {
+    if (row.session_started && !this.archiveHoldsWorkspace(row)) {
       const note = `Running on ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) though its project needs ${min} boxes: its workspace has no fresh archive to move.`
       if (!this.smallBoxNoted.has(`${row.id}:${boxId}`)) {
         this.smallBoxNoted.add(`${row.id}:${boxId}`)
@@ -1776,7 +1788,9 @@ export class TaskManager {
         return null
       }
     }
-    this.holdForDisk(taskId, low, busy[0], waitHere)
+    // Every box of its size is full and none can be added: say so rather than wait without a reason.
+    const poolFull = !this.wantsBox.has(taskId) && !this.poolHasRoom() ? "Waiting for a free slot: every box is full and the pool is at its limit" : null
+    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull)
     return null
   }
 

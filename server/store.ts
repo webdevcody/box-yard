@@ -1056,7 +1056,13 @@ export class Store {
       .run(patch.status, Date.now(), patch.costUsd ?? null, patch.error ?? null, id)
   }
 
-  getTaskTurn(id: string): TaskTurnRow | null {
+  /** When the task's last turn ended (null before its first). */
+  lastTurnFinishedAt(taskId: string): number | null {
+    const row = this.db.prepare("SELECT MAX(finished_at) AS at FROM task_turns WHERE task_id = ?").get(taskId) as { at: number | null }
+    return row.at ?? null
+  }
+
+    getTaskTurn(id: string): TaskTurnRow | null {
     return (this.db.prepare("SELECT * FROM task_turns WHERE id = ?").get(id) as TaskTurnRow | undefined) ?? null
   }
 
