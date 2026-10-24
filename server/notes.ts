@@ -1,12 +1,11 @@
 import type { Hub } from "./hub.js"
 import { BadRequestError, ConflictError, NotFoundError, type Store } from "./store.js"
 import { noteBudgetOf } from "./settings.js"
-import { budgetLine, budgetNotes, pruneAdvice, type NoteBudgetReport } from "../shared/notes.js"
+import { MAX_NOTE_CHARS, budgetLine, budgetNotes, pruneAdvice, type NoteBudgetReport } from "../shared/notes.js"
 import { withOwner } from "../shared/owner.js"
 import type { NoteSuggestion, ProjectNote, Settings } from "../shared/types.js"
 
-/** Longest note or suggestion Box Yard takes. Notes are rules, not reports. */
-export const MAX_NOTE_CHARS = 4000
+export { MAX_NOTE_CHARS }
 
 export const SUGGESTION_ACTIONS = ["accept", "merge", "reject"] as const
 export type SuggestionAction = (typeof SUGGESTION_ACTIONS)[number]

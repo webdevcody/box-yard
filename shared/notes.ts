@@ -10,6 +10,9 @@ export interface NoteBudget {
   maxTokens: number
 }
 
+/** Longest note or suggestion Box Yard takes. Notes are rules, not reports. */
+export const MAX_NOTE_CHARS = 4000
+
 /** Settings' defaults: about 25 notes or 4k tokens. */
 export const DEFAULT_NOTE_BUDGET: NoteBudget = { maxNotes: 25, maxTokens: 4000 }
 
