@@ -2,6 +2,7 @@
 // and runs of consecutive notices collapse into one expandable "N task updates" group.
 import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
 import type { EntityIndex, EntityRef } from "./linkify"
+import { groupPublished, type PublishedGroup } from "./publishedNotices"
 
 export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "info"
 
@@ -123,44 +124,53 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
   return { kind, title, summary: segments(text) }
 }
 
+/** One entry of a run of notices: a notice, or one task's back-to-back published files (lib/publishedNotices.ts). */
+export type CaptainNoticeItem =
+  | { type: "notice"; id: string; message: CaptainMessage }
+  | { type: "files"; id: string; group: PublishedGroup<CaptainMessage> }
+
 export type CaptainRow =
   | { type: "message"; id: string; message: CaptainMessage }
-  | { type: "notice"; id: string; message: CaptainMessage }
-  | { type: "notices"; id: string; messages: CaptainMessage[] }
+  | CaptainNoticeItem
+  /** `messages` is every notice in the run, in order (a files item counts each of its notices). */
+  | { type: "notices"; id: string; items: CaptainNoticeItem[]; messages: CaptainMessage[] }
 
 /** Notices from task events (and compactions) render as slim rows; everything else as chat. */
 export function isNoticeRow(m: CaptainMessage) {
   return m.role === "notice"
 }
 
+const itemMessages = (item: CaptainNoticeItem) => (item.type === "files" ? item.group.messages : [item.message])
+
 /**
- * Chat rows for the transcript, oldest first. Two or more notices in a row form one group whose id is
- * its first notice's id, so it stays the same row (and keeps its open/closed state) as notices append.
+ * Chat rows for the transcript, oldest first. Back-to-back published files fold into one item per task first.
+ * Two or more notice items in a row then form one group whose id is its first notice's id, so it stays the
+ * same row (and keeps its open/closed state) as notices append.
  */
 export function captainRows(messages: CaptainMessage[]): CaptainRow[] {
   const rows: CaptainRow[] = []
-  let run: CaptainMessage[] = []
+  let run: CaptainNoticeItem[] = []
   const flush = () => {
-    if (run.length === 1) rows.push({ type: "notice", id: run[0]!.id, message: run[0]! })
-    else if (run.length > 1) rows.push({ type: "notices", id: run[0]!.id, messages: run })
+    if (run.length === 1) rows.push(run[0]!)
+    else if (run.length > 1) rows.push({ type: "notices", id: run[0]!.id, items: run, messages: run.flatMap(itemMessages) })
     run = []
   }
-  for (const m of messages) {
-    if (isNoticeRow(m)) {
-      run.push(m)
-      continue
+  for (const r of groupPublished(messages)) {
+    if (r.type === "files") run.push(r)
+    else if (isNoticeRow(r.message)) run.push({ type: "notice", id: r.id, message: r.message })
+    else {
+      flush()
+      rows.push(r)
     }
-    flush()
-    rows.push({ type: "message", id: m.id, message: m })
   }
   flush()
   return rows
 }
 
-/** "4 task updates", or "3 updates" when some aren't about a task (compactions, warnings). */
-export function groupLabel(messages: CaptainMessage[]): string {
+/** "4 task updates", or "3 updates" when some aren't about a task (compactions, warnings). `count`: entries shown. */
+export function groupLabel(messages: CaptainMessage[], count = messages.length): string {
   const allTasks = messages.every((m) => typeof m.meta?.taskId === "string")
-  return `${messages.length} ${allTasks ? "task " : ""}updates`
+  return `${count} ${allTasks ? "task " : ""}update${count === 1 ? "" : "s"}`
 }
 
 /** A compaction file's markdown without its YAML front matter (timestamps and token counts shown elsewhere). */

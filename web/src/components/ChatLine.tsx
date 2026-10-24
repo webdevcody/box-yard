@@ -141,17 +141,18 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
   )
 })
 
-const NOTICE_CLASS = "rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400"
+export const NOTICE_CLASS = "rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400"
 
 /**
  * A task notice: clicking it opens the task (Cmd/Ctrl or middle click in a new tab). Not an <a>: the notice's
- * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks.
+ * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
+ * and buttons (a "Show all" toggle) keep their clicks.
  */
-function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
+export function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
   const [, navigate] = useLocation()
   const href = `/tasks/${taskId}`
   const open = (e: MouseEvent | KeyboardEvent) => {
-    if ((e.target as HTMLElement).closest("a")) return
+    if ((e.target as HTMLElement).closest("a, button")) return
     if ("key" in e) {
       if (e.key !== "Enter") return
     } else if (e.button > 1) return

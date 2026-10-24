@@ -748,6 +748,12 @@ export interface OrchestratorCompactionRecord extends CompactionInfo {
   markdown?: string
 }
 
+/** A compaction read back from its log files (Captain compactions have no database rows). */
+export interface CompactionRecord extends OrchestratorCompactionRecord {
+  /** Tasks the compaction links: snapshotted, listed in its frontmatter, or named in its summary. */
+  taskIds: string[]
+}
+
 export interface TaskCompactionRecord {
   id: string
   taskId: string
