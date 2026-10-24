@@ -3,10 +3,12 @@ import type { TaskOutcome } from "./quiet.js"
 import type { BoxCleanup } from "./disk.js"
 import type { Hook, HookRun } from "./hooks.js"
 import type { BoxResize } from "./boxSizes.js"
+import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
+export type { BoxEvent, BoxEventFilter, BoxEventType, BoxActor, BoxActorKind } from "./boxHistory.js"
 
 export const TASK_STATUSES = [
   "queued", // waiting for a free box slot
@@ -274,8 +276,11 @@ export interface ChatMessage {
   createdAt: number
 }
 
-/** Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain) or a schedule. */
-export type CaptainSource = "cody" | "coordinator" | "schedule" | "hook"
+/**
+ * Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain), a schedule,
+ * a hook, or an agent in the project (message_captain; meta has taskId, taskTitle and waitSeconds).
+ */
+export type CaptainSource = "cody" | "coordinator" | "schedule" | "hook" | "agent"
 
 /** The Captain-tool fields the Coordinator chat keeps on a send_to_captain/ask_captain/wait_for_captain tool line (meta.captain). */
 export interface CaptainToolResult {
@@ -405,6 +410,8 @@ export type UiEvent =
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
   | { type: "box.resize"; resize: BoxResize }
+  /** A new box history row (server/boxHistory.ts). */
+  | { type: "box.event"; event: BoxEvent }
   | { type: "schedule"; schedule: Schedule }
   | { type: "schedule.run"; run: ScheduleRun }
   | { type: "schedule.deleted"; scheduleId: string }
