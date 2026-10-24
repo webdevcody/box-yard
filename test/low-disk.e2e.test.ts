@@ -229,12 +229,24 @@ describe("low-disk placement", () => {
     expect(done.waitReason).toBeNull()
     const cleanup = await cleanupDone(r, box)
     const builds = cleanup.steps.find((s) => s.key === "builds")!
-    expect(builds.freedBytes).toBeGreaterThanOrEqual(600 * MB)
+    // Less a few KB: the clean step leaves cleaned.json (what went, for the next prompt).
+    expect(builds.freedBytes).toBeGreaterThanOrEqual(600 * MB - 16 * 1024)
     expect(cleanup.enough).toBe(true)
     // It stopped once there was room: nothing after the builds step ran.
     expect(cleanup.steps.filter((s) => s.key === "git" || s.key === "archive").every((s) => s.skipped === "enough room already")).toBe(true)
     expect(fs.existsSync(path.join(work, "node_modules"))).toBe(false)
     expect(fs.readFileSync(path.join(work, "notes.md"), "utf8")).toBe("keep me\n")
+
+    // The first task's next prompt says what went, once.
+    const demo = () => fs.readFileSync(path.join(work, "box-yard-demo.md"), "utf8")
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "one more haiku" })
+    await waitFor(() => demo().includes("one more haiku"), "the follow-up turn")
+    expect(demo()).toContain("[Box Yard] While this task was idle, Box Yard removed build output to free disk: work/node_modules.")
+    await until(r, first.id, "done")
+    await call(r, "POST", `/api/tasks/${first.id}/messages`, { content: "and another" })
+    await waitFor(() => demo().includes("and another"), "the second follow-up")
+    expect(demo()).not.toContain("[Box Yard] While this task was idle")
+    await until(r, first.id, "done")
   })
 })
 
@@ -317,7 +329,7 @@ describe("box cleanup", () => {
     expect(step(first, "caches").skipped).toBe("local boxes share this machine's caches")
     // Done tasks go first, and it stopped before the idle task once there was room.
     expect(step(first, "builds").removed).toEqual([`${done.id}: 1 dir`])
-    expect(step(first, "builds").freedBytes).toBeGreaterThanOrEqual(200 * MB)
+    expect(step(first, "builds").freedBytes).toBeGreaterThanOrEqual(200 * MB - 16 * 1024) // less cleaned.json
     expect(step(first, "archive").skipped).toBe("enough room already")
     expect(first.enough).toBe(true)
     expect(first.freedBytes).toBe(first.steps.reduce((n, s) => n + s.freedBytes, 0))
