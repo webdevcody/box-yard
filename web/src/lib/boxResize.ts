@@ -1,5 +1,5 @@
 // Resize display for the Boxes page: the size table rows, the modal's "what will happen" lines, and the toasts.
-import { BOX_SIZE_ORDER, BOX_SIZE_SPECS, compareSizes, initiatorLabel, resizeSummary, resizeTitle, type BoxResize, type ResizeMode } from "../../../shared/boxSizes"
+import { BOX_SIZE_ORDER, BOX_SIZE_SPECS, compareSizes, initiatorLabel, resizeFailure, resizeSummary, resizeTitle, type BoxResize, type ResizeMode } from "../../../shared/boxSizes"
 import { formatBytes } from "../../../shared/disk"
 import { SIZE_DEFAULTS, type BoxInfo, type BoxSize, type ResizePlan } from "../../../shared/types"
 import { toast } from "./toast"
@@ -70,7 +70,8 @@ export function resizeToast(r: BoxResize, projectName?: (id: string) => string):
     const done = r.steps.filter((s) => s.status === "done").length
     return { kind: "progress", title: resizeTitle(r), body: `${who}${resizeSummary(r)} (${done + 1} of ${r.steps.length})` }
   }
-  return { kind: r.status === "failed" ? "error" : "info", title: resizeTitle(r), body: `${who}${resizeSummary(r)[0]!.toUpperCase()}${resizeSummary(r).slice(1)}.` }
+  const summary = resizeSummary(r)
+  return { kind: r.status === "failed" ? "error" : "info", title: resizeTitle(r), body: `${who}${summary[0]!.toUpperCase()}${summary.slice(1)}${/[.!?]$/.test(summary) ? "" : "."}` }
 }
 
 /** Show or update a resize's toast (SSE box.resize). */
@@ -92,7 +93,7 @@ export function withResize(list: BoxInfo[] | undefined, r: BoxResize): BoxInfo[]
 /** One line about the box's last resize for the details modal. */
 export function resizeLine(r: BoxResize, boxId: string): string {
   if (r.status === "running") return `${resizeTitle(r)}: ${resizeSummary(r)}`
-  if (r.status === "failed") return `${resizeTitle(r)}: ${r.error ?? "unknown error"}`
+  if (r.status === "failed") return `${resizeTitle(r)}: ${resizeFailure(r)}`
   if (r.newBoxId === boxId && r.boxId !== boxId) return `Took over from ${r.boxId} (${r.from} → ${r.to})`
   return `${resizeTitle(r)}${r.mode === "in-place" ? " in place" : ""}`
 }

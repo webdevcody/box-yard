@@ -107,6 +107,18 @@ export class UpstashProvider implements BoxProvider {
     }
   }
 
+  async execStream(boxId: string, command: string, onOutput: (chunk: string) => void): Promise<{ exitCode: number }> {
+    const box = await this.box(boxId)
+    // Not retried: output may already have been handed over. A caller that fails tries again later.
+    const run = await box.exec.stream(`bash -c ${q(command)}`)
+    let exitCode: number | null = null
+    for await (const chunk of run) {
+      if (chunk.type === "output") onOutput(chunk.data)
+      else if (chunk.type === "exit") exitCode = chunk.exitCode
+    }
+    return { exitCode: exitCode ?? (run.status === "completed" ? 0 : 1) }
+  }
+
   async hold(boxId: string, command: string, signal: AbortSignal): Promise<void> {
     try {
       const box = await this.box(boxId)
