@@ -5,6 +5,7 @@ import type { Hook, HookRun } from "./hooks.js"
 import type { BoxResize } from "./boxSizes.js"
 import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
+import type { SetupStatus } from "./setup.js"
 import type { HeavyTasks } from "./memory.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
@@ -445,6 +446,8 @@ export type UiEvent =
   | { type: "settings"; info: SettingsInfo }
   /** Settings › Voice text-to-speech choices changed (keys only as set/unset). */
   | { type: "tts"; info: TtsInfo }
+  /** A credential was saved or removed in the app (status only, never a value). */
+  | { type: "setup"; status: SetupStatus }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
@@ -546,6 +549,8 @@ export interface BudgetSettings {
 export interface Settings {
   /** What Box Yard calls its human in prompts and labels (default "Cody"). */
   ownerName: string
+  /** A plain visit to / opens Zen (the Coordinator alone, full screen) unless Zen was left on purpose last time. */
+  startInZen: boolean
   orchestratorModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */

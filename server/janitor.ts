@@ -1,7 +1,7 @@
 import type { Store, TaskRow } from "./store.js"
 import type { Hub } from "./hub.js"
 import type { BoxProvider } from "./providers/types.js"
-import { q } from "./providers/types.js"
+import { providerOf, q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { RESTING_STATUSES } from "../shared/types.js"
 import { mirrorGcScript } from "./gitShare.js"
@@ -350,7 +350,9 @@ export class BoxJanitor {
 
   /** Run one step. `progress` re-measures and says whether there is enough room now. Returns a skip reason, or null. */
   private async step(key: CleanupStepKey, boxId: string, entry: CleanupStepReport, opts: CleanupOptions, progress: () => Promise<boolean>): Promise<string | null> {
-    const { store, provider } = this.host
+    const { store } = this.host
+    // The box's own provider: a local box's /tmp and caches are this machine's, whichever provider new boxes use.
+    const provider = providerOf(this.host.provider, boxId)
     const root = provider.root(boxId)
     const rows = () => store.listTaskRows()
     const onBox = () => rows().filter((r) => r.box_id === boxId)

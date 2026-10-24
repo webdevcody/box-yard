@@ -29,6 +29,8 @@
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
 // [pr] ends the turn without mark_done, like an agent that opened a PR and waits for review.
+// Logging in: a CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY containing "revoked" fails like a bad token, and
+// FAKE_CLAUDE_LOGIN=required fails every run that has neither, like the real CLI with no login.
 // The Merge PR button's standard message ("Merge your pull request #N") stands in for `gh pr merge` when
 // FAKE_GH_STATE names a file: the worker writes {"state":"MERGED"} there for a test's fake GitHub to read.
 // FAKE_CLAUDE_COMPACT_FAIL=1 makes /compact fail (after the summary was written), FAKE_CLAUDE_BAD_SUMMARY=1 the summary.
@@ -327,6 +329,16 @@ process.stdin.on("data", (d) => (prompt += d))
 process.stdin.on("end", async () => {
   const started = Date.now()
   out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
+  const login = [process.env.CLAUDE_CODE_OAUTH_TOKEN, process.env.ANTHROPIC_API_KEY].filter(Boolean)
+  const loginError = login.some((t) => t.includes("revoked"))
+    ? "Invalid API key · Please run /login"
+    : process.env.FAKE_CLAUDE_LOGIN === "required" && !login.length
+      ? "Not logged in · Please run /login"
+      : null
+  if (loginError) {
+    out({ type: "result", subtype: "success", is_error: true, result: loginError, session_id: session.id })
+    process.exit(1)
+  }
   let result = ""
   let mcp = null
   if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: prompt.slice(0, 120) }) + "\n")

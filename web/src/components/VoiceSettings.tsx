@@ -78,7 +78,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           Voice isn't supported in this browser.
         </p>
       )}
-      <Row id={fid("ve")} label="Voice announcements" help="Box Yard says short updates out loud: a one-line summary of each Coordinator reply, and task events. Off by default.">
+      <Row id={fid("ve")} label="Voice announcements" help="Box Yard says short updates out loud: a one-line summary of each Coordinator reply, and task events. On in a new browser until you turn it off.">
         <Check
           id={fid("ve")}
           disabled={!supported}

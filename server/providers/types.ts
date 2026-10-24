@@ -62,7 +62,12 @@ export interface BoxProvider {
   listIds?(label: string): Promise<string[]>
   /** Best-effort provider/disk usage metadata. Missing fields are estimated by Box Yard. */
   usage?(boxId: string): Promise<BoxUsageProbe>
+  /** The provider that runs this box, when one provider fronts several (AutoProvider). */
+  of?(boxId: string): BoxProvider
 }
+
+/** The provider behind one box: its name, node and claude binaries can differ from the one new boxes come from. */
+export const providerOf = (p: BoxProvider, boxId: string): BoxProvider => p.of?.(boxId) ?? p
 
 /** Quote a string for a POSIX shell. */
 export function q(s: string): string {

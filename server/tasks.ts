@@ -7,7 +7,7 @@ import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
-import { q } from "./providers/types.js"
+import { providerOf, q } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { deleteWipScript, gitPrepScript, gitRestoreScript, gitStages, parseGitPrep, parseGitRestore, wipRef, type GitPrepResult } from "./gitFirst.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
@@ -325,7 +325,7 @@ export class TaskManager {
     this.reader = new EventReader(deps.provider, deps.redis)
     this.prs = new PrTracker({
       store: deps.store,
-      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.c.githubToken) || null)),
+      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")) || null)),
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
       log: (msg) => console.warn(msg),
@@ -820,7 +820,7 @@ export class TaskManager {
       return
     }
     const slug = githubSlug(project.repo)
-    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.c.githubToken
+    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
     if (this.c.mock || !slug || !token) return
     await fetch(`https://api.github.com/repos/${slug}/git/refs/${wipRef(row.id).replace(/^refs\//, "")}`, {
       method: "DELETE",
@@ -1249,7 +1249,7 @@ export class TaskManager {
         let id: string
         try {
           id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
-          this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+          this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
         } catch (err) {
           throw new Error(`Couldn't create a ${r.to} box: ${errorMessage(err)}`)
         } finally {
@@ -2172,7 +2172,7 @@ export class TaskManager {
       const labels = this.boxLabels(projectId)
       const id = await this.provider.create({ labels, size })
       this.store.removeBox(placeholder)
-      this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
+      this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
       // The new box belongs to the project that asked for it, so its tasks land there.
       if (projectId && this.store.getProject(projectId)) {
         this.store.setKv(projectBoxKey(projectId), id)
@@ -2303,7 +2303,7 @@ export class TaskManager {
       // dropped exec connection. The runner writes turn.pid itself.
       const start = await this.provider.exec(
         boxId,
-        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(this.provider.nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
+        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
 
@@ -2485,11 +2485,15 @@ export class TaskManager {
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
     const env: Record<string, string> = { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }
-    if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
-    if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
-    if (this.c.githubToken) env.GITHUB_TOKEN = env.GITHUB_TOKEN ?? this.c.githubToken
-    const local = this.provider.name === "local"
-    const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : this.provider.claudeBin).split(" ")
+    // Read on every turn, so a credential saved in Settings › Credentials reaches the next turn without a restart.
+    const creds = this.settings.credentials
+    const claude = creds.claudeEnv()
+    Object.assign(env, claude)
+    const githubToken = creds.get("githubToken")
+    if (githubToken) env.GITHUB_TOKEN = env.GITHUB_TOKEN ?? githubToken
+    const provider = providerOf(this.provider, boxId)
+    const local = provider.name === "local"
+    const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
     return {
       taskId: row.id,
       projectId: project.id,
@@ -2499,7 +2503,7 @@ export class TaskManager {
       claudeArgs,
       // A local `claude` login lives in the default config dir, so only
       // isolate when we have a token to log in with.
-      isolateConfig: !local || Boolean(this.c.claudeOauthToken || this.c.anthropicApiKey),
+      isolateConfig: !local || Object.keys(claude).length > 0,
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),
@@ -2596,7 +2600,7 @@ export class TaskManager {
   /** The repo mirror on a box for a project, with the git command, env and credential helper that reach GitHub. */
   private mirrorSpec(boxId: string, project: NonNullable<ReturnType<Store["getProject"]>>) {
     const helper = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
-    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.c.githubToken
+    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
     const spec: MirrorSpec = {
       root: this.provider.root(boxId),
       mirror: `${this.provider.root(boxId)}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`,
@@ -3615,13 +3619,14 @@ export class TaskManager {
     const now = Date.now()
     if (!force && now - (this.lastBoxProbeAt.get(boxId) ?? 0) < 5 * 60_000) return
     this.lastBoxProbeAt.set(boxId, now)
-    if (!this.provider.usage) {
+    const provider = providerOf(this.provider, boxId)
+    if (!provider.usage) {
       await this.probeDisk(boxId, 0).catch(() => null)
       return
     }
     let probe: BoxUsageProbe
     try {
-      probe = await this.provider.usage(boxId)
+      probe = await provider.usage(boxId)
     } catch {
       return
     }

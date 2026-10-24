@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -18,6 +18,7 @@ import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifi
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
 import { HooksPanel } from "./Hooks"
+import { CredentialsPanel } from "./Setup"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
@@ -42,7 +43,7 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -357,6 +358,8 @@ export function SettingsDialog({
           <NotificationsPanel fid={fid} />
         ) : section === "voice" ? (
           <VoicePanel fid={fid} />
+        ) : section === "credentials" ? (
+          <CredentialsPanel fid={fid} />
         ) : section === "hooks" ? (
           <Panel section="hooks">
             <HooksPanel projectId={null} intro={false} />
@@ -365,6 +368,17 @@ export function SettingsDialog({
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : section === "orchestrator" ? (
           <Panel section="orchestrator">
+            <Row
+              id={fid("siz")}
+              label="Start in Zen mode"
+              help="A new tab or window opened on Box Yard's home page starts in Zen: just this chat, full screen. Reloading keeps you where you are, and a link to any page always opens that page."
+              hint={hint("startInZen")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("siz")} type="checkbox" checked={s.startInZen} onChange={(e) => set("startInZen", e.target.checked)} data-testid="start-in-zen" />
+                {s.startInZen ? "On: new tabs open in Zen" : "Off: new tabs open the Yard"}
+              </label>
+            </Row>
             <Row
               id={fid("om")}
               label="Model"

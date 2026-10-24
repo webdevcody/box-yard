@@ -7,6 +7,7 @@ import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
+import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { HeavyTasks } from "../../../shared/memory"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -75,6 +76,8 @@ export const keys = {
   captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
   tts: ["tts-settings"] as const,
+  setup: ["setup"] as const,
+  setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
   /** A project's hooks, or "global" for the Coordinator's. */
@@ -260,8 +263,8 @@ export const useCaptainMessages = (projectId: string) =>
   useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`) })
 export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
-export const useAgentSettings = () =>
-  useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
+export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity, enabled: o.enabled })
 /** Settings › Voice text-to-speech choices; keys only as set/unset. Also feeds lib/speech's engine choice. */
 export const useTtsSettings = () =>
   useQuery({
@@ -282,6 +285,31 @@ export function useSaveTts() {
       setTtsInfo(info)
     },
     onError: fail("Couldn't save the voice settings"),
+  })
+}
+/** First-run setup and Settings › Credentials: what's set and where from, never a value. Kept live by the "setup" event. */
+export const useSetup = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.setup, queryFn: () => api<SetupStatus>("/api/setup"), staleTime: Infinity, enabled: o.enabled })
+/** The GitHub token's most recently pushed repos, for Zen's first prompts. Empty without a token or on any error. */
+export const useRecentRepos = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.setupRepos, queryFn: () => api<RecentRepos>("/api/setup/repos"), staleTime: Infinity, enabled: o.enabled })
+/** Save or remove credentials. Errors show next to the field, so there's no toast. */
+export function useSaveCredentials() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (patch: CredentialsPatch) => api<SetupStatus>("/api/setup/credentials", { method: "PUT", body: patch }),
+    onSuccess: (status) => {
+      qc.setQueryData(keys.setup, status)
+      void qc.invalidateQueries({ queryKey: keys.health })
+      void qc.invalidateQueries({ queryKey: keys.setupRepos })
+    },
+  })
+}
+/** A live check of a credential: `value` when given (typed, not saved), else the one in effect. */
+export function useTestCredential() {
+  return useMutation({
+    mutationFn: ({ key, value }: { key: CredentialKey; value?: string }) =>
+      api<CredentialTest>(`/api/setup/test/${key}`, { method: "POST", body: value ? { value } : {} }),
   })
 }
 /** What Box Yard calls its human (Settings › Box agents › Your name). */

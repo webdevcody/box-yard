@@ -1,10 +1,12 @@
-import { memo, useCallback, useEffect, useState } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useState } from "react"
 import { PAGE_PADDING } from "./lib/layout"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
+import { navigate } from "wouter/use-browser-location"
+import { SETTINGS_PARAM, parseSection } from "./lib/settingsNav"
 import { Menu, MessageSquare } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
-import { keys, useMe } from "./lib/queries"
+import { keys, useAgentSettings, useMe } from "./lib/queries"
 import { useServerEvents } from "./lib/stream"
 import { Sidebar } from "./components/Sidebar"
 import { ChatPanel } from "./components/ChatPanel"
@@ -25,7 +27,7 @@ import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
 import { BrandLogo } from "./components/BrandLogo"
-import { useZen, useZenHotkeys } from "./lib/zen"
+import { useZen, useZenHotkeys, useZenLanding } from "./lib/zen"
 
 export function App() {
   const me = useMe()
@@ -40,6 +42,8 @@ export function App() {
   const closeChat = useCallback(() => setChatOpen(false), [])
   const zen = useZen()
   useZenHotkeys(zen)
+  const agentSettings = useAgentSettings({ enabled: authed })
+  const landed = useZenLanding(agentSettings.data?.settings.startInZen ?? (agentSettings.isError ? false : undefined))
   // Drawers close behind Zen, so leaving it (Esc, back or a link) shows the page, not a drawer over it.
   useEffect(() => {
     if (!zen) return
@@ -57,6 +61,8 @@ export function App() {
   if (me.isError)
     return <div className="grid h-full place-items-center text-sm text-zinc-500">Can't reach the Box Yard server. Is it running?</div>
   if (!authed) return <Login />
+  // A new tab on / waits for Start in Zen mode, so it opens straight into Zen or the Yard.
+  if (!landed) return null
 
   // Zen (/zen) drops everything but the chat. The chat keeps its slot in the tree either way, so entering or
   // leaving Zen keeps the same ChatPanel: its draft, attachments and scroll position survive the switch.
@@ -141,9 +147,16 @@ const Routes = memo(function Routes() {
       <Route path="/schedules" component={SchedulesView} />
       <Route path="/projects/:id">{(p) => <ProjectView id={p.id} />}</Route>
       <Route path="/tasks/:id">{(p) => <TaskView id={p.id} />}</Route>
+      <Route path="/settings/:section?">{(p) => <SettingsLink section={p.section} />}</Route>
       <Route>
         <YardView />
       </Route>
     </Switch>
   )
 })
+
+/** /settings and /settings/<section> are links to the settings dialog: it opens over the Yard. */
+function SettingsLink({ section }: { section?: string }) {
+  useLayoutEffect(() => navigate(`/?${SETTINGS_PARAM}=${parseSection(section)}`, { replace: true }), [section])
+  return null
+}

@@ -22,7 +22,11 @@ import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
 import { LocalProvider } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
+import { AutoProvider } from "./providers/auto.js"
 import type { BoxProvider } from "./providers/types.js"
+import { redact, type CredentialStore } from "./credentials.js"
+import { Setup, type SetupDeps } from "./setup.js"
+import { CREDENTIAL_KEYS, type CredentialKey } from "../shared/setup.js"
 import { startSelfHold, startSelfSnapshots } from "./backup.js"
 import { Scheduler } from "./scheduler.js"
 import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
@@ -180,9 +184,16 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
   return res.data
 }
 
-export function makeProvider(c: Config): BoxProvider {
-  if (c.provider === "upstash") return new UpstashProvider(c)
-  return new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
+/**
+ * BOX_PROVIDER, or UPSTASH_BOX_API_KEY in the env, fixes where boxes are made, as before. With neither (a first run),
+ * boxes are folders on this machine until an Upstash key is saved in Settings › Credentials, then Upstash boxes,
+ * with no restart. Without `credentials` (scripts), only the env counts.
+ */
+export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvider {
+  if (c.provider === "upstash") return new UpstashProvider(c, credentials)
+  const local = new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
+  if (!credentials || c.mock || c.boxProvider === "local") return local
+  return new AutoProvider(local, new UpstashProvider(c, credentials), () => Boolean(credentials.get("upstashBoxApiKey")))
 }
 
 export interface BoxYard {
@@ -195,6 +206,8 @@ export interface BoxYard {
   captains: CaptainManager
   scheduler: Scheduler
   settings: SettingsStore
+  /** Settings › Credentials and the first-run setup status (GET /api/setup). */
+  setup: Setup
   ttsSettings: TtsSettingsStore
   tts: TtsService
   hooks: HookEngine
@@ -215,6 +228,8 @@ export function createBoxYard(
     github?: TaskManagerDeps["github"]
     /** Stand-ins for ElevenLabs' HTTP API and OpenAI's Realtime socket (tests). */
     tts?: Pick<TtsOptions, "fetch" | "WebSocket" | "timeoutMs" | "voicesTtlMs">
+    /** Stand-ins for the services the setup Test buttons call (tests). GitHub's comes from `github.fetch`. */
+    setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs">
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -223,8 +238,9 @@ export function createBoxYard(
   const hub = new Hub()
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
-  const provider = opts.provider ?? makeProvider(c)
   const settings = new SettingsStore(store, c)
+  const provider = opts.provider ?? makeProvider(c, settings.credentials)
+  const setup = new Setup({ c, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
     settings: ttsSettings,
@@ -351,7 +367,7 @@ export function createBoxYard(
 
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
-    const problems = configProblems(c)
+    const problems = configProblems({ ...c, ...settings.credentials.values() })
     if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
@@ -579,6 +595,30 @@ export function createBoxYard(
   api.get("/settings", (_req, res) => {
     // Text-to-speech keys appear only as set/unset plus where they come from.
     res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys })
+  })
+
+  // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.
+  api.get("/setup", (_req, res) => {
+    res.json(setup.status())
+  })
+  api.put("/setup/credentials", (req, res) => {
+    settings.credentials.update(req.body)
+    const status = setup.status()
+    hub.broadcast({ type: "setup", status })
+    // A new box key or token can unblock queued work, and /api/health's problems change.
+    applyPoolChange()
+    res.json(status)
+  })
+  /** Repo names (never the token) for the first prompts Zen suggests. */
+  api.get("/setup/repos", async (_req, res) => {
+    res.json(await setup.recentRepos())
+  })
+  /** A cheap live check: the value in the body when there is one (not saved), else the one in effect. */
+  api.post("/setup/test/:key", async (req, res) => {
+    const key = String(req.params.key)
+    if (!(CREDENTIAL_KEYS as readonly string[]).includes(key)) throw new BadRequestError(`Unknown credential: ${key}`)
+    const { value } = parse(z.object({ value: z.string().max(4000).optional() }).strict(), req.body ?? {})
+    res.json(await setup.test(key as CredentialKey, value))
   })
 
   // ---- text-to-speech (Settings › Voice): settings, the provider proxy and voice lists
@@ -889,11 +929,12 @@ export function createBoxYard(
     res.status(404).json({ error: "Not found" })
   })
 
-  // Errors become JSON with a helpful message; 5xx are logged.
+  // Errors become JSON with a helpful message; 5xx are logged. Neither ever shows a credential.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const status = (err as { status?: number }).status ?? 500
-    const message = err instanceof Error ? err.message : String(err)
-    if (status >= 500) console.error("[box-yard]", err)
+    const secrets = settings.credentials.secrets()
+    const message = redact(err instanceof Error ? err.message : String(err), secrets)
+    if (status >= 500) console.error("[box-yard]", redact(err instanceof Error ? (err.stack ?? message) : message, secrets))
     if (res.headersSent) return
     res.status(status).json({ error: message })
   })
@@ -910,6 +951,7 @@ export function createBoxYard(
     captains,
     scheduler,
     settings,
+    setup,
     ttsSettings,
     tts,
     hooks,

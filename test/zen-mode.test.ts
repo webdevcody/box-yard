@@ -69,10 +69,13 @@ class FakeEventSource {
 let root: Root
 let host: HTMLElement
 
+/** `/` renders as a reload of this tab (already landed), so only the tests that ask for it start in Zen. */
 function render(path = "/", tokens = 84_000) {
   history.replaceState(null, "", path)
+  sessionStorage.setItem("box-yard:landed", "1")
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.me, { authed: true, authRequired: false })
+  qc.setQueryData(keys.agentSettings, { settings: { startInZen: true, ownerName: "Cody" }, sources: {}, defaults: {} })
   qc.setQueryData(keys.health, { ok: true, provider: "mock", mock: true, bus: "file", claude: { available: true, version: "x" }, problems: [], pool: {}, orchestratorBusy: false, scheduler: "local" })
   qc.setQueryData(keys.orchestrator, { busy: false, usage: { tokens, window: 1_000_000, updatedAt: now }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
   qc.setQueryData(keys.chat, CHAT)
@@ -94,6 +97,7 @@ const settle = () => act(() => new Promise((r) => setTimeout(r, 20)))
 
 beforeEach(() => {
   localStorage.clear()
+  sessionStorage.clear()
   vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})))
   vi.stubGlobal("EventSource", FakeEventSource)
   host = document.createElement("div")
@@ -168,7 +172,7 @@ describe("Zen mode", () => {
     expect(chat()!.querySelector("[data-testid=zen-context]")).toBeNull()
   })
 
-  it("a plain load of / is never Zen, and the panel offers the way in", () => {
+  it("a reload of / stays on the Yard, and the panel offers the way in", () => {
     render("/")
     expect(inZen()).toBe(false)
     expect(document.querySelector("main")).not.toBeNull()

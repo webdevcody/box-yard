@@ -162,6 +162,11 @@ export function useServerEvents(enabled: boolean): Connection {
         case "captain.state":
           qc.setQueryData(keys.captain(ev.state.projectId), ev.state)
           break
+        case "setup":
+          qc.setQueryData(keys.setup, ev.status)
+          void qc.invalidateQueries({ queryKey: keys.health })
+          void qc.invalidateQueries({ queryKey: keys.setupRepos })
+          break
         case "tts":
           setTtsInfo(ev.info)
           qc.setQueryData(keys.tts, ev.info)
@@ -169,6 +174,8 @@ export function useServerEvents(enabled: boolean): Connection {
         case "settings":
           qc.setQueryData(keys.agentSettings, ev.info)
           void qc.invalidateQueries({ queryKey: keys.health })
+          // The setup card shows the owner's name.
+          void qc.invalidateQueries({ queryKey: keys.setup })
           void qc.invalidateQueries({ queryKey: keys.usage })
           break
         case "artifact":

@@ -8,7 +8,7 @@ import { splitQueued } from "../lib/queued"
 import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
-import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
@@ -19,6 +19,8 @@ import { groupPublished } from "../lib/publishedNotices"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
+import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
+import { TryFirst, markTryFirstDone, useTryFirstDone } from "./TryFirst"
 import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -47,13 +49,25 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const tasks = useTasks()
   const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
+  const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
+  // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
+  // composer stay mounted behind it, so a draft survives.
+  const setup = useSetupNeeded()
+  const skipped = useSetupSkipped()
+  const showSetup = zen && setup.needed && !skipped
+  const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
+  // Then an empty Zen chat shows example requests, until one message is sent or they're dismissed.
+  const tryFirstDone = useTryFirstDone()
+  const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
+  const addGithub = useCallback(() => openSettings("credentials"), [openSettings])
 
   const submit = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
       send.mutate({ id: newClientId("chat"), content, attachments })
+      markTryFirstDone()
       box.current?.focus()
     },
     [send.mutate],
@@ -155,37 +169,52 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         />
       )}
 
-      <SelectionToTask source={selectionSource} onPrompt={submit}>
-        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
-          {messages.length === 0 && !chat.isLoading && (
-            <div className="space-y-3 pt-6 text-center">
-              <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
-              <div className="space-y-2">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => submit(s)}
-                    className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          <ChatLines messages={settled} onFollowUp={submit} />
-          <StreamingReply busy={Boolean(busy.data)} />
-          {queued.length > 0 && <ChatLines messages={queued} onFollowUp={submit} />}
-        </StickyScroll>
-      </SelectionToTask>
+      {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
+      {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
 
-      <Composer
-        onSubmit={submit}
-        placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
-        textareaRef={box}
-        panelRef={panel}
-        className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
-      />
+      <div className={showSetup ? "hidden" : "contents"}>
+        <SelectionToTask source={selectionSource} onPrompt={submit}>
+          <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+            {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
+              <TryFirst
+                ready={!setup.needed}
+                github={setup.status?.github.state === "set" && !setup.status.mock}
+                needsGithub={setup.status?.github.state === "unset" && !setup.status.mock}
+                onPick={fill}
+                onGithub={addGithub}
+              />
+            )}
+            {messages.length === 0 && !chat.isLoading && !zen && (
+              <div className="space-y-3 pt-6 text-center">
+                <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
+                <div className="space-y-2">
+                  {SUGGESTIONS.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => submit(s)}
+                      className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            <ChatLines messages={settled} onFollowUp={submit} />
+            <StreamingReply busy={Boolean(busy.data)} />
+            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={submit} />}
+          </StickyScroll>
+        </SelectionToTask>
+
+        <Composer
+          onSubmit={submit}
+          placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
+          textareaRef={box}
+          handleRef={composer}
+          panelRef={panel}
+          className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
+        />
+      </div>
     </section>
   )
 })

@@ -907,8 +907,8 @@ class Captain {
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
       for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
-      if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
-      if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
+      // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
+      Object.assign(env, this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {
