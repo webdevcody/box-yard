@@ -15,6 +15,7 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
+// Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
 // [reply] (reply_to_agent) or [reply-task] (send_to_task), after any [slow:<seconds>]; otherwise it doesn't reply.
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
@@ -155,7 +156,7 @@ async function say(text) {
   if (partial) {
     for (const word of text.split(/(?<= )/)) {
       out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: word } } })
-      await sleep(15)
+      await sleep(Number(process.env.FAKE_CLAUDE_WORD_MS) || 15)
     }
   }
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } })
