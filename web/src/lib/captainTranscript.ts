@@ -3,7 +3,7 @@
 import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
 import type { EntityIndex, EntityRef } from "./linkify"
 
-export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "artifact" | "message" | "warning" | "compaction" | "info"
+export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "artifact" | "message" | "warning" | "compaction" | "info"
 
 /** A piece of a notice's one-line summary: plain text, or a link (artifact, PR, page). */
 export type NoticeSegment = { text: string } | { href: string; label: string }
@@ -21,6 +21,7 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
   "❌": "failed",
   "🙋": "needs_input",
   "🔀": "pr",
+  "🚢": "merge",
   "📎": "artifact",
   "💬": "message",
   "⚠": "warning",
@@ -82,6 +83,14 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
     kind = "compaction"
     // The saved file path is server-local and not openable from the browser.
     rest = rest.replace(/\s*Summary saved to \S+\s*$/, "")
+  }
+  if (kind === "merge") {
+    // "Cody asked **Fix login** to merge PR #12 (Merge button): https://…/pull/12" → "Fix login" · "Cody asked it to merge PR #12".
+    const m = rest.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
+    if (m) {
+      const url = m[3]!.match(URL_RE)?.[0]
+      return { kind, title: plainText(m[2]!), summary: segments(url ? `${plainText(m[1]!)} it to merge ${url}` : plainText(`${m[1]}it${m[3]}`)) }
+    }
   }
   let title: string | null = null
   const bold = rest.match(/^\*\*(.+?)\*\*\s*/)

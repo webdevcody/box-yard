@@ -22,7 +22,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "agents",
     label: "Box agents",
     description: "Defaults for the Claude Code agents that work on tasks inside boxes.",
-    fields: ["agentModel", "agentEffort", "agentRoutingConfig", "agentAutoCompact"],
+    fields: ["ownerName", "agentModel", "agentEffort", "agentRoutingConfig", "agentAutoCompact"],
   },
   {
     key: "limits",
@@ -87,6 +87,7 @@ export function stepSection(current: SettingsSection, delta: number): SettingsSe
 
 /** Env vars that can supply a setting, shown next to "from env". */
 export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
+  ownerName: "BOXYARD_OWNER_NAME",
   orchestratorModel: "ORCHESTRATOR_MODEL",
   captainModel: "CAPTAIN_MODEL",
   captainEffort: "CAPTAIN_EFFORT",

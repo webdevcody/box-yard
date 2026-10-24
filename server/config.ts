@@ -109,6 +109,8 @@ export const config = {
   mockHeavy: mock && env.BOXYARD_MOCK_HEAVY === "1",
   /** Claude binary used by the orchestrator (and by local workers). */
   claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
+  /** What Box Yard calls its human in prompts and labels; empty means the Settings default ("Cody"). */
+  ownerName: env.BOXYARD_OWNER_NAME?.trim() ?? "",
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",
   /** Wake the orchestrator when a task finishes or needs Cody, so it reports back on its own. */
   orchestratorAutoWake: (env.BOXYARD_ORCHESTRATOR_AUTOWAKE ?? "1") !== "0",

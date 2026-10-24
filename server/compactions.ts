@@ -21,7 +21,7 @@ It goes into a folder of files that is kept for months or years and may be read 
 Reply with the markdown only (no preamble, no tool calls), with exactly these sections, leaving a section's body as "- none" when it is empty:
 
 ## Decisions and preferences
-Decisions Cody made, his preferences and his standing instructions.
+Decisions Cody made, their preferences and their standing instructions.
 
 ## Projects and repos
 Each project with its repo (owner/name) and what it is for.

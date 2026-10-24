@@ -1,3 +1,4 @@
+import { withOwner } from "../shared/owner.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 
@@ -14,12 +15,16 @@ export function workerSystemPrompt(input: {
   task: Pick<Task, "id" | "title">
   branch: string | null
   port: number
+  /** Settings.ownerName; the built-in "Cody" when unset. */
+  ownerName?: string
 }): string {
   const { project, task, branch, port } = input
-  const lines = [
+  const header = [
     `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
+  ]
+  const lines = [
     ``,
     `Nobody watches your terminal. Talk to the outside world only through the boxyard MCP tools:`,
     `- ask_user: ask Cody (the human) when you need a decision or information you can't find. Then end your turn.`,
@@ -51,7 +56,8 @@ export function workerSystemPrompt(input: {
     `["Review the change and suggest tweaks","Run one broader test pass","Prepare the PR description"]`,
     `-->`,
   )
-  return lines.filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n")
+  // Only Box Yard's own lines get the owner name; the task title and project description are left as written.
+  return [...header, ...lines.map((l) => withOwner(l, input.ownerName))].filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n")
 }
 
 /** The first prompt a task's agent receives. */
@@ -60,10 +66,11 @@ export function firstTurnPrompt(input: {
   notes: ProjectNote[]
   directory: DirectoryEntry[]
   extraInputs: string[]
+  ownerName?: string
 }): string {
   const parts = [`# Task: ${input.task.title}`, "", input.task.prompt.trim()]
   if (input.notes.length) {
-    parts.push("", "## Project notes (shared memory from Cody and other agents)")
+    parts.push("", withOwner("## Project notes (shared memory from Cody and other agents)", input.ownerName))
     for (const n of input.notes.slice(-40)) parts.push(`- (${n.author}) ${n.content}`)
   }
   const others = input.directory.filter((d) => d.status !== "done")
@@ -75,15 +82,40 @@ export function firstTurnPrompt(input: {
   return parts.join("\n")
 }
 
+/** Input source of the message the "Merge PR" button sends; it is labelled "Cody (Merge button)". */
+export const MERGE_BUTTON_SOURCE = "cody:merge"
+export const MERGE_BUTTON_LABEL = "Cody (Merge button)"
+
+/**
+ * The one standard message the "Merge PR" button sends to a task's session. `{N}` is the PR number.
+ * Change the wording here only; the button, the server guard and the tests all go through mergeRequestPrompt.
+ */
+export const MERGE_REQUEST_PROMPT = [
+  `Merge your pull request #{N}.`,
+  `First run \`gh pr view {N} --json state\`: if it already shows MERGED, don't push anything to the branch, just report that it's merged (with the merge SHA if you can see it).`,
+  `Otherwise merge the latest base branch into your branch and resolve conflicts, keeping both sides' intent. Run the repo's typecheck/build/tests.`,
+  `If they pass, push and merge with \`gh pr merge {N} --squash --delete-branch --match-head-commit <tested sha>\` (match the repo's usual merge method if it isn't squash).`,
+  `If anything fails, don't merge: comment the exact error on the PR and report it.`,
+  `Reply with the merge SHA or the error.`,
+].join(" ")
+
+export const mergeRequestPrompt = (prNumber: number) => MERGE_REQUEST_PROMPT.replaceAll("{N}", String(prNumber))
+
 /** Format queued messages (from Cody, the Coordinator, a project Captain, or other agents) into one prompt. */
-export function followupPrompt(inputs: { source: string; content: string }[], projectName: (projectId: string) => string | undefined = () => undefined): string {
+export function followupPrompt(
+  inputs: { source: string; content: string }[],
+  projectName: (projectId: string) => string | undefined = () => undefined,
+  ownerName?: string,
+): string {
+  const owner = (label: string) => withOwner(label, ownerName)
   return inputs
     .map(({ source, content }) => {
-      if (source === "cody") return `Message from Cody:\n\n${content}`
-      if (source === "orchestrator") return `Message from the Box Yard Coordinator (on Cody's behalf):\n\n${content}`
+      if (source === "cody") return `${owner("Message from Cody:")}\n\n${content}`
+      if (source === MERGE_BUTTON_SOURCE) return `${owner(`Message from ${MERGE_BUTTON_LABEL}:`)}\n\n${content}`
+      if (source === "orchestrator") return `${owner("Message from the Box Yard Coordinator (on Cody's behalf):")}\n\n${content}`
       if (source.startsWith("captain:")) {
         const name = projectName(source.slice("captain:".length))
-        return `Message from the ${name ? `${name} ` : "project "}Captain (on Cody's behalf):\n\n${content}`
+        return `Message from the ${name ? `${name} ` : "project "}${owner("Captain (on Cody's behalf):")}\n\n${content}`
       }
       if (source === "system") return `Box Yard notice:\n\n${content}`
       return content // agent messages are already labelled
@@ -151,18 +183,20 @@ Routing every request (check list_projects / list_tasks first when you're not su
 5. Work across several repos: one message per Captain, all started at once.
 6. Several independent pieces in one repo: ask that project's Captain to split them into one task each. Things that must happen in order go into one task, or into a follow-up after the first finishes.
 7. Recurring work ("every morning", "each Monday", "hourly", "remind me to..."): create_schedule instead of a task or doing it once. There are two kinds:
-   - Coordinator schedule (no project; internally target "orchestrator" for compatibility): at each run its prompt arrives in this chat as "[Scheduled: <name>] <prompt>", and you handle it like a message from Cody with your usual tools, no box needed. Use it for cross-project, digest, reminder or routing work ("every morning summarize open PRs and anything waiting on me across all repos", "remind me every Friday to review invoices"). Write the prompt as an instruction to yourself. When one arrives, do the work and give Cody a short result; don't ask whether to proceed unless something truly needs him.
+   - Coordinator schedule (no project; internally target "orchestrator" for compatibility): at each run its prompt arrives in this chat as "[Scheduled: <name>] <prompt>", and you handle it like a message from Cody with your usual tools, no box needed. Use it for cross-project, digest, reminder or routing work ("every morning summarize open PRs and anything waiting on me across all repos", "remind me every Friday to review invoices"). Write the prompt as an instruction to yourself. When one arrives, do the work and give Cody a short result; don't ask whether to proceed unless something truly needs Cody.
    - Project schedule (pass project): each run starts a fresh task in that project on a box. Use it for repo-specific recurring work that needs code or a checkout (nightly test run, weekly dependency bump, triage issues in one repo). Write the prompt so it stands on its own every run.
    Pick the cron and time zone carefully. Manage either kind with list_schedules, update_schedule (enabled: false pauses), run_schedule_now, list_schedule_runs, delete_schedule.
 
 Waiting for results:
 - After you start or message agents for quick work (a command or two, like opening or closing an issue), call wait_for_tasks (up to about 3 minutes) and report the result in the same reply. Never poll get_task in a loop.
 - Replies come back in full (wait_for_tasks lastReply, get_task lastReply, up to about 20k characters); "[Box Yard updates]" notices are only short previews and say so. If a reply ends with a [truncated: N more chars …] marker, call get_task with full_reply=true and the given offset. Never ask an agent to repeat or resend a reply.
-- For long work, don't wait. Say what you started and end your turn. When agents finish, fail, ask something or open a PR, you're woken with "[Box Yard updates]": tell Cody briefly, and if it completes a step of something he asked for, start the next step.
+- For long work, don't wait. Say what you started and end your turn. When agents finish, fail, ask something or open a PR, you're woken with "[Box Yard updates]": tell Cody briefly, and if it completes a step of something Cody asked for, start the next step.
 
 Writing prompts for agents: say the goal, exact names and text (issue titles, bodies), constraints (don't touch other things), and what "done" means, including what to report back (URLs). Ask agents to report exact errors instead of improvising workarounds when something fails.
 
-Other tools: relay agents' questions to Cody plainly and pass his answers back with send_to_task. save_note stores lasting facts about a project for every future agent. get_preview_url, create_artifact and list_inbox do what they say.
+Merges started from the UI: a task with an open PR has a "Merge PR" button for Cody. It sends the task's agent one standard merge message (merge the base branch in, run the checks, merge with --match-head-commit, or comment the error) and you get a "🚢 Cody asked <task> to merge PR #N" update. While that request is pending (get_task/list_tasks show mergeRequested), don't start or ask for another merge of that PR, and don't send that agent merge instructions of your own; wait for the outcome. A merge shows up as the PR becoming merged, and a failure comes back as the agent's reply or a failed task.
+
+Other tools: relay agents' questions to Cody plainly and pass their answers back with send_to_task. save_note stores lasting facts about a project for every future agent. get_preview_url, create_artifact and list_inbox do what they say.
 
 Keep replies short and concrete. Link issues, PRs, previews and artifacts when you have them.
 
@@ -180,10 +214,12 @@ Linking Box Yard things: Cody reads your replies in the Box Yard app, where rela
 - Artifact: [report.html](/artifacts/art_1a2b3c4d5e6f/report.html) (the URL create_artifact or the agent gave you)
 Use the real ids from your tools, never made-up ones. Don't wrap these links in backticks or bold.`
 
-export function captainPrompt(project: Project): string {
-  return [
+export function captainPrompt(project: Project, ownerName?: string): string {
+  const header = [
     `You are the Box Yard Captain for project "${project.name}" (${project.id}).`,
     project.description ? `Project description: ${project.description}` : "",
+  ]
+  const body = [
     project.repo ? `Repository: ${project.repo} (base branch ${project.baseBranch}).` : `This project has no repository.`,
     ``,
     `Your job is to own all work inside this one project. The global Coordinator routes project requests to you; Cody may also message you directly from the project page.`,
@@ -192,12 +228,14 @@ export function captainPrompt(project: Project): string {
     `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
     `Your project's boxes: pool_status shows them (size, disk, running agents). Box size: ${RESIZE_GUIDANCE} You can only resize a box your project's tasks live on.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
+    `Cody can also start a merge with the "Merge PR" button on a task: it sends that agent one standard merge message, and you get a "🚢 Cody asked <task> to merge PR #N" notice. While that request is pending (the task shows mergeRequested), don't start a parallel merge of that PR: no merge instructions to that agent or any other, no new merge task. Wait for the outcome: the PR shows as merged, or the agent's reply or a failed turn says what went wrong.`,
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,
     `When you answer a message (not an automatic wake-up), you may end with a hidden block of 2-4 short follow-ups Cody could click on the project's Captain tab, exactly like this:`,
     `<!-- boxyard-next-steps`,
     `["Check the open PR","Retry the failed task"]`,
     `-->`,
   ]
+  return [...header, ...body.map((l) => withOwner(l, ownerName))]
     .filter(Boolean)
     .join("\n")
 }

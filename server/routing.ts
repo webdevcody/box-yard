@@ -4,6 +4,7 @@ import YAML from "yaml"
 import { z } from "zod"
 import { DEFAULT_EFFORT, DEFAULT_MODEL, EFFORTS, type Effort, type Project } from "../shared/types.js"
 import type { Settings } from "../shared/types.js"
+import { withOwner } from "../shared/owner.js"
 
 export const ROUTING_FILENAMES = ["routing.yaml", "routing.yml"] as const
 
@@ -130,18 +131,19 @@ export function resolveDefaultRoute(config: RoutingConfig | null, project: Proje
   }
 }
 
-export function routingInstructions(dataDir: string, settings: Pick<Settings, "agentRoutingConfig">): string {
+export function routingInstructions(dataDir: string, settings: Pick<Settings, "agentRoutingConfig"> & Partial<Pick<Settings, "ownerName">>): string {
   const loaded = loadRouting(dataDir, settings)
+  const owner = (text: string) => withOwner(text, settings.ownerName)
   const parts = [
-    `Agent model/effort routing:
+    owner(`Agent model/effort routing:
 - When you call create_task for coding, research or ops work, choose a model and effort from the routing rules below and pass model, effort, routing_rule and routing_reason.
 - When you call send_to_task for a follow-up, you may pass a new model/effort for the next turn. Use this to escalate a task that failed, is looping, or outgrew its original cheap route; a resumed Claude session may use a different --model.
 - Prefer the lowest capable route. Use project defaults first when they exist, then matching rules, then fallback. If no routing config is present, omit model and effort unless Cody explicitly requests a change.
-- Keep routing_reason short and concrete so Cody can see why the task is on that route.`,
+- Keep routing_reason short and concrete so Cody can see why the task is on that route.`),
   ]
   if (loaded.sources.length) parts.push(`Routing sources: ${loaded.sources.join(", ")}`)
   if (loaded.yaml) parts.push(`Current routing config:\n\`\`\`yaml\n${loaded.yaml}\n\`\`\``)
   else parts.push(`No routing.yaml or Settings routing YAML is configured. Built-in fallback if you must choose: model ${DEFAULT_MODEL}, effort ${DEFAULT_EFFORT}.`)
-  if (loaded.errors.length) parts.push(`Routing config warnings (ignore invalid sources and tell Cody if relevant):\n${loaded.errors.map((e) => `- ${e}`).join("\n")}`)
+  if (loaded.errors.length) parts.push(`${owner("Routing config warnings (ignore invalid sources and tell Cody if relevant):")}\n${loaded.errors.map((e) => `- ${e}`).join("\n")}`)
   return parts.join("\n\n")
 }

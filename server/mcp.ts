@@ -15,6 +15,7 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
 import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
+import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 
@@ -55,7 +56,7 @@ const attachmentsSchema = z
   .array(z.string())
   .optional()
   .describe(
-    "Files Cody attached in this chat, as the ids (up_…) or paths shown in his message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
+    "Files Cody attached in this chat, as the ids (up_…) or paths shown in their message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
   )
 
 const effortSchema = z
@@ -87,9 +88,25 @@ const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars
  * A Captain caller is scoped on the server: Coordinator-only tools are not registered, and every
  * project, task, schedule, note, preview and artifact reference must belong to its own project.
  */
+/** Rewrite tool and parameter descriptions with the configured owner name as tools are registered. */
+function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
+  if (!ownerName?.trim() || ownerName.trim() === DEFAULT_OWNER_NAME) return
+  const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: unknown) => RegisteredTool
+  const named = (text: unknown) => (typeof text === "string" ? withOwner(text, ownerName) : text)
+  server.registerTool = ((name: string, config: { description?: string; inputSchema?: Record<string, z.ZodType> }, cb: unknown) => {
+    const inputSchema = config.inputSchema
+      ? Object.fromEntries(Object.entries(config.inputSchema).map(([k, v]) => [k, v.description ? v.describe(named(v.description) as string) : v]))
+      : undefined
+    return register(name, { ...config, description: named(config.description), ...(inputSchema ? { inputSchema } : {}) }, cb)
+  }) as typeof server.registerTool
+}
+
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
   const { store, tasks, hub, artifacts, scheduler, uploads } = deps
   const server = new McpServer({ name: "boxyard", version: "0.1.0" })
+  const ownerName = deps.settings?.get().ownerName
+  const owner = (text: string) => withOwner(text, ownerName)
+  nameOwnerInTools(server, ownerName)
   const scopeId = caller.kind === "captain" ? caller.projectId : null
   const ownProject = (): Project => {
     const p = scopeId ? store.getProject(scopeId) : null
@@ -99,7 +116,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const outOfScope = (what: string) =>
     new Error(
       `Out of scope: ${what}. You are the Captain for project "${ownProject().name}" and can only work inside that project. ` +
-        `If Cody wants work in another project, say so in your reply and the Coordinator will route it.`,
+        owner(`If Cody wants work in another project, say so in your reply and the Coordinator will route it.`),
     )
   const project = (ref: string): Project => {
     const p = store.findProject(ref)
@@ -151,6 +168,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
     prState: t.prUrl ? (t.prState ?? undefined) : undefined,
+    mergeRequested: t.mergeRequest
+      ? owner(`Cody pressed Merge PR for #${t.mergeRequest.prNumber} (${t.mergeRequest.deliveredAt ? "the agent is on it" : "queued behind its current turn"}); don't start another merge of this PR`)
+      : undefined,
     previews: t.previews.length ? t.previews.map((p) => p.url) : undefined,
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
@@ -202,7 +222,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     if (mode === "box") return `resuming: the agent's Claude session resumes now on box ${t.boxId} with full context`
     if (mode === "archive") return "resuming: the workspace and Claude session are restored from the archive onto a box, then the session resumes with full context"
     if (mode === "recap")
-      return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. Tell Cody if that matters`
+      return `resuming from a recap: this task's workspace archive has expired, so its old Claude session and uncommitted work are gone. A new session starts on a fresh checkout of ${t.branch ? `branch ${t.branch} (or the base branch if it was deleted)` : "the project"} with a recap of the task's summary, PR and recent messages. ${owner("Tell Cody if that matters")}`
     return "starting: the agent's first turn starts as soon as a box slot is free"
   }
   const projectView = (p: Project) => ({
@@ -505,7 +525,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
         "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. To pass along files Cody attached (a screenshot, a document), use attachments.",
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments.",
       inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...routeParams },
     },
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
@@ -889,7 +909,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description:
         "Resize a worker box up or down (small 2 vCPU/4 GB RAM/10 GB disk, medium 4/8/20, large 8/16/30; pool_status shows each box's size and disk). " +
-        (tasks.resizeMode() === "in-place"
+        (tasks?.resizeMode() === "in-place"
           ? "The provider resizes the box in place, keeping its disk. "
           : "Upstash can't change a box's size in place, so Box Yard makes a new box of that size, archives every workspace, moves the tasks and projects to it and deletes the old box; workspaces restore from their archive on each task's next turn. ") +
         "Refused while agents are running on the box (wait until it's idle; never stop agents for this), for a scale-down whose disk in use wouldn't fit, and when Cody's Settings don't allow it or the size is above the maximum set there. " +
@@ -904,10 +924,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { box: string; size: BoxSize; reason: string }) => {
       const guard = resizeGuard()
       if (!guard.allowed) {
-        return fail("Cody has turned off automatic box resizing (Settings → Boxes & limits → Resizing). Tell Cody why a resize would help; Cody can resize it from the Boxes page.")
+        return fail(owner("Cody has turned off automatic box resizing (Settings → Boxes & limits → Resizing). Tell Cody why a resize would help; Cody can resize it from the Boxes page."))
       }
       if (compareSizes(a.size, guard.max_size) > 0) {
-        return fail(`Cody's Settings let you resize boxes up to ${guard.max_size}; ${a.size} is above that. Ask Cody to resize it from the Boxes page, or pick ${guard.max_size}.`)
+        return fail(owner(`Cody's Settings let you resize boxes up to ${guard.max_size}; ${a.size} is above that. Ask Cody to resize it from the Boxes page, or pick ${guard.max_size}.`))
       }
       const box = store.getBox(a.box)
       if (!box) return fail(`No box "${a.box}". Use pool_status.`)

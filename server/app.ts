@@ -256,7 +256,7 @@ export function createBoxYard(
   api.post("/projects/:id/notes", (req, res) => {
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
-    store.addNote(id, "Cody", parse(schemas.note, req.body).content)
+    store.addNote(id, settings.get().ownerName, parse(schemas.note, req.body).content)
     tasks.publishNotes(id)
     const project = store.getProject(id)!
     hub.broadcast({ type: "project", project })
@@ -319,6 +319,10 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/close", async (req, res) => {
     res.json(await tasks.closeTask(req.params.id!))
+  })
+  // The "Merge PR" button: the standard merge message to the task's session (409 while one is pending for the PR).
+  api.post("/tasks/:id/merge", (req, res) => {
+    res.json(tasks.requestMerge(req.params.id!))
   })
   api.post("/tasks/:id/retry", (req, res) => {
     res.json(tasks.retryTask(req.params.id!))

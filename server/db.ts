@@ -455,6 +455,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN disk_checked_at INTEGER;
   `,
   `
+  -- "Merge PR" button: the pending merge request (JSON: prNumber, prUrl, requestedAt, deliveredAt, inputId).
+  ALTER TABLE tasks ADD COLUMN merge_request_json TEXT;
+  `,
+  `
   -- Box resize: a project's preferred size for new boxes, and notifications about a box rather than a task
   -- (a resize the Coordinator or a Captain made), so task_id becomes optional.
   ALTER TABLE projects ADD COLUMN box_size TEXT;

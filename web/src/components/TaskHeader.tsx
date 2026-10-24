@@ -30,6 +30,7 @@ import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
 import { Button, NewTabLink, PrChip, StatusBadge, TimeAgo, cx } from "./ui"
 import { FilesChip } from "./TaskFiles"
+import { MergePrButton, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
 import { ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
@@ -112,6 +113,7 @@ export function TaskHeader({
         </span>
         {task.pendingCount > 0 && <span>{task.pendingCount} queued msg</span>}
         <PrChip task={task} />
+        <MergePrButton task={task} />
         {(task.model || task.effort) && (
           <span title={[task.routingRule, task.routingReason].filter(Boolean).join(" · ") || undefined}>
             {[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}
@@ -345,6 +347,7 @@ function TaskMenu({
                 <Plug className="h-3.5 w-3.5 text-zinc-500" /> Open a port…
               </button>
             )}
+            <MergePrMenuItem task={task} onPicked={() => setOpen(false)} />
             {primary !== "done" && task.status !== "done" && (
               <button
                 type="button"

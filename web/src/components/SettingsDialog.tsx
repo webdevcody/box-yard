@@ -400,6 +400,14 @@ export function SettingsDialog({
           </Panel>
         ) : section === "agents" ? (
           <Panel section="agents">
+            <Row
+              id={fid("on")}
+              label="Your name"
+              help="What the Coordinator, Captains and agents call you in their prompts and labels."
+              hint={hint("ownerName")}
+            >
+              <input id={fid("on")} className={inputClass} value={s.ownerName} maxLength={40} onChange={(e) => set("ownerName", e.target.value)} />
+            </Row>
             <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on." hint={hint("agentModel")}>
               <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
             </Row>
