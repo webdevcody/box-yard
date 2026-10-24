@@ -143,6 +143,19 @@ describe("attachments in messages", () => {
     await waitFor(async () => !(await call<{ busy: boolean }>(r, "GET", `/api/projects/${p.id}/captain`)).busy, "Captain idle")
   })
 
+  it("starts a task with files, a model and an effort from the New task dialog", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const file = (await (await upload(r, "spec.png", binary)).json()) as Attachment
+    const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "T", prompt: "build it", model: "claude-haiku-5-5", effort: "low", attachments: [file.id] })
+    expect(t).toMatchObject({ model: "claude-haiku-5-5", effort: "low" })
+    const [first] = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
+    expect(first!.meta).toMatchObject({ kind: "task_prompt", attachments: [expect.objectContaining({ id: file.id, name: "spec.png" })] })
+    await expect(call(r, "POST", "/api/tasks", { projectId: p.id, title: "T", prompt: "x", effort: "huge" })).rejects.toThrow(/400/)
+    await expect(call(r, "POST", "/api/tasks", { projectId: p.id, title: "T", prompt: "x", attachments: ["/etc/passwd"] })).rejects.toThrow(/not an uploaded file/)
+    await untilSettled(r, t.id, 1)
+  })
+
   it("writes binary attachments into the task's box folder and names them in the prompt", async () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
