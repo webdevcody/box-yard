@@ -7,7 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer } from "../server/mcp.js"
 import type { Config } from "../server/config.js"
-import type { ChatMessage, OrchestratorCompactionRecord, OrchestratorState, Project, SettingsInfo, Task, TaskCompactionRecord, TaskMessage } from "../shared/types.js"
+import type { ChatMessage, Effort, OrchestratorCompactionRecord, OrchestratorState, Project, SettingsInfo, Task, TaskCompactionRecord, TaskMessage } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Context usage, compaction (tasks and the orchestrator), the compaction log,
@@ -22,10 +22,11 @@ interface Running {
 const running: Running[] = []
 const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_WINDOW"]
 
-async function start(overrides: Partial<Config> = {}): Promise<Running> {
+async function start(overrides: Partial<Config> = {}, seed?: (yard: BoxYard) => void): Promise<Running> {
   const port = await freePort()
   const config = testConfig({ port, ...overrides })
   const yard = createBoxYard(config, { webDir: "/nonexistent" })
+  seed?.(yard)
   const server = await new Promise<Server>((resolve) => {
     const s = yard.app.listen(port, "127.0.0.1", () => resolve(s))
   })
@@ -223,6 +224,68 @@ describe("settings reach the CLI", () => {
     const last = lines().filter((l) => l.args.includes("--resume") && l.prompt.startsWith("Message from")).at(-1)!
     expect(argOf(last.args, "--model")).toBe("claude-sonnet-5-5")
     expect(argOf(last.args, "--effort")).toBe("medium")
+  })
+})
+
+describe("model/effort precedence reaches the CLI (#44)", () => {
+  const ROUTING = "defaults:\n  model: claude-sonnet-5-5\n  effort: medium\nprojects:\n  routed:\n    model: claude-haiku-5-5\n"
+  const turnsOf = (r: Running, id: string) => r.yard.store.listTaskTurns(id).map((t) => ({ model: t.model, effort: t.effort, rule: t.routing_rule }))
+
+  it("resolves every turn, so a Settings change reaches an existing task over the routing YAML defaults", async () => {
+    const lines = logFile()
+    const r = await start()
+    await call(r, "PUT", "/api/agent-settings", { agentRoutingConfig: ROUTING })
+    const demo = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const routed = await call<Project>(r, "POST", "/api/projects", { name: "routed" })
+
+    // Settings at their defaults: the YAML defaults apply, but they aren't pinned on the task.
+    const t = await call<Task>(r, "POST", "/api/tasks", { projectId: demo.id, title: "Plain", prompt: "hi" })
+    expect(await untilQuiet(r, t.id)).toMatchObject({ model: null, effort: null, routingRule: null })
+    const first = lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Plain"))!
+    expect([argOf(first.args, "--model"), argOf(first.args, "--effort")]).toEqual(["claude-sonnet-5-5", "medium"])
+
+    // Saving Settings reaches the same task on its next turn.
+    await call(r, "PUT", "/api/agent-settings", { agentModel: "ui-model", agentEffort: "low" })
+    await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "one more thing" })
+    await untilQuiet(r, t.id)
+    const next = lines().filter((l) => l.args.includes("--resume") && l.prompt.includes("one more thing")).at(-1)!
+    expect([argOf(next.args, "--model"), argOf(next.args, "--effort")]).toEqual(["ui-model", "low"])
+    expect(turnsOf(r, t.id)).toEqual([
+      { model: "claude-sonnet-5-5", effort: "medium", rule: "defaults" },
+      { model: "ui-model", effort: "low", rule: null },
+    ])
+
+    // The project's entry beats Settings for the model it sets; Settings still gives the effort.
+    const p = await call<Task>(r, "POST", "/api/tasks", { projectId: routed.id, title: "Routed", prompt: "hi" })
+    await untilQuiet(r, p.id)
+    expect(turnsOf(r, p.id)).toEqual([{ model: "claude-haiku-5-5", effort: "low", rule: "project:routed" }])
+
+    // A task's own choice beats everything.
+    const own = r.yard.tasks.createTask({ projectId: routed.id, title: "Own", prompt: "hi", model: "claude-opus-5-5", effort: "max", routingRule: "architecture" })
+    await untilQuiet(r, own.id)
+    expect(turnsOf(r, own.id)).toEqual([{ model: "claude-opus-5-5", effort: "max", rule: "architecture" }])
+    const ownTurn = lines().find((l) => l.args.includes("--session-id") && l.prompt.includes("Own"))!
+    expect([argOf(ownTurn.args, "--model"), argOf(ownTurn.args, "--effort")]).toEqual(["claude-opus-5-5", "max"])
+    // Usage is logged with the model the turn ran on, not the Settings model.
+    const usage = r.yard.store.db.prepare("SELECT model FROM claude_usage WHERE task_id = ? ORDER BY rowid").all(p.id) as { model: string }[]
+    expect(usage.map((u) => u.model)).toEqual(["claude-haiku-5-5"])
+  })
+
+  it("on startup, forgets routes older versions copied from the YAML onto tasks, and keeps deliberate ones", async () => {
+    const ids: Record<string, string> = {}
+    const r = await start({}, (yard) => {
+      yard.settings.update({ agentRoutingConfig: ROUTING, agentModel: "ui-model" })
+      const project = yard.store.createProject({ name: "demo" })
+      const make = (title: string, model: string, effort: Effort, routingRule: string) =>
+        yard.store.createTask({ projectId: project.id, title, prompt: "hi [noop]", model, effort, routingRule, routingReason: "Global routing default." }).id
+      ids.copied = make("Copied", "claude-sonnet-5-5", "medium", "defaults")
+      ids.escalated = make("Escalated", "claude-opus-5-5", "high", "defaults")
+    })
+    expect(await getTask(r, ids.copied!)).toMatchObject({ model: null, effort: null, routingRule: null, routingReason: null })
+    expect(await getTask(r, ids.escalated!)).toMatchObject({ model: "claude-opus-5-5", effort: "high", routingRule: "defaults" })
+    await untilQuiet(r, ids.copied!)
+    await untilQuiet(r, ids.escalated!)
+    expect(turnsOf(r, ids.copied!)[0]).toMatchObject({ model: "ui-model", effort: "medium" })
   })
 })
 

@@ -25,7 +25,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, DEFAULT_EFFORT, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type PushState, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type PushState, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
@@ -34,7 +34,7 @@ import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
-import { loadRouting, resolveDefaultRoute } from "./routing.js"
+import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
@@ -339,6 +339,7 @@ export class TaskManager {
 
   /** After a restart: re-attach to running turns and requeue half-started ones. */
   private recover() {
+    this.forgetCopiedRoutes()
     // A resize can't pick up where it left off: say so. Its new box (if it got that far) holds no work yet.
     for (const box of this.store.listBoxes()) {
       const r = this.resizeReport(box.id)
@@ -417,7 +418,7 @@ export class TaskManager {
     if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
     if (!input.title.trim()) throw new BadRequestError("title is required")
     if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
-    const route = this.initialRoute(project, input)
+    const route = this.initialRoute(input)
     const task = this.store.createTask({
       ...input,
       startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
@@ -1786,7 +1787,7 @@ export class TaskManager {
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId), null, 2))
-      const agent = this.agentSettings(row)
+      const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
         boxId,
         `${dir}/turn.json`,
@@ -1811,8 +1812,8 @@ export class TaskManager {
         turnIndex: compact ? row.turn_count : row.turn_count + 1,
         model: agent.model,
         effort: agent.effort,
-        routingRule: row.routing_rule,
-        routingReason: row.routing_reason,
+        routingRule: route.rule,
+        routingReason: route.reason,
         status: compact ? "compact" : "started",
       })
 
@@ -1942,11 +1943,17 @@ export class TaskManager {
     return this.settings.get().ownerName
   }
 
-  /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
-  private agentSettings(row: TaskRow) {
-    const s = this.settings.get()
-    const effort: Effort = row.effort ?? (s.agentEffort === "orchestrator" ? DEFAULT_EFFORT : s.agentEffort)
-    return { model: row.model ?? s.agentModel, effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window) }
+  /** Model, effort, route and auto-compact window for a turn, from the task, routing YAML and saved settings (read fresh each turn; precedence in resolveAgentRoute). */
+  private agentSettings(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>) {
+    const { settings: s, sources } = this.settings.info()
+    const route = resolveAgentRoute({
+      task: { model: row.model, effort: row.effort, routingRule: row.routing_rule, routingReason: row.routing_reason },
+      config: loadRouting(this.c.dataDir, s).config,
+      project,
+      settings: s,
+      sources,
+    })
+    return { model: route.model, effort: route.effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window), route }
   }
 
   /**
@@ -2946,14 +2953,16 @@ export class TaskManager {
     const usage = usageObject(ev.resultUsage) ?? usageObject(ev.usage)
     const hasCost = typeof ev.costUsd === "number" && Number.isFinite(ev.costUsd)
     if (!usage && !hasCost && typeof ev.durationMs !== "number") return null
+    const turnId = typeof ev.turnId === "string" ? ev.turnId : row.current_turn_id
     const cost = this.store.recordClaudeUsage({
       source: "task",
       runKind: ev.compact ? "compact" : "turn",
       taskId: row.id,
       projectId: row.project_id,
-      turnId: typeof ev.turnId === "string" ? ev.turnId : row.current_turn_id,
+      turnId,
       sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
-      model: row.model ?? this.settings.get().agentModel,
+      // The model the turn started on (task_turns), which may come from Settings or routing rather than the task row.
+      model: (turnId ? this.store.getTaskTurn(turnId)?.model : null) ?? row.model ?? this.settings.get().agentModel,
       startedAt: typeof ev.startedAt === "number" ? ev.startedAt : Date.now() - (typeof ev.durationMs === "number" ? ev.durationMs : 0),
       endedAt: Date.now(),
       durationMs: typeof ev.durationMs === "number" ? ev.durationMs : null,
@@ -3296,16 +3305,27 @@ export class TaskManager {
     this.hub.broadcast({ type: "task.message", message: msg })
   }
 
-  private initialRoute(
-    project: NonNullable<ReturnType<Store["getProject"]>>,
-    input: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null },
-  ) {
-    const fallback = resolveDefaultRoute(loadRouting(this.c.dataDir, this.settings.get()).config, project)
+  /**
+   * What a new task stores as its route: only the explicit choices in create_task. Project routes, Settings and the
+   * routing YAML's defaults/fallback are resolved every turn (agentSettings), so a later change still reaches it.
+   */
+  private initialRoute(input: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null }) {
     return {
-      model: input.model ?? fallback.model,
-      effort: input.effort ?? fallback.effort,
-      routingRule: input.routingRule ?? (input.model || input.effort ? null : fallback.rule),
-      routingReason: input.routingReason ?? (input.model || input.effort ? null : fallback.reason),
+      model: input.model ?? null,
+      effort: input.effort ?? null,
+      routingRule: input.routingRule ?? null,
+      routingReason: input.routingReason ?? null,
+    }
+  }
+
+  /** Clear routes that older versions copied from the routing YAML onto task rows (#44), so Settings reaches those tasks again. */
+  private forgetCopiedRoutes() {
+    const config = loadRouting(this.c.dataDir, this.settings.get()).config
+    if (!config) return
+    for (const row of this.store.listTaskRows()) {
+      const project = this.store.getProject(row.project_id)
+      if (!project || !isCopiedDefaultRoute(config, project, row)) continue
+      this.store.updateTask(row.id, { model: null, effort: null, routingRule: null, routingReason: null }, { quiet: true, touch: false })
     }
   }
 
