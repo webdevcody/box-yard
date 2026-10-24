@@ -205,7 +205,8 @@ export class CaptainManager {
     const last = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "error")
     return {
       projectId: captain.projectId,
-      allFinished: !captain.active,
+      // A waiter that got its reply runs while that turn wraps up: only queued work means it isn't finished.
+      allFinished: answered ? !captain.queued : !captain.active,
       state: captain.state(),
       lastReply: last?.content ?? null,
       messages: messages.slice(-8),
@@ -321,7 +322,12 @@ class Captain {
   }
 
   get active() {
-    return this.running || this.pending || this.wakeWanted || this.compactWanted !== null
+    return this.running || this.queued
+  }
+
+  /** Work waiting for the next turn: a message, a wake-up or a compaction. */
+  get queued() {
+    return this.pending || this.wakeWanted || this.compactWanted !== null
   }
 
   private writeMcpConfig() {

@@ -14,6 +14,7 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
+//   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
 // replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
@@ -240,6 +241,7 @@ async function orchestrator(mcp, prompt) {
     )
   }
   if (/\[slow\]/i.test(text)) await sleep(2000)
+  if ((m = text.match(/\[slow:(\d+)\]/i))) await sleep(Number(m[1]) * 1000)
   await say(withNextSteps(lines.join("\n"), ["Check the latest yard status", "Start a related task", "Summarize open decisions"]))
   return lines.join("\n")
 }
