@@ -409,8 +409,10 @@ export class TtsService {
         const status = ev.response?.status
         // "incomplete" (hit max_output_tokens) still has usable audio; it just isn't cached.
         if (status === "completed" || status === "incomplete") return finish(status === "completed")
-        const why = ev.response?.status_details?.error?.message ?? ev.response?.status_details?.reason ?? status
-        fail(new TtsError(`${label}: the response ${status === "cancelled" ? "was cancelled" : "failed"}${why && why !== status ? `: ${why}` : ""}.`, 502, call.provider))
+        const details = ev.response?.status_details
+        const why = typeof details?.error?.message === "string" ? details.error.message.slice(0, 300) : null
+        const reason = typeof details?.reason === "string" ? ` (${details.reason})` : ""
+        fail(new TtsError(`${label}: ${why ?? `the response ${status === "cancelled" ? "was cancelled" : "failed"}${reason}.`}`, 502, call.provider))
       }
     })
 
