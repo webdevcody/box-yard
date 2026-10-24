@@ -321,7 +321,7 @@ describe("archiving on a full disk", () => {
     expect(r.provider.created).toEqual(["small", "medium", "medium"])
   })
 
-  it("says when a workspace is too big even without its files, and how to raise the limit", async () => {
+  it("says when a workspace is too big even archived thin (a 2 MB unpushed commit), and how to raise the limit", async () => {
     const r = await start({ archiveMaxMb: 1 })
     const p = await repoProject(r, "alpha")
     const t = await doneTask(r, p.id, "huge history")
@@ -333,7 +333,7 @@ describe("archiving on a full disk", () => {
     const res = await fetch(`${r.base}/api/boxes/${t.boxId}`, { method: "DELETE" })
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toBe(
-      `Couldn't archive ${t.id}, so ${t.boxId} was not deleted: archive ${t.id}: workspace is too large to archive even without its files (Claude session, log and git history are over 1 MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`,
+      `Couldn't archive ${t.id}, so ${t.boxId} was not deleted: archive ${t.id}: workspace is too large to archive even without its files and the history GitHub has (Claude session, log, unpushed commits and uncommitted work are over 1 MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`,
     )
     expect(fs.existsSync(work)).toBe(true)
   })

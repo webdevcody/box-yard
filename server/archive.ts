@@ -40,7 +40,7 @@ export interface ArchiveScript {
   /**
    * Too big even without the files (a repo cloned before tasks shared the box mirror carries its whole history):
    * instead of work/.git, `<taskId>/git-thin/` holds HEAD, the refs, a bundle of only the commits GitHub doesn't
-   * have (not reachable from the mirror's refs, or from the remote-tracking refs without a mirror) and the WIP
+   * have (not reachable from the mirror's refs or the clone's remote-tracking refs) and the WIP
    * snapshot. Restore clones from the mirror or GitHub and puts them back (thinRestoreScript). Implies `partial`.
    */
   thin?: boolean
@@ -158,8 +158,9 @@ function thinSnapshot(taskId: string, mirror?: string): string {
     `[ "$w" = clean ] || echo "$w refs/boxyard/wip" >> ${g}/refs`,
     `h=$(git rev-parse -q --verify HEAD) && echo "$h refs/boxyard/head" > "$stage/head" || : > "$stage/head"`,
     `cat ${g}/refs "$stage/head" | awk 'NF == 2 { print "update refs/keep/" $2 " " $1 }' | git -C "$T" update-ref --stdin 2>>"$err" || exit 1`,
-    // What GitHub has: the mirror's refs (GitHub's heads, tags and PR refs at its last fetch), else the clone's own remote-tracking refs.
-    `if [ -n "$bm" ]; then git -C "$bm" for-each-ref --format='%(objectname)' refs/heads refs/tags refs/pull; else git for-each-ref --format='%(objectname)' refs/remotes; fi 2>/dev/null | awk '{ print "update refs/excl/" NR " " $1 }' | git -C "$T" update-ref --stdin 2>>"$err" || exit 1`,
+    // What GitHub has: the mirror's refs (GitHub's heads, tags and PR refs at its last fetch) and the clone's own
+    // remote-tracking refs (branches it fetched or pushed since). Restore checks every commit is really there.
+    `{ [ -z "$bm" ] || git -C "$bm" for-each-ref --format='%(objectname)' refs/heads refs/tags refs/pull; git for-each-ref --format='%(objectname)' refs/remotes; } 2>/dev/null | sort -u | awk '{ print "update refs/excl/" NR " " $1 }' | git -C "$T" update-ref --stdin 2>>"$err" || exit 1`,
     `n=$(git -C "$T" rev-list --count --glob='refs/keep/*' --not --glob='refs/excl/*' 2>>"$err") || exit 1`,
     `if [ "$n" != 0 ]; then git -C "$T" bundle create -q ${g}/unpushed.bundle --glob='refs/keep/*' --not --glob='refs/excl/*' 2>>"$err" || exit 1; fi`,
     `echo "$w"`,

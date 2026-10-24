@@ -35,7 +35,7 @@ import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
-import { BoxJanitor } from "./janitor.js"
+import { BoxJanitor, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, MIRROR_MARK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
@@ -292,6 +292,7 @@ export class TaskManager {
       archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, withOwner(note, this.owner())),
       dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
+      pushedOnGitHub: (taskId, boxId) => this.pushedOnGitHub(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
@@ -788,6 +789,7 @@ export class TaskManager {
         while (this.janitor.isRunning(boxId)) await new Promise((r) => setTimeout(r, 200))
         const kept: string[] = []
         for (const row of this.store.listTaskRows({ boxId })) {
+          if (await this.skipArchiveIfPushed(row.id, boxId, `delete box ${boxId}`)) continue
           await this.archiveFresh(row.id)
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
@@ -1022,14 +1024,25 @@ export class TaskManager {
       })
       await this.resizeStep(r, "archive", async () => {
         const kept: string[] = []
+        const fromGitHub: string[] = []
         const rows = this.store.listTaskRows({ boxId: r.boxId })
         for (const row of rows) {
+          if (await this.skipArchiveIfPushed(row.id, r.boxId, `move to the ${r.to} box`)) {
+            fromGitHub.push(row.id)
+            continue
+          }
           await this.archiveFresh(row.id)
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === r.boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
         }
         if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so nothing moved and ${r.boxId} keeps its work: ${this.archiveProblems(kept)}`)
-        return rows.length ? `${rows.length} ${rows.length === 1 ? "workspace" : "workspaces"} archived` : "no workspaces on the box"
+        if (!rows.length) return "no workspaces on the box"
+        const archived = rows.length - fromGitHub.length
+        const parts = [
+          ...(archived ? [`${archived} ${archived === 1 ? "workspace" : "workspaces"} archived`] : []),
+          ...(fromGitHub.length ? [`${fromGitHub.length} restorable from GitHub (PR merged, nothing unpushed)`] : []),
+        ]
+        return parts.join(", ")
       })
     } catch (err) {
       // Nothing moved to it, so it must not sit there empty (and billed).
@@ -1042,7 +1055,12 @@ export class TaskManager {
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
         this.assign(row.id, to, { touch: false })
         r.movedTasks.push(row.id)
-        this.addEvent(row.id, `Moved to box ${to} (${r.to}) while ${r.boxId} was resized. The workspace comes back from its archive on the next turn.`)
+        const back = row.archive_path
+          ? "The workspace comes back from its archive on the next turn."
+          : row.session_started
+          ? "The next turn starts from a recap, on a fresh checkout of its branch."
+          : "Its workspace is set up there on its first turn."
+        this.addEvent(row.id, `Moved to box ${to} (${r.to}) while ${r.boxId} was resized. ${back}`)
         this.emitTask(row.id)
       }
       if (owner) this.store.setKv(boxOwnerKey(to), owner)
@@ -1533,6 +1551,36 @@ export class TaskManager {
       `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`,
     )
     this.emitTask(taskId)
+  }
+
+  /**
+   * A done task whose PR is merged and whose folder holds nothing GitHub lacks (the janitor's pushedCheck): it
+   * needs no archive to leave its box.
+   */
+  private async pushedOnGitHub(taskId: string, boxId: string): Promise<boolean> {
+    const row = this.store.getTaskRow(taskId)
+    if (!row || row.box_id !== boxId || row.status !== "done" || row.pr_state !== "merged" || row.current_turn_id || this.store.hasInputs(row.id)) return false
+    const res = await this.provider.exec(boxId, pushedCheck(`${this.taskDir(boxId, taskId)}/work`)).catch(() => null)
+    return res ? pushedVerdict(res.stdout) === "yes" : false
+  }
+
+  /**
+   * Before a box operation that needs every workspace archived (resize, Delete box): a merged and fully pushed
+   * task skips the archive. It's recorded as restorable from GitHub — no archive, so its next message starts from
+   * a recap — like the emergency cleanup does, and doesn't hold the operation up. True when it did.
+   */
+  private async skipArchiveIfPushed(taskId: string, boxId: string, operation: string): Promise<boolean> {
+    const row = this.store.getTaskRow(taskId)
+    if (!row || this.hasFreshArchive(row) || !(await this.pushedOnGitHub(taskId, boxId))) return false
+    this.store.updateTask(taskId, { archivePath: null, lastArchivedAt: null }, { touch: false })
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; GitHub has the merged work")
+    const pr = prNumber(row.pr_url)
+    console.log(`[box-yard] ${taskId} needs no archive to ${operation}: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    this.addEvent(
+      taskId,
+      `No archive needed to ${operation}: its PR${pr ? ` #${pr}` : ""} is merged and nothing in the workspace was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+    )
+    return true
   }
 
   /** Room to create another box (and box creation isn't failing right now). */

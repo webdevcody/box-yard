@@ -17,6 +17,8 @@ const kvKey = (boxId: string) => `box_cleanup:${boxId}`
 export const SESSION_TEMP_DIRS = ["shell-snapshots", "session-env", "debug", "statsig", "paste-cache", "file-history", "backups"]
 /** What the pushed check prints first; "yes" or "no <why>" follows. */
 const PUSHED_MARK = "boxyard-pushed="
+/** pushedCheck's verdict from its output: "yes", or why not. */
+export const pushedVerdict = (out: string) => out.split("\n").find((l) => l.startsWith(PUSHED_MARK))?.slice(PUSHED_MARK.length) ?? "no check failed"
 
 /**
  * Prints whether a work folder holds anything GitHub doesn't: one repo (no nested ones), nothing uncommitted or
@@ -55,6 +57,8 @@ export interface JanitorHost {
   park(taskId: string, boxId: string, note: string): Promise<void>
   /** Remove a done task's folder without an archive (GitHub has all of it); it comes back from a recap. */
   dropPushed(taskId: string, boxId: string): Promise<void>
+  /** A done task with a merged PR whose folder holds nothing GitHub lacks (pushedCheck), so it needs no archive to leave. */
+  pushedOnGitHub(taskId: string, boxId: string): Promise<boolean>
   /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs; with `owner`, also the box's own project's. */
   mirrorsToKeep(boxId: string, owner?: boolean): Set<string>
   /** A run ended (ok or not). */
@@ -352,7 +356,7 @@ export class BoxJanitor {
               entry.removed.push(`${row.id} (archived)`)
             } else {
               const out = await exec(pushedCheck(`${this.host.taskDir(boxId, row.id)}/work`))
-              const verdict = out.split("\n").find((l) => l.startsWith(PUSHED_MARK))?.slice(PUSHED_MARK.length) ?? "no check failed"
+              const verdict = pushedVerdict(out)
               if (verdict !== "yes") {
                 kept.push(`${row.id} (${verdict.replace(/^no /, "")})`)
                 continue
@@ -474,6 +478,12 @@ export class BoxJanitor {
     for (const candidate of order) {
       this.busy.add(candidate.id)
       try {
+        // Merged and fully pushed: GitHub has it all, so it leaves without an archive (and resumes from a recap).
+        if (!this.host.hasFreshArchive(candidate) && (await this.host.pushedOnGitHub(candidate.id, boxId))) {
+          await this.host.dropPushed(candidate.id, boxId)
+          entry.removed.push(`${candidate.id} (PR merged, nothing unpushed)`)
+          continue
+        }
         if (!this.host.hasFreshArchive(candidate)) await this.host.archive(candidate.id)
         const row = store.getTaskRow(candidate.id)
         if (!row || row.box_id !== boxId || row.current_turn_id) continue
