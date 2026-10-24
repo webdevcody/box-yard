@@ -24,6 +24,9 @@ export interface PrInfo {
   state: PrState
   mergedAt: number | null
   mergedBy: string | null
+  /** The head commit and label names, for hooks (left as they were when GitHub didn't say). */
+  headSha?: string | null
+  labels?: string[]
 }
 
 export interface PrChange {
@@ -65,6 +68,8 @@ interface GqlPr {
   isDraft?: boolean
   mergedAt?: string | null
   mergedBy?: { login?: string } | null
+  headRefOid?: string | null
+  labels?: { nodes?: ({ name?: string } | null)[] | null } | null
 }
 
 const toInfo = (pr: GqlPr): PrInfo | null => {
@@ -72,7 +77,14 @@ const toInfo = (pr: GqlPr): PrInfo | null => {
     pr.state === "MERGED" ? "merged" : pr.state === "CLOSED" ? "closed" : pr.state === "OPEN" ? (pr.isDraft ? "draft" : "open") : null
   if (!state) return null
   const mergedAt = pr.mergedAt ? Date.parse(pr.mergedAt) : NaN
-  return { state, mergedAt: Number.isFinite(mergedAt) ? mergedAt : null, mergedBy: pr.mergedBy?.login ?? null }
+  const labels = Array.isArray(pr.labels?.nodes) ? pr.labels.nodes.map((l) => l?.name).filter((n): n is string => typeof n === "string") : undefined
+  return {
+    state,
+    mergedAt: Number.isFinite(mergedAt) ? mergedAt : null,
+    mergedBy: pr.mergedBy?.login ?? null,
+    ...(typeof pr.headRefOid === "string" ? { headSha: pr.headRefOid } : {}),
+    ...(labels ? { labels } : {}),
+  }
 }
 
 export class PrTracker {
@@ -216,7 +228,7 @@ export class PrTracker {
       fields.push(`p${i}: repository(owner: $o${i}, name: $n${i}) { pullRequest(number: $p${i}) { ...pr } }`)
     })
     const query = `query(${defs.join(", ")}) { rateLimit { remaining resetAt } ${fields.join(" ")} }
-fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } }`
+fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } headRefOid labels(first: 30) { nodes { name } } }`
 
     this.requests++
     const res = await this.fetch("https://api.github.com/graphql", {
@@ -259,7 +271,15 @@ fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } }`
   apply(taskId: string, prUrl: string, info: PrInfo) {
     const row = this.store.getTaskRow(taskId)
     if (!row || row.pr_url !== prUrl) return // the agent opened a different PR in the meantime
-    if (row.pr_state === info.state && row.pr_merged_at === info.mergedAt && row.pr_merged_by === info.mergedBy) return
+    const labels = info.labels ? JSON.stringify(info.labels) : row.pr_labels_json
+    const headSha = info.headSha ?? row.pr_head_sha
+    const same = row.pr_state === info.state && row.pr_merged_at === info.mergedAt && row.pr_merged_by === info.mergedBy
+    if (same && headSha === row.pr_head_sha && labels === row.pr_labels_json) return
+    if (same) {
+      // Only the head commit or labels moved: save them for hooks, nothing else changed.
+      this.store.updateTask(row.id, { prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}) }, { quiet: true, touch: false })
+      return
+    }
     let status: TaskStatus | null = null
     if (row.status === "pr_ready" && !row.current_turn_id) {
       if (info.state === "merged") status = "done"
@@ -267,7 +287,7 @@ fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } }`
     }
     const task = this.store.updateTask(
       row.id,
-      { prState: info.state, prMergedAt: info.mergedAt, prMergedBy: info.mergedBy, ...(status ? { status } : {}) },
+      { prState: info.state, prMergedAt: info.mergedAt, prMergedBy: info.mergedBy, prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}), ...(status ? { status } : {}) },
       // Only a status change counts as activity; a backfilled PR state on an old task shouldn't make it "recent".
       { quiet: true, touch: Boolean(status) },
     )

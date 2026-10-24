@@ -15,10 +15,13 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 // Worker prompts understand these markers anywhere in the text:
-//   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop]
+//   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
 // [hang] keeps the turn running for two minutes (until it's stopped).
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
+// [pr] ends the turn without mark_done, like an agent that opened a PR and waits for review.
+// The Merge PR button's standard message ("Merge your pull request #N") stands in for `gh pr merge` when
+// FAKE_GH_STATE names a file: the worker writes {"state":"MERGED"} there for a test's fake GitHub to read.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -240,6 +243,15 @@ async function worker(mcp, prompt) {
   await say("Looking at the task. (mock Claude)")
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t0", name: "Bash", input: { command: "ls" } }] } })
 
+  const merge = prompt.match(/Merge your pull request #(\d+)/i)
+  if (merge && process.env.FAKE_GH_STATE) {
+    out({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: `gh pr merge ${merge[1]} --squash --delete-branch` } }] } })
+    fs.writeFileSync(process.env.FAKE_GH_STATE, JSON.stringify({ state: "MERGED", mergedBy: "fake-claude", number: Number(merge[1]) }))
+    const reply = `Merged PR #${merge[1]} (mock gh pr merge).`
+    await say(withNextSteps(reply, ["Check the merged PR", "Clean up the branch"]))
+    return reply
+  }
+
   if (/\[ask\]/i.test(prompt) && !session.turns.length) {
     await useTool(mcp, "ask_user", { question: "Which color should the button be: blue or green?" })
     if (noop) await markNoop()
@@ -261,7 +273,7 @@ async function worker(mcp, prompt) {
   fs.writeFileSync(file, `# Mock result\n\nPrompt:\n\n${prompt.slice(0, 2000)}\n`)
   if (/\[artifact\]/i.test(prompt)) await useTool(mcp, "publish_artifact", { path: "box-yard-demo.md", title: "Mock report" })
   if (noop) await markNoop()
-  else if (!/\[(ask|preview)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
+  else if (!/\[(ask|preview|pr)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
     await useTool(mcp, "mark_done", { summary: "The mock agent wrote box-yard-demo.md." })
   }
   const reply = "Done for now. I wrote box-yard-demo.md."

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, Network, Volume2, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -17,6 +17,7 @@ import { LEGACY_POOL_DEFAULTS, sizeCapacities } from "../lib/capacity"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
+import { HooksPanel } from "./Hooks"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
@@ -41,7 +42,7 @@ import {
 const MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
 const EFFORT_LABEL: Record<string, string> = { low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" }
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -338,6 +339,10 @@ export function SettingsDialog({
           <NotificationsPanel fid={fid} />
         ) : section === "voice" ? (
           <VoicePanel fid={fid} />
+        ) : section === "hooks" ? (
+          <Panel section="hooks">
+            <HooksPanel projectId={null} intro={false} />
+          </Panel>
         ) : !s ? (
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : section === "orchestrator" ? (

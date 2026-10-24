@@ -38,6 +38,8 @@ import type {
   TaskStatus,
   UsageReport,
 } from "../../../shared/types"
+import type { Hook, HookRun, HookTemplateView, HookWithLastRun } from "../../../shared/hooks"
+import type { HookInput } from "./hookForm"
 
 export const keys = {
   me: ["me"] as const,
@@ -64,7 +66,14 @@ export const keys = {
   tts: ["tts-settings"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
+  /** A project's hooks, or "global" for the Coordinator's. */
+  hooks: (scope: string) => ["hooks", scope] as const,
+  hookRuns: (scope: string) => ["hook-runs", scope] as const,
+  hookTemplates: ["hook-templates"] as const,
 }
+
+/** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
+const hookQuery = (scope: string) => (scope === "global" ? "scope=global" : `projectId=${encodeURIComponent(scope)}`)
 
 // ------------------------------------------------------------------ cache helpers
 
@@ -176,6 +185,51 @@ export const useChatBusy = () =>
 // ------------------------------------------------------------------ mutations
 
 const fail = (title: string) => (err: Error) => toast.error(title, err.message)
+
+// ------------------------------------------------------------------ hooks (automations on task events)
+
+export const useHooks = (scope: string) => useQuery({ queryKey: keys.hooks(scope), queryFn: () => api<HookWithLastRun[]>(`/api/hooks?${hookQuery(scope)}`) })
+export const useHookRuns = (scope: string) =>
+  useQuery({ queryKey: keys.hookRuns(scope), queryFn: () => api<HookRun[]>(`/api/hooks/runs?${hookQuery(scope)}&limit=200`) })
+export const useHookTemplates = () => useQuery({ queryKey: keys.hookTemplates, queryFn: () => api<HookTemplateView[]>("/api/hooks/templates"), staleTime: Infinity })
+
+function useHookMutation<V, R>(fn: (v: V) => Promise<R>, what: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: fn,
+    onError: fail(`Couldn't ${what}`),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ["hooks"] })
+      void qc.invalidateQueries({ queryKey: ["hook-runs"] })
+    },
+  })
+}
+
+export const useCreateHook = () => useHookMutation((input: HookInput) => api<Hook>("/api/hooks", { body: input }), "create the hook")
+export const useUpdateHook = () =>
+  useHookMutation(({ id, ...patch }: { id: string } & Partial<HookInput>) => api<Hook>(`/api/hooks/${id}`, { method: "PATCH", body: patch }), "update the hook")
+export const useDeleteHook = () => useHookMutation((id: string) => api(`/api/hooks/${id}`, { method: "DELETE" }), "delete the hook")
+export const useHookFromTemplate = () =>
+  useHookMutation((v: { projectId: string | null; template: string }) => api<Hook>("/api/hooks/from-template", { body: v }), "add the hook")
+
+/** Optimistic on/off: the switch flips at once and flips back if the server says no. */
+export function useToggleHook(scope: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api<Hook>(`/api/hooks/${id}`, { method: "PATCH", body: { enabled } }),
+    onMutate: async ({ id, enabled }) => {
+      await qc.cancelQueries({ queryKey: keys.hooks(scope) })
+      const undo = snapshot<HookWithLastRun[]>(qc, keys.hooks(scope))
+      qc.setQueryData<HookWithLastRun[]>(keys.hooks(scope), (list) => list?.map((h) => (h.id === id ? { ...h, enabled } : h)))
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't switch the hook")(err)
+    },
+    onSettled: () => void qc.invalidateQueries({ queryKey: ["hooks"] }),
+  })
+}
 
 export function useCreateProject() {
   const qc = useQueryClient()

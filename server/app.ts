@@ -10,7 +10,7 @@ import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
-import { TaskManager } from "./tasks.js"
+import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore } from "./settings.js"
@@ -26,6 +26,10 @@ import { Scheduler } from "./scheduler.js"
 import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
+import { HookStore } from "./hookStore.js"
+import { HookEngine } from "./hooks.js"
+import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
+import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { BOX_SIZES, type Health } from "../shared/types.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
@@ -36,6 +40,18 @@ const idSchema = z
 const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var names must be like MY_VAR"), z.string())
 
 const attachmentIds = z.array(z.string()).max(20).optional()
+
+const labelList = z.array(z.string().trim().min(1).max(100)).max(30).optional()
+const hookFilters = z.object({
+  projectId: z.string().min(1).nullish(),
+  titleRegex: z.string().max(300).nullish(),
+  promptRegex: z.string().max(300).nullish(),
+  sources: z.array(z.enum(HOOK_SOURCES)).optional(),
+  labels: labelList,
+  excludeLabels: labelList,
+  includeDrafts: z.boolean().optional(),
+  includeQuiet: z.boolean().optional(),
+})
 
 const schemas = {
   tts: z
@@ -92,6 +108,35 @@ const schemas = {
     catchUp: z.enum(["once", "skip"]).optional(),
     allowOverlap: z.boolean().optional(),
   }),
+  hook: z.object({
+    projectId: z.string().min(1).nullable(),
+    name: z.string().trim().min(1).max(120),
+    trigger: z.enum(HOOK_TRIGGERS),
+    filters: hookFilters.optional(),
+    action: z.enum(HOOK_ACTIONS),
+    taskTitle: z.string().max(120).nullish(),
+    prompt: z.string().trim().min(1).max(20_000),
+    enabled: z.boolean().optional(),
+    allowSelfTrigger: z.boolean().optional(),
+    maxFiresPerTask: z.number().int().min(1).max(50).optional(),
+    template: z.enum(HOOK_TEMPLATES).nullish(),
+  }),
+  hookPatch: z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+    trigger: z.enum(HOOK_TRIGGERS).optional(),
+    filters: hookFilters.optional(),
+    action: z.enum(HOOK_ACTIONS).optional(),
+    taskTitle: z.string().max(120).nullish(),
+    prompt: z.string().trim().min(1).max(20_000).optional(),
+    enabled: z.boolean().optional(),
+    allowSelfTrigger: z.boolean().optional(),
+    maxFiresPerTask: z.number().int().min(1).max(50).optional(),
+  }),
+  hookTemplate: z.object({
+    projectId: z.string().min(1).nullable(),
+    template: z.string().min(1),
+    enabled: z.boolean().optional(),
+  }),
   schedulePatch: z.object({
     name: z.string().trim().min(1).max(120).optional(),
     cron: z.string().trim().min(1).max(200).optional(),
@@ -128,6 +173,7 @@ export interface BoxYard {
   settings: SettingsStore
   ttsSettings: TtsSettingsStore
   tts: TtsService
+  hooks: HookEngine
   start(): Promise<void>
   stop(): void
 }
@@ -140,6 +186,7 @@ export function createBoxYard(
     webDir?: string
     qstash?: QStash | null
     now?: () => number
+    github?: TaskManagerDeps["github"]
     /** Stand-ins for the ElevenLabs / OpenAI HTTP APIs (tests). */
     tts?: { fetch?: typeof fetch; timeoutMs?: number; voicesTtlMs?: number }
   } = {},
@@ -159,17 +206,29 @@ export function createBoxYard(
     ...opts.tts,
   })
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
-  tasks.onNotice = (content, meta) => {
-    if (captains.notice(content, meta)) return true
-    orchestrator.nudge()
-    return false
+  tasks.onNotice = (content, meta, opts) => {
+    const wake = opts.wake !== false
+    const handled = captains.notice(content, meta, { wake })
+    // With opts.coordinator the Coordinator still reads it with its next updates (TaskManager.notice leaves it unseen).
+    if (wake && !handled) orchestrator.nudge()
+    return handled
   }
+  const hooks = new HookEngine({
+    store,
+    hooks: new HookStore(db),
+    tasks,
+    hub,
+    messageCaptain: (projectId, content, meta) => void captains.get(projectId).send(content, { source: "hook", meta }),
+    messageCoordinator: (content, meta) => void orchestrator.hookMessage(content, meta),
+    ownerName: () => settings.get().ownerName,
+  })
+  hooks.start()
   captains.onReport = (projectId, content) => {
     const project = store.getProject(projectId)
     const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
@@ -193,7 +252,7 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -458,6 +517,43 @@ export function createBoxYard(
     }
   })
 
+  // ---- hooks: `?projectId=<id>` for a project's hooks, `?scope=global` for the Coordinator's, neither for all
+  const owner = () => settings.get().ownerName?.trim() || DEFAULT_OWNER_NAME
+  const hookScope = (q: Request["query"]) => (q.scope === "global" ? null : typeof q.projectId === "string" ? q.projectId : undefined)
+  api.get("/hooks", (req, res) => {
+    res.json(hooks.list({ projectId: hookScope(req.query) }))
+  })
+  api.get("/hooks/templates", (_req, res) => {
+    res.json(hooks.templates())
+  })
+  api.get("/hooks/runs", (req, res) => {
+    const scope = hookScope(req.query)
+    const limit = Number(req.query.limit) || 100
+    res.json(
+      hooks.runs({
+        projectId: scope ?? undefined,
+        hookScope: scope === null ? null : undefined,
+        hookId: typeof req.query.hookId === "string" ? req.query.hookId : undefined,
+        taskId: typeof req.query.taskId === "string" ? req.query.taskId : undefined,
+        limit,
+      }),
+    )
+  })
+  api.post("/hooks", (req, res) => {
+    res.status(201).json(hooks.create({ ...parse(schemas.hook, req.body), createdBy: owner() }))
+  })
+  api.post("/hooks/from-template", (req, res) => {
+    const body = parse(schemas.hookTemplate, req.body)
+    res.status(201).json(hooks.fromTemplate(body.template, { projectId: body.projectId, createdBy: owner(), enabled: body.enabled }))
+  })
+  api.patch("/hooks/:id", (req, res) => {
+    res.json(hooks.update(req.params.id!, parse(schemas.hookPatch, req.body)))
+  })
+  api.delete("/hooks/:id", (req, res) => {
+    hooks.remove(req.params.id!)
+    res.json({ ok: true })
+  })
+
   // ---- file attachments. One file per request, sent as the raw body: POST /api/uploads?name=shot.png
   api.post(
     "/uploads",
@@ -666,6 +762,7 @@ export function createBoxYard(
     settings,
     ttsSettings,
     tts,
+    hooks,
     async start() {
       await tasks.start()
       scheduler.start()
@@ -684,6 +781,7 @@ export function createBoxYard(
       })
     },
     stop() {
+      hooks.stop()
       scheduler.stop()
       tasks.stop()
       captains.stop()

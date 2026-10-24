@@ -1,6 +1,7 @@
 // Types shared by the API server and the React app.
 import type { TaskOutcome } from "./quiet.js"
 import type { BoxCleanup } from "./disk.js"
+import type { Hook, HookRun } from "./hooks.js"
 import type { BoxResize } from "./boxSizes.js"
 import type { TtsInfo } from "./tts.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -124,6 +125,8 @@ export interface MergeRequest {
   requestedAt: number
   /** When the message went out in a turn; null while it waits for the agent's current turn to end. */
   deliveredAt: number | null
+  /** Who asked, when it wasn't the owner's Merge button: a hook, as `hook "On PR ready → merge"`. */
+  requestedBy?: string | null
 }
 
 /** What to do when runs were missed (the server was down or its box was paused). */
@@ -210,7 +213,7 @@ export interface ChatMessage {
 }
 
 /** Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain) or a schedule. */
-export type CaptainSource = "cody" | "coordinator" | "schedule"
+export type CaptainSource = "cody" | "coordinator" | "schedule" | "hook"
 
 /** The Captain-tool fields the Coordinator chat keeps on a send_to_captain/ask_captain/wait_for_captain tool line (meta.captain). */
 export interface CaptainToolResult {
@@ -338,6 +341,9 @@ export type UiEvent =
   | { type: "schedule.deleted"; scheduleId: string }
   | { type: "notification"; notification: AppNotification }
   | { type: "notifications.read"; ids: string[]; readAt: number }
+  | { type: "hook"; hook: Hook }
+  | { type: "hook.deleted"; hookId: string }
+  | { type: "hook.run"; run: HookRun }
 
 /** Task statuses that are worth telling Cody about when a task lands in them. */
 export const NOTIFY_STATUSES = ["done", "pr_ready", "needs_input", "failed", "idle"] as const

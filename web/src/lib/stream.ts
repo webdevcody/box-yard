@@ -190,6 +190,15 @@ export function useServerEvents(enabled: boolean): Connection {
         case "schedule.deleted":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.id !== ev.scheduleId))
           break
+        case "hook":
+        case "hook.deleted":
+          void qc.invalidateQueries({ queryKey: ["hooks"] })
+          break
+        case "hook.run":
+          // The run log, and each hook's "last run" line.
+          void qc.invalidateQueries({ queryKey: ["hook-runs"] })
+          void qc.invalidateQueries({ queryKey: ["hooks"] })
+          break
       }
     }
 
