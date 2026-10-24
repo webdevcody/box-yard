@@ -117,6 +117,7 @@ const schemas = {
     attachments: attachmentIds,
   }),
   message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
@@ -449,6 +450,22 @@ export function createBoxYard(
     const files = withAttachments(body.content, body.attachments)
     res.status(201).json(captains.send(id, body.content, { id: body.id, attachments: files, source: "cody" }))
   })
+  // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
+  api.patch("/projects/:id/captain/messages/:messageId", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.editQueued(id, req.params.messageId!, parse(schemas.queuedEdit, req.body).text))
+  })
+  api.delete("/projects/:id/captain/messages/:messageId", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.cancelQueued(id, req.params.messageId!))
+  })
+  api.post("/projects/:id/captain/messages/:messageId/restore", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.restoreQueued(id, req.params.messageId!))
+  })
   api.post("/projects/:id/captain/compact", (req, res) => {
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
@@ -481,6 +498,20 @@ export function createBoxYard(
     const body = parse(schemas.message, req.body)
     const files = withAttachments(body.content, body.attachments)
     res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
+  })
+  // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
+  api.get("/tasks/:id/queue", (req, res) => {
+    res.json(tasks.listQueue(req.params.id!))
+  })
+  api.patch("/tasks/:id/queue/:inputId", (req, res) => {
+    const body = parse(schemas.queuedEdit, req.body)
+    res.json(tasks.editQueued(req.params.id!, req.params.inputId!, body.text, body.version))
+  })
+  api.delete("/tasks/:id/queue/:inputId", (req, res) => {
+    res.json(tasks.cancelQueued(req.params.id!, req.params.inputId!))
+  })
+  api.post("/tasks/:id/queue/:inputId/restore", (req, res) => {
+    res.json(tasks.restoreQueued(req.params.id!, req.params.inputId!))
   })
   api.post("/tasks/:id/compact", (req, res) => {
     res.json(tasks.compactTask(req.params.id!))
@@ -681,6 +712,16 @@ export function createBoxYard(
     const body = parse(schemas.chat, req.body)
     const files = withAttachments(body.content, body.attachments)
     res.status(201).json(orchestrator.send(body.content, body.id, files))
+  })
+  // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
+  api.patch("/chat/messages/:messageId", (req, res) => {
+    res.json(orchestrator.editQueued(req.params.messageId!, parse(schemas.queuedEdit, req.body).text))
+  })
+  api.delete("/chat/messages/:messageId", (req, res) => {
+    res.json(orchestrator.cancelQueued(req.params.messageId!))
+  })
+  api.post("/chat/messages/:messageId/restore", (req, res) => {
+    res.json(orchestrator.restoreQueued(req.params.messageId!))
   })
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())

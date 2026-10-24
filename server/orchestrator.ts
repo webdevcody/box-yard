@@ -10,7 +10,7 @@ import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
 import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
-import { BadRequestError } from "./store.js"
+import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import {
@@ -159,6 +159,31 @@ export class Orchestrator {
     this.pending = true
     this.autoTurns = 0
     void this.drain()
+    return msg
+  }
+
+  /** Edit a message still queued for the next turn. Refused once that turn has taken it. */
+  editQueued(id: string, content: string): ChatMessage {
+    return this.queuedChanged(this.store.editQueuedChat("chat_messages", id, null, content.trim()))
+  }
+
+  /** Delete a queued message before a turn reads it. Undo with restoreQueued. */
+  cancelQueued(id: string): ChatMessage {
+    return this.queuedChanged(this.store.cancelQueuedChat("chat_messages", id, null))
+  }
+
+  restoreQueued(id: string): ChatMessage {
+    const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
+    const msg = this.queuedChanged(this.store.restoreQueuedChat("chat_messages", id, null, { queued: this.running, at: Math.max(Date.now(), since) }))
+    this.pending = true
+    void this.drain()
+    return msg
+  }
+
+  private queuedChanged(change: QueuedChatChange): ChatMessage {
+    if (!change.ok) throw queuedChatError(change.reason, "the Coordinator")
+    const msg: ChatMessage = { role: "user", ...change.row }
+    this.hub.broadcast({ type: "chat.message", message: msg })
     return msg
   }
 
@@ -444,7 +469,7 @@ export class Orchestrator {
   /** Messages Cody sent since the orchestrator last replied. */
   private unansweredUserMessages(): ChatMessage[] {
     const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
-    return this.store.listChat(200).filter((m) => m.role === "user" && m.createdAt >= since)
+    return this.store.listChat(200).filter((m) => m.role === "user" && m.createdAt >= since && m.meta?.cancelled !== true)
   }
 
   private promptText(messages: ChatMessage[]): string[] {
@@ -516,7 +541,7 @@ export class Orchestrator {
       this.store.setKv(SESSION_KEY, fresh)
       const recap = this.store
         .listChat(30)
-        .filter((m) => m.role === "user" || m.role === "assistant")
+        .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
       result = await this.run(`Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)

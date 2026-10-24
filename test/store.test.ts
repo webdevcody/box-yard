@@ -51,18 +51,84 @@ describe("store", () => {
     expect(() => s.createProject({ name: "docs" })).toThrow()
   })
 
-  it("queues inputs in order and deletes only the ones taken", () => {
+  it("queues inputs in order and delivers only the ones a turn claimed", () => {
     const s = store()
     const p = s.createProject({ name: "x" })
     const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
-    s.queueInput(t.id, "cody", "one")
+    s.queueInput(t.id, "cody", "one", [], { message: { source: "cody" } })
     s.queueInput(t.id, "agent:task_x", "two")
-    const first = s.peekInputs(t.id)
+    const first = s.claimInputs(t.id, "turn-1")
     expect(first.map((i) => i.content)).toEqual(["one", "two"])
     s.queueInput(t.id, "cody", "three")
-    s.deleteInputs(first.map((i) => i.id))
+    // Only Cody's message gets a transcript line; the agent's goes to the prompt only.
+    expect(s.deliverInputs("turn-1").map((m) => m.content)).toEqual(["one"])
     expect(s.peekInputs(t.id).map((i) => i.content)).toEqual(["three"])
     expect(s.getTask(t.id)!.pendingCount).toBe(1)
+  })
+
+  it("gives a hook's label to the agent only, and never lets an edit or cancel change a claimed input", () => {
+    const s = store()
+    const p = s.createProject({ name: "x" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const id = s.queueInput(t.id, "hook:hk_1", "merge it", [], { prefix: "From the hook:\n\n", message: { source: "hook" } })
+    expect(s.peekInputs(t.id)[0]!.content).toBe("From the hook:\n\nmerge it")
+    expect(s.editInput(t.id, id, "merge it now", 1)).toMatchObject({ ok: true, row: { content: "merge it now", version: 2 } })
+    expect(s.editInput(t.id, id, "stale", 1)).toMatchObject({ ok: false, row: { content: "merge it now" } })
+    const rev = s.getTask(t.id)!.queueRev
+    s.claimInputs(t.id, "turn-1")
+    expect(s.getTask(t.id)!.queueRev).not.toBe(rev)
+    expect(s.editInput(t.id, id, "late")).toMatchObject({ ok: false, row: { status: "delivering" } })
+    expect(s.cancelInput(t.id, id)).toMatchObject({ ok: false, row: { status: "delivering" } })
+    expect(s.deliverInputs("turn-1")).toMatchObject([{ content: "merge it now", meta: { source: "hook" } }])
+    expect(s.editInput(t.id, id, "gone")).toEqual({ ok: false, row: null })
+    expect(s.getTask(t.id)).toMatchObject({ pendingCount: 0, queueRev: "" })
+  })
+
+  it("an input handed to the agent mid-turn is locked until it's taken (with its transcript line) or the turn ends", () => {
+    const s = store()
+    const p = s.createProject({ name: "h" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const reply = s.queueInput(t.id, "captain:x", "the answer", [], { message: { source: "captain" } })
+    expect(s.lockInput(t.id, reply, "handoff:turn1")).toBe(true)
+    expect(s.lockInput(t.id, reply, "handoff:turn1")).toBe(false)
+    // Locked: no edit, no delete.
+    expect(s.editInput(t.id, reply, "changed").ok).toBe(false)
+    expect(s.cancelInput(t.id, reply).ok).toBe(false)
+    const taken = s.takeInput(t.id, reply)
+    expect(taken?.message).toMatchObject({ role: "user", content: "the answer", meta: { source: "captain", queuedAt: expect.any(Number) } })
+    expect(s.takeInput(t.id, reply)).toBeNull()
+    expect(s.hasInputs(t.id)).toBe(false)
+
+    // Not taken: the turn's end unlocks it (or the next claim does), and it goes out then.
+    const again = s.queueInput(t.id, "captain:x", "second answer")
+    s.lockInput(t.id, again, "handoff:turn2")
+    expect(s.claimInputs(t.id, "turn3").map((i) => i.id)).toEqual([again])
+    s.releaseInputs("turn3")
+    s.lockInput(t.id, again, "handoff:turn3")
+    s.releaseInputs("handoff:turn3")
+    expect(s.editInput(t.id, again, "edited").ok).toBe(true)
+    // A turn's claim can't be taken by a hand-off.
+    s.claimInputs(t.id, "turn4")
+    expect(s.takeInput(t.id, again)).toBeNull()
+  })
+
+  it("keeps a cancelled input out of the queue but restorable, and drops it once Undo is over", () => {
+    const s = store()
+    const p = s.createProject({ name: "x" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const a = s.queueInput(t.id, "cody", "a")
+    s.queueInput(t.id, "cody", "b")
+    expect(s.cancelInput(t.id, a).ok).toBe(true)
+    expect(s.listQueuedInputs(t.id).map((i) => i.content)).toEqual(["b"])
+    expect(s.getTask(t.id)!.pendingCount).toBe(1)
+    expect(s.cancelInput(t.id, a).ok).toBe(false)
+    expect(s.restoreInput(t.id, a).ok).toBe(true)
+    expect(s.listQueuedInputs(t.id).map((i) => i.content)).toEqual(["a", "b"])
+    s.cancelInput(t.id, a)
+    // Long cancelled: the next claim clears it for good.
+    s.db.prepare("UPDATE task_inputs SET updated_at = 0 WHERE id = ?").run(a)
+    expect(s.claimInputs(t.id, "turn-1").map((i) => i.content)).toEqual(["b"])
+    expect(s.restoreInput(t.id, a)).toEqual({ ok: false, row: null })
   })
 
   it("marks notices unseen until the orchestrator takes them", () => {
@@ -100,16 +166,21 @@ describe("queued messages", () => {
     expect(s.queuedChatIds()).toEqual([])
   })
 
-  it("task feedback is found by its input, and marked undelivered when its inputs are dropped", () => {
+  it("task feedback gets its transcript line at delivery (queuedAt = sent), or marked undelivered when its inputs are dropped", () => {
     const s = store()
     const p = s.createProject({ name: "q" })
     const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
-    const a = s.addTaskMessage(t.id, "user", "a", { source: "cody", queued: true, inputId: "in_aaaaaaaa" })
-    const b = s.addTaskMessage(t.id, "user", "b", { source: "cody", queued: true, inputId: "in_bbbbbbbb" })
-    expect(s.queuedTaskMessageIds(t.id, ["in_aaaaaaaa"])).toEqual([a.id])
-    s.deliverQueued("task_messages", [a.id], t.id)
-    const dropped = s.dropQueuedTaskMessages(t.id)
-    expect(dropped.map((m) => [m.id, m.meta])).toEqual([[b.id, { source: "cody", inputId: "in_bbbbbbbb", undelivered: true }]])
-    expect(s.listTaskMessages(t.id).find((m) => m.id === a.id)?.meta).toMatchObject({ queuedAt: a.createdAt })
+    s.queueInput(t.id, "cody", "a", [], { message: { source: "cody" } })
+    s.claimInputs(t.id, "turn1")
+    s.queueInput(t.id, "cody", "b", [], { message: { source: "cody" } })
+    s.queueInput(t.id, "agent:x", "c")
+    const c = s.queueInput(t.id, "cody", "gone", [], { message: { source: "cody" } })
+    s.cancelInput(t.id, c)
+    const delivered = s.deliverInputs("turn1")
+    expect(delivered.map((m) => [m.content, m.meta])).toEqual([["a", { source: "cody", queuedAt: expect.any(Number) }]])
+    const dropped = s.dropInputs(t.id)
+    expect(dropped.map((m) => [m.content, m.meta])).toEqual([["b", { source: "cody", undelivered: true }]])
+    expect(s.hasInputs(t.id)).toBe(false)
   })
+
 })

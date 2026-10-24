@@ -79,8 +79,13 @@ describe("usage migration", () => {
     // An old-shaped project row: Store.createProject writes columns later migrations add.
     db.prepare("INSERT INTO projects (id, name, created_at, updated_at) VALUES ('prj_demo01', 'demo', 1, 1)").run()
     const p = { id: "prj_demo01" }
-    const task = store.createTask({ projectId: p.id, title: "t", prompt: "t" })
-    const older = store.createTask({ projectId: p.id, title: "older", prompt: "o" })
+    // Old-shaped task rows too: Store.createTask reads back columns later migrations add.
+    const oldTask = (id: string, title: string) => {
+      db.prepare("INSERT INTO tasks (id, project_id, title, prompt, status, session_id, created_at, updated_at, last_active_at) VALUES (?, ?, ?, ?, 'idle', ?, 1, 1, 1)").run(id, p.id, title, title, `${id}-s`)
+      return { id }
+    }
+    const task = oldTask("tsk_reconcile1", "t")
+    const older = oldTask("tsk_reconcile2", "older")
     // `older` had a turn before usage was logged, so its first logged turn resumed its session.
     db.prepare("INSERT INTO task_turns (id, task_id, turn_index, status, started_at) VALUES ('tt1', ?, 1, 'done', 10), ('tt2', ?, 2, 'done', 1005)").run(older.id, older.id)
     let n = 0

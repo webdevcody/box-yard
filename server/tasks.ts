@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
-import type { BoxRow, Store, TaskRow, TurnFlags } from "./store.js"
+import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
@@ -26,11 +26,12 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
+import { userMessageLabel } from "../shared/sender.js"
 import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
@@ -153,7 +154,7 @@ export interface MergeRequester {
   who: string
   /** The message: the standard one rendered for this PR, or the hook's edited prompt. */
   prompt: string
-  hook?: { queued: string; meta: Record<string, unknown> }
+  hook?: { prefix: string; meta: Record<string, unknown> }
 }
 
 /**
@@ -180,6 +181,10 @@ const captainMeta = (store: Store, projectId: string) => ({ source: "captain", c
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
+/** kv key for the status a resting task had before a message queued it (where cancelling every message returns it). */
+const queuedFromKey = (taskId: string) => `queued_from:${taskId}`
+/** The claim on a queued input handed to the agent mid-turn (Store.lockInput). */
+const handoffClaim = (turnId: string) => `handoff:${turnId}`
 /** Is a box of size `size` big enough for a project that needs `min` (null: any box is)? */
 const sizeFits = (size: unknown, min: BoxSize | null) => !min || compareSizes(normalizeBoxSize(size), min) >= 0
 
@@ -250,6 +255,8 @@ export class TaskManager {
   private lastEventAt = new Map<string, number>()
   private pollFailures = new Map<string, number>()
   private stopRequested = new Set<string>()
+  /** Tasks whose turn was picked (starting) when Cody cancelled every message it was for: launch drops that turn. */
+  private cancelledAll = new Set<string>()
   private creatingBoxes = 0
   /** Boxes being created, per project they're for. */
   private creatingFor = new Map<string, number>()
@@ -394,6 +401,8 @@ export class TaskManager {
       if (made && !this.store.listTaskRows({ boxId: made.id }).length)
         void this.dropBox(made.id, r, `Box Yard restarted during the resize of ${r.boxId}, so nothing moved to it.`).then((note) => this.noteResizeCleanup(r, note))
     }
+    // No turn is starting yet: messages a launch had claimed are queued (and editable) again.
+    this.store.releaseInputs()
     for (const row of this.store.listTaskRows({ status: ["starting"] })) {
       // We died while launching. Inputs are only deleted after a launch
       // succeeds, so the turn can simply run again (launch kills any
@@ -498,13 +507,125 @@ export class TaskManager {
     source: InputSource = "cody",
     attachments: StoredUpload[] = [],
     route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
-    /** A hook's message: the labelled text the agent gets, and the transcript line's meta ("Hook: <name>"). */
-    hook?: { queued: string; meta: Record<string, unknown> },
+    /** A hook's message: the label the agent gets before it, and the transcript line's meta ("Hook: <name>"). */
+    hook?: { prefix: string; meta: Record<string, unknown> },
   ): Task {
-    this.enqueue(this.requireRow(taskId), content, source, attachments, route, hook)
+    return this.send(taskId, content, source, attachments, route, hook).task
+  }
+
+  /** sendInput that also says which queued message it made (the MCP tools hand it back for cancel/edit). */
+  send(taskId: string, content: string, source: InputSource = "cody", attachments: StoredUpload[] = [], route?: Parameters<TaskManager["sendInput"]>[4], hook?: Parameters<TaskManager["sendInput"]>[5]): { task: Task; inputId: string } {
+    const inputId = this.enqueue(this.requireRow(taskId), content, source, attachments, route, hook)
     this.emitTask(taskId)
     this.schedule()
-    return this.store.getTask(taskId)!
+    return { task: this.store.getTask(taskId)!, inputId }
+  }
+
+  // ---- queued messages: list, edit, cancel (with undo). Every change is a compare-and-set against the delivery claim.
+
+  /** A task's queued messages in send order: the task page's Queued rows and the queue MCP tools. */
+  listQueue(taskId: string): QueuedMessage[] {
+    this.requireRow(taskId)
+    return this.store.listQueuedInputs(taskId).map((r) => this.queuedMessage(r))
+  }
+
+  /** Replace a queued message's text. Refused (409) once a turn has taken it, or when `version` is stale. */
+  editQueued(taskId: string, inputId: string, text: string, version?: number): QueuedMessage {
+    this.requireRow(taskId)
+    const current = this.store.getQueuedInput(taskId, inputId)
+    if (!current) throw this.queueConflict(null)
+    if (!text.trim() && !current.attachments.length) throw new BadRequestError("A queued message can't be empty. Delete it instead.")
+    const change = this.store.editInput(taskId, inputId, text.trim(), version)
+    if (!change.ok) throw this.queueConflict(change.row, version)
+    this.emitTask(taskId)
+    return this.queuedMessage(change.row)
+  }
+
+  /**
+   * Delete a queued message before it goes out (restoreQueued undoes it for a while). When it was the last one,
+   * a task that was only waiting to deliver it goes back to how it was, and a turn that was starting for it is dropped.
+   */
+  cancelQueued(taskId: string, inputId: string): QueuedMessage {
+    this.requireRow(taskId)
+    const change = this.store.cancelInput(taskId, inputId)
+    if (!change.ok) throw this.queueConflict(change.row)
+    const row = this.requireRow(taskId)
+    if (!this.store.hasInputs(taskId) && row.session_started && !row.compact_pending && !this.store.turnFlags(row).interrupts) {
+      if (row.current_turn_id && row.status === "starting") this.cancelledAll.add(taskId)
+      else if (!row.current_turn_id && row.status === "queued") this.store.updateTask(taskId, { status: this.queuedFrom(taskId), waitReason: null })
+    }
+    this.emitTask(taskId)
+    return this.queuedMessage(change.row)
+  }
+
+  /** Undo a cancel: the message is queued again in its old place, and a resting task resumes for it. */
+  restoreQueued(taskId: string, inputId: string): QueuedMessage {
+    this.requireRow(taskId)
+    const change = this.store.restoreInput(taskId, inputId)
+    if (!change.ok) {
+      if (change.row?.status === "queued") return this.queuedMessage(change.row)
+      throw new ConflictError(change.row ? this.queueConflict(change.row).message : "That message can't be restored any more: it is gone.")
+    }
+    this.cancelledAll.delete(taskId)
+    const row = this.requireRow(taskId)
+    if (!row.current_turn_id && RESTING.includes(row.status)) {
+      this.store.setKv(queuedFromKey(row.id), row.status)
+      this.store.updateTask(taskId, { status: "queued", error: null })
+    }
+    this.emitTask(taskId)
+    this.schedule()
+    return this.queuedMessage(change.row)
+  }
+
+  /** Why a queued message can't be changed (any more), as a 409. */
+  private queueConflict(row: QueuedInputRow | null, version?: number): ConflictError {
+    if (!row) return new ConflictError("That message was already delivered to the agent (or the task was stopped), so it can't be changed.")
+    if (row.status === "delivering") return new ConflictError("That message is already being delivered to the agent, so it can't be changed.")
+    if (row.status === "cancelled") return new ConflictError("That message was deleted.")
+    if (version !== undefined && row.version !== version) return new ConflictError("That message was changed since you opened it. Reload and try again.")
+    return new ConflictError("That message can't be changed right now.")
+  }
+
+  /** The status a resting task had before a message queued it: where cancelling all its messages returns it. */
+  private queuedFrom(taskId: string): TaskStatus {
+    const prev = this.store.getKv(queuedFromKey(taskId)) as TaskStatus | null
+    return prev && RESTING.includes(prev) && prev !== "queued" ? prev : "idle"
+  }
+
+  private queuedMessage(r: QueuedInputRow): QueuedMessage {
+    const [kind, ref] = r.source.split(/:(.*)/s) as [string, string | undefined]
+    const meta = r.message ?? (kind === "captain" && ref ? captainMeta(this.store, ref) : kind === "hook" ? { source: "hook" } : { source: r.source })
+    const owner = this.owner()
+    const sender: { kind: QueuedSender; label: string } =
+      kind === "agent"
+        ? { kind: "agent", label: `From ${(ref && this.store.getTask(ref)?.title) || ref || "an agent"}` }
+        : kind === "system"
+          ? { kind: "system", label: "Box Yard" }
+          : kind === "orchestrator"
+            ? { kind: "coordinator", label: "Coordinator" }
+            : kind === "captain"
+              ? { kind: "captain", label: userMessageLabel(meta, owner) }
+              : kind === "hook"
+                ? { kind: "hook", label: userMessageLabel(meta, owner) }
+                : { kind: "owner", label: userMessageLabel(meta, owner) }
+    const shown = Array.isArray(r.message?.attachments) ? (r.message.attachments as Attachment[]) : null
+    const attachments = shown ?? r.attachments.flatMap((id) => {
+      const f = this.uploads.get(id)
+      return f ? publicFiles([f]) : []
+    })
+    return {
+      id: r.id,
+      taskId: r.taskId,
+      source: r.source,
+      kind: sender.kind,
+      sender: sender.label,
+      text: r.content,
+      attachments,
+      status: r.status === "delivering" ? "delivering" : "queued",
+      version: r.version,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    }
   }
 
   /** sendInput without the broadcast: queue the message, mark the task queued if it rests, and return the input's id. */
@@ -518,16 +639,14 @@ export class TaskManager {
   ): string {
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
-    const inputId = this.store.queueInput(row.id, source, hook?.queued ?? (content.trim() || "(no text)"), attachments.map((f) => f.id))
+    // Messages from Cody, the Coordinator, a Captain or a hook get their transcript line when a turn delivers them;
+    // until then the task page shows them as Queued rows (editable, cancellable).
+    const shown = source === "cody" || source === MERGE_BUTTON_SOURCE || source === "orchestrator" || source.startsWith("captain:") || hook
+    const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
+    const message = shown ? { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) } : undefined
+    const inputId = this.store.queueInput(row.id, source, content.trim(), attachments.map((f) => f.id), { prefix: hook?.prefix, message })
     // The project's Captain answering an agent that waits mid-turn (message_captain): hand it over now.
     if (source === `captain:${row.project_id}` && !hook && !attachments.length && content.trim()) this.handToWaitingAgent(row, inputId, content.trim())
-    if (source === "cody" || source === MERGE_BUTTON_SOURCE || source === "orchestrator" || source.startsWith("captain:") || hook) {
-      const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
-      // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
-      const queued = row.current_turn_id ? { queued: true, inputId } : {}
-      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}), ...queued })
-      this.hub.broadcast({ type: "task.message", message: msg })
-    }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
     if (route?.model) patch.model = route.model
     if (route?.effort) patch.effort = route.effort
@@ -537,6 +656,7 @@ export class TaskManager {
     if (!row.current_turn_id && RESTING.includes(row.status)) {
       patch.status = "queued"
       patch.error = null
+      this.store.setKv(queuedFromKey(row.id), row.status)
     }
     this.store.updateTask(row.id, patch)
     if (source !== "system" && (route?.model || route?.effort)) {
@@ -615,7 +735,6 @@ export class TaskManager {
       if (row.status === "working") await this.killTurn(row).catch(() => {})
       // The runner writes turn_end after it stops; that settles the status.
     } else if (row.status === "queued" || row.status === "starting") {
-      this.store.clearInputs(row.id)
       this.dropQueuedMessages(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
@@ -624,25 +743,15 @@ export class TaskManager {
     return this.store.getTask(row.id)!
   }
 
-  /** Feedback sent during the last turn moves to now, right before this turn's output. */
-  private deliverQueuedMessages(taskId: string, inputIds: string[]) {
-    const ids = this.store.queuedTaskMessageIds(taskId, inputIds)
-    if (!ids.length) return
-    this.store.deliverQueued("task_messages", ids, taskId)
-    const moved = new Set(ids)
-    for (const m of this.store.listTaskMessages(taskId, 100)) if (moved.has(m.id)) this.hub.broadcast({ type: "task.message", message: m })
-  }
-
-  /** Queued feedback whose inputs were cleared: it never reaches the agent, so it stops saying "queued". */
+  /** The queue is dropped (stop, close): what people sent lands in the transcript marked undelivered. */
   private dropQueuedMessages(taskId: string) {
-    for (const m of this.store.dropQueuedTaskMessages(taskId)) this.hub.broadcast({ type: "task.message", message: m })
+    for (const m of this.store.dropInputs(taskId)) this.hub.broadcast({ type: "task.message", message: m })
   }
 
   /** Finish a task: stop it, archive it, free its box folder. */
   async closeTask(taskId: string): Promise<Task> {
     const row = this.requireRow(taskId)
     if (row.current_turn_id) await this.stopTask(taskId)
-    this.store.clearInputs(row.id)
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
     this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
@@ -1420,15 +1529,17 @@ export class TaskManager {
     if (this.budgetBlocked()) return
     const waiting = this.store
       .listTaskRows()
-      .filter((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
-      .filter((r) => r.status !== "starting" && r.status !== "working")
+      .filter((r) => this.wantsTurn(r))
       .sort((a, b) => a.last_active_at - b.last_active_at)
 
     this.wantsBox.clear()
-    for (const row of waiting) {
+    for (const listed of waiting) {
       // Over the total agent cap: wait without growing the pool. Running work is never stopped.
       const cap = this.limits().maxAgents
-      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(row)
+      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(listed)
+      // Placement awaits: the task may have moved on meanwhile (its last queued message cancelled, stopped, started).
+      const row = this.store.getTaskRow(listed.id)
+      if (!row || !this.wantsTurn(row)) continue
       if (!boxId) {
         if (row.status !== "queued") {
           this.store.updateTask(row.id, { status: "queued" })
@@ -1463,6 +1574,12 @@ export class TaskManager {
       const need = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
       for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
+  }
+
+  /** A task that waits for a turn: queued, or resting with queued messages or a compaction to run. */
+  private wantsTurn(r: TaskRow): boolean {
+    if (r.current_turn_id || r.status === "starting" || r.status === "working") return false
+    return r.status === "queued" || (r.status !== "failed" && (Boolean(r.compact_pending) || this.store.hasInputs(r.id)))
   }
 
   /** Agents of a project one new box takes: its slots, or one when the project runs heavy tasks. */
@@ -2119,8 +2236,13 @@ export class TaskManager {
       const recapped = Boolean(prepared && !prepared.restored && row.session_started)
       if (recapped && row.compact_pending) throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
       const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
-      // A compaction is a turn of its own; queued messages wait for the next one.
-      const queued = compact ? [] : this.store.peekInputs(taskId)
+      // A compaction is a turn of its own; queued messages wait for the next one. The rest are claimed for this
+      // turn: locked against edits and cancels, delivered (deleted) once it starts, released if it can't.
+      const queued = compact ? [] : this.store.claimInputs(taskId, turnId)
+      if (!compact) this.emitTask(taskId)
+      // Cody cancelled every message this turn was for: don't run it on "Continue.".
+      if (!compact && !queued.length && row.session_started && this.cancelledAll.has(taskId)) throw new StoppedBeforeStart(true)
+      this.cancelledAll.delete(taskId)
       const inputs = await this.deliverAttachments(boxId, dir, queued)
       const firstTurn = !row.session_started
       const directory = this.directory()
@@ -2186,8 +2308,7 @@ export class TaskManager {
       if (merge && !merge.deliveredAt && queued.some((i) => i.id === merge.inputId)) {
         this.store.updateTask(taskId, { mergeRequest: { ...merge, deliveredAt: Date.now() } }, { quiet: true, touch: false })
       }
-      this.store.deleteInputs(queued.map((i) => i.id))
-      this.deliverQueuedMessages(taskId, queued.map((i) => i.id))
+      for (const message of this.store.deliverInputs(turnId)) this.hub.broadcast({ type: "task.message", message })
       this.diskRetried.delete(taskId)
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
@@ -2208,7 +2329,10 @@ export class TaskManager {
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
+      this.store.releaseInputs(turnId)
       const stopped = err instanceof StoppedBeforeStart
+      const cancelled = stopped && err.cancelled
+      if (cancelled) this.cancelledAll.delete(taskId)
       this.stopRequested.delete(taskId)
       let message = errorMessage(err)
       if (!stopped) console.error(`[box-yard] launch ${taskId} on ${boxId} failed: ${message}`)
@@ -2231,7 +2355,7 @@ export class TaskManager {
       this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       const prev = current.compact_prev_status
       this.store.updateTask(taskId, {
-        status: wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : stopped ? "idle" : "failed",
+        status: wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : cancelled ? this.queuedFrom(taskId) : stopped ? "idle" : "failed",
         currentTurnId: null,
         compactPending: false,
         compacting: false,
@@ -2690,7 +2814,8 @@ export class TaskManager {
       case "captain_reply_taken": {
         // The waiting agent got the Captain's reply mid-turn, so its queued copy mustn't go out again next turn.
         this.endCaptainWait(taskId, String(ev.id ?? ""))
-        if (typeof ev.inputId === "string") this.store.deleteInputs([ev.inputId])
+        const taken = typeof ev.inputId === "string" ? this.store.takeInput(taskId, ev.inputId) : null
+        if (taken?.message) this.hub.broadcast({ type: "task.message", message: taken.message })
         say("event", "The Captain's reply reached the agent mid-turn, while it waited.", { kind: "captain_reply", agentMessageId: ev.id })
         return this.emitTask(taskId)
       }
@@ -2805,6 +2930,8 @@ export class TaskManager {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
     this.captainWaits.delete(row.id)
+    // A Captain reply handed to a wait the agent didn't take: queued (and editable) again, for the next turn.
+    this.store.releaseInputs(handoffClaim(row.current_turn_id))
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -3035,6 +3162,7 @@ export class TaskManager {
       this.store.updateTask(from.id, { turnFlags: { ...flags, waitingOn: [...new Set([...(flags.waitingOn ?? []), target.id])] } })
     }
     if (!target.current_turn_id && RESTING.includes(target.status)) {
+      this.store.setKv(queuedFromKey(target.id), target.status)
       this.store.updateTask(target.id, { status: "queued" })
     }
     this.emitTask(target.id)
@@ -3105,13 +3233,16 @@ export class TaskManager {
   }
 
   /**
-   * Give the Captain's reply to the agent's oldest open wait. The input stays queued too: if the wait ran out
-   * before the runner read the file, the reply still arrives as the agent's next message; if the runner read it,
-   * its captain_reply_taken event drops the queued copy (it comes before the turn ends).
+   * Give the Captain's reply to the agent's oldest open wait. The input stays in the queue too, locked (not
+   * editable): if the wait ran out before the runner read the file, the turn's end unlocks it and the reply arrives
+   * as the agent's next message; if the runner read it, its captain_reply_taken event takes the queued copy (it
+   * comes before the turn ends) and writes its transcript line.
    */
   private handToWaitingAgent(row: TaskRow, inputId: string, content: string) {
     const wait = this.openCaptainWaits(row.id)[0]
     if (!wait) return
+    // Locked from now on, so an edit can't go missing: the agent may read this text any moment.
+    if (!row.current_turn_id || !this.store.lockInput(row.id, inputId, handoffClaim(row.current_turn_id))) return
     this.endCaptainWait(row.id, wait.id)
     void this.writeCaptainReply(row, wait.id, { status: "reply", text: content, inputId })
   }
@@ -3914,7 +4045,8 @@ export class TaskManager {
 }
 
 class StoppedBeforeStart extends Error {
-  constructor() {
+  /** `cancelled`: not a Stop, Cody cancelled every queued message the turn was for. */
+  constructor(readonly cancelled = false) {
     super("stopped before start")
   }
 }

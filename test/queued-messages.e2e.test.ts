@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
-import type { CaptainMessage, ChatMessage, Project, Task, TaskMessage, UiEvent } from "../shared/types.js"
+import type { CaptainMessage, ChatMessage, Project, QueuedMessage, Task, TaskMessage, UiEvent } from "../shared/types.js"
 import { freePort, testConfig, waitFor } from "./helpers.js"
 
 // A message sent while the Coordinator, a Captain or an agent is mid-turn is saved at once as queued, and the turn
@@ -166,34 +166,34 @@ describe("Captain: an agent's message_captain mid-turn", () => {
 })
 
 describe("Task: feedback sent while the agent works", () => {
-  it("is saved as queued, then delivered right before the turn that reads it", async () => {
+  it("waits in the task's queue, then lands in the transcript right before the turn that reads it", async () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "queued-task" })
     const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Queued feedback", prompt: "write a file [slow]" })
     await waitFor(async () => (await call<Task>(r, "GET", `/api/tasks/${t.id}`)).status === "working" || null, "working")
     await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "also add a test" })
+    // The task page shows it as a Queued row (editable) until then, not as a transcript line.
+    const queue = await call<QueuedMessage[]>(r, "GET", `/api/tasks/${t.id}/queue`)
+    expect(queue.map((q) => q.text)).toEqual(["also add a test"])
     const during = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
-    const queued = during.find((m) => m.role === "user" && m.content === "also add a test")!
-    expect(queued.meta?.queued).toBe(true)
-    expect(queued.meta?.inputId).toBeTypeOf("string")
+    expect(during.some((m) => m.content === "also add a test")).toBe(false)
 
     // The second turn picks it up.
-    await waitFor(async () => {
+    const delivered = await waitFor(async () => {
       const list = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
-      return list.find((m) => m.id === queued.id)?.meta?.queuedAt ? list : null
+      return list.find((m) => m.role === "user" && m.content === "also add a test") ?? null
     }, "delivered")
     await waitFor(async () => (await call<Task>(r, "GET", `/api/tasks/${t.id}`)).status === "done" || null, "done", 30_000)
 
     const list = await call<TaskMessage[]>(r, "GET", `/api/tasks/${t.id}/messages`)
-    const at = list.findIndex((m) => m.id === queued.id)
-    const msg = list[at]!
-    expect(msg.meta?.queued).toBeUndefined()
-    expect(msg.meta?.queuedAt).toBe(queued.createdAt)
+    const at = list.findIndex((m) => m.id === delivered.id)
+    expect(list[at]!.meta?.queuedAt).toBe(queue[0]!.createdAt)
     // Everything from the first turn (its reply included) comes before it, the second turn's reply after it.
     const firstReply = list.findIndex((m) => m.role === "assistant")
     expect(firstReply).toBeGreaterThanOrEqual(0)
     expect(firstReply).toBeLessThan(at)
     expect(list.slice(at + 1).some((m) => m.role === "assistant")).toBe(true)
-    expect(r.events.some((e) => e.type === "task.message" && e.message.id === queued.id && e.message.meta?.queuedAt)).toBe(true)
+    expect(r.events.some((e) => e.type === "task.message" && e.message.id === delivered.id)).toBe(true)
+    expect(await call<QueuedMessage[]>(r, "GET", `/api/tasks/${t.id}/queue`)).toEqual([])
   })
 })

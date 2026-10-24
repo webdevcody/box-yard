@@ -8,11 +8,17 @@ type Meta = { meta: Record<string, unknown> | null }
 const NONE: never[] = []
 
 export const isQueued = (m: Meta) => m.meta?.queued === true
+/** Deleted while queued (Undo can still restore it): not shown. */
+const isCancelled = (m: Meta) => m.meta?.cancelled === true
 
-/** The thread without its queued messages, and those. `settled` is `items` itself when nothing is queued, so memos hold. */
+/**
+ * The thread without its queued messages, and those; deleted ones are in neither. `settled` is `items` itself
+ * when nothing is queued or deleted, so memos hold.
+ */
 export function splitQueued<T extends Meta>(items: T[]): { settled: T[]; queued: T[] } {
-  if (!items.some(isQueued)) return { settled: items, queued: NONE }
-  return { settled: items.filter((m) => !isQueued(m)), queued: items.filter(isQueued) }
+  if (!items.some((m) => isQueued(m) || isCancelled(m))) return { settled: items, queued: NONE }
+  const queued = items.filter(isQueued)
+  return { settled: items.filter((m) => !isQueued(m) && !isCancelled(m)), queued: queued.length ? queued : NONE }
 }
 
 /**
