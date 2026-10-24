@@ -84,6 +84,34 @@ describe("store", () => {
     expect(s.getTask(t.id)).toMatchObject({ pendingCount: 0, queueRev: "" })
   })
 
+  it("an input handed to the agent mid-turn is locked until it's taken (with its transcript line) or the turn ends", () => {
+    const s = store()
+    const p = s.createProject({ name: "h" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const reply = s.queueInput(t.id, "captain:x", "the answer", [], { message: { source: "captain" } })
+    expect(s.lockInput(t.id, reply, "handoff:turn1")).toBe(true)
+    expect(s.lockInput(t.id, reply, "handoff:turn1")).toBe(false)
+    // Locked: no edit, no delete.
+    expect(s.editInput(t.id, reply, "changed").ok).toBe(false)
+    expect(s.cancelInput(t.id, reply).ok).toBe(false)
+    const taken = s.takeInput(t.id, reply)
+    expect(taken?.message).toMatchObject({ role: "user", content: "the answer", meta: { source: "captain", queuedAt: expect.any(Number) } })
+    expect(s.takeInput(t.id, reply)).toBeNull()
+    expect(s.hasInputs(t.id)).toBe(false)
+
+    // Not taken: the turn's end unlocks it (or the next claim does), and it goes out then.
+    const again = s.queueInput(t.id, "captain:x", "second answer")
+    s.lockInput(t.id, again, "handoff:turn2")
+    expect(s.claimInputs(t.id, "turn3").map((i) => i.id)).toEqual([again])
+    s.releaseInputs("turn3")
+    s.lockInput(t.id, again, "handoff:turn3")
+    s.releaseInputs("handoff:turn3")
+    expect(s.editInput(t.id, again, "edited").ok).toBe(true)
+    // A turn's claim can't be taken by a hand-off.
+    s.claimInputs(t.id, "turn4")
+    expect(s.takeInput(t.id, again)).toBeNull()
+  })
+
   it("keeps a cancelled input out of the queue but restorable, and drops it once Undo is over", () => {
     const s = store()
     const p = s.createProject({ name: "x" })
