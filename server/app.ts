@@ -10,7 +10,7 @@ import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
-import { TaskManager } from "./tasks.js"
+import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore } from "./settings.js"
@@ -163,7 +163,7 @@ export interface BoxYard {
 /** Wire up the database, task manager, orchestrator and HTTP routes. */
 export function createBoxYard(
   c: Config,
-  opts: { provider?: BoxProvider; webDir?: string; qstash?: QStash | null; now?: () => number } = {},
+  opts: { provider?: BoxProvider; webDir?: string; qstash?: QStash | null; now?: () => number; github?: TaskManagerDeps["github"] } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
   const store = new Store(db)
@@ -174,7 +174,7 @@ export function createBoxYard(
   const provider = opts.provider ?? makeProvider(c)
   const settings = new SettingsStore(store, c)
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)

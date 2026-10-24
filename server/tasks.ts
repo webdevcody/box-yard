@@ -61,6 +61,8 @@ export interface TaskManagerDeps {
   artifacts: Artifacts
   settings: SettingsStore
   uploads: Uploads
+  /** Tests: a fake GitHub for the PR tracker, and the token it gets (even in mock mode). */
+  github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
 }
 
 /** What clients see of an upload: no server paths. */
@@ -195,7 +197,8 @@ export class TaskManager {
     this.reader = new EventReader(deps.provider, deps.redis)
     this.prs = new PrTracker({
       store: deps.store,
-      token: (projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.c.githubToken) || null),
+      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.c.githubToken) || null)),
+      fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
       log: (msg) => console.warn(msg),
     })
