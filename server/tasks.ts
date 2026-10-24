@@ -800,7 +800,7 @@ export class TaskManager {
     if (row.current_turn_id) await this.stopTask(taskId)
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
-    this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
+    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder on this computer stays until the task is deleted." : "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
@@ -3723,7 +3723,11 @@ export class TaskManager {
   }
 
   private hasFreshArchive(row: TaskRow) {
-    return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
+    // A box task archives as each turn ends, a moment before last_active_at is stamped. A task on this computer
+    // never does, so an archive there is current only from after its last activity: a box archive from just
+    // before a fast local turn must not pass for one.
+    const slack = isLocalRunnerBox(row.box_id) ? 0 : 1000
+    return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - slack && fs.existsSync(row.archive_path))
   }
 
   /** Archive a task unless its archive is already fresh, waiting for one that's being written right now. */
@@ -3974,6 +3978,7 @@ export class TaskManager {
     await this.archive(taskId, { closing: true })
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
+    if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays until the task is deleted
     if (this.c.archiveWorkspaces && !this.hasFreshArchive(row)) return // keep the folder if we have no current copy
     const boxId = row.box_id
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] })
