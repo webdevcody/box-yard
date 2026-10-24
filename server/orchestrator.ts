@@ -148,7 +148,9 @@ export class Orchestrator {
 
   /** Save Cody's message and make sure a turn will pick it up. */
   send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), attachments.length ? { attachments } : null, id)
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+    const meta = { ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
+    const msg = this.store.addChat("user", content.trim(), Object.keys(meta).length ? meta : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     this.autoTurns = 0
@@ -161,7 +163,7 @@ export class Orchestrator {
    * on the next turn. Unlike Cody's messages it doesn't reset the automatic-turn count: it's an automation.
    */
   hookMessage(content: string, meta: Record<string, unknown>): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), meta)
+    const msg = this.store.addChat("user", content.trim(), this.running ? { ...meta, queued: true } : meta)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     void this.drain()
@@ -177,10 +179,11 @@ export class Orchestrator {
     void this.drain()
   }
 
-  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered. */
+  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered, and so are queued messages. */
   resumeScheduled() {
     for (const r of this.store.listScheduleRuns({ status: ["running"] })) this.finishScheduledRun(r.id, "Box Yard restarted before this run finished.")
-    if (this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
+    if (this.store.queuedChatIds().length) this.pending = true
+    if (this.pending || this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
   }
 
   /**
@@ -431,11 +434,13 @@ export class Orchestrator {
   }
 
   /** Messages Cody sent since the orchestrator last replied. */
-  private unansweredUserMessages(): string[] {
+  private unansweredUserMessages(): ChatMessage[] {
     const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
-    return this.store
-      .listChat(200)
-      .filter((m) => m.role === "user" && m.createdAt >= since)
+    return this.store.listChat(200).filter((m) => m.role === "user" && m.createdAt >= since)
+  }
+
+  private promptText(messages: ChatMessage[]): string[] {
+    return messages
       .map((m) =>
         m.meta?.source === "hook" && typeof m.meta.hookName === "string"
           ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
@@ -464,9 +469,16 @@ export class Orchestrator {
   }
 
   private async turn() {
-    const messages = this.unansweredUserMessages()
+    const answering = this.unansweredUserMessages()
+    const messages = this.promptText(answering)
     if (!messages.length) return
-    this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
+    // Messages sent during the last turn move to now, right before this turn's reply.
+    const moved = this.store.deliverQueued("chat_messages", answering.map((m) => m.id))
+    for (const d of moved) {
+      const m = answering.find((x) => x.id === d.id)!
+      this.hub.broadcast({ type: "chat.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
+    }
+    this.store.setKv("orchestrator_last_turn_at", String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const notices = this.store.takeUnseenNotices()
     const prompt = [
       updatesBlock("Box Yard updates since your last turn", notices),

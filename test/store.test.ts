@@ -82,3 +82,34 @@ describe("store", () => {
     expect(s.listTaskMessages(t.id, 5).map((m) => m.content)).toEqual(["m15", "m16", "m17", "m18", "m19"])
   })
 })
+
+describe("queued messages", () => {
+  it("delivering moves a queued message after everything already in the thread, even in the same millisecond", () => {
+    const s = store()
+    const q = s.addChat("user", "k it works perfect", { queued: true }, "chat_queued001")
+    const reply = s.addChat("assistant", "the long reply")
+    // The reply landed in this very millisecond (or the clock went back).
+    const moved = s.deliverQueued("chat_messages", [q.id, reply.id], undefined, reply.createdAt - 5)
+    expect(moved).toEqual([{ id: q.id, createdAt: reply.createdAt + 1, meta: { queuedAt: q.createdAt } }])
+    // A row of the next turn that ties with it still comes after it.
+    const next = s.addChat("assistant", "answer")
+    s.db.prepare("UPDATE chat_messages SET created_at = ? WHERE id = ?").run(reply.createdAt + 1, next.id)
+    expect(s.listChat().map((m) => m.content)).toEqual(["the long reply", "k it works perfect", "answer"])
+    // Delivered once: a second call changes nothing.
+    expect(s.deliverQueued("chat_messages", [q.id])).toEqual([])
+    expect(s.queuedChatIds()).toEqual([])
+  })
+
+  it("task feedback is found by its input, and marked undelivered when its inputs are dropped", () => {
+    const s = store()
+    const p = s.createProject({ name: "q" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const a = s.addTaskMessage(t.id, "user", "a", { source: "cody", queued: true, inputId: "in_aaaaaaaa" })
+    const b = s.addTaskMessage(t.id, "user", "b", { source: "cody", queued: true, inputId: "in_bbbbbbbb" })
+    expect(s.queuedTaskMessageIds(t.id, ["in_aaaaaaaa"])).toEqual([a.id])
+    s.deliverQueued("task_messages", [a.id], t.id)
+    const dropped = s.dropQueuedTaskMessages(t.id)
+    expect(dropped.map((m) => [m.id, m.meta])).toEqual([[b.id, { source: "cody", inputId: "in_bbbbbbbb", undelivered: true }]])
+    expect(s.listTaskMessages(t.id).find((m) => m.id === a.id)?.meta).toMatchObject({ queuedAt: a.createdAt })
+  })
+})

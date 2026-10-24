@@ -13,6 +13,8 @@ import {
 } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
+import { splitQueued } from "../lib/queued"
+import { QueuedLabel } from "./ChatLine"
 import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
@@ -124,15 +126,17 @@ const TaskThread = memo(function TaskThread({
 }) {
   const messages = useTaskMessages(id)
   const shown = useMemo(() => (messages.data ?? []).filter((m) => showTools || m.role !== "tool"), [messages.data, showTools])
-  const tail = useTail(shown, id)
+  // Feedback sent mid-turn waits at the bottom until the turn that reads it starts.
+  const { settled, queued } = useMemo(() => splitQueued(shown), [shown])
+  const tail = useTail(settled, id)
   const runs = useMemo(() => runsOf(tail.visible, isPublishedEvent), [tail.visible])
 
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
   const index = useEntityIndex()
   useEffect(() => {
-    if (hidden) warmMarkdown(shown.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
-  }, [shown, hidden, index])
+    if (hidden) warmMarkdown(settled.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
+  }, [settled, hidden, index])
 
   return (
     <SelectionToTask source={selectionSource} onPrompt={onStartFromSelection}>
@@ -151,6 +155,9 @@ const TaskThread = memo(function TaskThread({
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {working}
           </div>
         )}
+        {queued.map((m) => (
+          <Line key={m.id} m={m} onFollowUp={onFollowUp} />
+        ))}
       </StickyScroll>
     </SelectionToTask>
   )
@@ -196,6 +203,8 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}
           <AttachmentList files={m.meta?.attachments} />
+          {m.meta?.queued === true && <QueuedLabel who="the agent" className="mt-1" />}
+          {m.meta?.undelivered === true && <div className="mt-1 text-[11px] text-zinc-500">Not delivered: the task was stopped or marked done first.</div>}
         </div>
       )
     }
