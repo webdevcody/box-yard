@@ -161,6 +161,8 @@ process.on("SIGTERM", () => {
 async function runTurn() {
   const turn = readJson(path.join(taskDir, "turn.json"))
   fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
+  // Answers to message_captain waits that ran out last turn; their replies come as this turn's messages.
+  for (const f of fs.readdirSync(taskDir)) if (/^captain-reply-.*\.json$/.test(f)) fs.rmSync(path.join(taskDir, f), { force: true })
   await emit({ t: "turn_start", runner: RUNNER_VERSION })
 
   const mcpConfigFile = path.join(taskDir, "mcp.json")
@@ -428,6 +430,21 @@ const TOOLS = [
     },
   },
   {
+    name: "message_captain",
+    description:
+      "Message your project's Captain (the agent that runs this project for Cody) without ending your turn: a scope or project question, a conflict with another task, or a bug you found outside your brief. " +
+      "By default it returns at once and you keep working; any reply arrives as your next message. Set wait_seconds (at most 60) to wait briefly for the answer: it returns as soon as the Captain replies. " +
+      "Use ask_user instead when only Cody can decide, and message_agent to talk to another agent. Limited to 5 messages per 10 minutes.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message: { type: "string", description: "Self-contained: what you found or need, and the options if there are any." },
+        wait_seconds: { type: "integer", minimum: 0, maximum: 60, default: 0, description: "0 (default): don't wait. Up to 60: wait that long for the reply." },
+      },
+      required: ["message"],
+    },
+  },
+  {
     name: "suggest_note",
     description:
       "Suggest a lasting rule for the project's notes, which every future agent in this project starts with. The project's Captain curates them when your task is finished, so this is a suggestion, not a save. " +
@@ -552,6 +569,8 @@ async function callTool(name, args = {}) {
           : "Message sent.",
       )
     }
+    case "message_captain":
+      return messageCaptain(args)
     case "suggest_note":
     case "save_note": {
       if (!args.content?.trim()) return text("content is required", true)
@@ -603,6 +622,59 @@ async function callTool(name, args = {}) {
     default:
       return text(`Unknown tool ${name}`, true)
   }
+}
+
+// message_captain limits. The server (shared/captain.ts) enforces the same numbers.
+const CAPTAIN_MSG_LIMIT = 5
+const CAPTAIN_MSG_WINDOW_MS = 10 * 60_000
+const CAPTAIN_WAIT_MAX_SECONDS = 60
+const captainSentFile = path.join(taskDir, "captain-sent.json")
+/** Where the server writes the Captain's answer to a waiting message_captain (or why it wasn't delivered). */
+const captainReplyFile = (id) => path.join(taskDir, `captain-reply-${id}.json`)
+
+async function messageCaptain(args) {
+  const message = String(args.message ?? "").trim()
+  if (!message) return text("message is required", true)
+  const wait = Math.max(0, Math.min(CAPTAIN_WAIT_MAX_SECONDS, Math.round(Number(args.wait_seconds ?? 0)) || 0))
+  const now = Date.now()
+  const sent = readJson(captainSentFile, []).filter((t) => typeof t === "number" && now - t < CAPTAIN_MSG_WINDOW_MS)
+  if (sent.length >= CAPTAIN_MSG_LIMIT) {
+    const free = Math.max(1, Math.ceil((Math.min(...sent) + CAPTAIN_MSG_WINDOW_MS - now) / 60_000))
+    return text(
+      owner(
+        `Not sent: you already sent the Captain ${CAPTAIN_MSG_LIMIT} messages in the last 10 minutes (the limit). Try again in about ${free} min, put it in your final message, or use ask_user if you need Cody.`,
+      ),
+      true,
+    )
+  }
+  fs.writeFileSync(captainSentFile, JSON.stringify([...sent, now]))
+  const id = `cmsg_${randomUUID().replace(/-/g, "").slice(0, 12)}`
+  await emit({ t: "message_captain", id, message, wait })
+  if (!wait) return text("Sent to your project's Captain. Keep working; if it replies, the reply arrives as your next message.")
+
+  const file = captainReplyFile(id)
+  const deadline = Date.now() + wait * 1000
+  while (Date.now() < deadline) {
+    const answer = readJson(file, null)
+    if (answer && typeof answer.status === "string") {
+      try {
+        fs.rmSync(file, { force: true })
+      } catch {}
+      if (answer.status === "reply") {
+        await emit({ t: "captain_reply_taken", id, inputId: answer.inputId ?? null })
+        return text(`The Captain replied:\n\n${answer.text ?? ""}`)
+      }
+      if (answer.status === "no_reply") {
+        return text(
+          `The Captain read your message and ended its turn without replying to you, so carry on (or end your turn if you're blocked; a later reply still arrives as your next message). Its turn ended with:\n\n${answer.text || "(nothing)"}`,
+        )
+      }
+      return text(`Not delivered: ${answer.text ?? "the Captain couldn't take it"}`, true)
+    }
+    await sleep(400)
+  }
+  await emit({ t: "captain_wait_end", id })
+  return text(`No reply within ${wait} s. The Captain still has your message; its reply arrives as your next message. Keep working, or end your turn if you're blocked on it.`)
 }
 
 /** Commits on any local branch that aren't on origin's base branch, or null outside a git repo. */

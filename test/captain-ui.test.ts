@@ -100,3 +100,29 @@ describe("Captain tab inbound messages", () => {
     expect(rows[0]!.textContent).toContain("Step 30: do the thing")
   })
 })
+
+describe("Captain tab: an agent's message_captain", () => {
+  it("says which task sent it, links the task, and shows a waiting or held agent", () => {
+    const msg = (id: string, content: string, meta: Record<string, unknown>, at: number): CaptainMessage => ({ id, projectId: project.id, role: "user", content, meta, createdAt: at })
+    const agent = { source: "agent", tool: "message_captain", taskId: "task_abc123def", taskTitle: "Fix login" }
+    qc.setQueryData<CaptainMessage[]>(keys.captainMessages(project.id), [
+      msg("cap_agent00001", "Is the admin page in scope?", { ...agent, waitSeconds: 30 }, 1),
+      msg("cap_agent00002", "FYI: signup crashes too", { ...agent, waitSeconds: 0 }, 2),
+      msg("cap_agent00003", "Same again", { ...agent, waitSeconds: 0, heldUntil: Date.now() + 60_000 }, 3),
+    ])
+    qc.setQueryData<CaptainState>(keys.captain(project.id), {
+      projectId: project.id, busy: false, usage: { tokens: null, window: null, updatedAt: null }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null,
+    })
+    qc.setQueryData(keys.captainCompactions(project.id), [])
+    render(createElement(CaptainTab, { project }))
+
+    const rows = [...host.querySelectorAll<HTMLElement>('[data-testid="captain-inbound"]')]
+    expect(rows.map((r) => r.dataset.source)).toEqual(["agent", "agent", "agent"])
+    expect(rows[0]!.textContent).toContain("From task")
+    expect(rows[0]!.textContent).toContain("Fix login")
+    expect(rows[0]!.textContent).toContain("waits 30s")
+    expect(rows[0]!.querySelector("a")?.getAttribute("href")).toBe("/tasks/task_abc123def")
+    expect(rows[1]!.textContent).not.toContain("waits")
+    expect(rows[2]!.textContent).toContain("held by loop guard")
+  })
+})

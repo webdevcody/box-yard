@@ -22,6 +22,7 @@ import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
+import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 
 export interface McpDeps {
   store: Store
@@ -154,6 +155,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const coordinatorOnly = (tool: RegisteredTool) => {
     if (scopeId) tool.remove()
   }
+  /** Tools only a project's Captain has (agents message their Captain, never the Coordinator). */
+  const captainOnly = (tool: RegisteredTool) => {
+    if (!scopeId) tool.remove()
+  }
   /** How worker messages from this caller are labelled (#51). */
   const inputSource = scopeId ? (`captain:${scopeId}` as const) : ("orchestrator" as const)
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
@@ -225,6 +230,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const BUSY = new Set(["queued", "starting", "working"])
   /** What happens to a message sent to this task right now. */
   const delivery = (t: Task) => {
+    // Only the task's own Captain reaches an agent waiting in message_captain (TaskManager.handToWaitingAgent).
+    if (scopeId && t.projectId === scopeId && tasks.agentWaitingOnCaptain(t.id))
+      return "mid-turn: the agent is waiting on its message_captain, so it gets this right away, in its current turn"
     if (t.status === "working" || t.status === "starting")
       return "queued: the agent is mid-turn; the message is delivered (with any others) as soon as this turn ends, in the same session"
     if (t.status === "queued") return "queued: the task is waiting for a box slot; the message goes out with its next turn"
@@ -708,6 +716,28 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const t = task(a.task)
       return ok(queuedView(tasks.editQueued(t.id, a.message_id, a.message, a.version)))
     }),
+  )
+
+  captainOnly(
+    server.registerTool(
+      "reply_to_agent",
+      {
+        description:
+          'Captain tool: answer an agent in this project that messaged you with message_captain (labelled "From task "<title>" (task_…)"). ' +
+          "If the agent is still waiting mid-turn, it gets the reply right away in its current turn; otherwise the reply is queued and arrives as its next message, like send_to_task (which also reaches a waiting agent). " +
+          "Keep it short and actionable. The delivery field says which happened.",
+        inputSchema: {
+          task: z.string().describe("The task id from the message label (task_…)."),
+          message: z.string().min(1).describe("Your answer to the agent."),
+        },
+      },
+      safe(async (a: { task: string; message: string }) => {
+        const before = task(a.task)
+        const how = delivery(before)
+        const t = tasks.sendInput(before.id, a.message, inputSource)
+        return ok({ ...brief(t), delivery: how })
+      }),
+    ),
   )
 
   server.registerTool(
@@ -1441,10 +1471,51 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         inputSchema: { box: z.string().describe("Box id, from pool_status") },
       },
       safe(async (a: { box: string }) => {
-        const report = await tasks.cleanBox(a.box)
+        const report = await tasks.cleanBox(a.box, { kind: "coordinator" })
         return ok({ started: true, box: report.boxId, next: "Call pool_status in a minute to see what it freed." })
       }),
     ),
+  )
+
+  server.registerTool(
+    "box_history",
+    {
+      description:
+        "The box history log, newest first: every box created, resized (from → to, with the migration target), deleted, lost (the provider reports it gone), cleaned up or cleared (with freed bytes), size changes and orphan sweeps, " +
+        "with who did it (Cody, the Coordinator or a Captain with their reason, the resize migration, the failed-resize cleanup, the janitor, the orphan sweep, the provider) and the projects and tasks on the box. " +
+        "Deleted boxes stay in it (90 days). Use it to answer \"where did my box go\"." +
+        (scopeId ? " As a Captain you see only events about your project's boxes." : ""),
+      inputSchema: {
+        box: z.string().optional().describe("Box id; includes the other box of its resizes"),
+        type: z.enum(BOX_EVENT_TYPES.map((t) => t.key) as [BoxEventType, ...BoxEventType[]]).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    safe(async (a: { box?: string; type?: BoxEventType; limit?: number }) => {
+      const filter = { boxId: a.box?.trim() || undefined, type: a.type, limit: a.limit ?? 20 }
+      const events = tasks.history.list({ ...filter, projectId: scopeId ?? undefined })
+      if (scopeId && filter.boxId && !events.length && tasks.history.list({ ...filter, limit: 1 }).length) {
+        throw outOfScope(`box ${filter.boxId} never hosted project "${ownProject().name}"`)
+      }
+      const projectName = (id: string) => store.getProject(id)?.name
+      return ok(
+        events.map((e) => ({
+          at: new Date(e.at).toISOString(),
+          ago: ago(e.at),
+          box: e.boxId,
+          ...(e.boxName && e.boxName !== e.boxId ? { name: e.boxName } : {}),
+          event: e.type,
+          by: owner(boxActorLabel(e, projectName)),
+          reason: e.reason ?? undefined,
+          size: e.fromSize && e.toSize ? `${e.fromSize} → ${e.toSize}` : (e.size ?? undefined),
+          other_box: e.relatedBoxId ?? undefined,
+          projects: e.projects.length ? e.projects.map((p) => projectName(p.id) ?? p.name) : undefined,
+          tasks: e.taskIds.length ? e.taskIds : undefined,
+          freed_mb: e.freedBytes !== null ? mb(e.freedBytes) : undefined,
+          detail: e.detail ?? undefined,
+        })),
+      )
+    }),
   )
 
   server.registerTool(

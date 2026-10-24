@@ -25,12 +25,14 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type PushState, type QueuedMessage, type QueuedSender, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type PushState, type QueuedMessage, type QueuedSender, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { userMessageLabel } from "../shared/sender.js"
+import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
+import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
@@ -42,6 +44,8 @@ import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf
 import { BoxJanitor, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
+import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
+import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import {
   compareSizes,
   initiatorLabel,
@@ -63,6 +67,14 @@ function busyMessage(boxId: string, op: BoxOperation) {
   const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing" }[op]
   return `Box ${boxId} is busy: ${what} is in progress.`
 }
+
+/** The box history actor for whoever asked for a resize (Cody from the UI, the Coordinator or a Captain). */
+const resizeActor = (by: ResizeInitiator): BoxActor => (by.kind === "cody" ? { kind: "owner" } : by)
+
+/** Task ids a cleanup took off its box ("task_x (archived)" and the like in its steps' removed lists). */
+const cleanupTaskIds = (report: BoxCleanup) => [
+  ...new Set(report.steps.flatMap((s) => s.removed.map((r) => /^(task_[A-Za-z0-9_-]+)/.exec(r)?.[1]).filter((id): id is string => Boolean(id)))),
+]
 
 /** "Couldn't archive task_a" / "Couldn't archive 3 workspaces (task_a, task_b, task_c)". */
 function couldntArchive(taskIds: string[]) {
@@ -151,6 +163,15 @@ export interface NoticeOptions {
   coordinator?: boolean
   wake?: boolean
 }
+/** An agent's message_captain that waits mid-turn for the Captain's reply (the runner polls its reply file). */
+interface CaptainWait {
+  /** The runner's message id (cmsg_…), which names the reply file. */
+  id: string
+  turnId: string | null
+  /** When the runner stops waiting, plus a little slack for the write. */
+  until: number
+}
+
 /** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
 const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
 
@@ -160,6 +181,8 @@ const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
 /** The running or last resize of a box (old and new box both point at it). */
 /** kv key for the status a resting task had before a message queued it (where cancelling every message returns it). */
+/** The claim on a queued input handed to the agent mid-turn (Store.lockInput). */
+const handoffClaim = (turnId: string) => `handoff:${turnId}`
 const queuedFromKey = (taskId: string) => `queued_from:${taskId}`
 const resizeKey = (boxId: string) => `box_resize:${boxId}`
 /** The work disk's df total a box of this size last reported, for the scale-down check. */
@@ -246,6 +269,10 @@ export class TaskManager {
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
+  /** Every box lifecycle event and who did it (server/boxHistory.ts); write it with recordBoxEvent. */
+  readonly history: BoxHistory
+  /** Who asked for the disk cleanup running on a box ("manual" runs: Cody's button or the Coordinator's tool). */
+  private cleanupBy = new Map<string, BoxActor>()
   /** Latest df per box, so a scheduling pass doesn't run df for every task. */
   private diskCache = new Map<string, { at: number; space: DiskSpace }>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
@@ -265,6 +292,10 @@ export class TaskManager {
   private lowDiskNoticeAt = new Map<string, number>()
   /** Called after every notice; return true when another owner handled delivery. */
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
+  /** Hands an agent's message_captain to its project's Captain (CaptainManager.fromAgent); null when there are no Captains. */
+  onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
+  /** Agents waiting mid-turn for their Captain's reply, by task. */
+  private captainWaits = new Map<string, CaptainWait[]>()
   /** The task event bus hooks listen on (see subscribe). */
   private readonly listeners = new Set<TaskEventListener>()
 
@@ -286,6 +317,7 @@ export class TaskManager {
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
+    this.history = new BoxHistory(this.store.db)
     this.janitor = new BoxJanitor({
       store: this.store,
       provider: this.provider,
@@ -352,7 +384,8 @@ export class TaskManager {
       this.finishResize(r, "failed", "Box Yard restarted during the resize; nothing was moved. Try again.")
       // The box it was making holds no work yet: delete it rather than leave it empty.
       const made = r.newBoxId ? this.store.getBox(r.newBoxId) : null
-      if (made && !this.store.listTaskRows({ boxId: made.id }).length) void this.dropBox(made.id).then((note) => this.noteResizeCleanup(r, note))
+      if (made && !this.store.listTaskRows({ boxId: made.id }).length)
+        void this.dropBox(made.id, r, `Box Yard restarted during the resize of ${r.boxId}, so nothing moved to it.`).then((note) => this.noteResizeCleanup(r, note))
     }
     // No turn is starting yet: messages a launch had claimed are queued (and editable) again.
     this.store.releaseInputs()
@@ -387,7 +420,17 @@ export class TaskManager {
       for (const id of ids) {
         if (!known.has(id)) {
           console.log(`[box-yard] deleting orphan box ${id}`)
-          await this.provider.destroy(id).catch(() => {})
+          const err = await this.provider.destroy(id).then(() => null, (e: unknown) => errorMessage(e))
+          this.recordBoxEvent({
+            boxId: id,
+            type: "orphan_deleted",
+            actor: { kind: "orphan-sweep" },
+            reason: `At the provider with this install's label (${label}) but not in Box Yard's database.`,
+            detail: err ? `The delete failed: ${err}` : null,
+            size: null,
+            projects: [],
+            taskIds: [],
+          })
         }
       }
     } catch (err) {
@@ -588,6 +631,8 @@ export class TaskManager {
     const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
     const message = shown ? { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) } : undefined
     const inputId = this.store.queueInput(row.id, source, content.trim(), attachments.map((f) => f.id), { prefix: hook?.prefix, message })
+    // The project's Captain answering an agent that waits mid-turn (message_captain): hand it over now.
+    if (source === `captain:${row.project_id}` && !hook && !attachments.length && content.trim()) this.handToWaitingAgent(row, inputId, content.trim())
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
     if (route?.model) patch.model = route.model
     if (route?.effort) patch.effort = route.effort
@@ -980,7 +1025,11 @@ export class TaskManager {
       }
     }
     try {
-      await this.loseBox(boxId, withOwner("Box deleted by Cody.", this.owner()))
+      await this.loseBox(boxId, withOwner("Box deleted by Cody.", this.owner()), false, {
+        type: "deleted",
+        actor: { kind: "owner" },
+        detail: box.status === "ready" ? "Deleted from the Boxes page; every workspace was archived first." : `Deleted from the Boxes page while ${box.status}.`,
+      })
       await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
     } finally {
       this.boxOps.delete(boxId)
@@ -1187,6 +1236,16 @@ export class TaskManager {
           this.creatingBoxes--
         }
         created = id
+        this.recordBoxEvent({
+          boxId: id,
+          type: "created",
+          actor: { kind: "resize" },
+          reason: `Target of the resize of ${r.boxId} ${r.from} → ${r.to}, asked by ${initiatorLabel(r.by, this.initiatorProjectName(r.by))}${r.reason ? `: ${r.reason}` : "."}`,
+          relatedBoxId: r.boxId,
+          resizeId: r.id,
+          projects: this.projectsOnBox(r.boxId).map((p) => ({ id: p, name: this.store.getProject(p)?.name ?? p })),
+          taskIds: this.store.listTaskRows({ boxId: r.boxId }).map((row) => row.id),
+        })
         // Nothing lands on it until the move is done.
         this.boxOps.set(id, "resize")
         r.newBoxId = id
@@ -1218,7 +1277,7 @@ export class TaskManager {
       })
     } catch (err) {
       // Nothing moved to it, so it must not sit there empty (and billed).
-      if (created) r.cleanup = await this.dropBox(created)
+      if (created) r.cleanup = await this.dropBox(created, r, `Nothing moved to it: the resize of ${r.boxId} failed at its ${r.steps.find((s) => s.status === "failed")?.key ?? "create"} step.`)
       throw err
     }
     const to = r.newBoxId!
@@ -1241,7 +1300,17 @@ export class TaskManager {
       return n ? `${n} ${n === 1 ? "task" : "tasks"} moved to ${to}` : `nothing to move; ${to} takes over`
     })
     await this.resizeStep(r, "delete", async () => {
-      await this.loseBox(r.boxId, `Box ${r.boxId} was resized.`, true)
+      await this.loseBox(r.boxId, `Box ${r.boxId} was resized.`, true, {
+        type: "deleted",
+        actor: { kind: "resize" },
+        reason: `Resized ${r.from} → ${r.to}; ${to} took over its work.`,
+        fromSize: r.from,
+        toSize: r.to,
+        relatedBoxId: to,
+        resizeId: r.id,
+        projects: this.projectsOnBox(to).map((id) => ({ id, name: this.store.getProject(id)?.name ?? id })),
+        taskIds: r.movedTasks,
+      })
       try {
         await this.provider.destroy(r.boxId)
         return null
@@ -1257,7 +1326,7 @@ export class TaskManager {
    * Delete a box Box Yard made but never used (a failed migration). Its row stays, as "deleting", until the provider
    * confirms, so a failed delete is retried (maintain) instead of leaving a box nobody sees. Says what happened.
    */
-  private async dropBox(boxId: string): Promise<string> {
+  private async dropBox(boxId: string, r: BoxResize | null, why: string): Promise<string> {
     const box = this.store.getBox(boxId)
     this.boxOps.delete(boxId)
     this.resizes.delete(boxId)
@@ -1267,6 +1336,19 @@ export class TaskManager {
     this.emitBoxes()
     try {
       await this.provider.destroy(boxId)
+      this.recordBoxEvent({
+        boxId,
+        type: "deleted",
+        actor: { kind: "resize-cleanup" },
+        reason: why,
+        fromSize: r?.from ?? null,
+        toSize: r?.to ?? null,
+        relatedBoxId: r && r.boxId !== boxId ? r.boxId : null,
+        resizeId: r?.id ?? null,
+        // Made for the box being resized: its projects are the ones that lost the box.
+        projects: r ? this.projectsOnBox(r.boxId).map((p) => ({ id: p, name: this.store.getProject(p)?.name ?? p })) : [],
+        taskIds: [],
+      })
       this.store.removeBox(boxId)
       console.log(`[box-yard] deleted unused box ${boxId}`)
       return `Deleted the new ${normalizeBoxSize(box.size)} box ${boxId}.`
@@ -1289,15 +1371,16 @@ export class TaskManager {
         if (now - (this.lastReclaimAt.get(box.id) ?? 0) < 5 * 60_000) continue
         this.lastReclaimAt.set(box.id, now)
         const made = this.resizeReport(box.id)
-        const note = await this.dropBox(box.id)
-        if (made?.newBoxId === box.id && made.boxId !== box.id) this.noteResizeCleanup(made, note)
+        const fromResize = made?.newBoxId === box.id && made.boxId !== box.id ? made : null
+        const note = await this.dropBox(box.id, fromResize, `Retried the delete of a box ${fromResize ? `the failed resize of ${fromResize.boxId} made` : "Box Yard was deleting"}; the last attempt didn't go through.`)
+        if (fromResize) this.noteResizeCleanup(fromResize, note)
         continue
       }
       const r = this.resizeReport(box.id)
       if (box.status !== "ready" || r?.status !== "failed" || r.newBoxId !== box.id || r.boxId === box.id) continue
       // Used since (it took tasks once the resize gave up): it's a pool box like any other now.
       if (box.last_used_at > (r.finishedAt ?? r.startedAt) + 60_000) continue
-      const note = await this.dropBox(box.id)
+      const note = await this.dropBox(box.id, r, `Left empty by the failed resize of ${r.boxId} (${r.from} → ${r.to}) and never used since.`)
       console.log(`[box-yard] reclaimed ${box.id}, left empty by the failed resize of ${r.boxId}: ${note}`)
       this.noteResizeCleanup(r, note)
     }
@@ -1347,9 +1430,27 @@ export class TaskManager {
     }
     this.diskCache.delete(r.boxId)
     this.publishResize(r)
+    const migrated = status === "done" && r.mode === "migration" && r.newBoxId
+    this.recordBoxEvent({
+      boxId: r.boxId,
+      type: status === "done" ? "resized" : "resize_failed",
+      actor: resizeActor(r.by),
+      reason: r.reason,
+      size: r.from,
+      fromSize: r.from,
+      toSize: r.to,
+      relatedBoxId: r.newBoxId,
+      resizeId: r.id,
+      detail: status === "done" ? `${r.mode === "in-place" ? "In place" : `Migrated to ${r.newBoxId}`}: ${resizeSummary(r)}` : (error ?? "failed"),
+      ...(migrated ? { projects: this.projectsOnBox(r.newBoxId!).map((p) => ({ id: p, name: this.store.getProject(p)?.name ?? p })), taskIds: r.movedTasks } : {}),
+    })
     console.log(`[box-yard] resize of ${r.boxId} ${status}${error ? `: ${error}` : ""}`)
     if (r.by.kind !== "cody") this.announceResize(r)
     this.schedule()
+  }
+
+  private initiatorProjectName(by: ResizeInitiator) {
+    return by.kind === "captain" ? this.store.getProject(by.projectId)?.name : undefined
   }
 
   /** A resize the Coordinator or a Captain made: a notice for the Coordinator and the box's Captains, and a notification for Cody. */
@@ -1664,7 +1765,7 @@ export class TaskManager {
    * workspaces are parked only while the box is below the low-disk threshold.
    * Resolves with the first report (status "running") without waiting for the end.
    */
-  async cleanBox(boxId: string): Promise<BoxCleanup> {
+  async cleanBox(boxId: string, by: BoxActor = { kind: "owner" }): Promise<BoxCleanup> {
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleaned up.`)
@@ -1672,12 +1773,16 @@ export class TaskManager {
     if (op && !this.janitor.isRunning(boxId)) throw new ConflictError(busyMessage(boxId, op))
     // Routine upkeep is short: let it finish, then run the full cleanup that was asked for.
     if (this.janitor.runningReason(boxId) === "routine") await this.janitor.settle(boxId)
-    if (!this.janitor.isRunning(boxId)) void this.janitor.run(boxId, { reason: "manual", target: null, parkBelow: this.diskNeed(null) })
+    if (!this.janitor.isRunning(boxId)) {
+      this.cleanupBy.set(boxId, by)
+      void this.janitor.run(boxId, { reason: "manual", target: null, parkBelow: this.diskNeed(null) })
+    }
     return this.janitor.current(boxId)!
   }
 
   private cleanupFinished(report: BoxCleanup) {
     this.diskCache.delete(report.boxId)
+    this.recordCleanup(report)
     if (report.enough && report.targetFreeBytes !== null) this.lowBoxes.delete(report.boxId)
     const summary = cleanupSummary(report)
     // At most one "still low" notice per box an hour: each one can wake the Coordinator.
@@ -1692,6 +1797,34 @@ export class TaskManager {
     }
     this.emitBoxes()
     this.schedule()
+  }
+
+  /**
+   * A finished cleanup in the box history: always for Clear box and Clean up now, otherwise only when the janitor
+   * freed or removed something or failed (a box that stays low is retried every few minutes; those runs say nothing).
+   */
+  private recordCleanup(report: BoxCleanup) {
+    const by = this.cleanupBy.get(report.boxId)
+    this.cleanupBy.delete(report.boxId)
+    const asked = report.reason === "clear" || report.reason === "manual"
+    const did = report.freedBytes >= 1024 * 1024 || report.steps.some((s) => s.removed.length)
+    if (!asked && !did && (report.status !== "failed" || report.reason === "routine")) return
+    const why: Record<BoxCleanup["reason"], string> = {
+      "low-disk": "The box was low on disk.",
+      "out-of-space": "A task ran out of space on the box.",
+      manual: "Clean up now.",
+      clear: "Clear box: every workspace archived and taken off the box.",
+      routine: "Routine upkeep (build output of idle tasks, temp folders, mirror gc).",
+    }
+    this.recordBoxEvent({
+      boxId: report.boxId,
+      type: report.reason === "clear" ? "cleared" : "cleanup",
+      actor: report.reason === "clear" ? { kind: "owner" } : report.reason === "manual" ? (by ?? { kind: "owner" }) : { kind: "janitor" },
+      reason: why[report.reason],
+      freedBytes: report.freedBytes,
+      detail: `${cleanupSummary(report)}${report.status === "failed" ? ` (failed: ${report.error ?? "unknown error"})` : ""}`,
+      taskIds: cleanupTaskIds(report),
+    })
   }
 
   /** Repo mirrors a box still needs: those of its tasks' projects and of the project it was made for. */
@@ -1831,6 +1964,8 @@ export class TaskManager {
     this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
     this.emitBoxes()
     const project = projectId ? this.store.getProject(projectId) : null
+    // The tasks that made the pool grow, for the history row.
+    const waiting = [...this.wantsBox].filter((id) => !projectId || this.store.getTaskRow(id)?.project_id === projectId)
     try {
       const labels = this.boxLabels(projectId)
       const id = await this.provider.create({ labels, size })
@@ -1841,6 +1976,13 @@ export class TaskManager {
         this.store.setKv(projectBoxKey(projectId), id)
         this.store.setKv(boxOwnerKey(id), projectId)
       }
+      this.recordBoxEvent({
+        boxId: id,
+        type: "created",
+        actor: { kind: "scheduler" },
+        reason: project ? `Project ${project.name} needed a box for its tasks.` : "Tasks were waiting and the pool had room.",
+        taskIds: waiting,
+      })
       void this.refreshBoxUsage(id, true).finally(() => {
         this.emitBoxes()
         this.schedule()
@@ -2028,7 +2170,8 @@ export class TaskManager {
         const originHookIds = this.store.peekInputs(taskId).filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length))
         this.emitTaskEvent({ type: "task.failed", taskId, turnId, originHookIds })
         const health = await this.provider.health(boxId).catch(() => "unknown" as const)
-        if (health === "gone" || health === "error") await this.loseBox(boxId, `Box ${boxId} is ${health}.`)
+        if (health === "gone" || health === "error")
+          await this.loseBox(boxId, `Box ${boxId} is ${health}.`, false, { type: "lost", actor: { kind: "provider" }, reason: `The provider reports the box ${health} (an agent couldn't start on it).` })
       }
       this.emitTask(taskId)
       this.schedule()
@@ -2467,6 +2610,18 @@ export class TaskManager {
       }
       case "message_agent":
         return this.deliverAgentMessage(row, String(ev.to), String(ev.message ?? ""), Boolean(ev.expectReply))
+      case "message_captain":
+        return this.deliverCaptainMessage(row, ev)
+      case "captain_reply_taken": {
+        // The waiting agent got the Captain's reply mid-turn, so its queued copy mustn't go out again next turn.
+        this.endCaptainWait(taskId, String(ev.id ?? ""))
+        const taken = typeof ev.inputId === "string" ? this.store.takeInput(taskId, ev.inputId) : null
+        if (taken?.message) this.hub.broadcast({ type: "task.message", message: taken.message })
+        say("event", "The Captain's reply reached the agent mid-turn, while it waited.", { kind: "captain_reply", agentMessageId: ev.id })
+        return this.emitTask(taskId)
+      }
+      case "captain_wait_end":
+        return this.endCaptainWait(taskId, String(ev.id ?? ""))
       case "note": {
         // Agents suggest notes; the project's Captain curates them in the notes retro (server/retro.ts).
         const content = String(ev.content ?? "").trim().slice(0, MAX_NOTE_CHARS)
@@ -2575,6 +2730,9 @@ export class TaskManager {
   private finishTurn(row: TaskRow, ev: WorkerEvent, pr: PrState | null = null) {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
+    this.captainWaits.delete(row.id)
+    // A Captain reply handed to a wait the agent didn't take: queued (and editable) again, for the next turn.
+    this.store.releaseInputs(handoffClaim(row.current_turn_id))
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -2808,6 +2966,109 @@ export class TaskManager {
     }
     this.emitTask(target.id)
     this.schedule()
+  }
+
+  /**
+   * An agent's message_captain: to the Captain of the agent's own project, never another (the agent doesn't
+   * name one). Rate-limited per task; a waiting agent hears at once why a message wasn't delivered.
+   */
+  private deliverCaptainMessage(from: TaskRow, ev: WorkerEvent) {
+    const id = typeof ev.id === "string" && /^[\w-]{1,64}$/.test(ev.id) ? ev.id : null
+    const message = String(ev.message ?? "").trim().slice(0, 8000)
+    const wait = id ? Math.max(0, Math.min(AGENT_CAPTAIN_WAIT_MAX_SECONDS, Math.round(Number(ev.wait) || 0))) : 0
+    if (!message) return
+    const say = (content: string, meta: Record<string, unknown>) => {
+      const msg = this.store.addTaskMessage(from.id, "agent", content, { to: "captain", ...meta })
+      this.hub.broadcast({ type: "task.message", message: msg })
+    }
+    const refuse = (why: string) => {
+      say(`Message to the Captain not delivered: ${why}`, { blocked: true })
+      if (wait && id) void this.writeCaptainReply(from, id, { status: "rejected", text: why })
+      else {
+        this.store.queueInput(from.id, "system", `Your message_captain was not delivered: ${why}`)
+        this.schedule()
+      }
+    }
+    const since = Date.now() - AGENT_CAPTAIN_WINDOW_MS
+    const recent = this.store
+      .listCaptainMessages(from.project_id, 300)
+      .filter((m) => m.role === "user" && m.meta?.source === "agent" && m.meta?.taskId === from.id && m.createdAt >= since).length
+    if (recent >= AGENT_CAPTAIN_LIMIT) return refuse(`you already sent the Captain ${AGENT_CAPTAIN_LIMIT} messages in the last 10 minutes (the limit).`)
+    if (!this.onCaptainMessage) return refuse("this Box Yard has no Captains.")
+    const sent = this.onCaptainMessage(from.project_id, { taskId: from.id, taskTitle: from.title, message, agentMessageId: id ?? "", waitSeconds: wait })
+    const captain = `${this.store.getProject(from.project_id)?.name ?? "project"} Captain`
+    say(`→ ${captain}: ${message}`, { captainMessageId: sent.message.id, agentMessageId: id, waitSeconds: wait, ...(sent.heldUntil ? { heldUntil: sent.heldUntil } : {}) })
+    if (sent.heldUntil) {
+      const at = new Date(sent.heldUntil).toISOString().slice(11, 16)
+      const why = `the Captain's loop guard is holding repeated messages until ${at} UTC. It keeps yours and reads it then; any reply arrives as your next message.`
+      if (wait && id) void this.writeCaptainReply(from, id, { status: "rejected", text: why })
+      return
+    }
+    if (wait && id) {
+      const waits = this.captainWaits.get(from.id) ?? []
+      waits.push({ id, turnId: from.current_turn_id, until: Number(ev.ts ?? Date.now()) + wait * 1000 + 2000 })
+      this.captainWaits.set(from.id, waits)
+    }
+  }
+
+  /** The agent is in a message_captain wait right now, so a Captain reply reaches it mid-turn. */
+  agentWaitingOnCaptain(taskId: string): boolean {
+    return this.openCaptainWaits(taskId).length > 0
+  }
+
+  private openCaptainWaits(taskId: string): CaptainWait[] {
+    const row = this.store.getTaskRow(taskId)
+    const now = Date.now()
+    const open = (this.captainWaits.get(taskId) ?? []).filter((w) => row?.current_turn_id && w.turnId === row.current_turn_id && w.until > now)
+    if (open.length) this.captainWaits.set(taskId, open)
+    else this.captainWaits.delete(taskId)
+    return open
+  }
+
+  private endCaptainWait(taskId: string, id: string) {
+    const left = (this.captainWaits.get(taskId) ?? []).filter((w) => w.id !== id)
+    if (left.length) this.captainWaits.set(taskId, left)
+    else this.captainWaits.delete(taskId)
+  }
+
+  /**
+   * Give the Captain's reply to the agent's oldest open wait. The input stays in the queue too, locked (not
+   * editable): if the wait ran out before the runner read the file, the turn's end unlocks it and the reply arrives
+   * as the agent's next message; if the runner read it, its captain_reply_taken event takes the queued copy (it
+   * comes before the turn ends) and writes its transcript line.
+   */
+  private handToWaitingAgent(row: TaskRow, inputId: string, content: string) {
+    const wait = this.openCaptainWaits(row.id)[0]
+    if (!wait) return
+    // Locked from now on, so an edit can't go missing: the agent may read this text any moment.
+    if (!row.current_turn_id || !this.store.lockInput(row.id, inputId, handoffClaim(row.current_turn_id))) return
+    this.endCaptainWait(row.id, wait.id)
+    void this.writeCaptainReply(row, wait.id, { status: "reply", text: content, inputId })
+  }
+
+  /**
+   * A Captain turn read these message_captain messages. An agent still waiting on one got no reply_to_agent or
+   * send_to_task, so tell it now (with what the turn said) rather than let it wait out the clock.
+   */
+  captainHandledAgentMessages(messages: CaptainMessage[], reply: string) {
+    for (const m of messages) {
+      const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+      const id = typeof m.meta?.agentMessageId === "string" ? m.meta.agentMessageId : null
+      if (!taskId || !id) continue
+      const row = this.store.getTaskRow(taskId)
+      if (!row || !this.openCaptainWaits(taskId).some((w) => w.id === id)) continue
+      this.endCaptainWait(taskId, id)
+      void this.writeCaptainReply(row, id, { status: "no_reply", text: preview(reply, 4000, "the full text is in the Captain tab") })
+    }
+  }
+
+  private async writeCaptainReply(row: TaskRow, id: string, body: { status: "reply" | "no_reply" | "rejected"; text: string; inputId?: string }) {
+    if (!row.box_id) return
+    try {
+      await this.provider.writeFile(row.box_id, `${this.taskDir(row.box_id, row.id)}/captain-reply-${id}.json`, JSON.stringify(body))
+    } catch (err) {
+      console.warn(`[box-yard] couldn't hand the Captain's answer to ${row.id}: ${errorMessage(err)}`)
+    }
   }
 
   // ------------------------------------------------------------------ archives
@@ -3166,6 +3427,17 @@ export class TaskManager {
     }
     const row = this.store.getBox(boxId)
     if (row && typeof probe.activeMs === "number" && probe.activeMs > (row.active_ms ?? 0)) patch.activeMs = probe.activeMs
+    if (row && patch.size && patch.size !== normalizeBoxSize(row.size) && !this.boxOps.has(boxId)) {
+      this.recordBoxEvent({
+        boxId,
+        type: "size_changed",
+        actor: { kind: "provider" },
+        reason: "The provider reports a different size than Box Yard had on record.",
+        size: patch.size,
+        fromSize: normalizeBoxSize(row.size),
+        toSize: patch.size,
+      })
+    }
     this.store.meterBox(boxId, patch)
     await this.probeDisk(boxId, 0).catch(() => null)
   }
@@ -3270,7 +3542,7 @@ export class TaskManager {
       if (now - last < STALL_MS) continue
       const h = await health(row.box_id)
       if (h === "gone" || h === "error") {
-        await this.loseBox(row.box_id, `Box ${row.box_id} is ${h}.`)
+        await this.loseBox(row.box_id, `Box ${row.box_id} is ${h}.`, false, { type: "lost", actor: { kind: "provider" }, reason: `The provider reports the box ${h} (a running turn went quiet).` })
         continue
       }
       if (h === "unknown") continue
@@ -3306,7 +3578,11 @@ export class TaskManager {
         if (residents.some((r) => r.current_turn_id || this.store.hasInputs(r.id))) continue
         if (residents.some((r) => !this.hasFreshArchive(r))) continue
         console.log(`[box-yard] deleting idle box ${box.id}`)
-        await this.loseBox(box.id, "Box retired after being idle; workspaces are archived.", true)
+        await this.loseBox(box.id, "Box retired after being idle; workspaces are archived.", true, {
+          type: "deleted",
+          actor: { kind: "janitor" },
+          reason: `Idle for ${Math.round((now - box.last_used_at) / 60_000)} min (Settings retires boxes after ${idleDelete} min); every workspace was archived.`,
+        })
         await this.provider.destroy(box.id).catch(() => {})
       }
     }
@@ -3403,10 +3679,14 @@ export class TaskManager {
     this.schedule()
   }
 
-  /** A box is gone. Its tasks lose their folder and come back from archives elsewhere. */
-  private async loseBox(boxId: string, reason: string, quiet = false) {
+  /**
+   * A box is gone. Its tasks lose their folder and come back from archives elsewhere. `event` is its history row
+   * (deleted by whom, or lost), written while the box's projects and tasks are still known.
+   */
+  private async loseBox(boxId: string, reason: string, quiet: boolean, event: Omit<BoxEventInput, "boxId">) {
     const box = this.store.getBox(boxId)
     if (!box) return
+    this.recordBoxEvent({ boxId, ...event })
     this.store.setBoxStatus(boxId, "lost")
     this.store.setKv(boxOwnerKey(boxId), null)
     this.janitor.forget(boxId)
@@ -3426,6 +3706,30 @@ export class TaskManager {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /**
+   * Write a box history row and send it to the UI. The box's name, size, projects and tasks come from its row as it
+   * is now unless the caller passes them (a box already gone, or tasks already moved). Never throws: the history
+   * must not break the box operation it describes.
+   */
+  recordBoxEvent(input: BoxEventInput): BoxEvent | null {
+    try {
+      const box = this.store.getBox(input.boxId)
+      const projectRef = (id: string) => ({ id, name: this.store.getProject(id)?.name ?? id })
+      const event = this.history.add({
+        ...input,
+        boxName: input.boxName ?? input.boxId,
+        size: input.size !== undefined ? input.size : box ? normalizeBoxSize(box.size) : null,
+        projects: input.projects ?? this.projectsOnBox(input.boxId).map(projectRef),
+        taskIds: input.taskIds ?? this.store.listTaskRows({ boxId: input.boxId }).map((r) => r.id),
+      })
+      this.hub.broadcast({ type: "box.event", event })
+      return event
+    } catch (err) {
+      console.warn(`[box-yard] box history: couldn't record ${input.type} of ${input.boxId}: ${errorMessage(err)}`)
+      return null
+    }
+  }
 
   private requireRow(taskId: string): TaskRow {
     const row = this.store.getTaskRow(taskId)

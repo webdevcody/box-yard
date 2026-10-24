@@ -1321,6 +1321,8 @@ export class Store {
   claimInputs(taskId: string, turnId: string): PendingInput[] {
     return this.db.transaction(() => {
       this.db.prepare("DELETE FROM task_inputs WHERE task_id = ? AND status = 'cancelled' AND updated_at < ?").run(taskId, Date.now() - CANCELLED_INPUT_KEEP_MS)
+      // A hand-off the last turn didn't take (see lockInput) goes in with this one.
+      this.db.prepare("UPDATE task_inputs SET status = 'queued', claim = NULL WHERE task_id = ? AND status = 'delivering' AND claim LIKE 'handoff:%'").run(taskId)
       this.db.prepare("UPDATE task_inputs SET status = 'delivering', claim = ? WHERE task_id = ? AND status = 'queued'").run(turnId, taskId)
       return (this.db.prepare(`SELECT * FROM task_inputs WHERE claim = ? AND status = 'delivering' ${INPUT_ORDER}`).all(turnId) as InputRow[]).map(pendingInput)
     })()
@@ -1339,15 +1341,28 @@ export class Store {
   }
 
   /**
-   * Take one input out of the queue some other way than a turn's claim (handed to an agent mid-turn, say).
-   * Compare-and-set like the claim: only while it is still queued; returns it, or null when it's taken, cancelled or gone.
+   * The input was handed to the agent mid-turn (a Captain's reply to an agent waiting on message_captain): lock it
+   * like a turn's claim, so an edit can't be lost, until the agent takes it (takeInput) or the turn ends without
+   * taking it (releaseInputs(claim), or the next claimInputs). False when it isn't queued any more.
    */
-  takeInput(taskId: string, id: string): PendingInput | null {
+  lockInput(taskId: string, id: string, claim: string): boolean {
+    return this.db.prepare("UPDATE task_inputs SET status = 'delivering', claim = ? WHERE id = ? AND task_id = ? AND status = 'queued'").run(claim, id, taskId).changes > 0
+  }
+
+  /**
+   * The agent took this input mid-turn (see lockInput): remove it and write its transcript line, as deliverInputs
+   * would. Compare-and-set: only while it is queued or locked by a hand-off; null when cancelled, claimed by a
+   * turn or gone.
+   */
+  takeInput(taskId: string, id: string): { message: TaskMessage | null } | null {
     return this.db.transaction(() => {
-      const row = this.db.prepare("SELECT * FROM task_inputs WHERE id = ? AND task_id = ? AND status = 'queued'").get(id, taskId) as InputRow | undefined
+      const row = this.db
+        .prepare("SELECT * FROM task_inputs WHERE id = ? AND task_id = ? AND (status = 'queued' OR (status = 'delivering' AND claim LIKE 'handoff:%'))")
+        .get(id, taskId) as InputRow | undefined
       if (!row) return null
-      this.db.prepare("DELETE FROM task_inputs WHERE id = ? AND status = 'queued'").run(id)
-      return pendingInput(row)
+      this.db.prepare("DELETE FROM task_inputs WHERE id = ?").run(id)
+      const message = row.message_json ? this.addTaskMessage(taskId, "user", row.content, { ...(JSON.parse(row.message_json) as Record<string, unknown>), queuedAt: row.created_at }) : null
+      return { message }
     })()
   }
 
@@ -1411,6 +1426,11 @@ export class Store {
         r.message_json ? [this.addTaskMessage(taskId, "user", r.content, { ...(JSON.parse(r.message_json) as Record<string, unknown>), undelivered: true })] : [],
       )
     })()
+  }
+
+  /** Drop every input, without transcript lines (see dropInputs for the stop/close path). */
+  clearInputs(taskId: string) {
+    this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
   }
 
   /** Inputs waiting for a turn (queued or being delivered; cancelled ones don't count). */

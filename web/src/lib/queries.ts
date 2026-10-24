@@ -46,6 +46,7 @@ import type {
 } from "../../../shared/types"
 import type { Hook, HookRun, HookTemplateView, HookWithLastRun } from "../../../shared/hooks"
 import type { HookInput } from "./hookForm"
+import { boxHistoryQuery, type BoxHistoryPage, type HistoryFilter } from "./boxHistory"
 
 export const keys = {
   me: ["me"] as const,
@@ -59,6 +60,8 @@ export const keys = {
   chatBusy: ["chat-busy"] as const,
   artifacts: ["artifacts"] as const,
   boxes: ["boxes"] as const,
+  /** Prefix of every box history query; a box.event invalidates them all. */
+  boxHistory: ["box-history"] as const,
   schedules: ["schedules"] as const,
   scheduleRuns: ["schedule-runs"] as const,
   compactions: ["compactions"] as const,
@@ -286,6 +289,13 @@ export const useOwnerName = () => useAgentSettings().data?.settings.ownerName ??
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
 export const useBoxes = (o?: Quiet) => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes"), notifyOnChangeProps: o?.notifyOnChangeProps })
+/** The box history log, newest first, for a filter; the previous page stays on screen while a new filter loads. */
+export const useBoxHistory = (filter: HistoryFilter, limit: number) =>
+  useQuery({
+    queryKey: [...keys.boxHistory, filter.boxId ?? "", filter.type ?? "", filter.actor ?? "", limit],
+    queryFn: () => api<BoxHistoryPage>(`/api/box-history${boxHistoryQuery(filter, limit)}`),
+    placeholderData: keepPreviousData,
+  })
 /** The usage report; with a range it includes `period` for it. Live events invalidate every range (prefix key). */
 export const useUsage = (range?: { from: number; to: number; live: boolean }) =>
   useQuery({
