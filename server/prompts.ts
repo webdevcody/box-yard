@@ -163,12 +163,19 @@ export function followupPrompt(
 }
 
 /** What a recapped session finds in its folder: a fresh clone, not its old work tree. */
-export function recapWorkspaceNote(branch: string | null, checkout: "origin" | "base" | undefined, baseBranch: string): string {
-  const lost = "Uncommitted changes and anything not pushed from the old workspace are gone."
-  if (!branch) return `Your old workspace is gone too; the folder was set up fresh. ${lost}`
+/**
+ * What a recap says about the folder. `restoreFailed`: the workspace archive exists but couldn't be restored on this
+ * box (`wip`: the uncommitted work pushed at the end of the last turn was put back).
+ */
+export function recapWorkspaceNote(branch: string | null, checkout: "origin" | "base" | undefined, baseBranch: string, restoreFailed?: { reason: string; wip: boolean }): string {
+  const gone = restoreFailed ? `Your old workspace couldn't be restored on this box (${restoreFailed.reason}), so it was set up again.` : "Your old workspace is gone too."
+  const lost = restoreFailed?.wip
+    ? "The uncommitted changes from the end of your last turn were put back as uncommitted changes (check git status); anything else that wasn't pushed is not here."
+    : "Uncommitted changes and anything not pushed from the old workspace are gone."
+  if (!branch) return `${gone} The folder was set up fresh. ${lost}`
   if (checkout === "base")
-    return `Your old workspace is gone too. Branch ${branch} no longer exists on origin, so it was recreated from ${baseBranch}; earlier commits that were never pushed are lost. Check the pull request (if any) before redoing work. ${lost}`
-  return `Your old workspace is gone too. The folder is a fresh clone with branch ${branch} checked out from origin. ${lost}`
+    return `${gone} Branch ${branch} no longer exists on origin, so it was recreated from ${baseBranch}; earlier commits that were never pushed are lost. Check the pull request (if any) before redoing work. ${lost}`
+  return `${gone} The folder is a fresh clone with branch ${branch} checked out from origin. ${lost}`
 }
 
 /** Used when a session is lost: enough context for a fresh session to carry on. */
