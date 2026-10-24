@@ -152,14 +152,6 @@ function NewTaskPopover({
 
   useEffect(() => saveDraft(scope, text), [scope, text])
 
-  // Focus the text with the caret after a kept draft.
-  useLayoutEffect(() => {
-    const el = input.current
-    if (!el) return
-    el.focus()
-    el.setSelectionRange(el.value.length, el.value.length)
-  }, [narrow])
-
   // Grow with the text up to 40% of the window, then scroll inside.
   useLayoutEffect(() => {
     const el = input.current
@@ -183,6 +175,14 @@ function NewTaskPopover({
   }, [narrow, trigger])
 
   const pos = useAnchor(trigger, panel, !narrow)
+
+  // Focus the text with the caret after a kept draft.
+  useLayoutEffect(() => {
+    const el = input.current
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  }, [narrow])
 
   const submit = () => {
     const prompt = text.trim()
@@ -304,28 +304,11 @@ function trapKeys(e: ReactKeyboardEvent, root: HTMLElement | null, close: () => 
  * room there. Follows scrolling and resizes.
  */
 function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean): CSSProperties {
-  const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden", top: 0, left: 0, width: WIDTH })
+  // Placed from the first render: a hidden panel couldn't take focus.
+  const [style, setStyle] = useState<CSSProperties>(() => anchorStyle(trigger.current, 0))
   useLayoutEffect(() => {
     if (!on) return
-    const place = () => {
-      const t = trigger.current?.getBoundingClientRect()
-      if (!t) return
-      const vw = document.documentElement.clientWidth || window.innerWidth
-      const vh = window.innerHeight
-      const width = Math.min(WIDTH, vw - 2 * EDGE)
-      let left = t.right - width
-      if (left < EDGE) left = t.left
-      left = Math.max(EDGE, Math.min(left, vw - EDGE - width))
-      const height = panel.current?.offsetHeight ?? 0
-      const below = vh - t.bottom - GAP - EDGE
-      const above = t.top - GAP - EDGE
-      const up = height > below && above > below
-      setStyle(
-        up
-          ? { left, width, bottom: vh - t.top + GAP, maxHeight: above }
-          : { left, width, top: t.bottom + GAP, maxHeight: Math.max(below, 160) },
-      )
-    }
+    const place = () => setStyle(anchorStyle(trigger.current, panel.current?.offsetHeight ?? 0))
     place()
     window.addEventListener("resize", place)
     window.addEventListener("scroll", place, true)
@@ -335,6 +318,21 @@ function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTML
     }
   }, [on, trigger, panel])
   return style
+}
+
+function anchorStyle(trigger: HTMLElement | null, height: number): CSSProperties {
+  const vw = document.documentElement.clientWidth || window.innerWidth
+  const vh = window.innerHeight
+  const width = Math.min(WIDTH, vw - 2 * EDGE)
+  const t = trigger?.getBoundingClientRect() ?? { left: vw - EDGE - width, right: vw - EDGE, top: EDGE, bottom: EDGE }
+  let left = t.right - width
+  if (left < EDGE) left = t.left
+  left = Math.max(EDGE, Math.min(left, vw - EDGE - width))
+  const below = vh - t.bottom - GAP - EDGE
+  const above = t.top - GAP - EDGE
+  return height > below && above > below
+    ? { left, width, bottom: vh - t.top + GAP, maxHeight: above }
+    : { left, width, top: t.bottom + GAP, maxHeight: Math.max(below, 160) }
 }
 
 interface Pending {
