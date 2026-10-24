@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import type { AppNotification, ChatMessage } from "../shared/types.js"
 import {
   MAX_SPOKEN,
+  MAX_SUMMARY,
   VOICE_DEFAULTS,
   chunkForSpeech,
   cleanForSpeech,
@@ -11,6 +12,7 @@ import {
   pickVoice,
   shortTitle,
   speakableEvents,
+  splitSentences,
   spokenSummary,
   voiceAllowed,
   voiceEvent,
@@ -65,17 +67,69 @@ describe("cleanForSpeech", () => {
 })
 
 describe("spokenSummary", () => {
-  it("speaks only the first sentence, cleaned", () => {
-    expect(spokenSummary("PR #30 merged. Task cards now have equal heights.\n\n| a | b |\n|---|---|\n| 1 | 2 |")).toBe("PR number 30 merged.")
-    expect(spokenSummary("Started **3 agents** on [pricing research](/projects/prj_abcdef). More soon.")).toBe("Started 3 agents on pricing research.")
+  it("speaks the opening sentence, cleaned", () => {
+    expect(spokenSummary("Three tasks finished and the docs PR is ready for review. Details below.")).toBe("Three tasks finished and the docs PR is ready for review.")
+    expect(spokenSummary("Started **3 agents** on [pricing research](/projects/prj_abcdef) for the box. More soon.")).toBe(
+      "Started 3 agents on pricing research for the box.",
+    )
   })
 
-  it("skips headings, code and blocks with no words", () => {
-    expect(spokenSummary("## Status\n\nTwo tasks finished. Details below.")).toBe("Two tasks finished.")
+  it("tops up a short opener with the next sentence", () => {
+    expect(
+      spokenSummary(
+        "Partly. Leftover build files are one cause, but the bigger ones are how heavy the game's repo is and how Box Yard clones it for every task.\n\nDetails:",
+      ),
+    ).toBe("Partly. Leftover build files are one cause, but the bigger ones are how heavy the game's repo is and how Box Yard clones it for every task.")
+    expect(spokenSummary("Yes. The build passed on the first try, and the PR is up.")).toBe("Yes. The build passed on the first try, and the PR is up.")
+    expect(spokenSummary("Yes.")).toBe("Yes.")
+    expect(spokenSummary("Yes.\n\nThe retry worked and both boxes are healthy again.")).toBe("Yes. The retry worked and both boxes are healthy again.")
+    expect(spokenSummary("PR #30 merged. Task cards now have equal heights. Nothing else changed.")).toBe(
+      "PR number 30 merged. Task cards now have equal heights.",
+    )
+  })
+
+  it("keeps a dash-led answer whole", () => {
+    expect(spokenSummary("No — because the repo is 2 GB and every task clones it fresh. I'll fix the cache next.")).toBe(
+      "No — because the repo is 2 GB and every task clones it fresh.",
+    )
+  })
+
+  it("stops at three sentences or the length cap", () => {
+    expect(spokenSummary("Yes. Ok. Done. Fine. More.")).toBe("Yes. Ok. Done.")
+    const long = `Partly. Word ${"word ".repeat(100)}end.`
+    const out = spokenSummary(long)!
+    expect(out.length).toBeLessThanOrEqual(MAX_SUMMARY)
+    expect(out.startsWith("Partly. Word word")).toBe(true)
+  })
+
+  it("doesn't split on abbreviations, initials, decimals or versions", () => {
+    expect(spokenSummary("Small boxes, e.g. The pricing tier, cost less vs. Medium ones. Next.")).toBe("Small boxes, e.g. The pricing tier, cost less vs. Medium ones.")
+    expect(spokenSummary("Bumped to v1.2.3 in 2.5 minutes for $0.003 each. Next up docs.")).toBe("Bumped to v1.2.3 in 2.5 minutes for $0.003 each.")
+    expect(spokenSummary("Merged #45. Then #46 and #47 went in after the rebase. Done.")).toBe("Merged number 45. Then number 46 and number 47 went in after the rebase.")
+  })
+
+  it("ignores dots inside code spans, links and URLs", () => {
+    expect(spokenSummary("Set `config.ts` and see https://docs.example.com/a.b. It's live now on every box.")).toBe("Set and see. It's live now on every box.")
+    expect(spokenSummary("[Box resize](https://github.com/x/y/pull/75)\n\nResizing works on Upstash by moving workspaces to a new box.")).toBe(
+      "Box resize Resizing works on Upstash by moving workspaces to a new box.",
+    )
+  })
+
+  it("skips headings, code and lines with no words", () => {
+    expect(spokenSummary("## Status\n\nTwo tasks finished overnight and one needs your input.")).toBe("Two tasks finished overnight and one needs your input.")
     expect(spokenSummary("```\nlog\n```\n\nBuild passed.")).toBe("Build passed.")
     expect(spokenSummary("🎉\n\nAll green.")).toBe("All green.")
+  })
+
+  it("uses the first prose line when the reply opens with a list", () => {
     expect(spokenSummary("Here's the yard:\n- **Haiku** (demo): done\n- **Limerick** (demo): done")).toBe("Here's the yard")
+    expect(spokenSummary("- Merged #30\n- Started docs\n\nBoth are on track and nothing needs you right now.")).toBe("Both are on track and nothing needs you right now.")
     expect(spokenSummary("- Merged #30\n- Started docs")).toBe("Merged number 30")
+    expect(spokenSummary("# Report\n1. First thing\n2. Second")).toBe("First thing")
+  })
+
+  it("never reads the hidden next-steps block", () => {
+    expect(spokenSummary('Yes.\n\n<!-- boxyard-next-steps\n["Run tests"]\n-->')).toBe("Yes.")
   })
 
   it("never speaks (no update) or empty replies", () => {
@@ -88,12 +142,17 @@ describe("spokenSummary", () => {
   it("caps long sentences at a word boundary", () => {
     const long = `The ${"very ".repeat(80)}long sentence ends here.`
     const out = spokenSummary(long)!
-    expect(out.length).toBeLessThanOrEqual(MAX_SPOKEN)
+    expect(out.length).toBeLessThanOrEqual(MAX_SUMMARY)
     expect(out.endsWith("very")).toBe(true)
   })
+})
 
-  it("does not split on decimals or version numbers", () => {
-    expect(spokenSummary("Bumped to v1.2.3 in 2.5 minutes. Next up docs.")).toBe("Bumped to v1.2.3 in 2.5 minutes.")
+describe("splitSentences", () => {
+  it("splits on real sentence ends only", () => {
+    expect(splitSentences("Partly. Leftover files. Done!")).toEqual(["Partly.", "Leftover files.", "Done!"])
+    expect(splitSentences("See e.g. Box Yard, i.e. The app. Then go.")).toEqual(["See e.g. Box Yard, i.e. The app.", "Then go."])
+    expect(splitSentences("J. Smith wrote v2.0. It works.")).toEqual(["J. Smith wrote v2.0.", "It works."])
+    expect(splitSentences("No. It failed.")).toEqual(["No.", "It failed."])
   })
 })
 
@@ -328,7 +387,7 @@ describe("Announcer", () => {
     a.chatMessage(reply("c1", "PR #30 merged. Cards are equal height now."))
     a.chatTurn({ startedAt: 0, replyId: "c1" })
     a.chatTurn({ startedAt: 0, replyId: null })
-    expect(said).toEqual(["PR number 30 merged."])
+    expect(said).toEqual(["PR number 30 merged. Cards are equal height now."])
     done()
   })
 
@@ -364,7 +423,7 @@ describe("Announcer", () => {
     a.chatTurn({ startedAt: 200, replyId: "c1" })
     a.chatBusy(false)
     vi.advanceTimersByTime(MAX_HOLD_MS)
-    expect(said).toEqual(["Workout log is done."])
+    expect(said).toEqual(["Workout log is done. Here's the summary."])
     done()
   })
 

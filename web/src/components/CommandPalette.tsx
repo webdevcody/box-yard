@@ -1,11 +1,13 @@
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
-import { AlarmClock, Box, CornerDownLeft, FileText, FolderGit2, History, LayoutGrid, ListTodo, Search, Zap } from "lucide-react"
-import { useArtifacts, useBoxes, useProjects, useSchedules, useTasks } from "../lib/queries"
-import { buildItems, pushRecent, recentKeyFor, searchPalette, parseQuery, type PaletteCommand, type PaletteGroup, type PaletteItem } from "../lib/palette"
+import { Activity, AlarmClock, Box, CornerDownLeft, ExternalLink, FileText, FolderGit2, GitPullRequest, Hand, History, LayoutGrid, ListTodo, Search, X, Zap } from "lucide-react"
+import { QUIET, useArtifacts, useBoxes, useOwnerName, useProjects, useSchedules, useTasks } from "../lib/queries"
+import { buildItems, pushRecent, recentKeyFor, type PaletteCommand, type PaletteItem } from "../lib/palette"
+import { PREFIXES, bumpUsage, normalizeQuery, paletteRows, parseQuery, rankPalette, type GroupKey, type PaletteGroup, type PaletteRow, type PaletteScope } from "../lib/paletteRank"
+import { withOwner } from "../../../shared/owner"
 import { isFilePath, previewKind } from "../lib/filePreview"
 import { openPreview } from "../lib/preview"
-import { StatusBadge, TimeAgo, cx } from "./ui"
+import { NewTabLink, StatusBadge, TimeAgo, cx } from "./ui"
 import { useOpenSettings } from "./SettingsDialog"
 import { NewProjectDialog } from "./NewProjectDialog"
 import { Modal } from "./Modal"
@@ -31,26 +33,35 @@ const usePaletteOpen = () =>
 export const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform)
 export const MOD_KEY = IS_MAC ? "⌘" : "Ctrl "
 
-// ------------------------------------------------------------------ recently viewed
+// ------------------------------------------------------------------ recently viewed and command usage
 
 const RECENT_KEY = "box-yard:recent"
+const USAGE_KEY = "box-yard:command-usage"
 
-function loadRecent(): string[] {
+function read<T>(key: string, valid: (v: unknown) => v is T, fallback: T): T {
   try {
-    const list = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]")
-    return Array.isArray(list) ? list.filter((k): k is string => typeof k === "string") : []
+    const v: unknown = JSON.parse(localStorage.getItem(key) ?? "null")
+    return valid(v) ? v : fallback
   } catch {
-    return []
+    return fallback
   }
 }
 
-function remember(key: string) {
+function write(key: string, value: unknown) {
   try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(pushRecent(loadRecent(), key)))
+    localStorage.setItem(key, JSON.stringify(value))
   } catch {
-    // Private mode or full storage: recents are a nicety.
+    // Private mode or full storage: recents and usage are a nicety.
   }
 }
+
+const isKeyList = (v: unknown): v is string[] => Array.isArray(v)
+const isCounts = (v: unknown): v is Record<string, number> => typeof v === "object" && v !== null && !Array.isArray(v)
+
+const loadRecent = () => read(RECENT_KEY, isKeyList, []).filter((k): k is string => typeof k === "string")
+const remember = (key: string) => write(RECENT_KEY, pushRecent(loadRecent(), key))
+const loadUsage = () => read(USAGE_KEY, isCounts, {})
+const countUse = (key: string) => write(USAGE_KEY, bumpUsage(loadUsage(), key))
 
 const isTyping = (target: EventTarget | null) =>
   target instanceof HTMLElement && Boolean(target.closest("input, textarea, select, [contenteditable=''], [contenteditable=true]"))
@@ -98,22 +109,42 @@ const KIND_ICON: Record<PaletteItem["kind"], typeof Search> = {
   action: Zap,
   page: LayoutGrid,
   task: ListTodo,
+  pr: GitPullRequest,
   project: FolderGit2,
   schedule: AlarmClock,
   artifact: FileText,
   box: Box,
 }
 
+const GROUP_ICON: Partial<Record<GroupKey, typeof Search>> = { waiting: Hand, working: Activity, recent: History }
+
+const SCOPE_PLACEHOLDER: Record<PaletteScope, string> = {
+  command: "Commands and pages…",
+  pr: "PR number or title…",
+  file: "Search files…",
+  project: "Search projects…",
+  box: "Search boxes…",
+}
+
+const prefixOf = (scope: PaletteScope) => PREFIXES.find((p) => p.scope === scope)!
+
 function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: PaletteCommand) => void }) {
   const [, navigate] = useLocation()
-  const tasks = useTasks()
-  const projects = useProjects()
-  const schedules = useSchedules()
-  const artifacts = useArtifacts()
-  const boxes = useBoxes()
-  const [query, setQuery] = useState("")
+  // QUIET: live updates don't re-render the open palette; the next keystroke picks them up.
+  const tasks = useTasks(QUIET)
+  const projects = useProjects(QUIET)
+  const schedules = useSchedules(QUIET)
+  const artifacts = useArtifacts(QUIET)
+  const boxes = useBoxes(QUIET)
+  const ownerName = useOwnerName()
+  const [text, setText] = useState("")
+  const [scope, setScope] = useState<PaletteScope | null>(null)
+  const [expanded, setExpanded] = useState<ReadonlySet<GroupKey>>(() => new Set())
   const [active, setActive] = useState(0)
   const [recent] = useState(loadRecent)
+  const [usage] = useState(loadUsage)
+  // One clock per open palette, so recency boosts can't reorder rows between keystrokes.
+  const [now] = useState(Date.now)
   const input = useRef<HTMLInputElement>(null)
   const list = useRef<HTMLDivElement>(null)
   const id = useId()
@@ -122,44 +153,71 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
     () => buildItems({ tasks: tasks.data, projects: projects.data, schedules: schedules.data, artifacts: artifacts.data, boxes: boxes.data }),
     [tasks.data, projects.data, schedules.data, artifacts.data, boxes.data],
   )
-  const groups = useMemo(() => searchPalette(items, query, { recent }), [items, query, recent])
-  const flat = useMemo(() => groups.flatMap((g) => g.items), [groups])
-  const current = flat[Math.min(active, flat.length - 1)]
+  const query = normalizeQuery(text)
+  const groups = useMemo(() => rankPalette(items, { scope, query }, { now, recent, usage, expanded }), [items, scope, query, now, recent, usage, expanded])
+  const rows = useMemo(() => paletteRows(groups), [groups])
+  const at = Math.min(active, rows.length - 1)
+  const current = rows[at]
   const optionId = (i: number) => `${id}-opt-${i}`
 
   // The Modal gives focus back to whatever had it when the palette closes.
   useEffect(() => input.current?.focus(), [])
 
-  useEffect(() => setActive(0), [query])
+  useEffect(() => {
+    setActive(0)
+    setExpanded(new Set())
+  }, [query, scope])
 
   useEffect(() => {
-    list.current?.querySelector(`[data-index="${active}"]`)?.scrollIntoView({ block: "nearest" })
-  }, [active])
+    list.current?.querySelector(`[data-index="${at}"]`)?.scrollIntoView({ block: "nearest" })
+  }, [at])
 
   const choose = (item: PaletteItem, newTab = false) => {
-    if (item.kind !== "page" && item.kind !== "action") remember(item.key)
+    if (item.kind === "page" || item.kind === "action") countUse(item.key)
+    else if (item.kind === "task" || item.kind === "project") remember(item.key)
+    if (newTab && item.href) return void window.open(item.href, "_blank", "noopener")
     onClose()
     if (item.command) return onCommand(item.command)
     if (item.file && !newTab && isFilePath(item.file.url) && previewKind(item.file)) return openPreview(item.file)
     if (item.url) return void window.open(item.url, "_blank", "noopener")
     if (!item.href) return
-    if (newTab) return void window.open(item.href, "_blank", "noopener")
     navigate(item.href)
     // pushState doesn't fire hashchange; pages that scroll to #id listen for it.
     if (item.href.includes("#")) window.dispatchEvent(new HashChangeEvent("hashchange"))
   }
 
+  // The rows that were hidden take the "Show all" row's place, so the selection lands on the first of them.
+  const expand = (key: GroupKey) => setExpanded((s) => new Set(s).add(key))
+
+  const activate = (row: PaletteRow, newTab = false) => (row.type === "more" ? expand(row.group) : choose(row.item, newTab))
+
+  const pickScope = (next: PaletteScope | null) => {
+    setScope(next)
+    input.current?.focus()
+  }
+
+  const onInput = (value: string) => {
+    if (!scope) {
+      const parsed = parseQuery(value)
+      if (parsed.scope) {
+        setScope(parsed.scope)
+        return setText(parsed.rest)
+      }
+    }
+    setText(value)
+  }
+
   const onKeyDown = (e: ReactKeyboardEvent) => {
-    const n = flat.length
+    const n = rows.length
     if (e.key === "Escape") {
       e.preventDefault()
       onClose()
     } else if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) {
       e.preventDefault()
-      if (n) setActive((a) => (a + 1) % n)
+      if (n) setActive((at + 1) % n)
     } else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) {
       e.preventDefault()
-      if (n) setActive((a) => (a - 1 + n) % n)
+      if (n) setActive((at - 1 + n) % n)
     } else if (e.key === "Home" && e.ctrlKey) {
       e.preventDefault()
       setActive(0)
@@ -168,7 +226,11 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
       setActive(Math.max(0, n - 1))
     } else if (e.key === "Enter") {
       e.preventDefault()
-      if (current) choose(current, e.metaKey || e.ctrlKey)
+      if (current) activate(current, e.metaKey || e.ctrlKey)
+    } else if (e.key === "Backspace" && scope && input.current?.selectionStart === 0 && input.current.selectionEnd === 0) {
+      // Backspace in front of the text drops the prefix chip.
+      e.preventDefault()
+      setScope(null)
     } else if (e.key === "Tab") {
       // Focus trap: the input is the only stop; options are reached with the arrows.
       e.preventDefault()
@@ -176,7 +238,7 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
     }
   }
 
-  const { query: q, actionsOnly } = parseQuery(query)
+  const highlight = scope === "pr" ? query.replace(/^#/, "") : query
   let index = 0
 
   return (
@@ -186,33 +248,69 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
       label="Command palette"
       onClose={onClose}
       onKeyDown={onKeyDown}
-      className="sm:max-h-[70vh]"
+      // Important: the Modal's own sm:max-h would win otherwise, and long lists ran off the screen.
+      className="sm:max-h-[70vh]!"
       bodyClassName="flex min-h-0 flex-1 flex-col"
     >
-      <div className="flex min-h-14 items-center gap-2.5 border-b border-zinc-900 px-4">
-        {actionsOnly ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
+      <div className="flex min-h-14 shrink-0 items-center gap-2.5 border-b border-zinc-900 px-4">
+        {scope === "command" ? <Zap className="h-4 w-4 shrink-0 text-yard-400" /> : <Search className="h-4 w-4 shrink-0 text-zinc-500" />}
+        {scope && (
+          <button
+            type="button"
+            data-testid="palette-scope"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => pickScope(null)}
+            aria-label={`${prefixOf(scope).label} only: remove the ${prefixOf(scope).prefix} filter`}
+            className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-md border border-yard-500/40 bg-yard-500/10 px-2 text-xs font-medium text-yard-300 sm:min-h-0 sm:py-0.5"
+          >
+            <span className="font-mono">{prefixOf(scope).prefix}</span>
+            {prefixOf(scope).label}
+            <X className="h-3 w-3" />
+          </button>
+        )}
         <input
           ref={input}
           role="combobox"
-          aria-expanded={flat.length > 0}
+          aria-expanded={rows.length > 0}
           aria-controls={`${id}-list`}
-          aria-activedescendant={current ? optionId(flat.indexOf(current)) : undefined}
+          aria-activedescendant={current ? optionId(at) : undefined}
           aria-autocomplete="list"
           aria-label="Search Box Yard"
           autoComplete="off"
           spellCheck={false}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search tasks, projects, schedules, files… (> for actions)"
+          value={text}
+          onChange={(e) => onInput(e.target.value)}
+          placeholder={scope ? SCOPE_PLACEHOLDER[scope] : "Search tasks, projects, files, commands…"}
           className="min-w-0 flex-1 bg-transparent py-3.5 text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none sm:text-sm"
         />
-        <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500">esc</kbd>
+        <kbd className="rounded border border-zinc-800 px-1.5 py-0.5 font-sans text-[10px] text-zinc-500 max-sm:hidden">esc</kbd>
+        <button type="button" onClick={onClose} aria-label="Close" className="-mr-2 grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-500 hover:text-zinc-200 sm:hidden">
+          <X className="h-5 w-5" />
+        </button>
       </div>
 
+      {!scope && !text && (
+        <div data-testid="palette-prefixes" className="scroll-thin flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-zinc-900 px-4 py-2 text-[11px] text-zinc-500">
+          <span className="shrink-0">Narrow to</span>
+          {PREFIXES.map((p) => (
+            <button
+              key={p.scope}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => pickScope(p.scope)}
+              className="inline-flex min-h-9 shrink-0 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-200 sm:min-h-0 sm:py-0.5"
+            >
+              <span className="font-mono text-zinc-300">{p.prefix}</span>
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       <div ref={list} id={`${id}-list`} role="listbox" aria-label="Results" className="scroll-thin min-h-0 flex-1 overflow-y-auto p-2">
-        {flat.length === 0 && <div className="px-3 py-8 text-center text-sm text-zinc-500">{tasks.isLoading ? "Loading…" : "No matches"}</div>}
+        {rows.length === 0 && <div className="px-3 py-8 text-center text-sm text-zinc-500">{tasks.isLoading ? "Loading…" : "No matches"}</div>}
         {groups.map((g) => (
-          <Group key={`${g.kind}:${g.label}`} group={g} id={`${id}-${g.kind}`}>
+          <Group key={g.key} group={g} label={withOwner(g.label, ownerName)} id={`${id}-${g.key}`}>
             {g.items.map((item) => {
               const i = index++
               return (
@@ -221,18 +319,23 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
                   id={optionId(i)}
                   index={i}
                   item={item}
-                  query={q}
-                  selected={item === current}
+                  query={highlight}
+                  selected={i === at}
                   onHover={() => setActive(i)}
                   onChoose={(newTab) => choose(item, newTab)}
                 />
               )
             })}
+            {g.items.length < g.total &&
+              (() => {
+                const i = index++
+                return <ShowAll key="more" id={optionId(i)} index={i} total={g.total} selected={i === at} onHover={() => setActive(i)} onChoose={() => expand(g.key)} />
+              })()}
           </Group>
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500 max-sm:hidden">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 border-t border-zinc-900 px-4 py-2 text-[11px] text-zinc-500 max-sm:hidden">
         <span>
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd> move
@@ -244,9 +347,11 @@ function Palette({ onClose, onCommand }: { onClose: () => void; onCommand: (c: P
           <Kbd>{MOD_KEY.trim()}</Kbd>
           <Kbd>↵</Kbd> new tab
         </span>
-        <span className="ml-auto">
-          <Kbd>&gt;</Kbd> actions
-        </span>
+        {scope && (
+          <span className="ml-auto">
+            <Kbd>⌫</Kbd> clear filter
+          </span>
+        )}
       </div>
     </Modal>
   )
@@ -256,12 +361,13 @@ function Kbd({ children }: { children: ReactNode }) {
   return <kbd className="mr-0.5 inline-block min-w-4 rounded border border-zinc-800 bg-zinc-900 px-1 text-center font-sans text-[10px] text-zinc-400">{children}</kbd>
 }
 
-function Group({ group, id, children }: { group: PaletteGroup; id: string; children: ReactNode }) {
+function Group({ group, label, id, children }: { group: PaletteGroup; label: string; id: string; children: ReactNode }) {
+  const Icon = GROUP_ICON[group.key]
   return (
-    <div role="group" aria-labelledby={id} className="mb-1 last:mb-0">
+    <div role="group" aria-labelledby={id} data-group={group.key} className="mb-1 last:mb-0">
       <div id={id} className="flex items-center gap-1.5 px-2 pt-2 pb-1 text-[11px] font-semibold tracking-wider text-zinc-500 uppercase">
-        {group.kind === "recent" && <History className="h-3 w-3" />}
-        {group.label}
+        {Icon && <Icon className="h-3 w-3" />}
+        {label}
       </div>
       {children}
     </div>
@@ -292,6 +398,7 @@ function Option({
       role="option"
       aria-selected={selected}
       data-index={index}
+      data-key={item.key}
       // Keep focus in the input so the keyboard keeps working after a click.
       onMouseDown={(e) => e.preventDefault()}
       onMouseMove={() => !selected && onHover()}
@@ -307,12 +414,42 @@ function Option({
         {item.subtitle && <div className="truncate text-xs text-zinc-500">{item.subtitle}</div>}
       </div>
       {item.status && <StatusBadge status={item.status} />}
-      {item.kind === "task" && item.at && (
-        <span className="w-14 shrink-0 text-right text-xs text-zinc-500">
+      {(item.kind === "task" || item.kind === "pr") && item.at && (
+        <span className="w-14 shrink-0 text-right text-xs text-zinc-500 max-sm:hidden">
           <TimeAgo ts={item.at} />
         </span>
       )}
-      {selected && <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+      {item.externalUrl && (
+        <NewTabLink
+          href={item.externalUrl}
+          aria-label="Open on GitHub"
+          title="Open on GitHub"
+          onMouseDown={(e) => e.preventDefault()}
+          className="grid h-11 w-11 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-700/60 hover:text-zinc-200 sm:h-7 sm:w-7"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+        </NewTabLink>
+      )}
+      {selected && <CornerDownLeft className="h-3.5 w-3.5 shrink-0 text-zinc-500 max-sm:hidden" />}
+    </div>
+  )
+}
+
+/** The last row of a capped group: expands it in place. */
+function ShowAll({ id, index, total, selected, onHover, onChoose }: { id: string; index: number; total: number; selected: boolean; onHover: () => void; onChoose: () => void }) {
+  return (
+    <div
+      id={id}
+      role="option"
+      aria-selected={selected}
+      data-index={index}
+      data-testid="palette-show-all"
+      onMouseDown={(e) => e.preventDefault()}
+      onMouseMove={() => !selected && onHover()}
+      onClick={onChoose}
+      className={cx("flex min-h-11 cursor-pointer items-center rounded-lg px-2.5 py-1.5 pl-9.5 text-xs sm:min-h-8", selected ? "bg-zinc-800/80 text-zinc-100" : "text-zinc-500")}
+    >
+      Show all {total} →
     </div>
   )
 }
