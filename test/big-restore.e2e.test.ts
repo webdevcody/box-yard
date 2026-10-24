@@ -260,7 +260,7 @@ describe("restores never send one file over the box's upload limit", () => {
     expect(r.provider.restoreUploads(t.id).length).toBe(2)
     expect(turnJson(r, back.boxId!, t.id).resume).toBe(false)
     expect(events(r, t.id).filter((e) => e.startsWith("Couldn't restore the workspace archive"))).toHaveLength(1)
-    expect(r.yard.store.getTaskRow(t.id)!.archive_path).not.toContain("unrestored")
+    expect(fs.existsSync(path.join(r.dataDir, "archives", `${t.id}.unrestored.tgz`))).toBe(true)
 
     // The folder is there now: the next turn doesn't touch the old archive again.
     const again = await nextTurn(r, t.id)

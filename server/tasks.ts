@@ -2251,7 +2251,11 @@ export class TaskManager {
       // never made, or lost with its box): its Claude session is gone too. Start a
       // fresh session that carries a recap instead of resuming a missing one.
       const recapped = Boolean(prepared && !prepared.restored && row.session_started)
-      if (recapped && row.compact_pending) throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
+      if (recapped && row.compact_pending) {
+        // No folder left behind: the next turn must find the session gone too and start from a recap, not resume it.
+        await this.removeTaskDir(boxId, taskId).catch(() => {})
+        throw new Error("its Claude session is gone (no workspace archive), so there is nothing to compact")
+      }
       const compact = Boolean(row.compact_pending) && Boolean(row.session_started)
       // A compaction is a turn of its own; queued messages wait for the next one. The rest are claimed for this
       // turn: locked against edits and cancels, delivered (deleted) once it starts, released if it can't.
@@ -2608,7 +2612,9 @@ export class TaskManager {
     try {
       prepared = await this.cloneWorkspace(row, project, boxId, dir, mirror)
     } catch (err) {
-      throw new Error(`restoring workspace failed (${reason}), and so did the fresh checkout to restart from a recap: ${errorMessage(err)}`)
+      // No half-built folder, and the archive stays as it was (origin may only be unreachable for now): the next start tries it again.
+      await this.provider.exec(boxId, `rm -rf ${q(dir)}`).catch(() => {})
+      throw new Error(`restoring workspace failed: ${reason}; the fresh checkout to restart from a recap failed too: ${errorMessage(err)}`)
     }
     const wip = mirror ? await this.applyPushedWip(row, boxId, dir, mirror) : false
     const kept = this.setAsideArchive(row, reason)
@@ -3810,6 +3816,7 @@ export class TaskManager {
     const cutoff = now - days * 24 * 60 * 60_000
     const dir = path.join(this.c.dataDir, "archives")
     if (!fs.existsSync(dir)) return
+    // `<task>.unrestored.tgz` (setAsideArchive) has no task of that id, so it goes as an orphan.
     for (const name of fs.readdirSync(dir)) {
       if (!name.endsWith(".tgz")) continue
       const file = path.join(dir, name)
