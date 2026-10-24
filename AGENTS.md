@@ -16,6 +16,8 @@
   migrate(db, MIGRATIONS.findIndex((m) => m.includes("claude_usage_new")))
   ```
   Don't use `MIGRATIONS.length - 1`.
+- **Notices.** `TaskManager.notice()` text has the shape `<emoji> **Title** verb: detail`, which `parseNotice` in `web/src/lib/captainTranscript.ts` reads. If you change the format or add an emoji, update `EMOJI_KIND` and `test/captain-transcript.test.ts` too.
+- **Box sizes.** Per-size CPU, RAM, disk and price live only in `BOX_SIZE_SPECS` (`shared/boxSizes.ts`).
 
 ### Web UI: shared pieces
 
@@ -34,6 +36,8 @@ Use these instead of hand-rolling:
 | A list of task cards | `useStableTasks(tasks, { compare, include, resetKey })` + `<TaskGrid stable />` | `web/src/components/TaskGrid.tsx` |
 
 - `AppLink`, `FileLink` and `NewTabLink` stop click propagation. Never wrap rendered Markdown in a `<Link>`/`<a>`: auto-linked URLs become nested anchors. Use a `role="link"` div card (see `NoticeCard` in `ChatLine.tsx`).
+- PR links and task status: `<PrChip>` and `<StatusBadge status={badgeStatus(task)} />` from `ui.tsx` (`badgeStatus` is in `lib/prState.ts`). They show the purple Merged state, so don't hand-roll PR links.
+- Settings: open it with `useOpenSettings()(section)`. It's mounted once as `SettingsHost`, so don't render `<SettingsDialog>` yourself. New categories go in `SETTINGS_SECTIONS` (`lib/settingsNav.ts`).
 - `useStableTasks`: pass all candidate tasks and filter with `include` (pre-filtering makes cards vanish instead of dimming). `resetKey` is the sort/filter/search, never `now`.
 
 ### Web UI: performance
