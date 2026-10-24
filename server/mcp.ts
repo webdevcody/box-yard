@@ -964,7 +964,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         inputSchema: {
           name: z.string().min(1).max(120).optional().describe("Required unless template is given"),
           project: z.string().optional().describe(scopeId ? "Your project (the default)" : "Project id or name for a project hook; omit for a global hook"),
-          template: z.enum(HOOK_TEMPLATES).optional(),
+          template: z.enum(HOOK_TEMPLATES).optional().describe("Start from a built-in hook; the other fields override it, and filters add to its own"),
           trigger: z.enum(HOOK_TRIGGERS).optional().describe("Required unless template is given"),
           action: z.enum(HOOK_ACTIONS).optional().describe("Required unless template is given"),
           prompt: z.string().min(1).max(20_000).optional().describe("Required unless template is given"),
@@ -993,9 +993,20 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           const filters = toFilters(a.filters)
           if (scopeId && filters?.projectId && filters.projectId !== scopeId) throw outOfScope("hooks can only watch your own project")
           if (a.template) {
-            let hook = hookEngine.fromTemplate(a.template, { projectId, createdBy: createdBy(), enabled: a.enabled, name: a.name, prompt: a.prompt })
-            const rest = { trigger: a.trigger, action: a.action, taskTitle: a.task_title, filters, allowSelfTrigger: a.allow_self_trigger, maxFiresPerTask: a.max_fires_per_task }
-            if (Object.values(rest).some((v) => v !== undefined)) hook = hookEngine.update(hook.id, rest)
+            // One create with the overrides applied; given filters add to the template's (pr_merge keeps skipping no-automerge).
+            const hook = hookEngine.fromTemplate(a.template, {
+              projectId,
+              createdBy: createdBy(),
+              enabled: a.enabled,
+              name: a.name,
+              prompt: a.prompt,
+              trigger: a.trigger,
+              action: a.action,
+              taskTitle: a.task_title,
+              filters,
+              allowSelfTrigger: a.allow_self_trigger,
+              maxFiresPerTask: a.max_fires_per_task,
+            })
             return ok(hookView(hook))
           }
           if (!a.name || !a.trigger || !a.action || !a.prompt) throw new Error("Give name, trigger, action and prompt (or a template).")

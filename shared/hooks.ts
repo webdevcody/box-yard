@@ -114,6 +114,22 @@ export interface HookRun {
   createdAt: number
 }
 
+/** What creating a hook takes (POST /api/hooks, create_hook); the server adds who created it. */
+export interface HookFields {
+  projectId: string | null
+  name: string
+  trigger: HookTrigger
+  filters?: HookFilters
+  action: HookAction
+  taskTitle?: string | null
+  prompt: string
+  enabled?: boolean
+  allowSelfTrigger?: boolean
+  maxFiresPerTask?: number
+  /** Set when it came from a built-in template (pr_merge takes the Merge PR button's path). */
+  template?: HookTemplate | null
+}
+
 /** A hook as lists show it: with its newest run. */
 export type HookWithLastRun = Hook & { lastRun: HookRun | null }
 
@@ -156,6 +172,31 @@ export const SAMPLE_HOOK_VARS: HookVars = {
   head_sha: "9f3c2e1a7b6d5c4e3f2a1b0c9d8e7f6a5b4c3d2e",
   status: "pr_ready",
   summary: "Added a dark mode toggle to Settings, with tests. PR #42 is open.",
+}
+
+/** The number of a github.com pull request URL, or null. */
+export function prNumberOf(url: string | null | undefined): number | null {
+  const m = /^https?:\/\/(?:www\.)?github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+)/.exec(url ?? "")
+  return m ? Number(m[1]) : null
+}
+
+/** A task's template variables. The server knows the PR's head commit; the editor's preview passes a sample. */
+export function taskHookVars(
+  task: { id: string; title: string; projectId: string; prUrl: string | null; branch: string | null; status: string; summary: string | null },
+  projectName: string | null | undefined,
+  headSha: string | null | undefined,
+): HookVars {
+  return {
+    task_id: task.id,
+    task_title: task.title,
+    project: projectName ?? task.projectId,
+    pr_number: String(prNumberOf(task.prUrl) ?? ""),
+    pr_url: task.prUrl ?? "",
+    branch: task.branch ?? "",
+    head_sha: headSha ?? "",
+    status: task.status,
+    summary: task.summary ?? "",
+  }
 }
 
 const VAR_RE = /\{([a-z_]+)\}/g

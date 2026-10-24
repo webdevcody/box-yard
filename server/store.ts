@@ -44,7 +44,8 @@ import type {
 
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
 
-const json = <T>(text: string | null | undefined, fallback: T): T => {
+/** Parse JSON text, or return the fallback when it's empty or invalid. */
+export const json = <T>(text: string | null | undefined, fallback: T): T => {
   if (!text) return fallback
   try {
     return JSON.parse(text) as T

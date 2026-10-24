@@ -1312,7 +1312,9 @@ export class TaskManager {
       if (!stopped && !wasCompact) {
         this.addEvent(taskId, `Couldn't start the agent: ${message}`)
         this.notice(`❌ **${current.title}** couldn't start: ${message}`, { taskId })
-        this.emitTaskEvent({ type: "task.failed", taskId, turnId, originHookIds: [] })
+        // The inputs stay queued when a launch fails; a hook's among them caused this, so it mustn't fire on it.
+        const originHookIds = this.store.peekInputs(taskId).filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length))
+        this.emitTaskEvent({ type: "task.failed", taskId, turnId, originHookIds })
         const health = await this.provider.health(boxId).catch(() => "unknown" as const)
         if (health === "gone" || health === "error") await this.loseBox(boxId, `Box ${boxId} is ${health}.`)
       }

@@ -7,9 +7,11 @@ import {
   hookProblems,
   sourceLabel,
   normalizeFilters,
+  taskHookVars,
   unknownVariables,
   type Hook,
   type HookAction,
+  type HookFields,
   type HookFilters,
   type HookRun,
   type HookRunStatus,
@@ -21,19 +23,8 @@ import {
 } from "../../../shared/hooks"
 import type { Task } from "../../../shared/types"
 
-/** What POST /api/hooks takes. */
-export interface HookInput {
-  projectId: string | null
-  name: string
-  trigger: HookTrigger
-  filters: HookFilters
-  action: HookAction
-  taskTitle: string | null
-  prompt: string
-  enabled: boolean
-  allowSelfTrigger: boolean
-  maxFiresPerTask: number
-}
+/** What POST /api/hooks takes (always with filters, from the editor). */
+export type HookInput = HookFields & { filters: HookFilters }
 
 /** The editor's state. Labels are comma-separated text; fires per task is the input's text. */
 export interface HookDraft {
@@ -142,6 +133,8 @@ export function draftToInput(d: HookDraft, projectId: string | null): HookInput 
     enabled: d.enabled,
     allowSelfTrigger: d.allowSelfTrigger,
     maxFiresPerTask: Number(d.maxFiresPerTask),
+    // Kept so a hook made from the merge template takes the Merge PR button's path.
+    template: d.template,
   }
 }
 
@@ -170,21 +163,10 @@ export function draftWarnings(d: HookDraft): string[] {
   return out
 }
 
-/** The live preview's values: a real task's (its head commit isn't known here, so it's a sample), or the samples. */
+/** The live preview's values: a real task's (the server alone knows its head commit, so that one is a sample), or the samples. */
 export function previewVars(task: Task | null | undefined, projectName?: string): HookVars {
   if (!task) return SAMPLE_HOOK_VARS
-  const pr = /\/pull\/(\d+)/.exec(task.prUrl ?? "")?.[1] ?? ""
-  return {
-    task_id: task.id,
-    task_title: task.title,
-    project: projectName ?? task.projectId,
-    pr_number: pr,
-    pr_url: task.prUrl ?? "",
-    branch: task.branch ?? "",
-    head_sha: task.prUrl ? SAMPLE_HOOK_VARS.head_sha : "",
-    status: task.status,
-    summary: task.summary ?? "",
-  }
+  return taskHookVars(task, projectName, task.prUrl ? SAMPLE_HOOK_VARS.head_sha : null)
 }
 
 /** Insert `{name}` at the cursor (or the end), returning the new text and where the cursor goes. */

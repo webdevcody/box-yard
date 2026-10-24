@@ -101,6 +101,7 @@ describe("hook editor helpers", () => {
       enabled: true,
       allowSelfTrigger: false,
       maxFiresPerTask: 3,
+      template: "pr_merge",
     })
     const t = draftFromTemplate(template)
     expect(t).toMatchObject({ name: "On PR ready → merge", enabled: false, template: "pr_merge", excludeLabels: "no-automerge", prompt: MERGE_PROMPT })
@@ -273,6 +274,8 @@ describe("the Hooks panel", () => {
       prompt: MERGE_PROMPT,
       filters: { excludeLabels: ["no-automerge"] },
       enabled: false,
+      // So it takes the Merge PR button's path on the server.
+      template: "pr_merge",
     })
   })
 

@@ -18,8 +18,12 @@ import {
   type HookGuard,
   type HookRun,
   type HookSubject,
+  type HookFields,
+  type HookFilters,
   type HookTemplateView,
   type HookWithLastRun,
+  normalizeFilters,
+  taskHookVars,
   type HookVars,
   type TaskSource,
 } from "../shared/hooks.js"
@@ -97,21 +101,6 @@ export function prLabels(row: Pick<TaskRow, "pr_labels_json">): string[] {
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
   } catch {
     return []
-  }
-}
-
-/** The template variables for a task. */
-export function hookVars(task: Task, row: Pick<TaskRow, "pr_head_sha">, project: Project | null): HookVars {
-  return {
-    task_id: task.id,
-    task_title: task.title,
-    project: project?.name ?? task.projectId,
-    pr_number: String(prNumber(task.prUrl) ?? ""),
-    pr_url: task.prUrl ?? "",
-    branch: task.branch ?? "",
-    head_sha: row.pr_head_sha ?? "",
-    status: task.status,
-    summary: task.summary ?? "",
   }
 }
 
@@ -209,17 +198,28 @@ export class HookEngine {
     }))
   }
 
-  /** Create a hook from a built-in template. It starts off unless `enabled` says otherwise. */
-  fromTemplate(key: string, scope: { projectId: string | null; createdBy: string; enabled?: boolean; name?: string; prompt?: string }): Hook {
+  /**
+   * Create a hook from a built-in template, with any overrides applied before it's saved (one create, so a bad
+   * override saves nothing). It starts off unless `enabled` says otherwise. Filters given here are added to the
+   * template's (so pr_merge keeps skipping no-automerge PRs unless excludeLabels is given).
+   */
+  fromTemplate(
+    key: string,
+    scope: { projectId: string | null; createdBy: string } & Partial<Omit<HookFields, "projectId" | "template">>,
+  ): Hook {
     const t = hookTemplate(key)
     if (!t) throw new BadRequestError(`No hook template "${key}". Templates: ${hookTemplates().map((x) => x.key).join(", ")}.`)
+    const { projectId, createdBy, filters, ...overrides } = scope
+    const given = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined && v !== null && v !== ""))
+    const extra = Object.fromEntries(Object.entries(filters ?? {}).filter(([, v]) => v !== undefined && v !== null)) as HookFilters
     return this.create({
       ...t.draft,
-      projectId: scope.projectId,
-      createdBy: scope.createdBy,
-      enabled: scope.enabled ?? false,
-      ...(scope.name?.trim() ? { name: scope.name } : {}),
-      ...(scope.prompt?.trim() ? { prompt: scope.prompt } : {}),
+      enabled: false,
+      ...given,
+      filters: normalizeFilters({ ...t.draft.filters, ...extra }),
+      projectId,
+      createdBy,
+      template: t.key,
     })
   }
 
@@ -255,40 +255,49 @@ export class HookEngine {
     }
     const key = fireKey(event, row)
     if (!key) return []
+    const matching = candidates.filter((hook) => !hookMismatch(hook, subject))
+    if (!matching.length) return []
+    // Worked out once per event: the variables, who started this work, and the counts the caps look at.
+    const vars = taskHookVars(task, project?.name, row.pr_head_sha)
     const origin = new Set([...event.originHookIds, ...hooks.lineage(row.id)])
+    const now = this.now()
+    const counts = { task: hooks.taskFiresSince(row.id, now - this.tuning.taskCap.windowMs), yard: hooks.firesSince(now - this.tuning.rateLimit.windowMs) }
     const runs: HookRun[] = []
-    for (const hook of candidates) {
-      if (hookMismatch(hook, subject)) continue
+    for (const hook of matching) {
       // Fire once: anything but a guard's skip settles this event for this hook.
       const prior = hooks.runFor(hook.id, row.id, event.type, key)
       if (prior.some((r) => r.status !== "skipped" || !r.guard)) continue
-      const prompt = renderHookTemplate(hook.prompt, hookVars(task, row, project))
-      const blocked = this.blocked(hook, row.id, origin)
+      const prompt = renderHookTemplate(hook.prompt, vars)
+      const blocked = this.blocked(hook, row.id, origin, counts)
       if (blocked) {
         // The same guard again for the same event isn't logged twice.
         if (prior.some((r) => r.guard === blocked.guard)) continue
         runs.push(this.skip(hook, task, row, event, key, prompt, blocked))
         continue
       }
-      runs.push(this.fire(hook, task, row, project, event, key, prompt))
+      const run = this.fire(hook, task, row, project, event, key, prompt, vars)
+      if (run.status !== "skipped") {
+        counts.task++
+        counts.yard++
+      }
+      runs.push(run)
     }
     return runs
   }
 
   /** Which guard stops this fire and why, or null. */
-  private blocked(hook: Hook, taskId: string, origin: Set<string>): { guard: HookGuard; reason: string } | null {
+  private blocked(hook: Hook, taskId: string, origin: Set<string>, counts: { task: number; yard: number }): { guard: HookGuard; reason: string } | null {
     const { hooks } = this.deps
-    const now = this.now()
     if (origin.has(hook.id) && !hook.allowSelfTrigger) return { guard: "loop", reason: "Skipped by the loop guard: this hook's own prompt started this work." }
     if (hooks.firesFor(hook.id, taskId) >= hook.maxFiresPerTask) {
       return { guard: "hook_cap", reason: `Skipped: this hook already fired ${hook.maxFiresPerTask} time${hook.maxFiresPerTask === 1 ? "" : "s"} for this task, its limit.` }
     }
     const cap = this.tuning.taskCap
-    if (hooks.taskFiresSince(taskId, now - cap.windowMs) >= cap.max) {
+    if (counts.task >= cap.max) {
       return { guard: "task_cap", reason: `Skipped: hooks already fired ${cap.max} times for this task in ${windowLabel(cap.windowMs)}.` }
     }
     const rate = this.tuning.rateLimit
-    if (hooks.firesSince(now - rate.windowMs) >= rate.max) {
+    if (counts.yard >= rate.max) {
       return { guard: "rate_limit", reason: `Skipped by the rate limit: hooks fired ${rate.max} times across the yard in ${windowLabel(rate.windowMs)}.` }
     }
     return null
@@ -318,7 +327,7 @@ export class HookEngine {
     return run
   }
 
-  private fire(hook: Hook, task: Task, row: TaskRow, project: Project | null, event: TaskEvent, key: string, prompt: string): HookRun {
+  private fire(hook: Hook, task: Task, row: TaskRow, project: Project | null, event: TaskEvent, key: string, prompt: string, vars: HookVars): HookRun {
     const { hooks, tasks, hub } = this.deps
     // Logged before acting, so the fire counts toward the caps even if the action throws.
     let run = hooks.addRun({ ...this.base(hook, task, row, event, key, prompt), status: "fired", result: "Firing…" })
@@ -359,7 +368,7 @@ export class HookEngine {
         this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) messaged the Coordinator: ${preview(prompt, 400, "see the Coordinator chat")}`, hook, run)
         this.notice(hook, task, `messaged the Coordinator${pr}: ${preview(prompt, 240, "see the Coordinator chat")}`, meta)
       } else {
-        const title = renderHookTemplate(hook.taskTitle ?? hook.name, hookVars(task, row, project)).slice(0, 120).trim() || hook.name
+        const title = renderHookTemplate(hook.taskTitle ?? hook.name, vars).slice(0, 120).trim() || hook.name
         const created = tasks.createTask({ projectId: task.projectId, title, prompt, source: `hook:${hook.id}` })
         target = created.id
         result = `Started task "${created.title}" (${created.id}).`

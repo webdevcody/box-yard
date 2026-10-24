@@ -86,6 +86,15 @@ describe("hook tools", () => {
     expect((await coord.json<any[]>("list_hooks")).map((h) => h.name)).toEqual(["Failures to me", "On PR ready → merge", "Beta docs"])
     expect((await coord.json<any[]>("list_hooks", { project: "global" })).map((h) => h.name)).toEqual(["Failures to me", "Beta docs"])
     expect((await coord.json<any[]>("list_hooks", { project: "alpha" })).map((h) => h.name)).toEqual(["On PR ready → merge"])
+    // Filters given with a template add to its own: the no-automerge skip stays.
+    const narrowed = await coord.json("create_hook", { project: "beta", template: "pr_merge", filters: { title_regex: "^feat" } })
+    expect(narrowed.filters).toEqual({ titleRegex: "^feat", excludeLabels: ["no-automerge"] })
+    // A bad override saves nothing (no half-made, enabled merge hook to retry into duplicates).
+    const before = s.yard.hooks.list().length
+    const broken = await coord.tool("create_hook", { project: "beta", template: "pr_merge", enabled: true, action: "create_task" })
+    expect(broken.isError).toBe(true)
+    expect(broken.content[0]!.text).toMatch(/needs a task title/)
+    expect(s.yard.hooks.list()).toHaveLength(before)
     // A typo'd regex is refused with a reason.
     const bad = await coord.tool("create_hook", { name: "x", trigger: "task.failed", action: "message_coordinator", prompt: "p", filters: { title_regex: "(" } })
     expect(bad.isError).toBe(true)

@@ -27,7 +27,7 @@ import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
 import { HookStore } from "./hookStore.js"
 import { HookEngine } from "./hooks.js"
-import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TRIGGERS } from "../shared/hooks.js"
+import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import type { Health } from "../shared/types.js"
 
@@ -105,6 +105,7 @@ const schemas = {
     enabled: z.boolean().optional(),
     allowSelfTrigger: z.boolean().optional(),
     maxFiresPerTask: z.number().int().min(1).max(50).optional(),
+    template: z.enum(HOOK_TEMPLATES).nullish(),
   }),
   hookPatch: z.object({
     name: z.string().trim().min(1).max(120).optional(),

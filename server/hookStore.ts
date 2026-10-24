@@ -1,5 +1,5 @@
 import type { DB } from "./db.js"
-import { BadRequestError, NotFoundError, newId } from "./store.js"
+import { BadRequestError, NotFoundError, json, newId } from "./store.js"
 import {
   HOOK_ACTIONS,
   HOOK_GUARDS,
@@ -9,6 +9,7 @@ import {
   normalizeFilters,
   type Hook,
   type HookAction,
+  type HookFields,
   type HookFilters,
   type HookGuard,
   type HookRun,
@@ -55,18 +56,7 @@ interface HookRunRow {
   created_at: number
 }
 
-export interface HookInput {
-  name: string
-  projectId: string | null
-  trigger: HookTrigger
-  filters?: HookFilters
-  action: HookAction
-  taskTitle?: string | null
-  prompt: string
-  enabled?: boolean
-  allowSelfTrigger?: boolean
-  maxFiresPerTask?: number
-  template?: HookTemplate | null
+export interface HookInput extends HookFields {
   createdBy: string
 }
 
@@ -74,22 +64,13 @@ export type HookPatch = Partial<Pick<Hook, "name" | "trigger" | "filters" | "act
 
 export const DEFAULT_MAX_FIRES_PER_TASK = 3
 
-const parseJson = <T>(raw: string | null, fallback: T): T => {
-  if (!raw) return fallback
-  try {
-    return JSON.parse(raw) as T
-  } catch {
-    return fallback
-  }
-}
-
 function hookFromRow(r: HookRow): Hook {
   return {
     id: r.id,
     name: r.name,
     projectId: r.project_id,
     trigger: r.trigger as HookTrigger,
-    filters: normalizeFilters(parseJson<HookFilters>(r.filters_json, {})),
+    filters: normalizeFilters(json<HookFilters>(r.filters_json, {})),
     action: r.action as HookAction,
     taskTitle: r.task_title,
     prompt: r.prompt,
@@ -309,19 +290,21 @@ export class HookStore {
     return rows.map(runFromRow)
   }
 
+  // Fires count toward the caps whether their action worked or threw, so a hook that keeps failing still stops.
+
   /** How often this hook fired for this task. */
   firesFor(hookId: string, taskId: string): number {
-    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE hook_id = ? AND task_id = ? AND status = 'fired'").get(hookId, taskId) as { n: number }).n
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE hook_id = ? AND task_id = ? AND status IN ('fired', 'failed')").get(hookId, taskId) as { n: number }).n
   }
 
   /** Fires (any hook) for a task since a time. */
   taskFiresSince(taskId: string, since: number): number {
-    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE task_id = ? AND status = 'fired' AND created_at >= ?").get(taskId, since) as { n: number }).n
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE task_id = ? AND status IN ('fired', 'failed') AND created_at >= ?").get(taskId, since) as { n: number }).n
   }
 
   /** Fires (any hook, any task) since a time, for the global rate limit. */
   firesSince(since: number): number {
-    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE status = 'fired' AND created_at >= ?").get(since) as { n: number }).n
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM hook_runs WHERE status IN ('fired', 'failed') AND created_at >= ?").get(since) as { n: number }).n
   }
 
   /** Hooks that created this task (directly or through a chain of hook-created tasks), so none of them fires on it again. */

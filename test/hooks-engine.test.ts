@@ -278,12 +278,15 @@ describe("hook engine: loop guards and limits", () => {
     expect(s.engine.handle(ev(prTask(s, s.alpha).id))[0]!.status).toBe("fired")
   })
 
-  it("logs a failed action instead of throwing", () => {
+  it("logs a failed action instead of throwing, and failures count toward the caps", () => {
     const s = setup()
-    hook(s, { action: "message_captain" })
+    hook(s, { action: "message_captain", trigger: "task.finished", maxFiresPerTask: 2 })
     const engine = new HookEngine({ ...(s.engine as unknown as { deps: ConstructorParameters<typeof HookEngine>[0] }).deps, messageCaptain: () => { throw new Error("Captain is gone") } })
-    const [run] = engine.handle(ev(prTask(s, s.alpha).id))
-    expect(run).toMatchObject({ status: "failed", result: "Failed: Captain is gone" })
+    const t = prTask(s, s.alpha)
+    const runs = ["t1", "t2", "t3"].map((turnId) => engine.handle(ev(t.id, { type: "task.finished", turnId }))[0]!)
+    expect(runs.map((r) => r.status)).toEqual(["failed", "failed", "skipped"])
+    expect(runs[0]!.result).toBe("Failed: Captain is gone")
+    expect(runs[2]!.guard).toBe("hook_cap")
   })
 })
 
