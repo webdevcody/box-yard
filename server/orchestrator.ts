@@ -612,8 +612,8 @@ export class Orchestrator {
       // When Box Yard itself was started from inside a Claude Code session, don't
       // let the orchestrator think it is that session's child.
       for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
-      if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
-      if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
+      // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
+      Object.assign(env, this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {

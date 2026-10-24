@@ -67,6 +67,8 @@ export const config = {
   publicUrl: env.BOXYARD_PUBLIC_URL ?? "",
 
   provider: (env.BOX_PROVIDER ?? (env.UPSTASH_BOX_API_KEY && !mock ? "upstash" : "local")) as ProviderName,
+  /** BOX_PROVIDER as set; empty means new boxes are Upstash boxes once a key is set (env or Settings › Credentials). */
+  boxProvider: env.BOX_PROVIDER?.trim() ?? "",
   upstashBoxApiKey: env.UPSTASH_BOX_API_KEY ?? "",
   workerSnapshotId: env.WORKER_SNAPSHOT_ID ?? "",
   workerRuntime: env.WORKER_RUNTIME ?? "node",
@@ -172,21 +174,21 @@ export function redisEnabled(c: Config = config) {
   return Boolean(c.redisUrl && c.redisToken)
 }
 
-/** Problems that stop Box Yard from doing real work, shown in the UI. */
+/** Problems that stop Box Yard from doing real work, shown in the UI. Pass the credentials in effect (env or saved). */
 export function configProblems(c: Config = config): string[] {
   const problems: string[] = []
   if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
   if (!c.claudeOauthToken && !c.anthropicApiKey) {
-    problems.push("Set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`) or ANTHROPIC_API_KEY.")
+    problems.push("Claude isn't signed in: add a subscription token (`claude setup-token`) or an Anthropic API key in Settings › Credentials, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.")
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {
-    problems.push("BOX_PROVIDER is upstash but UPSTASH_BOX_API_KEY is missing.")
+    problems.push("BOX_PROVIDER is upstash but there's no Upstash Box API key: add one in Settings › Credentials, or set UPSTASH_BOX_API_KEY.")
   }
   if (c.qstashToken && !qstashEnabled(c)) {
     problems.push("QSTASH_TOKEN is set but schedules still use the local timer: QStash also needs BOXYARD_PUBLIC_URL and QSTASH_CURRENT_SIGNING_KEY.")
   }
   if (!c.githubToken) {
-    problems.push("GITHUB_TOKEN is missing, so agents can't push branches or open pull requests.")
+    problems.push("No GitHub token, so agents can't push branches or open pull requests: add one in Settings › Credentials, or set GITHUB_TOKEN.")
   }
   return problems
 }

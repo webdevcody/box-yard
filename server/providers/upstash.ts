@@ -3,6 +3,7 @@ import fs from "node:fs"
 import type { Config } from "../config.js"
 import type { WorkerSize } from "../../shared/types.js"
 import { retry } from "../util/retry.js"
+import type { CredentialStore } from "../credentials.js"
 import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
 
 const ROOT = "/workspace/home"
@@ -27,39 +28,66 @@ export class UpstashProvider implements BoxProvider {
   readonly nodeBin = "node"
   readonly claudeBin = "claude"
   private cache = new Map<string, Box>()
+  private cacheFor = ""
 
-  constructor(private readonly c: Config) {}
+  /** `creds` reads the key and tokens on each use (Settings › Credentials, env wins); without it, the env values at startup. */
+  constructor(
+    private readonly c: Config,
+    private readonly creds?: Pick<CredentialStore, "get" | "claudeEnv">,
+  ) {}
+
+  private get apiKey() {
+    return this.creds ? this.creds.get("upstashBoxApiKey") : this.c.upstashBoxApiKey
+  }
+  private get gitToken() {
+    return this.creds ? this.creds.get("githubToken") : this.c.githubToken
+  }
+
+  /** Cached Box handles carry the key and git token they were made with, so a new key or token drops them. */
+  private boxes(): Map<string, Box> {
+    const key = `${this.apiKey}\n${this.gitToken}`
+    if (key !== this.cacheFor) {
+      this.cache.clear()
+      this.cacheFor = key
+    }
+    return this.cache
+  }
 
   root() {
     return ROOT
   }
 
   private async box(boxId: string): Promise<Box> {
-    const hit = this.cache.get(boxId)
+    const cache = this.boxes()
+    const hit = cache.get(boxId)
     if (hit) return hit
-    const box = await retry(() => Box.get(boxId, { apiKey: this.c.upstashBoxApiKey, gitToken: this.c.githubToken }))
-    this.cache.set(boxId, box)
+    const box = await retry(() => Box.get(boxId, { apiKey: this.apiKey, gitToken: this.gitToken }))
+    cache.set(boxId, box)
     return box
   }
 
   async create({ labels, size }: { labels: string[]; size?: WorkerSize }): Promise<string> {
     const env: Record<string, string> = { DISABLE_AUTOUPDATER: "1", IS_SANDBOX: "1" }
-    if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
-    if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
-    if (this.c.githubToken) env.GITHUB_TOKEN = this.c.githubToken
+    if (this.creds) Object.assign(env, this.creds.claudeEnv())
+    else {
+      if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
+      if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
+    }
+    const gitToken = this.gitToken
+    if (gitToken) env.GITHUB_TOKEN = gitToken
     const opts = {
-      apiKey: this.c.upstashBoxApiKey,
+      apiKey: this.apiKey,
       runtime: this.c.workerRuntime as "node",
       size: size ?? this.c.workerSize,
       labels: labels.map((l) => l.replace(/[^\w.:-]/g, "-").slice(0, 20)).slice(0, 5),
       env,
-      git: this.c.githubToken
-        ? { token: this.c.githubToken, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail }
+      git: gitToken
+        ? { token: gitToken, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail }
         : undefined,
     }
     // Create is not idempotent, so only one attempt; callers handle failure.
     const box = this.c.workerSnapshotId ? await Box.fromSnapshot(this.c.workerSnapshotId, opts) : await Box.create(opts)
-    this.cache.set(box.id, box)
+    this.boxes().set(box.id, box)
     try {
       const setup = await this.exec(box.id, workerSetupScript(this.c))
       if (setup.exitCode !== 0) throw new Error(`worker setup failed: ${(setup.stderr || setup.stdout).slice(-1500)}`)
@@ -175,7 +203,7 @@ export class UpstashProvider implements BoxProvider {
   }
 
   async listIds(label: string): Promise<string[]> {
-    const boxes = await retry(() => Box.list({ apiKey: this.c.upstashBoxApiKey, label }))
+    const boxes = await retry(() => Box.list({ apiKey: this.apiKey, label }))
     return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
   }
 

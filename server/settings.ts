@@ -22,6 +22,8 @@ import {
   type WorkerSize,
 } from "../shared/types.js"
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
+import { CredentialStore } from "./credentials.js"
+import type { CredentialKey } from "../shared/setup.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
 import {
@@ -43,6 +45,7 @@ const KEY = "settings"
 
 export const DEFAULT_SETTINGS: Settings = {
   ownerName: DEFAULT_OWNER_NAME,
+  startInZen: true,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorEffort: DEFAULT_EFFORT,
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
@@ -137,6 +140,7 @@ const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 export const settingsPatch = z
   .object({
     ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
+    startInZen: z.boolean(),
     orchestratorModel: model,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
@@ -203,9 +207,15 @@ export class SettingsStore {
       | "buildCleanupIdleMinutes"
       | "notesMaxCount"
       | "notesMaxTokens"
+      | CredentialKey
       >
     >,
-  ) {}
+  ) {
+    this.credentials = new CredentialStore(store, c)
+  }
+
+  /** Settings › Credentials: the box, Claude and GitHub keys (env wins). Kept apart from get(), which reaches the browser. */
+  readonly credentials: CredentialStore
 
   private saved(): Partial<Settings> {
     const raw = this.store.getKv(KEY)
