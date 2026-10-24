@@ -25,11 +25,13 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type PushState, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type PushState, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
+import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
+import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
@@ -160,6 +162,15 @@ export interface NoticeOptions {
   coordinator?: boolean
   wake?: boolean
 }
+/** An agent's message_captain that waits mid-turn for the Captain's reply (the runner polls its reply file). */
+interface CaptainWait {
+  /** The runner's message id (cmsg_…), which names the reply file. */
+  id: string
+  turnId: string | null
+  /** When the runner stops waiting, plus a little slack for the write. */
+  until: number
+}
+
 /** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
 const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
 
@@ -274,6 +285,10 @@ export class TaskManager {
   private lowDiskNoticeAt = new Map<string, number>()
   /** Called after every notice; return true when another owner handled delivery. */
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
+  /** Hands an agent's message_captain to its project's Captain (CaptainManager.fromAgent); null when there are no Captains. */
+  onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
+  /** Agents waiting mid-turn for their Captain's reply, by task. */
+  private captainWaits = new Map<string, CaptainWait[]>()
   /** The task event bus hooks listen on (see subscribe). */
   private readonly listeners = new Set<TaskEventListener>()
 
@@ -490,6 +505,8 @@ export class TaskManager {
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
     const inputId = this.store.queueInput(row.id, source, hook?.queued ?? (content.trim() || "(no text)"), attachments.map((f) => f.id))
+    // The project's Captain answering an agent that waits mid-turn (message_captain): hand it over now.
+    if (source === `captain:${row.project_id}` && !hook && !attachments.length && content.trim()) this.handToWaitingAgent(row, inputId, content.trim())
     if (source === "cody" || source === MERGE_BUTTON_SOURCE || source === "orchestrator" || source.startsWith("captain:") || hook) {
       const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
       const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
@@ -2450,6 +2467,17 @@ export class TaskManager {
       }
       case "message_agent":
         return this.deliverAgentMessage(row, String(ev.to), String(ev.message ?? ""), Boolean(ev.expectReply))
+      case "message_captain":
+        return this.deliverCaptainMessage(row, ev)
+      case "captain_reply_taken": {
+        // The waiting agent got the Captain's reply mid-turn, so its queued copy mustn't go out again next turn.
+        this.endCaptainWait(taskId, String(ev.id ?? ""))
+        if (typeof ev.inputId === "string") this.store.deleteInputs([ev.inputId])
+        say("event", "The Captain's reply reached the agent mid-turn, while it waited.", { kind: "captain_reply", agentMessageId: ev.id })
+        return this.emitTask(taskId)
+      }
+      case "captain_wait_end":
+        return this.endCaptainWait(taskId, String(ev.id ?? ""))
       case "note": {
         // Agents suggest notes; the project's Captain curates them in the notes retro (server/retro.ts).
         const content = String(ev.content ?? "").trim().slice(0, MAX_NOTE_CHARS)
@@ -2558,6 +2586,7 @@ export class TaskManager {
   private finishTurn(row: TaskRow, ev: WorkerEvent, pr: PrState | null = null) {
     if (ev.turnId && row.current_turn_id && ev.turnId !== row.current_turn_id) return // stale event from an older turn
     if (!row.current_turn_id) return
+    this.captainWaits.delete(row.id)
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -2790,6 +2819,106 @@ export class TaskManager {
     }
     this.emitTask(target.id)
     this.schedule()
+  }
+
+  /**
+   * An agent's message_captain: to the Captain of the agent's own project, never another (the agent doesn't
+   * name one). Rate-limited per task; a waiting agent hears at once why a message wasn't delivered.
+   */
+  private deliverCaptainMessage(from: TaskRow, ev: WorkerEvent) {
+    const id = typeof ev.id === "string" && /^[\w-]{1,64}$/.test(ev.id) ? ev.id : null
+    const message = String(ev.message ?? "").trim().slice(0, 8000)
+    const wait = id ? Math.max(0, Math.min(AGENT_CAPTAIN_WAIT_MAX_SECONDS, Math.round(Number(ev.wait) || 0))) : 0
+    if (!message) return
+    const say = (content: string, meta: Record<string, unknown>) => {
+      const msg = this.store.addTaskMessage(from.id, "agent", content, { to: "captain", ...meta })
+      this.hub.broadcast({ type: "task.message", message: msg })
+    }
+    const refuse = (why: string) => {
+      say(`Message to the Captain not delivered: ${why}`, { blocked: true })
+      if (wait && id) void this.writeCaptainReply(from, id, { status: "rejected", text: why })
+      else {
+        this.store.queueInput(from.id, "system", `Your message_captain was not delivered: ${why}`)
+        this.schedule()
+      }
+    }
+    const since = Date.now() - AGENT_CAPTAIN_WINDOW_MS
+    const recent = this.store
+      .listCaptainMessages(from.project_id, 300)
+      .filter((m) => m.role === "user" && m.meta?.source === "agent" && m.meta?.taskId === from.id && m.createdAt >= since).length
+    if (recent >= AGENT_CAPTAIN_LIMIT) return refuse(`you already sent the Captain ${AGENT_CAPTAIN_LIMIT} messages in the last 10 minutes (the limit).`)
+    if (!this.onCaptainMessage) return refuse("this Box Yard has no Captains.")
+    const sent = this.onCaptainMessage(from.project_id, { taskId: from.id, taskTitle: from.title, message, agentMessageId: id ?? "", waitSeconds: wait })
+    const captain = `${this.store.getProject(from.project_id)?.name ?? "project"} Captain`
+    say(`→ ${captain}: ${message}`, { captainMessageId: sent.message.id, agentMessageId: id, waitSeconds: wait, ...(sent.heldUntil ? { heldUntil: sent.heldUntil } : {}) })
+    if (sent.heldUntil) {
+      const at = new Date(sent.heldUntil).toISOString().slice(11, 16)
+      const why = `the Captain's loop guard is holding repeated messages until ${at} UTC. It keeps yours and reads it then; any reply arrives as your next message.`
+      if (wait && id) void this.writeCaptainReply(from, id, { status: "rejected", text: why })
+      return
+    }
+    if (wait && id) {
+      const waits = this.captainWaits.get(from.id) ?? []
+      waits.push({ id, turnId: from.current_turn_id, until: Number(ev.ts ?? Date.now()) + wait * 1000 + 2000 })
+      this.captainWaits.set(from.id, waits)
+    }
+  }
+
+  /** The agent is in a message_captain wait right now, so a Captain reply reaches it mid-turn. */
+  agentWaitingOnCaptain(taskId: string): boolean {
+    return this.openCaptainWaits(taskId).length > 0
+  }
+
+  private openCaptainWaits(taskId: string): CaptainWait[] {
+    const row = this.store.getTaskRow(taskId)
+    const now = Date.now()
+    const open = (this.captainWaits.get(taskId) ?? []).filter((w) => row?.current_turn_id && w.turnId === row.current_turn_id && w.until > now)
+    if (open.length) this.captainWaits.set(taskId, open)
+    else this.captainWaits.delete(taskId)
+    return open
+  }
+
+  private endCaptainWait(taskId: string, id: string) {
+    const left = (this.captainWaits.get(taskId) ?? []).filter((w) => w.id !== id)
+    if (left.length) this.captainWaits.set(taskId, left)
+    else this.captainWaits.delete(taskId)
+  }
+
+  /**
+   * Give the Captain's reply to the agent's oldest open wait. The input stays queued too: if the wait ran out
+   * before the runner read the file, the reply still arrives as the agent's next message; if the runner read it,
+   * its captain_reply_taken event drops the queued copy (it comes before the turn ends).
+   */
+  private handToWaitingAgent(row: TaskRow, inputId: string, content: string) {
+    const wait = this.openCaptainWaits(row.id)[0]
+    if (!wait) return
+    this.endCaptainWait(row.id, wait.id)
+    void this.writeCaptainReply(row, wait.id, { status: "reply", text: content, inputId })
+  }
+
+  /**
+   * A Captain turn read these message_captain messages. An agent still waiting on one got no reply_to_agent or
+   * send_to_task, so tell it now (with what the turn said) rather than let it wait out the clock.
+   */
+  captainHandledAgentMessages(messages: CaptainMessage[], reply: string) {
+    for (const m of messages) {
+      const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+      const id = typeof m.meta?.agentMessageId === "string" ? m.meta.agentMessageId : null
+      if (!taskId || !id) continue
+      const row = this.store.getTaskRow(taskId)
+      if (!row || !this.openCaptainWaits(taskId).some((w) => w.id === id)) continue
+      this.endCaptainWait(taskId, id)
+      void this.writeCaptainReply(row, id, { status: "no_reply", text: preview(reply, 4000, "the full text is in the Captain tab") })
+    }
+  }
+
+  private async writeCaptainReply(row: TaskRow, id: string, body: { status: "reply" | "no_reply" | "rejected"; text: string; inputId?: string }) {
+    if (!row.box_id) return
+    try {
+      await this.provider.writeFile(row.box_id, `${this.taskDir(row.box_id, row.id)}/captain-reply-${id}.json`, JSON.stringify(body))
+    } catch (err) {
+      console.warn(`[box-yard] couldn't hand the Captain's answer to ${row.id}: ${errorMessage(err)}`)
+    }
   }
 
   // ------------------------------------------------------------------ archives

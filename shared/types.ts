@@ -276,8 +276,11 @@ export interface ChatMessage {
   createdAt: number
 }
 
-/** Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain) or a schedule. */
-export type CaptainSource = "cody" | "coordinator" | "schedule" | "hook"
+/**
+ * Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain), a schedule,
+ * a hook, or an agent in the project (message_captain; meta has taskId, taskTitle and waitSeconds).
+ */
+export type CaptainSource = "cody" | "coordinator" | "schedule" | "hook" | "agent"
 
 /** The Captain-tool fields the Coordinator chat keeps on a send_to_captain/ask_captain/wait_for_captain tool line (meta.captain). */
 export interface CaptainToolResult {
