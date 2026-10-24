@@ -42,6 +42,8 @@ describe("orchestrator auto-wake", () => {
       return notice >= 0 && list.slice(notice + 1).some((m) => m.role === "assistant") ? list : null
     }, "an unprompted orchestrator reply after the done notice", 30_000)
     expect(after.filter((m) => m.role === "user")).toHaveLength(1)
+    // The reply lands mid-turn: let the turn end before teardown closes the database.
+    await waitFor(async () => !yard.orchestrator.busy && !(await fetch(base + "/api/orchestrator").then((r) => r.json())).busy, "the auto-turn to end")
   })
 
   it(`stops waking itself after ${MAX_AUTO_TURNS} automatic turns in a row, until Cody writes; a hook's message doesn't count`, async () => {

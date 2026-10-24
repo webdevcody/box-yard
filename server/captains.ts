@@ -793,6 +793,8 @@ class Captain {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         let msg: any
         try {
           msg = JSON.parse(line)
@@ -862,6 +864,7 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         // Captain runs get their own usage line and count toward the project's totals.
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({

@@ -595,6 +595,8 @@ export class Orchestrator {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         let msg: any
         try {
           msg = JSON.parse(line)
@@ -690,6 +692,7 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
             source: "orchestrator",

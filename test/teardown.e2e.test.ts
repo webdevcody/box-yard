@@ -25,6 +25,7 @@ async function start(): Promise<Running> {
   })
   await yard.start()
   process.on("unhandledRejection", onRejection)
+  process.on("uncaughtException", onRejection)
   const r = { yard, server, base: `http://127.0.0.1:${port}` }
   running.push(r)
   return r
@@ -33,6 +34,7 @@ async function start(): Promise<Running> {
 afterEach(async () => {
   for (const r of running.splice(0)) await new Promise((res) => r.server.close(() => res(null)))
   process.off("unhandledRejection", onRejection)
+  process.off("uncaughtException", onRejection)
   rejections.length = 0
 })
 
@@ -57,6 +59,43 @@ describe("stopping Box Yard mid-work", () => {
     await waitFor(() => r.yard.orchestrator.busy, "the Coordinator turn to start")
     r.yard.stop()
     await waitFor(() => !r.yard.orchestrator.busy, "the killed turn to wind down")
+    await settle()
+    expect(dbClosed(rejections)).toEqual([])
+  })
+
+  it("ignores a Coordinator claude run that answered just before stop() and exits after it", async () => {
+    const r = await start()
+    // Stop as soon as the reply lands: the run's result line and exit come after the database closed.
+    const broadcast = r.yard.hub.broadcast.bind(r.yard.hub)
+    let stopped = false
+    r.yard.hub.broadcast = (ev) => {
+      broadcast(ev)
+      if (!stopped && ev.type === "chat.message" && ev.message.role === "assistant") {
+        stopped = true
+        setImmediate(() => r.yard.stop())
+      }
+    }
+    await call(r, "POST", "/api/chat", { content: "status" })
+    await waitFor(() => stopped && !r.yard.orchestrator.busy, "the turn to wind down")
+    await settle()
+    expect(dbClosed(rejections)).toEqual([])
+  })
+
+  it("ignores a Captain claude run that answered just before stop() and exits after it", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const captain = r.yard.captains.get(p.id)
+    const broadcast = r.yard.hub.broadcast.bind(r.yard.hub)
+    let stopped = false
+    r.yard.hub.broadcast = (ev) => {
+      broadcast(ev)
+      if (!stopped && ev.type === "captain.message" && ev.message.role === "assistant") {
+        stopped = true
+        setImmediate(() => r.yard.stop())
+      }
+    }
+    await call(r, "POST", `/api/projects/${p.id}/captain/messages`, { content: "status" })
+    await waitFor(() => stopped && !captain.active, "the turn to wind down")
     await settle()
     expect(dbClosed(rejections)).toEqual([])
   })
