@@ -16,7 +16,7 @@ import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loop
 import { attachmentNote } from "./orchestrator.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
-import { captainSourceOf } from "../shared/captain.js"
+import { agentCaptainLabel, captainSourceOf } from "../shared/captain.js"
 import { budgetLine, budgetNotes, noteLine, pruneAdvice, shortTokens } from "../shared/notes.js"
 import {
   SUMMARY_PROMPT,
@@ -74,13 +74,43 @@ export interface CaptainSendOptions {
   meta?: Record<string, unknown>
 }
 
-const SOURCE_LABEL: Record<CaptainSource, string> = { cody: "From Cody", coordinator: "From the Coordinator", schedule: "From a schedule", hook: "From a hook" }
+const SOURCE_LABEL: Record<CaptainSource, string> = {
+  cody: "From Cody",
+  coordinator: "From the Coordinator",
+  schedule: "From a schedule",
+  hook: "From a hook",
+  agent: "From an agent",
+}
 
-/** "[From Cody]", or the hook's name for a hook's message. */
-function sourceLabel(m: CaptainMessage) {
+/** "[From Cody]", the hook's name for a hook's message, or the task for an agent's. Only Box Yard's own words get the owner name. */
+function sourceLabel(m: CaptainMessage, ownerName: string) {
   const source = captainSourceOf(m)
-  if (source === "hook" && typeof m.meta?.hookName === "string") return `From the hook "${m.meta.hookName}" (an automation, not a new message from Cody)`
-  return SOURCE_LABEL[source]
+  if (source === "hook" && typeof m.meta?.hookName === "string") return `From the hook "${m.meta.hookName}" ${withOwner("(an automation, not a new message from Cody)", ownerName)}`
+  if (source === "agent") return `${agentCaptainLabel(m.meta)}${withOwner(agentLabelTail(m), ownerName)}`
+  return withOwner(SOURCE_LABEL[source], ownerName)
+}
+
+/** What the Captain should do about an agent's message_captain: answer fast when it is waiting. */
+function agentLabelTail(m: CaptainMessage) {
+  const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : "?"
+  const wait = typeof m.meta?.waitSeconds === "number" ? m.meta.waitSeconds : 0
+  const held = typeof m.meta?.heldUntil === "number" ? " Your loop guard held it back for a while, so the agent stopped waiting." : ""
+  const how =
+    wait > 0 && !held
+      ? ` It is waiting up to ${wait} s for your answer mid-turn: reply first, with reply_to_agent (task ${taskId}), before anything slow.`
+      : ` It kept working. If it needs an answer, use reply_to_agent (task ${taskId}); it gets the reply as its next message.`
+  return `, an agent in this project, via message_captain. Not a message from Cody.${held}${how}`
+}
+
+/** An agent's message_captain, as the server hands it to its project's Captain. */
+export interface AgentCaptainMessage {
+  taskId: string
+  taskTitle: string
+  message: string
+  /** The runner's id for this message; the reply file and the wait use it. */
+  agentMessageId: string
+  /** How long the agent waits for the reply mid-turn; 0 for fire-and-forget. */
+  waitSeconds: number
 }
 
 /** Up to this much of a Captain's reply is kept on the Coordinator's tool line. */
@@ -115,6 +145,11 @@ export class CaptainManager {
   /** Each Captain's own MCP bearer token, so the MCP server can scope it to its project. */
   private readonly tokens = new Map<string, string>()
   onReport: ((projectId: string, content: string, report: CaptainReport) => void) | null = null
+  /**
+   * A Captain turn that read these agent messages (message_captain) ended; `reply` is what the turn said.
+   * An agent still waiting on one without a reply_to_agent/send_to_task hears that, so it stops waiting.
+   */
+  onAgentMessagesHandled: ((projectId: string, messages: CaptainMessage[], reply: string) => void) | null = null
   /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
   onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** Read when a Captain is created; tests shorten these. */
@@ -144,6 +179,7 @@ export class CaptainManager {
         (text, report = {}) => this.onReport?.(project.id, text, report),
         this.tuning,
         (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
+        (messages, reply) => this.onAgentMessagesHandled?.(project.id, messages, reply),
       )
       this.captains.set(project.id, captain)
     }
@@ -178,6 +214,11 @@ export class CaptainManager {
 
   send(projectRef: string, content: string, opts: CaptainSendOptions = {}) {
     return this.find(projectRef).send(content, opts)
+  }
+
+  /** An agent's message_captain, to the Captain of the agent's own project (the server picks it, never the agent). */
+  fromAgent(projectId: string, input: AgentCaptainMessage) {
+    return this.get(projectId).fromAgent(input)
   }
 
   /**
@@ -318,6 +359,7 @@ class Captain {
     private readonly report: (content: string, report?: CaptainReport) => void,
     private readonly tuning: CaptainTuning,
     private readonly noticesHandled: (notices: CaptainNoticeEntry[], ok: boolean) => void = () => {},
+    private readonly agentMessagesHandled: (messages: CaptainMessage[], reply: string) => void = () => {},
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
@@ -362,6 +404,47 @@ class Captain {
     this.publishState()
     void this.drain()
     return msg
+  }
+
+  /**
+   * An agent's message_captain. Like a hook's message it's an automation, so it doesn't reset the loop guard (#58);
+   * the guard also sees it, and an agent repeating the same message is held (kept, never dropped) until the
+   * throttle ends or something new arrives. `heldUntil` says when, so the server can tell the agent.
+   */
+  fromAgent(input: AgentCaptainMessage): { message: CaptainMessage; heldUntil: number | null } {
+    const meta: Record<string, unknown> = {
+      source: "agent",
+      tool: "message_captain",
+      taskId: input.taskId,
+      taskTitle: input.taskTitle,
+      agentMessageId: input.agentMessageId,
+      waitSeconds: input.waitSeconds,
+    }
+    const key = `agent ${input.taskId}: ${input.message}`
+    const decision = this.loopGuard.check([key])
+    if (!decision.wake) meta.heldUntil = decision.until
+    // Mid-turn it waits for the next turn, like send(): queued (see Store.deliverQueued).
+    if (this.running) meta.queued = true
+    const msg = this.store.addCaptainMessage(this.project.id, "user", input.message.trim(), meta)
+    this.hub.broadcast({ type: "captain.message", message: msg })
+    if (!decision.wake) {
+      this.holdUntil(decision.until)
+      if (decision.started) {
+        const minutes = Math.max(1, Math.round((decision.until - Date.now()) / 60_000))
+        this.report(
+          `Loop guard: task ${input.taskId} ("${input.taskTitle}") keeps sending me the same message, so my automatic turns are paused for ${minutes} min. ` +
+            `Its messages are kept, not dropped; I'll read them then, or sooner when something new arrives.`,
+        )
+      }
+      this.publishState()
+      return { message: msg, heldUntil: decision.until }
+    }
+    this.loopGuard.record([key])
+    this.clearThrottleTimer()
+    this.pending = true
+    this.publishState()
+    void this.drain()
+    return { message: msg, heldUntil: null }
   }
 
   /**
@@ -503,7 +586,7 @@ class Captain {
   private async turn() {
     const answering = this.unansweredUserMessages()
     const messages = answering
-      .map((m) => `[${withOwner(sourceLabel(m), this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
+      .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
     if (!messages.length) return
     // Messages sent during the last turn move to now, right before this turn's reply.
@@ -521,6 +604,14 @@ class Captain {
     const result = await this.runPrompt(prompt)
     this.handled(entries, result.ok)
     this.replyUpward(answering, result)
+    const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
+    if (fromAgents.length) {
+      try {
+        this.agentMessagesHandled(fromAgents, result.ok ? result.text.trim() : `The Captain hit an error: ${result.error.slice(0, 500)}`)
+      } catch (err) {
+        console.error(`[captain ${this.project.id}] after-turn agent message handling failed:`, err)
+      }
+    }
   }
 
   /**
@@ -592,7 +683,11 @@ class Captain {
     if (this.throttleTimer) return
     this.throttleTimer = setTimeout(() => {
       this.throttleTimer = null
-      this.nudge()
+      // Agent messages the guard held are answered in a turn of their own; task updates wait for the next wake.
+      if (this.unansweredUserMessages().length) {
+        this.pending = true
+        void this.drain()
+      } else this.nudge()
     }, Math.max(0, until - Date.now()))
     this.throttleTimer.unref?.()
   }
