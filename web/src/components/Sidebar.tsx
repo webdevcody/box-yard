@@ -99,7 +99,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
           {activeSchedules > 0 && <span className="ml-auto text-xs text-zinc-500">{activeSchedules}</span>}
         </Link>
         <Link href="/usage" className={navItem(location === "/usage")}>
-          <DollarSign className="h-4 w-4" /> Usage & costs
+          <DollarSign className="h-4 w-4" /> $ Usage
         </Link>
         <Link href="/compactions" className={navItem(location === "/compactions")}>
           <Archive className="h-4 w-4" /> Compactions
