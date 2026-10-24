@@ -122,18 +122,18 @@ describe("POST /api/tasks/:id/merge", () => {
     expect(again.status).toBe(409)
     expect((again.data as { error: string }).error).toMatch(/already requested/)
 
-    // The transcript has Cody's message (labelled) and a merge_requested event.
-    const msgs = r.yard.store.listTaskMessages(t.id, 100)
-    const user = msgs.filter((m) => m.role === "user" && m.meta?.source === "cody:merge")
-    expect(user).toHaveLength(1)
-    expect(user[0]!.content).toBe(mergeRequestPrompt(12))
-    expect(msgs.filter((m) => m.meta?.kind === "merge_requested")).toHaveLength(1)
+    // The transcript has a merge_requested event.
+    expect(r.yard.store.listTaskMessages(t.id, 100).filter((m) => m.meta?.kind === "merge_requested")).toHaveLength(1)
 
     // The agent gets it in its session, then the request clears with the turn.
     const done = await waitFor(async () => {
       const x = await getTask(r, t.id)
       return x.turnCount >= 2 && !["queued", "starting", "working"].includes(x.status) ? x : null
     }, "merge turn")
+    // Delivered, Cody's message (labelled) is in the transcript, once.
+    const user = r.yard.store.listTaskMessages(t.id, 100).filter((m) => m.role === "user" && m.meta?.source === "cody:merge")
+    expect(user).toHaveLength(1)
+    expect(user[0]!.content).toBe(mergeRequestPrompt(12))
     expect(done.mergeRequest).toBeNull()
     expect(workerPrompt(r, done)).toContain(`Message from Cody (Merge button):\n\n${mergeRequestPrompt(12)}`)
     expect((await merge(r, t.id)).status).toBe(200)

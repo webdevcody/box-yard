@@ -616,6 +616,32 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX box_events_at ON box_events(at);
   CREATE INDEX box_events_box ON box_events(box_id, at);
   `,
+  `
+  -- Memory-aware placement: each box's memory in use and load from its last probe (the df script), and a project's
+  -- "heavy tasks" choice: NULL or 'off', 'one-per-box', 'whole-box'.
+  ALTER TABLE boxes ADD COLUMN mem_used_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN mem_total_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN load_avg REAL;
+  ALTER TABLE boxes ADD COLUMN cpu_count INTEGER;
+  ALTER TABLE projects ADD COLUMN heavy_tasks TEXT;
+  `,
+  `
+  -- Editable queued messages. status: queued (editable), delivering (claimed by the turn \`claim\` that is starting;
+  -- locked), cancelled (deleted by the owner, kept a while for Undo). Edits, deletes and the delivery claim are
+  -- compare-and-set on status (and version for edits). prefix goes before content in the agent's prompt only
+  -- (a hook's label); message_json is the transcript line's meta, written when the message is delivered
+  -- (NULL: no transcript line, e.g. agent and system messages).
+  ALTER TABLE task_inputs ADD COLUMN status TEXT NOT NULL DEFAULT 'queued';
+  ALTER TABLE task_inputs ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+  ALTER TABLE task_inputs ADD COLUMN claim TEXT;
+  ALTER TABLE task_inputs ADD COLUMN prefix TEXT NOT NULL DEFAULT '';
+  ALTER TABLE task_inputs ADD COLUMN message_json TEXT;
+  ALTER TABLE task_inputs ADD COLUMN updated_at INTEGER;
+  `,
+  `
+  -- Size-aware placement: the box size a queued task waits for (its project's box size), shown with wait_reason.
+  ALTER TABLE tasks ADD COLUMN wait_box_size TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

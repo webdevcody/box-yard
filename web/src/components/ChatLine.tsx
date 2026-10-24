@@ -8,6 +8,7 @@ import { useEntityIndex } from "../lib/entities"
 import { toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage } from "../lib/captainTranscript"
 import { AttachmentList } from "./Attachments"
+import { QueuedChatMessage } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import type { ChatMessage } from "../../../shared/types"
 
@@ -191,24 +192,42 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   }
   if (m.role === "user" && m.meta?.source === "hook") {
     // A hook's message_coordinator action (server/hooks.ts), not typed by Cody.
-    return (
-      <div id={`chat-${m.id}`} className="flex justify-end">
-        <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
-          <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-teal-300 uppercase">
-            <Webhook className="h-3 w-3" /> Hook: {String(m.meta.hookName ?? "")}
-          </div>
-          {m.content}
+    const bubble = (
+      <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
+        <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-teal-300 uppercase">
+          <Webhook className="h-3 w-3" /> Hook: {String(m.meta.hookName ?? "")}
         </div>
+        {m.content}
+      </div>
+    )
+    return (
+      <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
+        {m.meta.queued === true ? (
+          <QueuedChatMessage m={m} projectId={null} who="the Coordinator">
+            {bubble}
+          </QueuedChatMessage>
+        ) : (
+          bubble
+        )}
       </div>
     )
   }
   if (m.role === "user") {
+    const bubble = (
+      <div className={cx("max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
+        {m.content}
+        <AttachmentList files={m.meta?.attachments} />
+      </div>
+    )
     return (
-      <div id={`chat-${m.id}`} className="flex justify-end">
-        <div className={cx("max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
-          {m.content}
-          <AttachmentList files={m.meta?.attachments} />
-        </div>
+      <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
+        {m.meta?.queued === true ? (
+          <QueuedChatMessage m={m} projectId={null} who="the Coordinator">
+            {bubble}
+          </QueuedChatMessage>
+        ) : (
+          bubble
+        )}
       </div>
     )
   }

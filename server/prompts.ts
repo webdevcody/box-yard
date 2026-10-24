@@ -1,6 +1,8 @@
 import { withOwner } from "../shared/owner.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
+import { formatBytes } from "../shared/disk.js"
+import type { HeavyTasks } from "../shared/memory.js"
 import { DEFAULT_NOTE_BUDGET, noteLine, shortTokens, type NoteBudget } from "../shared/notes.js"
 
 export interface DirectoryEntry {
@@ -20,6 +22,8 @@ export function workerSystemPrompt(input: {
   ownerName?: string
   /** Box Yard pushes the branch and uncommitted work after every turn (TaskManager.pushAtTurnEnd). */
   pushAtTurnEnd?: boolean
+  /** The box the turn runs on, so the agent paces heavy jobs. Keep it stable from turn to turn: it's in the cached system prompt. */
+  box?: BoxPromptInfo
 }): string {
   const { project, task, branch, port } = input
   const header = [
@@ -57,6 +61,8 @@ export function workerSystemPrompt(input: {
       `This project has no repository. Work in your working directory, and publish deliverables with publish_artifact.`,
     )
   }
+  const box = input.box ? boxLines(input.box) : []
+  if (box.length) lines.push(``, ...box)
   lines.push(
     ``,
     `Your conversation is resumed on every new message, so you keep your context. Keep your final message of each turn short: what you did, and what (if anything) you need.`,
@@ -67,6 +73,25 @@ export function workerSystemPrompt(input: {
   )
   // Only Box Yard's own lines get the owner name; the task title and project description are left as written.
   return [...header, ...lines.map((l) => withOwner(l, input.ownerName))].filter((l, i, a) => !(l === "" && a[i - 1] === "")).join("\n")
+}
+
+export interface BoxPromptInfo {
+  /** The box's memory (its cgroup limit), null before Box Yard first measured it. */
+  memoryBytes: number | null
+  /** Agents that may run on the box at once. */
+  slots: number
+  /** The project's heavy-tasks setting (shared/memory.ts). */
+  heavyTasks: HeavyTasks
+}
+
+/** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */
+function boxLines(b: BoxPromptInfo): string[] {
+  const mem = b.memoryBytes ? `This box has ${formatBytes(b.memoryBytes)} of memory` : `This box's memory is limited`
+  const heavy = `Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need: running out of memory kills every agent on the box.`
+  if (b.heavyTasks === "whole-box") return [`${mem}, and your project runs its agents alone on a box, so it's yours while your turn runs. ${heavy}`]
+  if (b.slots <= 1) return [`${mem}. ${heavy}`]
+  const who = b.heavyTasks === "one-per-box" ? `up to ${b.slots - 1} agents of other projects` : `up to ${b.slots - 1} other agents`
+  return [`${mem}, shared with ${who} that may run at the same time. ${heavy}`]
 }
 
 /** The first prompt a task's agent receives. */
@@ -190,7 +215,7 @@ How the yard is built:
 Routing every request (check list_projects / list_tasks first when you're not sure what exists):
 1. Project-scoped work: send it to that project's Captain with send_to_captain and end your turn (tell Cody it's with the Captain). The Captain's reply reaches you as a "Captain for <project> replied: …" update that wakes you, so don't block on it. ask_captain (waits at most 60 s) is only for a quick question whose answer you need right now; wait_for_captain is rarely needed. For cross-project requests, send to all relevant Captains at once and synthesize their replies as they arrive.
 2. Follow-up on work an agent already did (same issue, PR, branch, or "those"/"that"/"it"; corrections; "also do X there"): route it to the Captain for that task's project so it can send_to_task to the right agent. It resumes the same session with full context, even if it's done, as long as its workspace is on a box or in an archive. If its archive has expired (Settings → Boxes & limits), send_to_task still works: the agent starts a new session from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch, and the tool result says so. Don't start a new agent for it.
-   - If that agent is mid-turn, send_to_task still works: the message is queued and goes out as soon as its turn ends. Do that when the new request depends on or changes what it's doing.
+   - If that agent is mid-turn, send_to_task still works: the message is queued and goes out as soon as its turn ends. Do that when the new request depends on or changes what it's doing. To change or withdraw a message before it goes out, use list_queued_messages, edit_queued_message or cancel_queued_message.
    - If the follow-up spans several agents (e.g. "close all those issues" after issues were opened by agents in different projects), send_to_task to each of them.
 3. New, independent work in an existing project: route to its Captain. The Captain will create_task in that project (a fresh session on the project's box) or reuse context when appropriate.
 4. Work on a repo or topic that has no project yet: create_project (repo as owner/name), then route the work to the new Captain. One project per repo; match existing projects by repo before creating one.

@@ -255,15 +255,15 @@ describe("Captain message labels (#51)", () => {
     const { tool } = await mcpAs(r, { kind: "captain", projectId: p.id })
     expect((await tool("send_to_task", { task: t.id, message: "Make it rhyme." })).isError).not.toBe(true)
 
-    const msg = r.yard.store.listTaskMessages(t.id, 50).find((m) => m.role === "user" && m.content === "Make it rhyme.")!
-    expect(msg.meta).toMatchObject({ source: "captain", captainProjectId: p.id, captainName: "alpha" })
-    expect(userMessageLabel(msg.meta)).toBe("alpha Captain")
-
     // The fake worker writes the prompt it got into box-yard-demo.md.
     const task = await waitFor(async () => {
       const x = await call<Task>(r, "GET", `/api/tasks/${t.id}`)
       return x.turnCount >= 2 && x.status === "done" ? x : null
     }, "follow-up turn")
+    // Its transcript line is written when the turn takes it.
+    const msg = r.yard.store.listTaskMessages(t.id, 50).find((m) => m.role === "user" && m.content === "Make it rhyme.")!
+    expect(msg.meta).toMatchObject({ source: "captain", captainProjectId: p.id, captainName: "alpha" })
+    expect(userMessageLabel(msg.meta)).toBe("alpha Captain")
     const demo = fs.readFileSync(path.join(r.dataDir, "local-boxes", task.boxId!, "tasks", t.id, "work", "box-yard-demo.md"), "utf8")
     expect(demo).toContain("Message from the alpha Captain (on Cody's behalf):\n\nMake it rhyme.")
     expect(demo).not.toContain("Coordinator")
@@ -339,5 +339,26 @@ describe("Captain loop guard (#45)", () => {
     r.yard.captains.send(p.id, "status")
     await waitFor(() => !state().busy && unseen().length === 0, "message turn")
     expect(state()).toMatchObject({ throttledUntil: null, autoTurns: 0 })
+  }, 60_000)
+
+  it("a hook's message gets a turn but doesn't lift the throttle or reset the count: it's an automation", async () => {
+    const { r, p, state, unseen, notice, settled } = await setup({ maxRepeats: 1, windowMs: 60_000, throttleMs: 60_000, maxThrottleMs: 60_000 })
+    const loop = "💬 **Overnight job** finished its turn: (no reply)"
+    notice(loop)
+    await settled(1)
+    notice(loop)
+    const throttled = await waitFor(() => state().throttledUntil, "throttle")
+    const replies = () => r.yard.store.listCaptainMessages(p.id, 200).filter((m) => m.role === "assistant").length
+    const before = replies()
+    r.yard.captains.send(p.id, "nightly check", { source: "hook", meta: { hookId: "hook_nightly01", hookName: "nightly" } })
+    // Its turn reads the queued update like any turn does...
+    await waitFor(() => !state().busy && unseen().length === 0, "hook turn")
+    expect(replies()).toBeGreaterThan(before)
+    // ...but the loop guard keeps holding the automatic wake-ups.
+    expect(state()).toMatchObject({ throttledUntil: throttled, autoTurns: 1 })
+    notice(loop)
+    await new Promise((res) => setTimeout(res, 300))
+    expect(state().autoTurns).toBe(1)
+    expect(unseen()).toEqual([loop])
   }, 60_000)
 })

@@ -10,7 +10,7 @@ import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
 import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
-import { BadRequestError } from "./store.js"
+import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import {
@@ -31,7 +31,7 @@ const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
 const WAKE_DEBOUNCE_MS = 4000
 /** Automatic turns in a row (no message from Cody in between) before it stops waking itself. */
-const MAX_AUTO_TURNS = 8
+export const MAX_AUTO_TURNS = 8
 /** What the orchestrator says on an automatic turn when there's nothing to tell Cody; not shown. */
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
@@ -105,6 +105,10 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Read on every nudge; tests shorten it. */
+  readonly tuning = { wakeDebounceMs: WAKE_DEBOUNCE_MS }
+  /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
+  private stopped = false
   /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
   private readonly runNotes = new Map<string, string>()
   private child: ChildProcess | null = null
@@ -148,11 +152,38 @@ export class Orchestrator {
 
   /** Save Cody's message and make sure a turn will pick it up. */
   send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), attachments.length ? { attachments } : null, id)
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+    const meta = { ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
+    const msg = this.store.addChat("user", content.trim(), Object.keys(meta).length ? meta : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     this.autoTurns = 0
     void this.drain()
+    return msg
+  }
+
+  /** Edit a message still queued for the next turn. Refused once that turn has taken it. */
+  editQueued(id: string, content: string): ChatMessage {
+    return this.queuedChanged(this.store.editQueuedChat("chat_messages", id, null, content.trim()))
+  }
+
+  /** Delete a queued message before a turn reads it. Undo with restoreQueued. */
+  cancelQueued(id: string): ChatMessage {
+    return this.queuedChanged(this.store.cancelQueuedChat("chat_messages", id, null))
+  }
+
+  restoreQueued(id: string): ChatMessage {
+    const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
+    const msg = this.queuedChanged(this.store.restoreQueuedChat("chat_messages", id, null, { queued: this.running, at: Math.max(Date.now(), since) }))
+    this.pending = true
+    void this.drain()
+    return msg
+  }
+
+  private queuedChanged(change: QueuedChatChange): ChatMessage {
+    if (!change.ok) throw queuedChatError(change.reason, "the Coordinator")
+    const msg: ChatMessage = { role: "user", ...change.row }
+    this.hub.broadcast({ type: "chat.message", message: msg })
     return msg
   }
 
@@ -161,7 +192,7 @@ export class Orchestrator {
    * on the next turn. Unlike Cody's messages it doesn't reset the automatic-turn count: it's an automation.
    */
   hookMessage(content: string, meta: Record<string, unknown>): ChatMessage {
-    const msg = this.store.addChat("user", content.trim(), meta)
+    const msg = this.store.addChat("user", content.trim(), this.running ? { ...meta, queued: true } : meta)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
     void this.drain()
@@ -177,10 +208,11 @@ export class Orchestrator {
     void this.drain()
   }
 
-  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered. */
+  /** On startup: runs that were mid-turn when the server stopped are failed; queued ones are delivered, and so are queued messages. */
   resumeScheduled() {
     for (const r of this.store.listScheduleRuns({ status: ["running"] })) this.finishScheduledRun(r.id, "Box Yard restarted before this run finished.")
-    if (this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
+    if (this.store.queuedChatIds().length) this.pending = true
+    if (this.pending || this.store.listScheduleRuns({ status: ["queued"], limit: 1 }).length) void this.drain()
   }
 
   /**
@@ -200,11 +232,12 @@ export class Orchestrator {
       if (!ready) return
       this.wakeWanted = true
       void this.drain()
-    }, WAKE_DEBOUNCE_MS)
+    }, this.tuning.wakeDebounceMs)
     this.wakeTimer.unref?.()
   }
 
   stop() {
+    this.stopped = true
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
     this.cancel()
@@ -368,11 +401,11 @@ export class Orchestrator {
   }
 
   private async drain() {
-    if (this.running) return
+    if (this.running || this.stopped) return
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun()) {
+      while (!this.stopped && (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun())) {
         if (this.compactWanted) {
           await this.doCompact()
         } else if (this.pending) {
@@ -386,6 +419,9 @@ export class Orchestrator {
           await this.autoTurn()
         }
       }
+    } catch (err) {
+      // stop() killed the turn and closed the database under it: nothing left to record.
+      if (!this.stopped) throw err
     } finally {
       this.running = false
       this.hub.broadcast({ type: "chat.busy", busy: false })
@@ -431,11 +467,13 @@ export class Orchestrator {
   }
 
   /** Messages Cody sent since the orchestrator last replied. */
-  private unansweredUserMessages(): string[] {
+  private unansweredUserMessages(): ChatMessage[] {
     const since = Number(this.store.getKv("orchestrator_last_turn_at") ?? 0)
-    return this.store
-      .listChat(200)
-      .filter((m) => m.role === "user" && m.createdAt >= since)
+    return this.store.listChat(200).filter((m) => m.role === "user" && m.createdAt >= since && m.meta?.cancelled !== true)
+  }
+
+  private promptText(messages: ChatMessage[]): string[] {
+    return messages
       .map((m) =>
         m.meta?.source === "hook" && typeof m.meta.hookName === "string"
           ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
@@ -464,9 +502,16 @@ export class Orchestrator {
   }
 
   private async turn() {
-    const messages = this.unansweredUserMessages()
+    const answering = this.unansweredUserMessages()
+    const messages = this.promptText(answering)
     if (!messages.length) return
-    this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
+    // Messages sent during the last turn move to now, right before this turn's reply.
+    const moved = this.store.deliverQueued("chat_messages", answering.map((m) => m.id))
+    for (const d of moved) {
+      const m = answering.find((x) => x.id === d.id)!
+      this.hub.broadcast({ type: "chat.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
+    }
+    this.store.setKv("orchestrator_last_turn_at", String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const notices = this.store.takeUnseenNotices()
     const prompt = [
       updatesBlock("Box Yard updates since your last turn", notices),
@@ -496,7 +541,7 @@ export class Orchestrator {
       this.store.setKv(SESSION_KEY, fresh)
       const recap = this.store
         .listChat(30)
-        .filter((m) => m.role === "user" || m.role === "assistant")
+        .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
       result = await this.run(`Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
@@ -587,6 +632,8 @@ export class Orchestrator {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         let msg: any
         try {
           msg = JSON.parse(line)
@@ -682,6 +729,7 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
             source: "orchestrator",

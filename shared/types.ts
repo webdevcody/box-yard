@@ -6,6 +6,7 @@ import type { BoxResize } from "./boxSizes.js"
 import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
+import type { HeavyTasks } from "./memory.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -53,6 +54,8 @@ export interface Project {
   partialClone: boolean | null
   /** Push each task's branch and uncommitted work at the end of every turn; null uses Settings → Push at turn end. */
   pushAtTurnEnd: boolean | null
+  /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
+  heavyTasks: HeavyTasks
   createdAt: number
   updatedAt: number
 }
@@ -128,9 +131,13 @@ export interface Task {
   error: string | null
   /** Why a queued task is held back beyond a free slot, e.g. "Waiting for disk cleanup on box-1". */
   waitReason: string | null
+  /** Set when that wait is for a box of at least this size (the project's box size): no such box has room yet. */
+  waitBoxSize: BoxSize | null
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
+  /** Changes whenever the queued messages do (added, edited, cancelled, being delivered); "" when none. */
+  queueRev?: string
   lastArchivedAt: number | null
   /** Set when a schedule started this task. */
   scheduleId: string | null
@@ -256,6 +263,30 @@ export interface Attachment {
   path?: string
 }
 
+/** Who sent a queued message: shapes its row on the task page. */
+export type QueuedSender = "owner" | "coordinator" | "captain" | "hook" | "agent" | "system"
+
+/**
+ * A message waiting for a task's next turn (GET /api/tasks/:id/queue). "queued" ones can be edited and deleted;
+ * "delivering" ones are being handed to a turn that is starting, and are locked.
+ */
+export interface QueuedMessage {
+  id: string
+  taskId: string
+  /** The raw input source: cody, cody:merge, orchestrator, captain:<project>, hook:<id>, agent:<task>, system. */
+  source: string
+  kind: QueuedSender
+  /** Who sent it, as the row says it: "Cody", "Coordinator", "box-yard Captain", "Hook: On PR ready". */
+  sender: string
+  text: string
+  attachments: Attachment[]
+  status: "queued" | "delivering"
+  /** Bumped on every edit; pass it back to an edit to refuse it when someone else changed the message first. */
+  version: number
+  createdAt: number
+  updatedAt: number
+}
+
 export type TaskMessageRole = "user" | "assistant" | "tool" | "event" | "agent"
 
 export interface TaskMessage {
@@ -334,6 +365,14 @@ export interface BoxInfo {
   /** Free and total space on the box's root disk (/tmp, HOME) when that isn't the work disk; null otherwise or until checked. */
   rootFreeBytes?: number | null
   rootTotalBytes?: number | null
+  /** Memory in use (without reclaimable page cache) and the box's memory, from the same probe; null until checked. */
+  memUsedBytes?: number | null
+  memTotalBytes?: number | null
+  /** 1-minute load average and the CPUs it's over (nproc). */
+  loadAvg?: number | null
+  cpuCount?: number | null
+  /** Why placement skips the box for new agents (Settings → Boxes & limits → Memory), or null. */
+  memoryPressure?: string | null
   /** Too little free space for a new workspace (Settings → Boxes & limits → Disk). */
   diskLow: boolean
   /** The running cleanup, or the last one. */
@@ -531,6 +570,8 @@ export interface Settings {
   autoResizeEnabled: boolean
   /** The largest size resize_box may pick. */
   autoResizeMaxSize: BoxSize
+  /** When the pool is full and no box of a project's size is free, placement may resize an idle box up to it. Off: the task waits. */
+  placementResizeEnabled: boolean
   /** Most worker boxes alive at once. */
   maxBoxes: number
   /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
@@ -555,6 +596,12 @@ export interface Settings {
   diskMinFreeMb: number
   /** ...and at least this many times the repo's last clone size. */
   diskCloneFactor: number
+  /** Placement skips a box with more than this % of its memory in use while agents run on it. 0 = off. */
+  memoryMaxUsedPercent: number
+  /** ...or with less than this much memory free (MB). 0 = off. */
+  memoryMinFreeMb: number
+  /** ...or with a 1-minute load average above this many times its CPUs. 0 = off. */
+  loadMaxPerCpu: number
   /** Box repo mirrors are partial clones (blob:none): old blobs are fetched when something reads them. A project can override it. */
   gitPartialClone: boolean
   /**

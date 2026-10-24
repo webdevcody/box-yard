@@ -14,7 +14,7 @@ import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
-import { TtsError, TtsService } from "./tts.js"
+import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
@@ -37,6 +37,7 @@ import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
+import { HEAVY_TASKS } from "../shared/memory.js"
 import { BOX_SIZES, EFFORTS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -91,6 +92,7 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
   projectOrder: z.object({ ids: z.array(z.string().max(64)).max(1000) }).strict(),
@@ -104,6 +106,7 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
   note: z.object({ content: z.string().trim().min(1).max(MAX_NOTE_CHARS) }),
@@ -118,6 +121,7 @@ const schemas = {
     attachments: attachmentIds,
   }),
   message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
@@ -222,8 +226,8 @@ export function createBoxYard(
     qstash?: QStash | null
     now?: () => number
     github?: TaskManagerDeps["github"]
-    /** Stand-ins for the ElevenLabs / OpenAI HTTP APIs (tests). */
-    tts?: { fetch?: typeof fetch; timeoutMs?: number; voicesTtlMs?: number }
+    /** Stand-ins for ElevenLabs' HTTP API and OpenAI's Realtime socket (tests). */
+    tts?: Pick<TtsOptions, "fetch" | "WebSocket" | "timeoutMs" | "voicesTtlMs">
     /** Stand-ins for the services the setup Test buttons call (tests). GitHub's comes from `github.fetch`. */
     setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs">
   } = {},
@@ -462,6 +466,22 @@ export function createBoxYard(
     const files = withAttachments(body.content, body.attachments)
     res.status(201).json(captains.send(id, body.content, { id: body.id, attachments: files, source: "cody" }))
   })
+  // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
+  api.patch("/projects/:id/captain/messages/:messageId", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.editQueued(id, req.params.messageId!, parse(schemas.queuedEdit, req.body).text))
+  })
+  api.delete("/projects/:id/captain/messages/:messageId", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.cancelQueued(id, req.params.messageId!))
+  })
+  api.post("/projects/:id/captain/messages/:messageId/restore", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    res.json(captains.restoreQueued(id, req.params.messageId!))
+  })
   api.post("/projects/:id/captain/compact", (req, res) => {
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
@@ -494,6 +514,20 @@ export function createBoxYard(
     const body = parse(schemas.message, req.body)
     const files = withAttachments(body.content, body.attachments)
     res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
+  })
+  // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
+  api.get("/tasks/:id/queue", (req, res) => {
+    res.json(tasks.listQueue(req.params.id!))
+  })
+  api.patch("/tasks/:id/queue/:inputId", (req, res) => {
+    const body = parse(schemas.queuedEdit, req.body)
+    res.json(tasks.editQueued(req.params.id!, req.params.inputId!, body.text, body.version))
+  })
+  api.delete("/tasks/:id/queue/:inputId", (req, res) => {
+    res.json(tasks.cancelQueued(req.params.id!, req.params.inputId!))
+  })
+  api.post("/tasks/:id/queue/:inputId/restore", (req, res) => {
+    res.json(tasks.restoreQueued(req.params.id!, req.params.inputId!))
   })
   api.post("/tasks/:id/compact", (req, res) => {
     res.json(tasks.compactTask(req.params.id!))
@@ -611,7 +645,7 @@ export function createBoxYard(
       ttsFailed(res, err)
     }
   })
-  /** Synthesize `text` with the saved provider (or the one given) and stream the mp3 back. */
+  /** Synthesize `text` with the saved provider (or the one given) and stream the audio back as it arrives (mp3, or OpenAI's PCM). */
   api.post("/tts", async (req, res) => {
     const body = parse(schemas.tts, req.body) as Parameters<TtsService["synthesize"]>[0]
     let audio: Awaited<ReturnType<TtsService["synthesize"]>>
@@ -718,6 +752,16 @@ export function createBoxYard(
     const body = parse(schemas.chat, req.body)
     const files = withAttachments(body.content, body.attachments)
     res.status(201).json(orchestrator.send(body.content, body.id, files))
+  })
+  // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
+  api.patch("/chat/messages/:messageId", (req, res) => {
+    res.json(orchestrator.editQueued(req.params.messageId!, parse(schemas.queuedEdit, req.body).text))
+  })
+  api.delete("/chat/messages/:messageId", (req, res) => {
+    res.json(orchestrator.cancelQueued(req.params.messageId!))
+  })
+  api.post("/chat/messages/:messageId/restore", (req, res) => {
+    res.json(orchestrator.restoreQueued(req.params.messageId!))
   })
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())

@@ -5,11 +5,12 @@ import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { SpeechQueue, type SynthLike, type UtteranceLike } from "../web/src/lib/speech.js"
 import { CloudSynth, activeProvider, fetchTts, reportFallback, resetFallbackToasts, type AudioLike, type CloudDeps } from "../web/src/lib/tts.js"
-import { filterVoices, voiceMeta, voiceUnavailable } from "../web/src/lib/ttsVoices.js"
+import { filterVoices, voiceMeta } from "../web/src/lib/ttsVoices.js"
+import { PcmPlayer, pcm16ToFloat, pcmRate, pcmToWav, type AudioContextLike, type PcmCallbacks, type PcmPlayerLike, type PcmStream } from "../web/src/lib/pcm.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { keys } from "../web/src/lib/queries.js"
 import { TtsSection } from "../web/src/components/TtsSettings.js"
-import { TTS_DEFAULTS, type TtsInfo, type TtsProvider } from "../shared/tts.js"
+import { OPENAI_SPEED, TTS_DEFAULTS, type TtsInfo, type TtsProvider } from "../shared/tts.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -70,7 +71,40 @@ class FakeAudio implements AudioLike {
   }
 }
 
-function rig(provider: TtsProvider = "elevenlabs", fetchAudio?: CloudDeps["fetchAudio"]) {
+/** A PCM body the test feeds chunk by chunk. */
+function pcmStream(sampleRate = 24_000) {
+  let ctl!: ReadableStreamDefaultController<Uint8Array>
+  let cancelled = false
+  const body = new ReadableStream<Uint8Array>({
+    start: (c) => void (ctl = c),
+    cancel: () => void (cancelled = true),
+  })
+  return {
+    pcm: { kind: "pcm", sampleRate, body } as PcmStream,
+    push: (...bytes: number[]) => ctl.enqueue(new Uint8Array(bytes)),
+    end: () => ctl.close(),
+    fail: (msg: string) => ctl.error(new Error(msg)),
+    get cancelled() {
+      return cancelled
+    },
+  }
+}
+
+/** Stands in for PcmPlayer: records what it was asked to play and lets the test drive the callbacks. */
+class FakePcm implements PcmPlayerLike {
+  plays: { pcm: PcmStream; cb: PcmCallbacks; stopped: boolean }[] = []
+  play(pcm: PcmStream, cb: PcmCallbacks) {
+    const p = { pcm, cb, stopped: false }
+    this.plays.push(p)
+    queueMicrotask(() => cb.onstart())
+    return { stop: () => void (p.stopped = true) }
+  }
+  get last() {
+    return this.plays.at(-1)!
+  }
+}
+
+function rig(provider: TtsProvider = "elevenlabs", fetchAudio?: CloudDeps["fetchAudio"], pcm?: PcmPlayerLike | null) {
   const os = new FakeOs()
   const audio = new FakeAudio()
   const requests: { text: string; signal: AbortSignal }[] = []
@@ -87,7 +121,8 @@ function rig(provider: TtsProvider = "elevenlabs", fetchAudio?: CloudDeps["fetch
         requests.push({ text, signal })
         return Promise.resolve(new Blob([text]))
       }),
-    objectUrl: { create: (b) => `blob:${(b as Blob).size}`, revoke: () => {} },
+    objectUrl: { create: (b) => `blob:${(b as Blob).type}:${(b as Blob).size}`, revoke: () => {} },
+    pcm: () => pcm ?? null,
     onFallback: (prov, msg) => fallbacks.push(`${prov}: ${msg}`),
   })
   const onBlocked = vi.fn()
@@ -212,6 +247,254 @@ describe("CloudSynth under the speech queue", () => {
   })
 })
 
+describe("CloudSynth with OpenAI's streamed PCM", () => {
+  const pcmRig = (player: PcmPlayerLike | null = new FakePcm()) => {
+    const streams: ReturnType<typeof pcmStream>[] = []
+    const r = rig("openai", () => {
+      const s = pcmStream()
+      streams.push(s)
+      return Promise.resolve(s.pcm)
+    }, player)
+    return { ...r, streams, player: player as FakePcm }
+  }
+
+  it("hands the stream to the PCM player (not the <audio> element) and moves on when it ends", async () => {
+    const r = pcmRig()
+    r.q.say("PR 30 merged.", OPTS)
+    r.q.say("Task Login finished.", OPTS)
+    await flush()
+    expect(r.player.plays).toHaveLength(1)
+    expect(r.player.last.pcm.sampleRate).toBe(24_000)
+    expect(r.player.last.cb.volume).toBe(0.8)
+    expect(r.audio.played).toHaveLength(0)
+    expect(r.q.speaking).toBe(true)
+    r.player.last.cb.onend()
+    await flush()
+    expect(r.player.plays).toHaveLength(2)
+    r.player.last.cb.onend()
+    expect(r.q.speaking).toBe(false)
+    expect(r.os.spoken).toHaveLength(0)
+  })
+
+  it("stop() stops the playback; a stream error falls back to the browser voice", async () => {
+    const r = pcmRig()
+    r.q.say("one", OPTS)
+    await flush()
+    r.q.stop()
+    expect(r.player.last.stopped).toBe(true)
+    r.player.last.cb.onend() // late callbacks from the stopped clip are ignored
+    r.player.last.cb.onerror("late")
+    expect(r.fallbacks).toEqual([])
+
+    r.q.say("two", OPTS)
+    await flush()
+    r.player.last.cb.onerror("network error")
+    expect(r.fallbacks).toEqual(["openai: network error"])
+    expect(r.os.spoken.map((u) => u.text)).toEqual(["two"])
+  })
+
+  it("an autoplay block stops the queue and asks for a tap", async () => {
+    const r = pcmRig()
+    r.q.say("one", OPTS)
+    r.q.say("two", OPTS)
+    await flush()
+    r.player.last.cb.onblocked()
+    expect(r.onBlocked).toHaveBeenCalledOnce()
+    expect(r.q.pending).toBe(0)
+    expect(r.fallbacks).toEqual([])
+  })
+
+  it("cancels a stream that arrives after the line was stopped", async () => {
+    let resolve!: (p: PcmStream) => void
+    const s = pcmStream()
+    const r = rig("openai", () => new Promise((res) => (resolve = res)), new FakePcm())
+    r.q.say("late", OPTS)
+    r.q.stop()
+    resolve(s.pcm)
+    await flush()
+    expect(s.cancelled).toBe(true)
+  })
+
+  it("without Web Audio, buffers the clip into a WAV for the <audio> element", async () => {
+    const r = pcmRig(null)
+    r.q.say("Hi.", OPTS)
+    await flush()
+    r.streams[0]!.push(1, 0, 2, 0)
+    r.streams[0]!.end()
+    await flush()
+    await flush()
+    expect(r.audio.played).toEqual(["blob:audio/wav:48"])
+  })
+})
+
+/** Enough of AudioContext to watch the scheduling. */
+class FakeContext implements AudioContextLike {
+  currentTime = 10
+  state = "running"
+  destination = {}
+  resumed = 0
+  resumeResult: Promise<void> | null = null
+  sources: { start: number; samples: Float32Array; duration: number; stopped: boolean; onended: (() => void) | null }[] = []
+  gains: { gain: { value: number }; disconnected: boolean }[] = []
+  resume() {
+    this.resumed++
+    return this.resumeResult ?? Promise.resolve().then(() => void (this.state = "running"))
+  }
+  createBuffer(_ch: number, length: number, rate: number) {
+    const buf = { duration: length / rate, samples: new Float32Array(length), copyToChannel: (src: Float32Array) => buf.samples.set(src) }
+    return buf
+  }
+  createBufferSource() {
+    const ctx = this
+    const src = {
+      buffer: null as any,
+      onended: null as (() => void) | null,
+      connect: () => undefined,
+      start(when: number) {
+        ctx.sources.push(Object.assign(entry, { start: when, samples: src.buffer.samples, duration: src.buffer.duration }))
+      },
+      stop: () => void (entry.stopped = true),
+    }
+    const entry = { start: 0, samples: new Float32Array(), duration: 0, stopped: false, get onended() { return src.onended } }
+    return src
+  }
+  createGain() {
+    const g = { gain: { value: 1 }, disconnected: false, connect: () => undefined, disconnect: () => void (g.disconnected = true) }
+    this.gains.push(g)
+    return g
+  }
+}
+
+describe("PcmPlayer", () => {
+  const callbacks = () => {
+    const seen: string[] = []
+    const cb: PcmCallbacks = {
+      volume: 0.5,
+      onstart: () => seen.push("start"),
+      onend: () => seen.push("end"),
+      onblocked: () => seen.push("blocked"),
+      onerror: (m) => seen.push(`error: ${m}`),
+    }
+    return { seen, cb }
+  }
+
+  it("starts at the first chunk and queues the rest back to back, across odd byte splits", async () => {
+    const ctx = new FakeContext()
+    const s = pcmStream(4)
+    const { seen, cb } = callbacks()
+    new PcmPlayer(() => ctx).play(s.pcm, cb)
+    // 0x4000 = 0.5, then a sample split across two chunks: 0xC000 = -0.5.
+    s.push(0x00, 0x40, 0x00)
+    await flush()
+    expect(seen).toEqual(["start"])
+    expect(ctx.gains[0]!.gain.value).toBe(0.5)
+    expect(ctx.sources).toHaveLength(1)
+    expect([...ctx.sources[0]!.samples]).toEqual([0.5])
+    expect(ctx.sources[0]!.start).toBeCloseTo(10.08)
+    s.push(0xc0, 0xff, 0x7f)
+    await flush()
+    expect([...ctx.sources[1]!.samples]).toEqual([-0.5, 32767 / 32768])
+    // Right after the first one (1 sample at 4 Hz = 0.25 s).
+    expect(ctx.sources[1]!.start).toBeCloseTo(10.33)
+    s.end()
+    await flush()
+    expect(seen).toEqual(["start"])
+    ctx.sources[0]!.onended!()
+    expect(seen).toEqual(["start"])
+    ctx.sources[1]!.onended!()
+    expect(seen).toEqual(["start", "end"])
+    expect(ctx.gains[0]!.disconnected).toBe(true)
+  })
+
+  it("restarts a moment from now after running dry, rather than in the past", async () => {
+    const ctx = new FakeContext()
+    const s = pcmStream(4)
+    new PcmPlayer(() => ctx).play(s.pcm, callbacks().cb)
+    s.push(0, 0)
+    await flush()
+    ctx.currentTime = 20
+    s.push(0, 0)
+    await flush()
+    expect(ctx.sources[1]!.start).toBeCloseTo(20.08)
+  })
+
+  it("stop() silences queued chunks and cancels the stream", async () => {
+    const ctx = new FakeContext()
+    const s = pcmStream()
+    const { seen, cb } = callbacks()
+    const playback = new PcmPlayer(() => ctx).play(s.pcm, cb)
+    s.push(0, 0, 0, 0)
+    await flush()
+    playback.stop()
+    await flush()
+    expect(ctx.sources[0]!.stopped).toBe(true)
+    expect(s.cancelled).toBe(true)
+    expect(seen).toEqual(["start"])
+  })
+
+  it("reports a broken stream, an empty one, a blocked context and no Web Audio", async () => {
+    const ctx = new FakeContext()
+    let s = pcmStream()
+    let c = callbacks()
+    new PcmPlayer(() => ctx).play(s.pcm, c.cb)
+    s.fail("network error")
+    await flush()
+    expect(c.seen).toEqual(["error: network error"])
+
+    s = pcmStream()
+    c = callbacks()
+    new PcmPlayer(() => ctx).play(s.pcm, c.cb)
+    s.end()
+    await flush()
+    expect(c.seen).toEqual(["error: The server sent no audio."])
+
+    // Suspended, and resume() never settles without a tap.
+    const locked = new FakeContext()
+    locked.state = "suspended"
+    locked.resumeResult = new Promise(() => {})
+    c = callbacks()
+    vi.useFakeTimers()
+    new PcmPlayer(() => locked).play(pcmStream().pcm, c.cb)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(c.seen).toEqual(["blocked"])
+    vi.useRealTimers()
+
+    // Suspended but resumable (an earlier tap): plays.
+    const asleep = new FakeContext()
+    asleep.state = "suspended"
+    s = pcmStream()
+    c = callbacks()
+    new PcmPlayer(() => asleep).play(s.pcm, c.cb)
+    await flush()
+    s.push(0, 0)
+    await flush()
+    expect(asleep.resumed).toBe(1)
+    expect(c.seen).toEqual(["start"])
+
+    c = callbacks()
+    new PcmPlayer(() => null).play(pcmStream().pcm, c.cb)
+    await flush()
+    expect(c.seen).toEqual(["error: This browser can't play streamed audio."])
+  })
+
+  it("PCM helpers: content type, sample conversion and the WAV wrapper", async () => {
+    expect(pcmRate("audio/pcm;rate=24000")).toBe(24_000)
+    expect(pcmRate("audio/pcm")).toBe(24_000)
+    expect(pcmRate("audio/mpeg")).toBeNull()
+    expect(pcmRate(null)).toBeNull()
+    expect(pcm16ToFloat(new Uint8Array([0x00, 0x80, 0x01]), null)).toEqual({ samples: new Float32Array([-1]), carry: 1 })
+    const s = pcmStream()
+    s.push(1, 2, 3, 4)
+    s.end()
+    const wav = new Uint8Array(await (await pcmToWav(s.pcm)).arrayBuffer())
+    const view = new DataView(wav.buffer)
+    expect(String.fromCharCode(...wav.slice(0, 4))).toBe("RIFF")
+    expect(view.getUint32(24, true)).toBe(24_000)
+    expect(view.getUint32(40, true)).toBe(4)
+    expect([...wav.slice(44)]).toEqual([1, 2, 3, 4])
+  })
+})
+
 describe("fallback toast", () => {
   it("shows each exact error once", () => {
     reportFallback("elevenlabs", "ElevenLabs: Invalid API key (HTTP 401)")
@@ -234,9 +517,21 @@ describe("fetchTts", () => {
         ? new Response("MP3", { status: 200, headers: { "Content-Type": "audio/mpeg" } })
         : new Response(JSON.stringify({ error: "ElevenLabs: Invalid API key (HTTP 401)" }), { status: 502 })
     })
-    expect(await (await fetchTts({ text: "Hi." })).text()).toBe("MP3")
+    expect(await ((await fetchTts({ text: "Hi." })) as Blob).text()).toBe("MP3")
     expect(calls[0]).toEqual({ url: "/api/tts", body: { text: "Hi." } })
     await expect(fetchTts({ text: "Hi.", provider: "openai", voice: "ash" })).rejects.toThrow("ElevenLabs: Invalid API key (HTTP 401)")
+  })
+
+  it("hands back OpenAI's PCM as a stream, as soon as the headers arrive", async () => {
+    const s = pcmStream()
+    vi.stubGlobal("fetch", async () => new Response(s.pcm.body, { status: 200, headers: { "Content-Type": "audio/pcm;rate=24000" } }))
+    const clip = (await fetchTts({ text: "Hi." })) as PcmStream
+    expect(clip.kind).toBe("pcm")
+    expect(clip.sampleRate).toBe(24_000)
+    const reader = clip.body.getReader()
+    s.push(7, 8)
+    expect([...(await reader.read()).value!]).toEqual([7, 8])
+    s.end()
   })
 })
 
@@ -265,11 +560,6 @@ describe("voice picker helpers", () => {
     expect(filterVoices([george, mine], "brit").map((v) => v.id)).toEqual(["g"])
     expect(filterVoices([george, mine], "clone").map((v) => v.id)).toEqual(["m"])
     expect(filterVoices([george, mine], "").length).toBe(2)
-  })
-  it("mark OpenAI voices tts-1 can't use", () => {
-    expect(voiceUnavailable({ id: "marin", name: "Marin", category: "built-in" }, "openai", "tts-1")).toBe("gpt-4o-mini-tts only")
-    expect(voiceUnavailable({ id: "marin", name: "Marin", category: "built-in" }, "openai", "gpt-4o-mini-tts")).toBeNull()
-    expect(voiceUnavailable({ id: "coral", name: "Coral", category: "built-in" }, "openai", "tts-1-hd")).toBeNull()
   })
 })
 
@@ -334,6 +624,22 @@ describe("Settings › Voice provider section", () => {
     expect(host.textContent).toContain("OPENAI_API_KEY")
     await render(info({ provider: "openai" }))
     expect(host.querySelector('input[type="password"]')).not.toBeNull()
+  })
+
+  it("OpenAI shows the Realtime model, its ten voices, instructions and the 1.5× speed cap", async () => {
+    await render(info({ provider: "openai" }, { openai: { state: "set", source: "ui" } }))
+    const model = host.querySelector<HTMLSelectElement>("#t-oa-model")!
+    expect(model.value).toBe("gpt-realtime-2.1-mini")
+    expect([...model.options].map((o) => o.textContent)).toEqual(["gpt-realtime-2.1-mini (default)", "gpt-realtime-2.1"])
+    expect(host.textContent).toContain("OpenAI's replacement for its retired speech models")
+    expect(host.textContent).not.toMatch(/tts-1|gpt-4o-mini-tts/)
+    const voices = [...host.querySelectorAll('[data-voice-picker="openai"] [role="radio"]')].map((b) => b.textContent)
+    expect(voices).toEqual(["Alloy", "Ash", "Ballad", "Coral", "Echo", "Sage", "Shimmer", "Verse", "Marin", "Cedar"])
+    expect(host.querySelector('[data-voice-picker="openai"] [aria-checked="true"]')?.textContent).toBe("Marin")
+    expect(host.querySelector<HTMLTextAreaElement>("#t-oa-instr")!.disabled).toBe(false)
+    expect(host.querySelector<HTMLInputElement>("#t-oa-speed")!.max).toBe(String(OPENAI_SPEED.max))
+    expect(OPENAI_SPEED.max).toBe(1.5)
+    expect(host.textContent).toContain("0.25× to 1.5×")
   })
 
   it("picking a provider or a voice saves it", async () => {

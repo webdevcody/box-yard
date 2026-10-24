@@ -1,14 +1,15 @@
 import { memo } from "react"
 import { Link } from "wouter"
-import { Activity, AlarmClock, Check, Globe, HardDrive, MessageCircleQuestion } from "lucide-react"
+import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
 import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
+import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
+import { QueuedLink } from "./QueuedMessages"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
@@ -60,8 +61,8 @@ export const TaskCard = memo(function TaskCard({
             <span className="line-clamp-2 break-words">{task.question}</span>
           </div>
         ) : task.status === "queued" && task.waitReason ? (
-          <p className="line-clamp-2 break-words text-amber-200/80">
-            <HardDrive className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
+          <p className="line-clamp-2 break-words text-amber-200/80" data-testid="wait-reason">
+            <WaitIcon task={task} className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
             {task.waitReason}
           </p>
         ) : task.status === "failed" && task.error ? (
@@ -102,8 +103,13 @@ export const TaskCard = memo(function TaskCard({
             {[task.model, task.effort].filter(Boolean).join(" · ")}
           </span>
         )}
-        <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
-          {task.pendingCount > 0 && `${task.pendingCount} queued · `}
+        <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0">
+          {task.pendingCount > 0 && (
+            <>
+              <QueuedLink taskId={task.id} count={task.pendingCount} />
+              {" · "}
+            </>
+          )}
           <TimeAgo ts={task.updatedAt} />
         </span>
         {onMarkDone && (

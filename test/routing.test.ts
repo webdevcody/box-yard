@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
+import fs from "node:fs"
+import path from "node:path"
 import YAML from "yaml"
-import { isCopiedDefaultRoute, resolveAgentRoute, routingConfigSchema, routingInstructions, type RoutingConfig } from "../server/routing.js"
+import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute, routingConfigSchema, routingInstructions, type RoutingConfig } from "../server/routing.js"
 import type { Effort, Project, SettingSource, Settings } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
@@ -116,5 +118,131 @@ describe("routing instructions", () => {
     expect(text).toMatch(/"Let the Coordinator decide": pass an effort on create_task/)
     expect(text).toContain("effort chosen by you")
     expect(text).not.toMatch(/\bCody\b/)
+  })
+})
+
+// loadRouting and the prompt's sources and warnings (#50).
+
+const dataDir = (files: Record<string, string> = {}) => {
+  const dir = tmpDir()
+  for (const [name, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), text)
+  return dir
+}
+const settings = (agentRoutingConfig = "") => ({ agentRoutingConfig })
+const routedHere = () => ({ id: "prj_demo01", name: "demo", repo: "acme/demo" }) as Project
+
+describe("loadRouting", () => {
+  it("returns nothing when no routing is configured", () => {
+    expect(loadRouting(dataDir(), settings())).toEqual({ config: null, yaml: "", sources: [], errors: [] })
+    expect(loadRouting(dataDir(), settings("  \n"))).toEqual({ config: null, yaml: "", sources: [], errors: [] })
+  })
+
+  it("reads routing.yaml from the data dir, else routing.yml, but never both", () => {
+    const yml = dataDir({ "routing.yml": "fallback:\n  model: claude-haiku-5-5\n" })
+    expect(loadRouting(yml, settings())).toMatchObject({ config: { fallback: { model: "claude-haiku-5-5" } }, sources: [path.join(yml, "routing.yml")], errors: [] })
+
+    const both = dataDir({ "routing.yaml": "fallback:\n  model: claude-sonnet-5-5\n", "routing.yml": "defaults:\n  effort: low\n" })
+    const loaded = loadRouting(both, settings())
+    expect(loaded.sources).toEqual([path.join(both, "routing.yaml")])
+    expect(loaded.config).toEqual({ fallback: { model: "claude-sonnet-5-5" } })
+  })
+
+  it("doesn't fall back to routing.yml when routing.yaml is invalid", () => {
+    const dir = dataDir({ "routing.yaml": "fallback: [unclosed", "routing.yml": "fallback:\n  model: claude-haiku-5-5\n" })
+    const loaded = loadRouting(dir, settings())
+    expect(loaded.config).toBeNull()
+    expect(loaded.sources).toEqual([])
+    expect(loaded.errors).toHaveLength(1)
+    expect(loaded.errors[0]!.startsWith(`${path.join(dir, "routing.yaml")}: `)).toBe(true)
+  })
+
+  it("merges the Settings YAML over the file: targets key by key, projects by name, rules appended", () => {
+    const dir = dataDir({
+      "routing.yaml": [
+        "fallback: { model: claude-haiku-5-5, effort: low }",
+        "defaults: { model: claude-sonnet-5-5, reason: cheap first }",
+        "projects:",
+        "  demo: { effort: medium }",
+        "  docs: { model: claude-haiku-5-5 }",
+        "rules:",
+        "  - { name: file rule, when: bug fixes, model: claude-opus-5-5 }",
+      ].join("\n"),
+    })
+    const loaded = loadRouting(
+      dir,
+      settings(["fallback: { effort: medium }", "defaults: { effort: high }", "projects:", "  demo: { model: claude-opus-5-5 }", "rules:", "  - { name: settings rule, effort: max }"].join("\n")),
+    )
+    expect(loaded.errors).toEqual([])
+    expect(loaded.sources).toEqual([path.join(dir, "routing.yaml"), "Settings"])
+    expect(loaded.config).toEqual({
+      fallback: { model: "claude-haiku-5-5", effort: "medium" },
+      defaults: { model: "claude-sonnet-5-5", effort: "high", reason: "cheap first" },
+      // A project entry from Settings replaces the file's entry for that project as a whole.
+      projects: { demo: { model: "claude-opus-5-5" }, docs: { model: "claude-haiku-5-5" } },
+      rules: [
+        { name: "file rule", when: "bug fixes", model: "claude-opus-5-5" },
+        { name: "settings rule", effort: "max" },
+      ],
+    })
+    // The merged config is what the prompt shows.
+    expect(loaded.yaml).toContain("settings rule")
+    expect(loaded.yaml).toContain("file rule")
+  })
+
+  it("adds no empty sections when merging, so a file's fallback stays the fallback", () => {
+    const dir = dataDir({ "routing.yaml": "fallback:\n  model: claude-haiku-5-5\n" })
+    const loaded = loadRouting(dir, settings("projects:\n  docs:\n    effort: low\n"))
+    expect(loaded.config).toEqual({ fallback: { model: "claude-haiku-5-5" }, projects: { docs: { effort: "low" } } })
+    expect(loaded.yaml).toBe("fallback:\n  model: claude-haiku-5-5\nprojects:\n  docs:\n    effort: low")
+    // A pre-#44 row holding a copy of the fallback route is still recognized as one.
+    expect(isCopiedDefaultRoute(loaded.config, routedHere(), { model: "claude-haiku-5-5", effort: null, routing_rule: "fallback" })).toBe(true)
+  })
+
+  it("keeps a valid source when the other is broken, and names the broken one", () => {
+    const dir = dataDir({ "routing.yaml": "defaults:\n  model: claude-sonnet-5-5\n" })
+    const loaded = loadRouting(dir, settings("defaults:\n  effort: extreme\n"))
+    expect(loaded.config).toEqual({ defaults: { model: "claude-sonnet-5-5" } })
+    expect(loaded.sources).toEqual([path.join(dir, "routing.yaml")])
+    expect(loaded.errors).toHaveLength(1)
+    expect(loaded.errors[0]).toMatch(/^Settings routing YAML: defaults\.effort /)
+  })
+
+  it("validates targets strictly and says where the problem is", () => {
+    const err = (yaml: string) => loadRouting(dataDir(), settings(yaml)).errors
+    expect(err("fallback:\n  model: claude opus\n")[0]).toMatch(/fallback\.model Model names have no spaces/)
+    expect(err("projects:\n  demo:\n    effort: turbo\n")[0]).toMatch(/projects\.demo\.effort /)
+    expect(err("defaults:\n  modle: claude-opus-5-5\n")[0]).toMatch(/defaults .*modle/)
+    expect(err("rules: nope\n")[0]).toMatch(/^Settings routing YAML: rules /)
+    expect(err("- just\n- a list\n")[0]).toMatch(/^Settings routing YAML: root /)
+  })
+
+  it("lets rules and the top level carry extra keys, and accepts provider model ids", () => {
+    const loaded = loadRouting(
+      dataDir(),
+      settings("version: 2\nfallback:\n  model: us.anthropic.claude-opus-5-5[1m]\nrules:\n  - name: tagged\n    tags: [infra]\n    when: [deploys, outages]\n"),
+    )
+    expect(loaded.errors).toEqual([])
+    expect(loaded.config).toEqual({
+      version: 2,
+      fallback: { model: "us.anthropic.claude-opus-5-5[1m]" },
+      rules: [{ name: "tagged", tags: ["infra"], when: ["deploys", "outages"] }],
+    })
+  })
+})
+
+describe("routing instructions: sources and warnings", () => {
+  it("lists the sources and the merged config as YAML", () => {
+    const dir = dataDir({ "routing.yaml": "fallback:\n  model: claude-haiku-5-5\n" })
+    const text = routingInstructions(dir, settings("defaults:\n  effort: high\n"))
+    expect(text).toContain(`Routing sources: ${path.join(dir, "routing.yaml")}, Settings`)
+    expect(text).toContain("Current routing config:\n```yaml\nfallback:\n  model: claude-haiku-5-5\ndefaults:\n  effort: high\n```")
+    expect(text).not.toContain("there are no rules")
+  })
+
+  it("passes on config errors as warnings, addressed to the owner", () => {
+    const text = routingInstructions(dataDir({ "routing.yaml": "fallback: [unclosed" }), { agentRoutingConfig: "", ownerName: "Ana" })
+    expect(text).toContain("Routing config warnings (ignore invalid sources and tell Ana if relevant):\n- ")
+    expect(text).toContain("routing.yaml: ")
+    expect(text).toContain("there are no rules")
   })
 })

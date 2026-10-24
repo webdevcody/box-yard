@@ -3,6 +3,7 @@ import type { DB } from "./db.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
+import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -96,6 +97,7 @@ export interface TaskRow {
   summary: string | null
   error: string | null
   wait_reason: string | null
+  wait_box_size: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -229,6 +231,7 @@ interface ProjectRow {
   box_size: string | null
   partial_clone: number | null
   push_at_turn_end: number | null
+  heavy_tasks: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   sort_order: number
@@ -254,6 +257,10 @@ export interface BoxRow {
   disk_checked_at: number | null
   root_free_bytes: number | null
   root_total_bytes: number | null
+  mem_used_bytes: number | null
+  mem_total_bytes: number | null
+  load_avg: number | null
+  cpu_count: number | null
 }
 
 /** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
@@ -319,6 +326,7 @@ type TaskPatch = Partial<{
   summary: string | null
   error: string | null
   waitReason: string | null
+  waitBoxSize: BoxSize | null
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -359,6 +367,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   summary: "summary",
   error: "error",
   waitReason: "wait_reason",
+  waitBoxSize: "wait_box_size",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -500,6 +509,78 @@ const suggestionFromRow = (r: SuggestionRow): NoteSuggestion => ({
   retroAt: r.retro_at,
 })
 
+/** Queued inputs in send order. */
+const INPUT_ORDER = "ORDER BY created_at ASC, rowid ASC"
+/** How long a cancelled queued input is kept, so Undo can bring it back. */
+export const CANCELLED_INPUT_KEEP_MS = 10 * 60_000
+
+interface InputRow {
+  id: string
+  task_id: string
+  source: string
+  content: string
+  attachments: string | null
+  status: "queued" | "delivering" | "cancelled"
+  version: number
+  claim: string | null
+  prefix: string
+  message_json: string | null
+  created_at: number
+  updated_at: number | null
+}
+
+/** A queued input as a turn delivers it: `content` is what the agent reads (prefix included). */
+export interface PendingInput {
+  id: string
+  source: string
+  content: string
+  attachments: string[]
+}
+
+/** A queued input as stored, for the queue list and its edits. `content` is the editable text (no prefix). */
+export interface QueuedInputRow {
+  id: string
+  taskId: string
+  source: string
+  content: string
+  attachments: string[]
+  status: "queued" | "delivering" | "cancelled"
+  version: number
+  /** The transcript line's meta (who sent it); null for agent and system messages. */
+  message: Record<string, unknown> | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** A compare-and-set on a queued input: ok, or the input as it is now (null: gone, i.e. delivered or cleared). */
+export type InputChange = { ok: true; row: QueuedInputRow } | { ok: false; row: QueuedInputRow | null }
+
+/** A queued Coordinator chat or Captain message (meta.queued: sent mid-turn, waiting for the next one). */
+export type QueuedChatTable = "chat_messages" | "captain_messages"
+export interface QueuedChatRow {
+  id: string
+  content: string
+  meta: Record<string, unknown>
+  createdAt: number
+}
+/** Why a queued chat message couldn't change: a turn took it already, it was deleted, or there is no such message. */
+export type QueuedChatChange = { ok: true; row: QueuedChatRow } | { ok: false; reason: "delivered" | "deleted" | "missing" }
+
+const inputAttachments = (r: InputRow) => (r.attachments ? (JSON.parse(r.attachments) as string[]) : [])
+const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r) })
+const queuedInputRow = (r: InputRow): QueuedInputRow => ({
+  id: r.id,
+  taskId: r.task_id,
+  source: r.source,
+  content: r.content,
+  attachments: inputAttachments(r),
+  status: r.status,
+  version: r.version,
+  message: r.message_json ? (JSON.parse(r.message_json) as Record<string, unknown>) : null,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at ?? r.created_at,
+})
+
 export class Store {
   constructor(readonly db: DB) {}
 
@@ -522,6 +603,7 @@ export class Store {
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
+      heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -536,6 +618,16 @@ export class Store {
   getProject(id: string): Project | null {
     const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
     return row ? this.projectFromRow(row) : null
+  }
+
+  /** Just the name, without loading the notes (placement asks often). */
+  getProjectName(id: string): string | null {
+    return (this.db.prepare("SELECT name FROM projects WHERE id = ?").get(id) as { name: string } | undefined)?.name ?? null
+  }
+
+  /** The project's "heavy tasks" setting, without loading the rest (placement asks per box and running task). */
+  projectHeavyTasks(id: string): HeavyTasks {
+    return normalizeHeavyTasks((this.db.prepare("SELECT heavy_tasks FROM projects WHERE id = ?").get(id) as { heavy_tasks: string | null } | undefined)?.heavy_tasks)
   }
 
   findProject(idOrName: string): Project | null {
@@ -560,6 +652,7 @@ export class Store {
     boxSize?: BoxSize | null
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
+    heavyTasks?: HeavyTasks
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -583,6 +676,7 @@ export class Store {
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
+    this.setHeavyTasks(id, input.heavyTasks)
     this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
   }
@@ -602,6 +696,8 @@ export class Store {
       partialClone?: boolean | null
       /** null clears it (Settings → Push at turn end applies). */
       pushAtTurnEnd?: boolean | null
+      /** How its running agents share boxes (shared/memory.ts HEAVY_TASKS). */
+      heavyTasks?: HeavyTasks
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -629,8 +725,15 @@ export class Store {
         Date.now(),
         id,
       )
+    this.setHeavyTasks(id, patch.heavyTasks)
     this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** undefined leaves it as it is; "off" is stored as NULL. */
+  private setHeavyTasks(id: string, v: HeavyTasks | undefined) {
+    if (v === undefined) return
+    this.db.prepare("UPDATE projects SET heavy_tasks = ? WHERE id = ?").run(v === "off" ? null : normalizeHeavyTasks(v), id)
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
@@ -767,9 +870,11 @@ export class Store {
   // ---------- tasks ----------
 
   taskFromRow(row: TaskRow): Task {
-    const pending = this.db.prepare("SELECT COUNT(*) AS n FROM task_inputs WHERE task_id = ?").get(row.id) as {
-      n: number
-    }
+    const pending = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(version), 0) AS v, COALESCE(SUM(status = 'delivering'), 0) AS d, COALESCE(MAX(updated_at), 0) AS t FROM task_inputs WHERE task_id = ? AND status != 'cancelled'",
+      )
+      .get(row.id) as { n: number; v: number; d: number; t: number }
     const usage = this.taskClaudeTotals(row.id)
     return {
       id: row.id,
@@ -790,8 +895,10 @@ export class Store {
       activity: row.summary === null ? this.taskActivity(row.id) : null,
       error: row.error,
       waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
+      waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
       turnCount: row.turn_count,
       pendingCount: pending.n,
+      queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",
       lastArchivedAt: row.last_archived_at,
       scheduleId: row.schedule_id ?? null,
       outcome: parseOutcome(row.outcome),
@@ -819,7 +926,7 @@ export class Store {
   mergeRequestOf(row: TaskRow): StoredMergeRequest | null {
     const req = json<StoredMergeRequest | null>(row.merge_request_json, null)
     if (!req || req.prUrl !== row.pr_url) return null
-    if (req.deliveredAt === null && !this.db.prepare("SELECT 1 FROM task_inputs WHERE id = ?").get(req.inputId)) return null
+    if (req.deliveredAt === null && !this.db.prepare("SELECT 1 FROM task_inputs WHERE id = ? AND status != 'cancelled'").get(req.inputId)) return null
     return req
   }
 
@@ -1217,34 +1324,252 @@ export class Store {
 
   // pending inputs: messages for a task that wait for its next turn
 
-  /** Returns the input's id. */
-  queueInput(taskId: string, source: string, content: string, attachments: string[] = []): string {
+  /**
+   * Returns the input's id. `prefix` goes before the content in the agent's prompt only (a hook's label);
+   * `message` is the transcript line's meta, written when the message is delivered (none for agent/system messages).
+   */
+  queueInput(taskId: string, source: string, content: string, attachments: string[] = [], opts: { prefix?: string; message?: Record<string, unknown> } = {}): string {
     const id = newId("in")
+    const now = Date.now()
     this.db
-      .prepare("INSERT INTO task_inputs (id, task_id, source, content, attachments, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, Date.now())
+      .prepare("INSERT INTO task_inputs (id, task_id, source, content, attachments, prefix, message_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(id, taskId, source, content, attachments.length ? JSON.stringify(attachments) : null, opts.prefix ?? "", opts.message ? JSON.stringify(opts.message) : null, now, now)
     return id
   }
 
-  /** Queued inputs, oldest first. Delete them with deleteInputs once a turn has started. */
-  peekInputs(taskId: string): { id: string; source: string; content: string; attachments: string[] }[] {
+  /** Queued inputs (not claimed by a starting turn, not cancelled), oldest first, as the agent gets them. */
+  peekInputs(taskId: string): PendingInput[] {
     const rows = this.db
-      .prepare("SELECT id, source, content, attachments FROM task_inputs WHERE task_id = ? ORDER BY created_at ASC, rowid ASC")
-      .all(taskId) as { id: string; source: string; content: string; attachments: string | null }[]
-    return rows.map((r) => ({ ...r, attachments: r.attachments ? (JSON.parse(r.attachments) as string[]) : [] }))
+      .prepare(`SELECT * FROM task_inputs WHERE task_id = ? AND status = 'queued' ${INPUT_ORDER}`)
+      .all(taskId) as InputRow[]
+    return rows.map(pendingInput)
   }
 
-  deleteInputs(ids: string[]) {
-    const stmt = this.db.prepare("DELETE FROM task_inputs WHERE id = ?")
-    this.db.transaction(() => ids.forEach((id) => stmt.run(id)))()
+  /**
+   * Claim every queued input for the turn `turnId` that is starting (status delivering): from now on they can't
+   * be edited or cancelled. deliverInputs removes them once the turn has started, releaseInputs hands them back
+   * if it couldn't. Also drops inputs cancelled long enough ago that Undo is over.
+   */
+  claimInputs(taskId: string, turnId: string): PendingInput[] {
+    return this.db.transaction(() => {
+      this.db.prepare("DELETE FROM task_inputs WHERE task_id = ? AND status = 'cancelled' AND updated_at < ?").run(taskId, Date.now() - CANCELLED_INPUT_KEEP_MS)
+      // A hand-off the last turn didn't take (see lockInput) goes in with this one.
+      this.db.prepare("UPDATE task_inputs SET status = 'queued', claim = NULL WHERE task_id = ? AND status = 'delivering' AND claim LIKE 'handoff:%'").run(taskId)
+      this.db.prepare("UPDATE task_inputs SET status = 'delivering', claim = ? WHERE task_id = ? AND status = 'queued'").run(turnId, taskId)
+      return (this.db.prepare(`SELECT * FROM task_inputs WHERE claim = ? AND status = 'delivering' ${INPUT_ORDER}`).all(turnId) as InputRow[]).map(pendingInput)
+    })()
   }
 
+  /** The turn started: remove its claimed inputs and write their transcript lines, all at once. */
+  deliverInputs(turnId: string): TaskMessage[] {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT * FROM task_inputs WHERE claim = ? AND status = 'delivering' ${INPUT_ORDER}`).all(turnId) as InputRow[]
+      this.db.prepare("DELETE FROM task_inputs WHERE claim = ? AND status = 'delivering'").run(turnId)
+      // meta.queuedAt: when it was sent, like the chats' queued messages (see deliverQueued).
+      return rows.flatMap((r) =>
+        r.message_json ? [this.addTaskMessage(r.task_id, "user", r.content, { ...(JSON.parse(r.message_json) as Record<string, unknown>), queuedAt: r.created_at })] : [],
+      )
+    })()
+  }
+
+  /**
+   * The input was handed to the agent mid-turn (a Captain's reply to an agent waiting on message_captain): lock it
+   * like a turn's claim, so an edit can't be lost, until the agent takes it (takeInput) or the turn ends without
+   * taking it (releaseInputs(claim), or the next claimInputs). False when it isn't queued any more.
+   */
+  lockInput(taskId: string, id: string, claim: string): boolean {
+    return this.db.prepare("UPDATE task_inputs SET status = 'delivering', claim = ? WHERE id = ? AND task_id = ? AND status = 'queued'").run(claim, id, taskId).changes > 0
+  }
+
+  /**
+   * The agent took this input mid-turn (see lockInput): remove it and write its transcript line, as deliverInputs
+   * would. Compare-and-set: only while it is queued or locked by a hand-off; null when cancelled, claimed by a
+   * turn or gone.
+   */
+  takeInput(taskId: string, id: string): { message: TaskMessage | null } | null {
+    return this.db.transaction(() => {
+      const row = this.db
+        .prepare("SELECT * FROM task_inputs WHERE id = ? AND task_id = ? AND (status = 'queued' OR (status = 'delivering' AND claim LIKE 'handoff:%'))")
+        .get(id, taskId) as InputRow | undefined
+      if (!row) return null
+      this.db.prepare("DELETE FROM task_inputs WHERE id = ?").run(id)
+      const message = row.message_json ? this.addTaskMessage(taskId, "user", row.content, { ...(JSON.parse(row.message_json) as Record<string, unknown>), queuedAt: row.created_at }) : null
+      return { message }
+    })()
+  }
+
+  /** The turn couldn't start: its claimed inputs are queued (and editable) again. Without a turn id: every claim (startup). */
+  releaseInputs(turnId?: string) {
+    if (turnId) this.db.prepare("UPDATE task_inputs SET status = 'queued', claim = NULL WHERE claim = ? AND status = 'delivering'").run(turnId)
+    else this.db.prepare("UPDATE task_inputs SET status = 'queued', claim = NULL WHERE status = 'delivering'").run()
+  }
+
+  /** What the task page shows: queued and delivering inputs, in send order. */
+  listQueuedInputs(taskId: string): QueuedInputRow[] {
+    return (this.db.prepare(`SELECT * FROM task_inputs WHERE task_id = ? AND status IN ('queued', 'delivering') ${INPUT_ORDER}`).all(taskId) as InputRow[]).map(queuedInputRow)
+  }
+
+  getQueuedInput(taskId: string, id: string): QueuedInputRow | null {
+    const row = this.db.prepare("SELECT * FROM task_inputs WHERE id = ? AND task_id = ?").get(id, taskId) as InputRow | undefined
+    return row ? queuedInputRow(row) : null
+  }
+
+  /**
+   * Replace a queued input's text, only while it is still queued (and at `version`, when given). Compare-and-set
+   * against the delivery claim: an input a turn already took is never changed.
+   */
+  editInput(taskId: string, id: string, content: string, version?: number): InputChange {
+    const res = this.db
+      .prepare("UPDATE task_inputs SET content = ?, version = version + 1, updated_at = ? WHERE id = ? AND task_id = ? AND status = 'queued' AND (? IS NULL OR version = ?)")
+      .run(content, Date.now(), id, taskId, version ?? null, version ?? null)
+    return this.inputChange(taskId, id, res.changes > 0)
+  }
+
+  /** Cancel a queued input (kept a while for Undo). Compare-and-set like editInput. */
+  cancelInput(taskId: string, id: string): InputChange {
+    const res = this.db
+      .prepare("UPDATE task_inputs SET status = 'cancelled', version = version + 1, updated_at = ? WHERE id = ? AND task_id = ? AND status = 'queued'")
+      .run(Date.now(), id, taskId)
+    return this.inputChange(taskId, id, res.changes > 0)
+  }
+
+  /** Undo a cancel: the input is queued again, in its old place. */
+  restoreInput(taskId: string, id: string): InputChange {
+    const res = this.db
+      .prepare("UPDATE task_inputs SET status = 'queued', version = version + 1, updated_at = ? WHERE id = ? AND task_id = ? AND status = 'cancelled'")
+      .run(Date.now(), id, taskId)
+    return this.inputChange(taskId, id, res.changes > 0)
+  }
+
+  private inputChange(taskId: string, id: string, ok: boolean): InputChange {
+    const row = this.getQueuedInput(taskId, id)
+    return ok && row ? { ok: true, row } : { ok: false, row }
+  }
+
+  /**
+   * The task stopped or closed before a turn read its queue: drop every input. The messages from people get their
+   * transcript line anyway, marked undelivered, so nothing Cody sent just vanishes. Returns those lines.
+   */
+  dropInputs(taskId: string): TaskMessage[] {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT * FROM task_inputs WHERE task_id = ? AND status != 'cancelled' ${INPUT_ORDER}`).all(taskId) as InputRow[]
+      this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
+      return rows.flatMap((r) =>
+        r.message_json ? [this.addTaskMessage(taskId, "user", r.content, { ...(JSON.parse(r.message_json) as Record<string, unknown>), undelivered: true })] : [],
+      )
+    })()
+  }
+
+  /** Drop every input, without transcript lines (see dropInputs for the stop/close path). */
   clearInputs(taskId: string) {
     this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
   }
 
+  /** Inputs waiting for a turn (queued or being delivered; cancelled ones don't count). */
   hasInputs(taskId: string) {
-    return Boolean(this.db.prepare("SELECT 1 FROM task_inputs WHERE task_id = ? LIMIT 1").get(taskId))
+    return Boolean(this.db.prepare("SELECT 1 FROM task_inputs WHERE task_id = ? AND status != 'cancelled' LIMIT 1").get(taskId))
+  }
+
+  // ---------- queued messages ----------
+  //
+  // (Task feedback waits in task_inputs instead and gets its transcript line at delivery; see claimInputs.)
+  // A message sent while the Coordinator or a Captain is mid-turn waits for the next turn. It is stored
+  // right away with meta.queued, and the UI shows it under the live turn, labelled "Queued". When the turn that
+  // reads it starts, deliverQueued moves it to that moment (created_at = delivery, meta.queuedAt = when it was
+  // sent), so it sits right before that turn's output, after the reply it was typed over, and stays there after a reload.
+
+  /**
+   * Deliver these queued messages now; returns the ones that moved, with their new createdAt and meta. `thread`
+   * names the Captain's project or the task, for captain_messages and task_messages.
+   */
+  deliverQueued(
+    table: "chat_messages" | "captain_messages" | "task_messages",
+    ids: string[],
+    thread?: string,
+    now = Date.now(),
+  ): { id: string; createdAt: number; meta: Record<string, unknown> }[] {
+    if (!ids.length) return []
+    const scope = table === "captain_messages" ? "WHERE project_id = ?" : table === "task_messages" ? "WHERE task_id = ?" : ""
+    return this.db.transaction(() => {
+      // Strictly after everything already in the thread (the previous turn may have ended in this very millisecond).
+      // Later rows that tie still sort after it, by rowid.
+      const last = (this.db.prepare(`SELECT MAX(created_at) AS t FROM ${table} ${scope}`).get(...(scope ? [thread] : [])) as { t: number | null }).t ?? 0
+      const at = Math.max(now, last + 1)
+      const get = this.db.prepare(`SELECT meta_json, created_at FROM ${table} WHERE id = ?`)
+      const set = this.db.prepare(`UPDATE ${table} SET meta_json = ?, created_at = ? WHERE id = ?`)
+      const moved: { id: string; createdAt: number; meta: Record<string, unknown> }[] = []
+      for (const id of ids) {
+        const r = get.get(id) as { meta_json: string | null; created_at: number } | undefined
+        const prev = json<Record<string, unknown> | null>(r?.meta_json, null)
+        if (!r || !prev?.queued) continue
+        const { queued: _, ...rest } = prev
+        const meta = { ...rest, queuedAt: r.created_at }
+        set.run(JSON.stringify(meta), at, id)
+        moved.push({ id, createdAt: at, meta })
+      }
+      return moved
+    })()
+  }
+
+  /** Ids of Coordinator chat messages still waiting for a turn (after a restart, say). */
+  queuedChatIds(): string[] {
+    return (this.db.prepare("SELECT id FROM chat_messages WHERE json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC").all() as { id: string }[]).map((r) => r.id)
+  }
+
+  // Cody can edit or delete a queued Coordinator/Captain message until the turn that reads it takes it. Each change
+  // is a compare-and-set on meta.queued, which deliverQueued clears in the same tick the turn reads the messages,
+  // so a change lands either before the read (the turn sees it) or not at all ("delivered"). Deleting is soft
+  // (meta.cancelled, queued cleared) so Undo can bring it back; turns skip cancelled messages.
+
+  /** `thread`: the Captain's project, for captain_messages. */
+  editQueuedChat(table: QueuedChatTable, id: string, thread: string | null, content: string): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row?.meta.queued) return this.queuedChatRefusal(row)
+      if (!content.trim() && !(row.meta.attachments as unknown[] | undefined)?.length) throw new BadRequestError("message is empty")
+      this.db.prepare(`UPDATE ${table} SET content = ? WHERE id = ?`).run(content, id)
+      return { ok: true, row: { ...row, content } }
+    })()
+  }
+
+  cancelQueuedChat(table: QueuedChatTable, id: string, thread: string | null): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row?.meta.queued) return this.queuedChatRefusal(row)
+      const { queued: _, ...rest } = row.meta
+      const meta = { ...rest, cancelled: true }
+      this.db.prepare(`UPDATE ${table} SET meta_json = ? WHERE id = ?`).run(JSON.stringify(meta), id)
+      return { ok: true, row: { ...row, meta } }
+    })()
+  }
+
+  /**
+   * Undo a delete: the message waits again (`queued` while a turn runs) and moves to `at`, so the next turn's
+   * "since the last turn" picks it up even if a turn ran meanwhile.
+   */
+  restoreQueuedChat(table: QueuedChatTable, id: string, thread: string | null, { queued, at }: { queued: boolean; at: number }): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row) return { ok: false, reason: "missing" }
+      if (!row.meta.cancelled) return { ok: false, reason: row.meta.queued ? "deleted" : "delivered" }
+      const { cancelled: _, ...rest } = row.meta
+      const meta = { ...rest, ...(queued ? { queued: true } : {}) }
+      this.db.prepare(`UPDATE ${table} SET meta_json = ?, created_at = ? WHERE id = ?`).run(JSON.stringify(meta), at, id)
+      return { ok: true, row: { ...row, meta, createdAt: at } }
+    })()
+  }
+
+  private queuedChatRow(table: QueuedChatTable, id: string, thread: string | null): QueuedChatRow | null {
+    const r = (
+      table === "captain_messages"
+        ? this.db.prepare("SELECT id, content, meta_json, created_at FROM captain_messages WHERE id = ? AND project_id = ? AND role = 'user'").get(id, thread)
+        : this.db.prepare("SELECT id, content, meta_json, created_at FROM chat_messages WHERE id = ? AND role = 'user'").get(id)
+    ) as { id: string; content: string; meta_json: string | null; created_at: number } | undefined
+    return r ? { id: r.id, content: r.content, meta: json<Record<string, unknown>>(r.meta_json, {}) ?? {}, createdAt: r.created_at } : null
+  }
+
+  private queuedChatRefusal(row: QueuedChatRow | null): QueuedChatChange {
+    return { ok: false, reason: !row ? "missing" : row.meta.cancelled ? "deleted" : "delivered" }
   }
 
   // ---------- task transcript ----------
@@ -1920,6 +2245,10 @@ export class Store {
       diskCheckedAt: number | null
       rootFreeBytes: number | null
       rootTotalBytes: number | null
+      memUsedBytes: number | null
+      memTotalBytes: number | null
+      loadAvg: number | null
+      cpuCount: number | null
     }>,
   ) {
     const sets: string[] = []
@@ -1937,6 +2266,10 @@ export class Store {
       diskCheckedAt: "disk_checked_at",
       rootFreeBytes: "root_free_bytes",
       rootTotalBytes: "root_total_bytes",
+      memUsedBytes: "mem_used_bytes",
+      memTotalBytes: "mem_total_bytes",
+      loadAvg: "load_avg",
+      cpuCount: "cpu_count",
     } as const
     for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
       if (v === undefined) continue
@@ -2307,6 +2640,13 @@ export class BadRequestError extends Error {
 /** The request is fine but the thing is busy or in the way right now (e.g. agents running on a box). */
 export class ConflictError extends Error {
   status = 409
+}
+
+/** The error for a refused change to a queued chat message (see Store.editQueuedChat). */
+export function queuedChatError(reason: "delivered" | "deleted" | "missing", who: string): Error {
+  if (reason === "missing") return new NotFoundError("No such message.")
+  if (reason === "deleted") return new ConflictError("That message was deleted.")
+  return new ConflictError(`That message was already delivered to ${who}, so it can't be changed.`)
 }
 
 /** Accept `owner/name`, `github.com/owner/name`, or a full URL. Returns null for empty. */

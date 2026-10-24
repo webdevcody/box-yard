@@ -15,6 +15,7 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
+// Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
 // [reply] (reply_to_agent) or [reply-task] (send_to_task), after any [slow:<seconds>]; otherwise it doesn't reply.
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
@@ -32,6 +33,7 @@
 // FAKE_CLAUDE_LOGIN=required fails every run that has neither, like the real CLI with no login.
 // The Merge PR button's standard message ("Merge your pull request #N") stands in for `gh pr merge` when
 // FAKE_GH_STATE names a file: the worker writes {"state":"MERGED"} there for a test's fake GitHub to read.
+// FAKE_CLAUDE_COMPACT_FAIL=1 makes /compact fail (after the summary was written), FAKE_CLAUDE_BAD_SUMMARY=1 the summary.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -157,7 +159,7 @@ async function say(text) {
   if (partial) {
     for (const word of text.split(/(?<= )/)) {
       out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: word } } })
-      await sleep(15)
+      await sleep(Number(process.env.FAKE_CLAUDE_WORD_MS) || 15)
     }
   }
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } })
@@ -349,6 +351,7 @@ process.stdin.on("end", async () => {
     if (/^\s*\/compact\b/.test(prompt)) {
       // Like the real CLI: same session, much smaller context, nothing printed as a message.
       if (!session.turns.length) throw new Error("Nothing to compact")
+      if (process.env.FAKE_CLAUDE_COMPACT_FAIL) throw new Error("fake /compact failure (FAKE_CLAUDE_COMPACT_FAIL)")
       session.tokens = 2000
       result = ""
     } else if (/^\s*\/context\b/.test(prompt)) {

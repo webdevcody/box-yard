@@ -17,11 +17,12 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
+import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 
 export interface McpDeps {
@@ -294,6 +295,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
     ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
+    ...(p.heavyTasks !== "off" ? { heavyTasks: p.heavyTasks } : {}),
     notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
     ...(p.notesMaxCount !== null || p.notesMaxTokens !== null ? { notesBudget: notes.budgetStatus(p.id).line } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
@@ -389,7 +391,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     server.registerTool(
       "update_project",
       {
-        description: "Change a project's name, description, repo, base branch, env vars or its own notes budget.",
+        description: "Change a project's name, description, repo, base branch, env vars, heavy-tasks placement or its own notes budget.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           name: z.string().optional(),
@@ -398,6 +400,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch: z.string().optional(),
           env: envSchema,
           remove_env: z.array(z.string()).optional(),
+          heavy_tasks: z
+            .enum(HEAVY_TASKS)
+            .optional()
+            .describe(
+              "How its running agents share boxes, for test suites and headless browsers that run a box out of memory: off, one-per-box (at most one of its agents per box) or whole-box (each of its agents runs alone on a box).",
+            ),
           notes_max: z
             .number()
             .int()
@@ -425,6 +433,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch?: string
           env?: Record<string, string>
           remove_env?: string[]
+          heavy_tasks?: HeavyTasks
           notes_max?: number | null
           notes_max_tokens?: number | null
         }) => {
@@ -435,6 +444,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             baseBranch: a.base_branch,
             env: a.env,
             removeEnv: a.remove_env,
+            heavyTasks: a.heavy_tasks,
             notesMaxCount: a.notes_max,
             notesMaxTokens: a.notes_max_tokens,
           })
@@ -650,13 +660,71 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
+      const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
         model: a.model,
         effort: a.effort,
         routingRule: a.routing_rule,
         routingReason: a.routing_reason,
       })
-      return ok({ ...brief(t), delivery: how })
+      // Until a turn takes it, the message can still be changed or withdrawn by this id.
+      const queued = store.getQueuedInput(t.id, inputId) ? inputId : undefined
+      return ok({ ...brief(t), delivery: how, queuedMessageId: queued })
+    }),
+  )
+
+  const queuedView = (m: QueuedMessage) => ({
+    id: m.id,
+    from: m.sender,
+    text: preview(m.text, 2000, "the rest is in the task page's queue"),
+    attachments: m.attachments.length ? m.attachments.map((f) => f.name) : undefined,
+    status: m.status === "delivering" ? "delivering: a turn is starting with it, it can't be changed any more" : "queued",
+    version: m.version,
+    queued: ago(m.createdAt),
+  })
+
+  server.registerTool(
+    "list_queued_messages",
+    {
+      description:
+        "List the messages queued for a task's next turn (sent with send_to_task, by Cody, a Captain, a hook or another agent while it was busy), oldest first. Use it before cancel_queued_message or edit_queued_message, or to check what an agent will get when its turn ends.",
+      inputSchema: { task: z.string() },
+    },
+    safe(async (a: { task: string }) => {
+      const t = task(a.task)
+      const list = tasks.listQueue(t.id)
+      return ok({ task: t.id, title: t.title, status: t.status, messages: list.map(queuedView) })
+    }),
+  )
+
+  server.registerTool(
+    "cancel_queued_message",
+    {
+      description:
+        "Withdraw a message queued for a task's next turn, before the agent gets it (ids from list_queued_messages or send_to_task's queuedMessageId). Fails with \"already delivered\" once a turn has taken it: then send a correction with send_to_task instead. If it was the only message, the agent isn't woken for it.",
+      inputSchema: { task: z.string(), message_id: z.string() },
+    },
+    safe(async (a: { task: string; message_id: string }) => {
+      const t = task(a.task)
+      const m = tasks.cancelQueued(t.id, a.message_id)
+      return ok({ cancelled: m.id, from: m.sender, remaining: tasks.listQueue(t.id).length })
+    }),
+  )
+
+  server.registerTool(
+    "edit_queued_message",
+    {
+      description:
+        "Replace the text of a message queued for a task's next turn, before the agent gets it. Fails with \"already delivered\" once a turn has taken it. Pass version (from list_queued_messages) to refuse the edit if someone changed the message meanwhile.",
+      inputSchema: {
+        task: z.string(),
+        message_id: z.string(),
+        message: z.string().min(1).describe("The new text; it replaces the old text entirely"),
+        version: z.number().int().positive().optional(),
+      },
+    },
+    safe(async (a: { task: string; message_id: string; message: string; version?: number }) => {
+      const t = task(a.task)
+      return ok(queuedView(tasks.editQueued(t.id, a.message_id, a.message, a.version)))
     }),
   )
 
@@ -1137,6 +1205,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             b.diskFreeBytes !== null && b.diskTotalBytes !== null
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
               : null,
+          ...(b.memUsedBytes != null && b.memTotalBytes != null
+            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new agents go elsewhere)" : ""}` }
+            : {}),
           ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
           ...(b.resize && (b.resize.status === "running" || Date.now() - (b.resize.finishedAt ?? 0) < 24 * 3600_000)

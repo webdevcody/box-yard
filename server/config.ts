@@ -97,6 +97,12 @@ export const config = {
   diskMinFreeMb: int("BOXYARD_DISK_MIN_FREE_MB", 1024),
   /** ...and at least this many times its repo's last clone size. */
   diskCloneFactor: num("BOXYARD_DISK_CLONE_FACTOR", 2),
+  /** Placement skips a box with more than this % of its memory in use while agents run there. 0 = off. */
+  memoryMaxUsedPercent: int("BOXYARD_MEMORY_MAX_USED_PERCENT", 80),
+  /** ...or with less than this much memory free (MB). 0 = off. */
+  memoryMinFreeMb: int("BOXYARD_MEMORY_MIN_FREE_MB", 1024),
+  /** ...or with a 1-minute load average above this many times its CPUs. 0 = off. */
+  loadMaxPerCpu: num("BOXYARD_LOAD_MAX_PER_CPU", 2),
   /** Box repo mirrors are partial clones (blob:none) unless a project says otherwise. */
   gitPartialClone: (env.BOXYARD_GIT_PARTIAL_CLONE ?? "1") !== "0",
   /** Push each repo task's branch, and its uncommitted work to a hidden ref, at the end of every turn. */

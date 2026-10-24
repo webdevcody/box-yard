@@ -17,7 +17,7 @@ interface Running {
   dataDir: string
 }
 const running: Running[] = []
-const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY"]
+const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_COMPACT_FAIL"]
 
 async function start(): Promise<Running> {
   const port = await freePort()
@@ -171,6 +171,37 @@ describe("Captain compaction (#50)", () => {
     expect(s.lastCompaction).toBeNull()
     expect((await messages()).some((m) => m.role === "error" && /Compaction skipped/.test(m.content))).toBe(true)
     expect((await state()).usage.tokens).toBeGreaterThan(0)
+  })
+
+  it("skips the compaction when /compact itself fails, keeping the session, the usage and the summary on record", async () => {
+    const r = await start()
+    const { p, state, messages, idle, say } = await captain(r)
+    await say("status")
+    const session = r.yard.store.getKv(`captain_session:${p.id}`)
+    const before = (await state()).usage.tokens
+    process.env.FAKE_CLAUDE_COMPACT_FAIL = "1"
+    await call(r, "POST", `/api/projects/${p.id}/captain/compact`)
+    const s = await waitFor(async () => {
+      const x = await idle()
+      return x?.error ? x : null
+    }, "failed compaction")
+    expect(s.error).toMatch(/^Compaction skipped: \/compact failed: fake \/compact failure/)
+    expect(s.usage.tokens).toBe(before)
+    expect(r.yard.store.getKv(`captain_session:${p.id}`)).toBe(session)
+    // The summary was written first, so it stays, but never gets a tokens_after.
+    expect(s.lastCompaction).toMatchObject({ trigger: "button", tokensAfter: null })
+    expect((await messages()).some((m) => m.role === "notice" && /Context compacted/.test(m.content))).toBe(false)
+
+    // The next turn resumes the same session, and the next compaction works and clears the error.
+    delete process.env.FAKE_CLAUDE_COMPACT_FAIL
+    await say("status again")
+    expect(r.yard.store.getKv(`captain_session:${p.id}`)).toBe(session)
+    await call(r, "POST", `/api/projects/${p.id}/captain/compact`)
+    const ok = await waitFor(async () => {
+      const x = await idle()
+      return x?.lastCompaction?.tokensAfter ? x : null
+    }, "compaction")
+    expect(ok.error).toBeNull()
   })
 
   it("refuses a compaction before the Captain has a conversation", async () => {

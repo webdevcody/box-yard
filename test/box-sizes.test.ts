@@ -74,6 +74,13 @@ describe("per-box limits", () => {
     expect(s.update({ autoResizeEnabled: false, autoResizeMaxSize: "medium" }).settings).toMatchObject({ autoResizeEnabled: false, autoResizeMaxSize: "medium" })
     expect(() => s.update({ autoResizeMaxSize: "huge" })).toThrow()
   })
+
+  it("leaves placement's idle-box resize off by default", () => {
+    const s = new SettingsStore(memStore(), {})
+    expect(s.get().placementResizeEnabled).toBe(false)
+    expect(s.update({ placementResizeEnabled: true }).settings.placementResizeEnabled).toBe(true)
+    expect(() => s.update({ placementResizeEnabled: "yes" })).toThrow()
+  })
 })
 
 const report = (patch: Partial<BoxResize> = {}): BoxResize => ({

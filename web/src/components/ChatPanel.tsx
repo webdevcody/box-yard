@@ -4,6 +4,7 @@ import { Bot, Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIc
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
+import { splitQueued } from "../lib/queued"
 import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
@@ -74,6 +75,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
   const messages = chat.data ?? NO_MESSAGES
   const tail = useTail(messages, "chat")
+  // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
+  const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
     if (projectId) return projects.data?.find((p) => p.id === projectId) ?? null
@@ -197,8 +200,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 </div>
               </div>
             )}
-            <ChatLines messages={tail.visible} onFollowUp={submit} />
+            <ChatLines messages={settled} onFollowUp={submit} />
             <StreamingReply busy={Boolean(busy.data)} />
+            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={submit} />}
           </StickyScroll>
         </SelectionToTask>
 

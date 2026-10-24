@@ -6,6 +6,7 @@ import { withActivity } from "./taskSummary"
 import { applyOrder } from "./projectOrder"
 import { announceCleanup, withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
+import { placeMessage } from "./queued"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
@@ -97,7 +98,8 @@ export function useServerEvents(enabled: boolean): Connection {
         case "task.message":
           qc.setQueryData<TaskMessage[]>(keys.taskMessages(ev.message.taskId), (list) => {
             if (!list) return list
-            if (list.some((m) => m.id === ev.message.id)) return list
+            // An update (a queued message delivered) may move it.
+            if (list.some((m) => m.id === ev.message.id)) return placeMessage(list, ev.message)
             // Replace the optimistic copy of a message we sent.
             const tmp = list.findIndex((m) => m.id.startsWith("tmp-") && m.role === ev.message.role && m.content === ev.message.content)
             if (tmp >= 0) {
@@ -126,7 +128,7 @@ export function useServerEvents(enabled: boolean): Connection {
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.projectId !== ev.projectId))
           break
         case "chat.message":
-          qc.setQueryData<ChatMessage[]>(keys.chat, (list) => (list ? upsert(list, ev.message) : list))
+          qc.setQueryData<ChatMessage[]>(keys.chat, (list) => (list ? placeMessage(list, ev.message) : list))
           if (ev.message.role === "assistant" || ev.message.role === "tool") qc.setQueryData(keys.chatStream, "")
           voiceChatMessage(ev.message)
           break
@@ -147,7 +149,7 @@ export function useServerEvents(enabled: boolean): Connection {
         case "captain.message":
           qc.setQueryData<CaptainMessage[]>(keys.captainMessages(ev.message.projectId), (list) => {
             if (!list) return list
-            if (list.some((m) => m.id === ev.message.id)) return list
+            if (list.some((m) => m.id === ev.message.id)) return placeMessage(list, ev.message)
             const tmp = list.findIndex((m) => m.id.startsWith("tmp-") && m.role === ev.message.role && m.content === ev.message.content)
             if (tmp >= 0) {
               const next = list.slice()

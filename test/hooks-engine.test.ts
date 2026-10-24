@@ -101,10 +101,14 @@ describe("hook engine: firing", () => {
     expect(queued[0]!.content).toContain(run!.prompt)
     expect(s.yard.store.getTask(t.id)!.status).toBe("queued")
 
-    // The transcript shows the prompt as "Hook: Auto-merge".
-    const line = s.yard.store.listTaskMessages(t.id).find((m) => m.role === "user")!
-    expect(line.content).toBe(run!.prompt)
-    expect(line.meta).toMatchObject({ source: "hook", hookId: h.id, hookName: "Auto-merge" })
+    // Until a turn takes it, it's a Queued row "Hook: Auto-merge" holding just the prompt (the label is the agent's).
+    expect(s.yard.tasks.listQueue(t.id)).toMatchObject([{ kind: "hook", sender: "Hook: Auto-merge", text: run!.prompt }])
+    // Delivered, the transcript shows the prompt as "Hook: Auto-merge".
+    s.yard.store.claimInputs(t.id, "turn-1")
+    const [line] = s.yard.store.deliverInputs("turn-1")
+    expect(line!.content).toBe(run!.prompt)
+    expect(line!.meta).toMatchObject({ source: "hook", hookId: h.id, hookName: "Auto-merge" })
+    expect(s.yard.store.listTaskMessages(t.id).find((m) => m.role === "user")).toEqual(line)
   })
 
   it("tells both the Captain and the Coordinator, without waking either", () => {
@@ -309,6 +313,9 @@ describe("the On PR ready → merge template", () => {
     expect(queued!.content).toContain(mergeRequestPrompt(7))
     // The button's pending guard, merge_requested event and notices, naming the hook instead of Cody.
     expect(s.yard.store.getTask(t.id)!.mergeRequest).toMatchObject({ prNumber: 7, deliveredAt: null, requestedBy: 'hook "On PR ready → merge"' })
+    expect(s.yard.tasks.listQueue(t.id)).toMatchObject([{ kind: "hook", sender: "Hook: On PR ready → merge", text: mergeRequestPrompt(7) }])
+    s.yard.store.claimInputs(t.id, "turn-1")
+    s.yard.store.deliverInputs("turn-1")
     const msgs = s.yard.store.listTaskMessages(t.id)
     expect(msgs.find((m) => m.role === "user")).toMatchObject({ content: mergeRequestPrompt(7), meta: expect.objectContaining({ source: "hook", hookName: "On PR ready → merge" }) })
     expect(msgs.find((m) => m.meta?.kind === "merge_requested")!.content).toBe('The hook "On PR ready → merge" asked for a merge of PR #7.')

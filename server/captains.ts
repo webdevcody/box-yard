@@ -5,7 +5,7 @@ import path from "node:path"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { CaptainNoticeEntry, Store } from "./store.js"
-import { BadRequestError } from "./store.js"
+import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
@@ -259,6 +259,18 @@ export class CaptainManager {
     }
   }
 
+  editQueued(projectId: string, id: string, content: string) {
+    return this.get(projectId).editQueued(id, content)
+  }
+
+  cancelQueued(projectId: string, id: string) {
+    return this.get(projectId).cancelQueued(id)
+  }
+
+  restoreQueued(projectId: string, id: string) {
+    return this.get(projectId).restoreQueued(id)
+  }
+
   requestCompact(projectId: string) {
     return this.get(projectId).requestCompact("button")
   }
@@ -338,6 +350,8 @@ class Captain {
   private throttleTimer: NodeJS.Timeout | null = null
   /** Unattended wake-ups since Cody or the Coordinator last wrote. */
   private autoTurns = 0
+  /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
+  private stopped = false
   private readonly loopGuard: WakeLoopGuard
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
@@ -390,7 +404,8 @@ class Captain {
   }
 
   send(content: string, { id, attachments = [], source = "coordinator", tool, meta: extra }: CaptainSendOptions = {}): CaptainMessage {
-    const meta = { ...extra, source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}) }
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+    const meta = { ...extra, source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
     const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), meta, id)
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
@@ -402,6 +417,34 @@ class Captain {
     }
     this.publishState()
     void this.drain()
+    return msg
+  }
+
+  /** Edit a message still queued for the next turn. Refused once that turn has taken it. */
+  editQueued(id: string, content: string): CaptainMessage {
+    return this.queuedChanged(this.store.editQueuedChat("captain_messages", id, this.project.id, content.trim()))
+  }
+
+  /** Delete a queued message before a turn reads it. Undo with restoreQueued. */
+  cancelQueued(id: string): CaptainMessage {
+    return this.queuedChanged(this.store.cancelQueuedChat("captain_messages", id, this.project.id))
+  }
+
+  restoreQueued(id: string): CaptainMessage {
+    const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
+    const msg = this.queuedChanged(
+      this.store.restoreQueuedChat("captain_messages", id, this.project.id, { queued: this.running, at: Math.max(Date.now(), since) }),
+    )
+    this.pending = true
+    this.publishState()
+    void this.drain()
+    return msg
+  }
+
+  private queuedChanged(change: QueuedChatChange): CaptainMessage {
+    if (!change.ok) throw queuedChatError(change.reason, "the Captain")
+    const msg: CaptainMessage = { role: "user", projectId: this.project.id, ...change.row }
+    this.hub.broadcast({ type: "captain.message", message: msg })
     return msg
   }
 
@@ -422,6 +465,8 @@ class Captain {
     const key = `agent ${input.taskId}: ${input.message}`
     const decision = this.loopGuard.check([key])
     if (!decision.wake) meta.heldUntil = decision.until
+    // Mid-turn it waits for the next turn, like send(): queued (see Store.deliverQueued).
+    if (this.running) meta.queued = true
     const msg = this.store.addCaptainMessage(this.project.id, "user", input.message.trim(), meta)
     this.hub.broadcast({ type: "captain.message", message: msg })
     if (!decision.wake) {
@@ -482,6 +527,7 @@ class Captain {
   }
 
   stop() {
+    this.stopped = true
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
     this.clearThrottleTimer()
@@ -549,11 +595,11 @@ class Captain {
   }
 
   private async drain() {
-    if (this.running) return
+    if (this.running || this.stopped) return
     this.running = true
     this.publishState()
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted) {
+      while (!this.stopped && (this.pending || this.wakeWanted || this.compactWanted)) {
         if (this.compactWanted) await this.doCompact()
         else if (this.pending) {
           this.pending = false
@@ -564,6 +610,9 @@ class Captain {
           await this.autoTurn()
         }
       }
+    } catch (err) {
+      // stop() killed the turn and closed the database under it: nothing left to record.
+      if (!this.stopped) throw err
     } finally {
       this.running = false
       this.publishState()
@@ -577,7 +626,7 @@ class Captain {
 
   private unansweredUserMessages(): CaptainMessage[] {
     const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
-    return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since)
+    return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since && m.meta?.cancelled !== true)
   }
 
   private async turn() {
@@ -586,7 +635,13 @@ class Captain {
       .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
     if (!messages.length) return
-    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
+    // Messages sent during the last turn move to now, right before this turn's reply.
+    const moved = this.store.deliverQueued("captain_messages", answering.map((m) => m.id), this.project.id)
+    for (const d of moved) {
+      const m = answering.find((x) => x.id === d.id)!
+      this.hub.broadcast({ type: "captain.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
+    }
+    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
     const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
@@ -728,7 +783,7 @@ class Captain {
       now = this.projectNow()
       const recap = this.store
         .listCaptainMessages(this.project.id, 30)
-        .filter((m) => m.role === "user" || m.role === "assistant")
+        .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
       result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)
@@ -880,6 +935,8 @@ class Captain {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         let msg: any
         try {
           msg = JSON.parse(line)
@@ -949,6 +1006,7 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         // Captain runs get their own usage line and count toward the project's totals.
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
