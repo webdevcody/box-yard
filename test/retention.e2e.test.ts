@@ -81,6 +81,7 @@ const archivedDone = (r: Running, id: string, turnCount = 1) =>
   }, `task ${id} to finish and archive`)
 
 const DAY = 24 * 60 * 60_000
+const listing = (archive: string) => execFileSync("tar", ["tzf", archive]).toString().split("\n").filter(Boolean)
 
 /** Make a task (and optionally its archive file) look untouched since `at`. */
 function age(r: Running, id: string, at: number, archive = true) {
@@ -217,6 +218,27 @@ describe("resuming after retention", () => {
     expect(execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: localWork }).toString().trim()).toBe(local.branch)
     expect(fs.existsSync(path.join(localWork, "README.md"))).toBe(true)
     expect(events(r, local.id).some((e) => e.startsWith("Resumed from a recap") && e.includes("recreated from main"))).toBe(true)
+  })
+})
+
+describe("archiving", () => {
+  it("a second archive request waits for the one running and then archives again, instead of being dropped", async () => {
+    const r = await start()
+    const p = await project(r, "alpha")
+    const done = await archivedDone(r, (await task(r, p.id, "twice")).id)
+    await waitFor(() => !(r.yard.tasks as unknown as { archiving: Set<string> }).archiving.has(done.id), "the turn's archive to wind down")
+    const saved: number[] = []
+    const update = r.yard.store.updateTask.bind(r.yard.store)
+    r.yard.store.updateTask = ((id, patch, opts) => {
+      if (id === done.id && patch.lastArchivedAt) saved.push(patch.lastArchivedAt)
+      return update(id, patch, opts)
+    }) as typeof r.yard.store.updateTask
+    const first = r.yard.tasks.archive(done.id)
+    // Written while the first archive runs: only an archive that starts after it can be sure to have it.
+    put(path.join(r.yard.tasks.taskDir(done.boxId!, done.id), "work", "late.md"), "late\n")
+    await Promise.all([first, r.yard.tasks.archive(done.id, { closing: true })])
+    expect(saved).toHaveLength(2)
+    expect(listing(r.yard.store.getTaskRow(done.id)!.archive_path!)).toContain(`${done.id}/work/late.md`)
   })
 })
 
