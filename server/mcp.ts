@@ -10,6 +10,7 @@ import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import type { CaptainManager } from "./captains.js"
+import type { HookEngine } from "./hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
@@ -28,6 +29,8 @@ export interface McpDeps {
   /** Optional so tests can build the server without it; then effort is fixed. */
   settings?: SettingsStore
   captains?: CaptainManager
+  /** Optional so older tests can build the server without it; then the hook tools aren't offered. */
+  hooks?: HookEngine
 }
 
 /** Who is calling the MCP server. Captains only see and touch their own project. */

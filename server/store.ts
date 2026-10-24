@@ -62,6 +62,10 @@ export interface TurnFlags {
   noop?: { commits: number | null }
   /** How many times in a row a turn died and was retried. */
   interrupts?: number
+  /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
+  hookIds?: string[]
+  /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
+  lastHookIds?: string[]
 }
 
 export interface TaskRow {
@@ -105,6 +109,10 @@ export interface TaskRow {
   effort: Effort | null
   routing_rule: string | null
   routing_reason: string | null
+  /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
+  source: string | null
+  pr_head_sha: string | null
+  pr_labels_json: string | null
 }
 
 export interface TaskTurnRow {
@@ -298,6 +306,8 @@ type TaskPatch = Partial<{
   effort: Effort | null
   routingRule: string | null
   routingReason: string | null
+  prHeadSha: string | null
+  prLabels: string[]
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -334,6 +344,8 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   effort: "effort",
   routingRule: "routing_rule",
   routingReason: "routing_reason",
+  prHeadSha: "pr_head_sha",
+  prLabels: "pr_labels_json",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -641,13 +653,15 @@ export class Store {
     effort?: Effort | null
     routingRule?: string | null
     routingReason?: string | null
+    /** Who started it (TaskRow.source). */
+    startedBy?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
     this.db
       .prepare(
-        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, created_at, updated_at, last_active_at)
-         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, project_id, title, prompt, status, session_id, branch, env_json, schedule_id, model, effort, routing_rule, routing_reason, source, created_at, updated_at, last_active_at)
+         VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -662,6 +676,7 @@ export class Store {
         input.effort ?? null,
         input.routingRule ?? null,
         input.routingReason ?? null,
+        input.startedBy ?? null,
         now,
         now,
         now,
@@ -727,7 +742,7 @@ export class Store {
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
-      if (key === "previews" || key === "turnFlags") args.push(JSON.stringify(value))
+      if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
     }

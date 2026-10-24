@@ -32,6 +32,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
+import type { HookTrigger } from "../shared/hooks.js"
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -65,8 +66,29 @@ export interface TaskManagerDeps {
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
 
-/** Who a queued task input is from. `captain:<projectId>` is that project's Captain. */
-export type InputSource = "cody" | "orchestrator" | "system" | `agent:${string}` | `captain:${string}`
+/** Who a queued task input is from. `captain:<projectId>` is that project's Captain; `hook:<hookId>` a hook (server/hooks.ts). */
+export type InputSource = "cody" | "orchestrator" | "system" | `agent:${string}` | `captain:${string}` | `hook:${string}`
+
+/**
+ * Something happened to a task that hooks (server/hooks.ts) can act on. `originHookIds` are the hooks whose
+ * prompts started the turn behind it, so a hook doesn't fire on its own work.
+ */
+export interface TaskEvent {
+  type: HookTrigger
+  taskId: string
+  /** The turn that ended (task events), or null (a PR merged while the task rested). */
+  turnId: string | null
+  originHookIds: string[]
+  /** The agent opened or pushed to its PR during this turn. */
+  sawPr?: boolean
+}
+export type TaskEventListener = (event: TaskEvent) => void
+
+/** How a notice is delivered. `both`: the Captain and the Coordinator both read it. `wake: false`: it waits for their next turn. */
+export interface NoticeOptions {
+  both?: boolean
+  wake?: boolean
+}
 /** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
 const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
 
@@ -157,7 +179,9 @@ export class TaskManager {
   private diskHold = new Map<string, string>()
   private lowDiskNoticeAt = new Map<string, number>()
   /** Called after every notice; return true when another owner handled delivery. */
-  onNotice: ((content: string, meta: Record<string, unknown> | null) => boolean | void) | null = null
+  onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
+  /** The task event bus hooks listen on (see subscribe). */
+  private readonly listeners = new Set<TaskEventListener>()
 
   constructor(deps: TaskManagerDeps) {
     this.c = deps.config
@@ -297,6 +321,7 @@ export class TaskManager {
     const route = this.initialRoute(project, input)
     const task = this.store.createTask({
       ...input,
+      startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
       model: route.model,
       effort: route.effort,
       routingRule: route.routingRule,
@@ -318,13 +343,15 @@ export class TaskManager {
     source: InputSource = "cody",
     attachments: StoredUpload[] = [],
     route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
+    /** A hook's message: the labelled text the agent gets, and the transcript line's meta ("Hook: <name>"). */
+    hook?: { queued: string; meta: Record<string, unknown> },
   ): Task {
     const row = this.requireRow(taskId)
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
-    this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
-    if (source === "cody" || source === "orchestrator" || source.startsWith("captain:")) {
-      const from = source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
+    this.store.queueInput(row.id, source, hook?.queued ?? (content.trim() || "(no text)"), attachments.map((f) => f.id))
+    if (source === "cody" || source === "orchestrator" || source.startsWith("captain:") || hook) {
+      const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
       const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
       this.hub.broadcast({ type: "task.message", message: msg })
     }
@@ -1010,11 +1037,13 @@ export class TaskManager {
       this.diskRetried.delete(taskId)
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
+      // Hooks whose prompts are in this turn (a retried turn keeps the interrupted one's), so they don't fire on it.
+      const hookIds = [...new Set([...queued.filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length)), ...(flags.interrupts ? (flags.hookIds ?? []) : [])])]
       this.store.updateTask(taskId, {
         status: "working",
         sessionStarted: true,
         ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
-        turnFlags: { interrupts: flags.interrupts } as TurnFlags,
+        turnFlags: { interrupts: flags.interrupts, ...(hookIds.length ? { hookIds } : {}) } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
       })
@@ -1058,6 +1087,7 @@ export class TaskManager {
       if (!stopped && !wasCompact) {
         this.addEvent(taskId, `Couldn't start the agent: ${message}`)
         this.notice(`❌ **${current.title}** couldn't start: ${message}`, { taskId })
+        this.emitTaskEvent({ type: "task.failed", taskId, turnId, originHookIds: [] })
         const health = await this.provider.health(boxId).catch(() => "unknown" as const)
         if (health === "gone" || health === "error") await this.loseBox(boxId, `Box ${boxId} is ${health}.`)
       }
@@ -1404,12 +1434,15 @@ export class TaskManager {
       case "pr": {
         const url = String(ev.url ?? "")
         const first = row.pr_url !== url
+        const headSha = typeof ev.headSha === "string" && /^[0-9a-f]{7,64}$/i.test(ev.headSha) ? ev.headSha : null
         this.store.updateTask(taskId, {
           prUrl: url,
           branch: String(ev.branch ?? row.branch ?? "") || row.branch,
           turnFlags: { ...flags, sawPr: true },
-          // A new PR starts open; the check below tells draft from open.
-          ...(first ? { prState: "open", prMergedAt: null, prMergedBy: null } : {}),
+          // A new PR starts open; the check below tells draft from open (and reads its labels).
+          ...(first ? { prState: "open", prMergedAt: null, prMergedBy: null, prLabels: [] } : {}),
+          // The runner reports the commit it pushed; GitHub's answer replaces it when it comes.
+          ...(headSha ? { prHeadSha: headSha } : first ? { prHeadSha: null } : {}),
         })
         say("event", `${first ? "Opened" : "Updated"} pull request: ${url}`, { kind: "pr", url })
         if (first) this.notice(`🔀 **${row.title}** opened a pull request: ${url}`, { taskId })
@@ -1466,13 +1499,22 @@ export class TaskManager {
   }
 
   /** The tracker saw a PR change state (and maybe moved the task off pr_ready): tell the transcript and the UI. */
-  private prChanged({ taskId, info, status }: PrChange) {
+  private prChanged({ taskId, prev, info, status }: PrChange) {
     const row = this.store.getTaskRow(taskId)
     if (!row) return
-    if (info.state === "merged") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was merged${info.mergedBy ? ` by ${info.mergedBy}` : ""}: ${row.pr_url}`)
-    else if (info.state === "closed") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was closed without merging: ${row.pr_url}`)
+    const stateChanged = prev !== info.state
+    if (stateChanged && info.state === "merged") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was merged${info.mergedBy ? ` by ${info.mergedBy}` : ""}: ${row.pr_url}`)
+    else if (stateChanged && info.state === "closed") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was closed without merging: ${row.pr_url}`)
     this.emitTask(taskId)
     if (status) this.publishDirectory()
+    // Hooks: a merge seen live (not the startup backfill of an old PR), or a resting task's draft marked ready.
+    const flags = this.store.turnFlags(row)
+    const originHookIds = (row.current_turn_id ? flags.hookIds : flags.lastHookIds) ?? []
+    if (info.state === "merged" && (prev === "open" || prev === "draft")) {
+      this.emitTaskEvent({ type: "pr.merged", taskId, turnId: row.current_turn_id, originHookIds })
+    } else if (prev === "draft" && info.state === "open" && row.status === "pr_ready" && !row.current_turn_id) {
+      this.emitTaskEvent({ type: "task.pr_ready", taskId, turnId: null, originHookIds })
+    }
   }
 
   private finishTurn(row: TaskRow, ev: WorkerEvent, pr: PrState | null = null) {
@@ -1515,7 +1557,7 @@ export class TaskManager {
       sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
       lastActiveAt: Date.now(),
       question: status === "needs_input" ? (flags.asked ?? null) : null,
-      turnFlags: { interrupts: 0 },
+      turnFlags: { interrupts: 0, ...(flags.hookIds ? { lastHookIds: flags.hookIds } : {}) },
       outcome,
     }, { quiet: stopped })
     if (row.box_id) this.store.touchBox(row.box_id)
@@ -1538,11 +1580,42 @@ export class TaskManager {
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
       this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
     }
+    if (!stopped) this.turnEvents(row, status, Boolean(more), Boolean(finished && isQuietRun(finished)), flags)
 
     this.emitTask(row.id)
     this.publishDirectory()
     void this.archiveAndClean(row.id).finally(() => this.schedule())
     this.schedule()
+  }
+
+  /** The hook events a finished turn raises. A stopped turn raises none: Cody stepped in. */
+  private turnEvents(row: TaskRow, status: TaskStatus, more: boolean, quiet: boolean, flags: TurnFlags) {
+    const base = { taskId: row.id, turnId: row.current_turn_id, originHookIds: flags.hookIds ?? [], sawPr: Boolean(flags.sawPr) }
+    if (row.schedule_id && ["done", "idle", "pr_ready", "failed"].includes(status) && !more) this.emitTaskEvent({ ...base, type: "schedule.run_finished" })
+    // A quiet run did nothing worth acting on; only schedule.run_finished hooks that include quiet runs see it.
+    if (quiet) return
+    if (status === "failed") this.emitTaskEvent({ ...base, type: "task.failed" })
+    else if (status === "needs_input") this.emitTaskEvent({ ...base, type: "task.needs_input" })
+    else if (!more && (status === "idle" || status === "pr_ready" || status === "done")) {
+      this.emitTaskEvent({ ...base, type: "task.finished" })
+      if (status === "pr_ready") this.emitTaskEvent({ ...base, type: "task.pr_ready" })
+    }
+  }
+
+  /** Listen to task events (the hook engine does). Returns an unsubscribe function. */
+  subscribe(listener: TaskEventListener): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
+
+  private emitTaskEvent(event: TaskEvent) {
+    for (const listener of this.listeners) {
+      try {
+        listener(event)
+      } catch (err) {
+        console.error(`[box-yard] ${event.type} listener for ${event.taskId} failed: ${errorMessage(err)}`)
+      }
+    }
   }
 
   /** What a run did, to check the agent's noop mark against (shared/quiet.ts). */
@@ -2051,12 +2124,13 @@ export class TaskManager {
       return
     }
     if (interrupts > MAX_INTERRUPTS) {
-      this.store.updateTask(row.id, { status: "failed", currentTurnId: null, error: `Interrupted: ${reason}`, turnFlags: { interrupts: 0 } })
+      this.store.updateTask(row.id, { status: "failed", currentTurnId: null, error: `Interrupted: ${reason}`, turnFlags: { interrupts: 0, lastHookIds: flags.hookIds } })
       this.addEvent(row.id, `Turn interrupted (${reason}). Gave up after ${MAX_INTERRUPTS} retries.`)
       this.notice(`❌ **${row.title}** was interrupted: ${reason}`, { taskId: row.id })
+      this.emitTaskEvent({ type: "task.failed", taskId: row.id, turnId: row.current_turn_id, originHookIds: flags.hookIds ?? [] })
     } else {
       this.store.queueInput(row.id, "system", `Your previous turn was interrupted (${reason}). Check where things stand (git status, files) and continue the task.`)
-      this.store.updateTask(row.id, { status: "queued", currentTurnId: null, turnFlags: { interrupts } })
+      this.store.updateTask(row.id, { status: "queued", currentTurnId: null, turnFlags: { interrupts, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}) } })
       this.addEvent(row.id, `Turn interrupted (${reason}); retrying.`)
     }
     this.emitTask(row.id)
@@ -2130,8 +2204,8 @@ export class TaskManager {
   }
 
   /** A line for the owner of a task update; by default the Coordinator reads it on its next turn. */
-  notice(content: string, meta: Record<string, unknown> | null = null) {
-    const handled = Boolean(this.onNotice?.(content, meta))
+  notice(content: string, meta: Record<string, unknown> | null = null, opts: NoticeOptions = {}) {
+    const handled = Boolean(this.onNotice?.(content, meta, opts)) && !opts.both
     const msg = this.store.addChat("notice", content, meta)
     // Keep the historical main-chat notice for existing installs, but do not
     // make the Coordinator process every project task event once a Captain owns it.

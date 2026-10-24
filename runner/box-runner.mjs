@@ -633,7 +633,9 @@ async function createPullRequest(args) {
       })
       created = true
     }
-    await emit({ t: "pr", url: pr.html_url, number: pr.number, branch })
+    // The commit just pushed, so Box Yard hooks fire once per head commit (task.pr_ready).
+    const headSha = (await sh("git", ["rev-parse", "HEAD"])).stdout.trim()
+    await emit({ t: "pr", url: pr.html_url, number: pr.number, branch, ...(/^[0-9a-f]{40}$/.test(headSha) ? { headSha } : {}) })
     return text(`${created ? "Opened" : "Updated (pushed to)"} PR #${pr.number}: ${pr.html_url}`)
   } catch (err) {
     return text(String(err.message), true)
