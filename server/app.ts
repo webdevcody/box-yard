@@ -422,10 +422,13 @@ export function createBoxYard(
     res.json({ ids })
   })
   api.patch("/projects/:id", (req, res) => {
-    const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))
+    const body = parse(schemas.projectPatch, req.body)
+    const project = store.updateProject(req.params.id!, body)
     hub.broadcast({ type: "project", project })
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
+    // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool).
+    if (body.runner) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {

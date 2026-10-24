@@ -72,6 +72,8 @@ export interface TurnFlags {
   noop?: { commits: number | null }
   /** How many times in a row a turn died and was retried. */
   interrupts?: number
+  /** How many local-runner turns in a row this computer's sleep cut off, each resumed instead of failed (#104). */
+  sleeps?: number
   /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
   hookIds?: string[]
   /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
