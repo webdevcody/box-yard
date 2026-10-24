@@ -36,6 +36,7 @@ import { NotesTab } from "./NotesTab"
 import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
+import { HEAVY_TASKS, HEAVY_TASKS_LABEL, type HeavyTasks } from "../../../shared/memory"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -410,6 +411,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
+  const [heavyTasks, setHeavyTasks] = useState<HeavyTasks>(project.heavyTasks ?? "off")
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -431,6 +433,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           boxSize: boxSize || null,
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
+          heavyTasks,
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -483,6 +486,18 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="">Default ({settings.data?.settings.gitPushAtTurnEnd === false ? "off" : "on"}: Settings → Push at turn end)</option>
           <option value="on">On: push branch and WIP, small archives</option>
           <option value="off">Off: full archives</option>
+        </Select>
+      </Field>
+      <Field
+        label="Heavy tasks"
+        hint="For projects whose agents run test suites, headless browsers or big builds that run a box out of memory when several go at once. One per box: at most one of its agents runs on each box; other projects may share it. Whole box: each of its agents has a box to itself while it runs. Either way Box Yard makes more boxes (within Max boxes) or queues the rest."
+      >
+        <Select className="w-full sm:w-80" value={heavyTasks} onChange={(e) => setHeavyTasks(e.target.value as HeavyTasks)} data-testid="project-heavy-tasks">
+          {HEAVY_TASKS.map((v) => (
+            <option key={v} value={v}>
+              {HEAVY_TASKS_LABEL[v]}
+            </option>
+          ))}
         </Select>
       </Field>
       <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">
