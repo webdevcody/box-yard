@@ -1,7 +1,7 @@
 import type { MouseEvent } from "react"
 import { navigate } from "wouter/use-browser-location"
 import { Loader2, X } from "lucide-react"
-import { dismiss, pauseToasts, resumeToasts, useToasts, type Toast, type ToastTone } from "../lib/toast"
+import { dismiss, isCritical, pauseToasts, resumeToasts, useToasts, type Toast, type ToastTone } from "../lib/toast"
 import { followAppLink } from "../lib/linkify"
 import { StatusBadge, cx } from "./ui"
 
@@ -15,9 +15,11 @@ const TONE: Record<ToastTone, string> = {
 /**
  * The one toast stack, bottom right of the main pane. Only this component subscribes to the toast store,
  * so a toast coming or going re-renders nothing else. Hovering the stack holds every toast.
+ * `quiet` (Zen mode) shows only critical toasts, top right under the chat header, clear of the composer.
  */
-export function Toasts({ className }: { className?: string }) {
-  const toasts = useToasts()
+export function Toasts({ className, quiet = false }: { className?: string; quiet?: boolean }) {
+  const all = useToasts()
+  const toasts = quiet ? all.filter(isCritical) : all
   if (!toasts.length) return null
   return (
     <div
@@ -25,7 +27,12 @@ export function Toasts({ className }: { className?: string }) {
       aria-live="polite"
       onMouseEnter={pauseToasts}
       onMouseLeave={resumeToasts}
-      className={cx("pointer-events-none absolute right-4 bottom-4 z-50 flex w-[22rem] max-w-[calc(100%-2rem)] flex-col items-end gap-2", className)}
+      data-quiet={quiet || undefined}
+      className={cx(
+        "pointer-events-none z-50 flex w-[22rem] max-w-[calc(100%-2rem)] flex-col items-end gap-2",
+        quiet ? "fixed top-[calc(env(safe-area-inset-top)+4.5rem)] right-[max(1rem,env(safe-area-inset-right))]" : "absolute right-4 bottom-4",
+        className,
+      )}
     >
       {toasts.map((t) => (t.kind === "task" ? <TaskToast key={t.id} t={t} /> : <PlainToast key={t.id} t={t} />))}
     </div>
