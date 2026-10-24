@@ -16,6 +16,10 @@ export interface Toast {
   context?: string
   /** Runs when the toast is clicked through to `href`. */
   onOpen?: () => void
+  /** Keyed toasts (`toast.progress`) are updated in place instead of stacking. */
+  key?: string
+  /** Shows a spinner and stays up until settled or dismissed. */
+  progress?: boolean
 }
 
 interface ToastOptions {
@@ -90,7 +94,26 @@ export function resumeToasts() {
   }
 }
 
+/** Show or update the toast for `key` (one per key). A progress toast stays up; others time out after `duration`. */
+function keyed(key: string, t: Omit<Toast, "id" | "key">, duration: number | null) {
+  const current = toasts.find((x) => x.key === key)
+  if (!current) {
+    const id = push({ ...t, key }, duration ?? 0)
+    if (duration === null) clearTimer(id)
+    return id
+  }
+  clearTimer(current.id)
+  toasts = toasts.map((x) => (x.id === current.id ? { ...t, key, id: current.id } : x))
+  if (duration !== null) arm(current.id, duration)
+  emit()
+  return current.id
+}
+
 export const toast = {
+  /** Something long is running: one toast per `key`, updated as it goes, with a spinner. */
+  progress: (key: string, title: string, body?: string) => keyed(key, { kind: "info", title, body, progress: true }, null),
+  /** Replace the `key` toast with the outcome (or show it, when there was none). */
+  settle: (key: string, kind: "info" | "error", title: string, body?: string, duration = kind === "error" ? 10_000 : 8000) => keyed(key, { kind, title, body }, duration),
   error: (title: string, body?: string, opts: ToastOptions = {}) => push({ kind: "error", title, body, action: opts.action }, opts.duration ?? 8000),
   info: (title: string, body?: string, opts: ToastOptions = {}) => push({ kind: "info", title, body, action: opts.action }, opts.duration ?? 4000),
   /** A task finished or needs Cody: clickable, colored by status. */

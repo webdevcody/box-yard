@@ -206,6 +206,7 @@ interface ProjectRow {
   repo: string | null
   base_branch: string
   env_json: string
+  box_size: string | null
   created_at: number
   updated_at: number
 }
@@ -353,7 +354,9 @@ const NOTIFICATIONS_KEPT = 200
 
 interface NotificationRow {
   id: string
-  task_id: string
+  task_id: string | null
+  box_id: string | null
+  href: string | null
   project_id: string
   title: string
   project_name: string
@@ -431,6 +434,7 @@ export class Store {
       baseBranch: row.base_branch,
       envKeys: Object.keys(json<Record<string, string>>(row.env_json, {})),
       notes: this.listNotes(row.id),
+      boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -465,6 +469,7 @@ export class Store {
     repo?: string | null
     baseBranch?: string
     env?: Record<string, string>
+    boxSize?: BoxSize | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -483,6 +488,7 @@ export class Store {
         now,
         now,
       )
+    if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     return this.getProject(id)!
   }
 
@@ -495,6 +501,8 @@ export class Store {
       baseBranch?: string
       env?: Record<string, string>
       removeEnv?: string[]
+      /** null clears it (Settings → Worker size applies). */
+      boxSize?: BoxSize | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -504,7 +512,7 @@ export class Store {
     for (const k of patch.removeEnv ?? []) delete env[k]
     this.db
       .prepare(
-        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         patch.name?.trim() || current.name,
@@ -512,6 +520,7 @@ export class Store {
         patch.repo === undefined ? current.repo : normalizeRepo(patch.repo),
         patch.baseBranch?.trim() || current.base_branch,
         JSON.stringify(env),
+        patch.boxSize === undefined ? current.box_size : patch.boxSize,
         Date.now(),
         id,
       )
@@ -1913,6 +1922,33 @@ export class Store {
     return n
   }
 
+  /** A notification about a box, not a task (e.g. a resize the Coordinator made). */
+  addBoxNotification(input: { boxId: string; title: string; summary: string; status: "done" | "failed"; projectId?: string; projectName?: string; href?: string }): AppNotification {
+    const n: AppNotification = {
+      id: newId("ntf"),
+      taskId: null,
+      boxId: input.boxId,
+      href: input.href ?? `/boxes#${input.boxId}`,
+      projectId: input.projectId ?? "",
+      title: input.title,
+      projectName: input.projectName ?? "",
+      status: input.status,
+      summary: oneLine(input.summary),
+      createdAt: Date.now(),
+      readAt: null,
+    }
+    this.db
+      .prepare(
+        "INSERT INTO notifications (id, task_id, box_id, href, project_id, title, project_name, status, summary, created_at, read_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+      )
+      .run(n.id, n.boxId, n.href, n.projectId, n.title, n.projectName, n.status, n.summary, n.createdAt)
+    this.db
+      .prepare("DELETE FROM notifications WHERE id NOT IN (SELECT id FROM notifications ORDER BY created_at DESC, rowid DESC LIMIT ?)")
+      .run(NOTIFICATIONS_KEPT)
+    this.onNotification?.(n)
+    return n
+  }
+
   /** Newest first. */
   listNotifications(limit = 50): AppNotification[] {
     const rows = this.db
@@ -1921,6 +1957,8 @@ export class Store {
     return rows.map((r) => ({
       id: r.id,
       taskId: r.task_id,
+      ...(r.box_id ? { boxId: r.box_id } : {}),
+      ...(r.href ? { href: r.href } : {}),
       projectId: r.project_id,
       title: r.title,
       projectName: r.project_name,

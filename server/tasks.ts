@@ -23,7 +23,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, DEFAULT_EFFORT, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { formatTokens } from "./usage.js"
@@ -35,6 +35,27 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
+import {
+  compareSizes,
+  initiatorLabel,
+  resizeSummary,
+  resizeTitle,
+  scaleDownFit as scaleDownFitCheck,
+  sizeSpecLine,
+  type BoxResize,
+  type DiskFit,
+  type ResizeInitiator,
+  type ResizeMode,
+  type ResizePlan,
+  type ResizeStep,
+} from "../shared/boxSizes.js"
+
+type BoxOp = "clear" | "delete" | "resize"
+
+function busyMessage(boxId: string, op: BoxOperation) {
+  const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing" }[op]
+  return `Box ${boxId} is busy: ${what} is in progress.`
+}
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -77,6 +98,10 @@ const captainMeta = (store: Store, projectId: string) => ({ source: "captain", c
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
+/** The running or last resize of a box (old and new box both point at it). */
+const resizeKey = (boxId: string) => `box_resize:${boxId}`
+/** The work disk's df total a box of this size last reported, for the scale-down check. */
+const diskTotalKey = (size: BoxSize) => `disk_total:${size}`
 /** kv key for a repo's last measured clone size in bytes (by mirror name). */
 const cloneBytesKey = (mirror: string) => `clone_bytes:${mirror}`
 
@@ -154,8 +179,10 @@ export class TaskManager {
   private reserved = new Map<string, Map<string, number>>()
   /** Boxes the last placement check found too full for a new workspace. */
   private lowBoxes = new Set<string>()
-  /** Boxes being cleared or deleted: nothing is placed on them and their tasks wait. */
-  private boxOps = new Map<string, "clear" | "delete">()
+  /** Boxes being cleared, deleted or resized: nothing is placed on them and their tasks wait. */
+  private boxOps = new Map<string, BoxOp>()
+  /** Resizes in progress, by box (the old box and, once made, the new one). */
+  private resizes = new Map<string, BoxResize>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
@@ -232,6 +259,12 @@ export class TaskManager {
 
   /** After a restart: re-attach to running turns and requeue half-started ones. */
   private recover() {
+    // A resize can't pick up where it left off: say so. Its new box (if it got that far) holds no work yet.
+    for (const box of this.store.listBoxes()) {
+      const r = this.resizeReport(box.id)
+      if (r?.status !== "running") continue
+      this.finishResize(r, "failed", "Box Yard restarted during the resize; nothing was moved. Try again.")
+    }
     for (const row of this.store.listTaskRows({ status: ["starting"] })) {
       // We died while launching. Inputs are only deleted after a launch
       // succeeds, so the turn can simply run again (launch kills any
@@ -499,6 +532,26 @@ export class TaskManager {
     return { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes }
   }
 
+  /** Agents per box and task folders per box for a box of this size: Settings when set there, else the size's defaults. */
+  sizeLimits(size: BoxSize): { slotsPerBox: number; maxResidentPerBox: number } {
+    const o = this.settings.boxLimitOverrides()
+    return { slotsPerBox: o.slotsPerBox ?? SIZE_DEFAULTS[size].slotsPerBox, maxResidentPerBox: o.maxResidentPerBox ?? SIZE_DEFAULTS[size].maxResidentPerBox }
+  }
+
+  /** Turns that may run at once on this box (its own size decides the default). */
+  private slotsFor(boxId: string) {
+    return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
+  }
+
+  private residentsFor(boxId: string) {
+    return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).maxResidentPerBox
+  }
+
+  /** Size for a new box made for a project: its preferred size, else Settings → Worker size. */
+  newBoxSize(projectId?: string | null): BoxSize {
+    return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? this.settings.get().workerSize
+  }
+
   /** Agents (running turns) across all boxes. */
   runningTotal() {
     return this.store.listTaskRows().filter((r) => r.current_turn_id).length
@@ -530,7 +583,7 @@ export class TaskManager {
         status: b.status,
         size,
         keepAlive: Boolean(b.keep_alive),
-        slots: this.limits().slotsPerBox,
+        slots: this.slotsFor(b.id),
         runningTurns: residents.filter((r) => r.current_turn_id).length,
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
@@ -543,6 +596,7 @@ export class TaskManager {
         diskLow: this.lowBoxes.has(b.id) || (b.disk_free_bytes !== null && b.disk_free_bytes !== undefined && b.disk_free_bytes < floor),
         cleanup: this.janitor.current(b.id),
         operation: this.boxOperation(b.id),
+        resize: this.resizeReport(b.id),
         estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
         usageSource: b.usage_source ?? "estimated",
         createdAt: b.created_at,
@@ -664,10 +718,10 @@ export class TaskManager {
     }
   }
 
-  /** Mark a box for clear/delete, or say why not: another operation on it, or agents running without `stopAgents`. */
-  private claimBox(boxId: string, op: "clear" | "delete", stopAgents: boolean) {
+  /** Mark a box for clear/delete/resize, or say why not: another operation on it, or agents running without `stopAgents`. */
+  private claimBox(boxId: string, op: BoxOp, stopAgents: boolean) {
     const busy = this.boxOperation(boxId)
-    if (busy) throw new ConflictError(`Box ${boxId} is busy: ${busy === "cleanup" ? "a disk cleanup" : busy === "clear" ? "clearing" : "deleting"} is in progress.`)
+    if (busy) throw new ConflictError(busyMessage(boxId, busy))
     const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length
     if (running && !stopAgents) throw new ConflictError(`${running} ${running === 1 ? "agent is" : "agents are"} running on ${boxId}: stop ${running === 1 ? "it" : "them"} first.`)
     this.boxOps.set(boxId, op)
@@ -679,13 +733,306 @@ export class TaskManager {
     const runningRows = () => this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id)
     for (const row of runningRows()) {
       await this.stopTask(row.id).catch(() => {})
-      this.addEvent(row.id, withOwner(`Stopped so Cody could ${this.boxOps.get(boxId) === "delete" ? "delete" : "clear"} box ${boxId}.`, this.owner()))
+      this.addEvent(row.id, withOwner(`Stopped so Cody could ${this.boxOps.get(boxId) ?? "clear"} box ${boxId}.`, this.owner()))
     }
     const until = Date.now() + timeoutMs
     while (runningRows().length) {
       if (Date.now() > until) throw new ConflictError(`Agents on ${boxId} didn't stop within ${Math.round(timeoutMs / 1000)}s; nothing was removed.`)
       await new Promise((r) => setTimeout(r, 200))
     }
+  }
+
+  // ------------------------------------------------------------------ resize
+
+  /** In place when the provider can change a box's size, else by moving the box's work to a new box. */
+  resizeMode(): ResizeMode {
+    return this.provider.resize ? "in-place" : "migration"
+  }
+
+  /** The running resize of a box, or its last one. */
+  resizeReport(boxId: string): BoxResize | null {
+    const live = this.resizes.get(boxId)
+    if (live) return structuredClone(live)
+    const raw = this.store.getKv(resizeKey(boxId))
+    if (!raw) return null
+    try {
+      return JSON.parse(raw) as BoxResize
+    } catch {
+      return null
+    }
+  }
+
+  /** Projects with work on a box, or that it was made for. */
+  projectsOnBox(boxId: string): string[] {
+    const owner = this.store.getKv(boxOwnerKey(boxId))
+    return [...new Set([...this.store.listTaskRows({ boxId }).map((r) => r.project_id), ...(owner ? [owner] : [])])]
+  }
+
+  /** What resizing a box to `to` would do, and why it can't right now (for the Resize modal). */
+  async resizePlan(boxId: string, to: BoxSize): Promise<ResizePlan> {
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    const from = normalizeBoxSize(box.size)
+    const rows = this.store.listTaskRows({ boxId })
+    const fit = compareSizes(to, from) < 0 && box.status === "ready" ? await this.scaleDownFit(boxId, to) : null
+    return {
+      boxId,
+      from,
+      to,
+      mode: this.resizeMode(),
+      running: rows.filter((r) => r.current_turn_id).map((r) => ({ id: r.id, title: r.title })),
+      tasks: rows.length,
+      fit,
+      refusal: this.resizeRefusal(boxId, to, fit),
+    }
+  }
+
+  /** Would the box's disk in use fit `to` with the free space new workspaces need on top? */
+  private async scaleDownFit(boxId: string, to: BoxSize): Promise<DiskFit> {
+    // Measured now: a cleanup just before a scale-down should count.
+    const space = await this.probeDisk(boxId, 0)
+    const box = this.store.getBox(boxId)
+    const used = space
+      ? Math.max(0, space.totalBytes - space.freeBytes)
+      : box?.disk_free_bytes != null && box.disk_total_bytes != null
+      ? Math.max(0, box.disk_total_bytes - box.disk_free_bytes)
+      : null
+    // The same need placement checks before a new workspace: the floor, or its repo's clone size x factor.
+    const headroom = Math.max(this.diskNeed(null), ...this.store.listTaskRows({ boxId }).map((r) => this.diskNeed(r)))
+    const observed = Number(this.store.getKv(diskTotalKey(to)) ?? NaN)
+    return scaleDownFitCheck({ usedBytes: used, to, headroomBytes: headroom, observedTotalBytes: Number.isFinite(observed) ? observed : null })
+  }
+
+  private resizeRefusal(boxId: string, to: BoxSize, fit: DiskFit | null): string | null {
+    const box = this.store.getBox(boxId)
+    if (!box) return `Box ${boxId} not found.`
+    if (box.status !== "ready") return `Box ${boxId} is ${box.status}; only a running box can be resized.`
+    const from = normalizeBoxSize(box.size)
+    if (from === to) return `Box ${boxId} is already ${to}.`
+    const busy = this.boxOperation(boxId)
+    if (busy) return busyMessage(boxId, busy)
+    if (fit && !fit.ok) return `Can't scale ${boxId} down to ${to}: ${fit.reason}`
+    return null
+  }
+
+  /**
+   * Resize a box up or down. Refuses while agents are running unless `stopAgents` (never for MCP callers), and
+   * refuses a scale-down whose disk in use wouldn't fit. Answers right away with the running report; progress
+   * goes out as SSE `box.resize`. While it runs nothing is placed on the box (or on the new one).
+   */
+  async resizeBox(boxId: string, to: BoxSize, opts: { stopAgents?: boolean; by?: ResizeInitiator; reason?: string | null } = {}): Promise<BoxResize> {
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (!(BOX_SIZES as readonly string[]).includes(to)) throw new BadRequestError(`Unknown size "${to}": use small, medium or large.`)
+    const from = normalizeBoxSize(box.size)
+    const fit = compareSizes(to, from) < 0 && box.status === "ready" ? await this.scaleDownFit(boxId, to) : null
+    const refusal = this.resizeRefusal(boxId, to, fit)
+    if (refusal) throw this.boxOperation(boxId) ? new ConflictError(refusal) : new BadRequestError(refusal)
+    this.claimBox(boxId, "resize", Boolean(opts.stopAgents))
+    const mode = this.resizeMode()
+    const running = this.runningOn(boxId)
+    const step = (key: ResizeStep["key"], label: string, skip = false): ResizeStep => ({ key, label, status: skip ? "skipped" : "pending", detail: null })
+    const r: BoxResize = {
+      id: `rsz_${randomUUID().slice(0, 12)}`,
+      boxId,
+      newBoxId: null,
+      from,
+      to,
+      mode,
+      status: "running",
+      steps: [
+        ...(opts.stopAgents && running ? [step("stop", `Stop ${running} running ${running === 1 ? "agent" : "agents"}`)] : []),
+        ...(mode === "in-place"
+          ? [step("resize", `Resize ${boxId} to ${to}`)]
+          : [
+              step("create", `Create a ${to} box`),
+              step("archive", "Archive every workspace"),
+              step("move", "Move tasks and projects to the new box"),
+              step("delete", `Delete ${boxId}`),
+            ]),
+      ],
+      movedTasks: [],
+      by: opts.by ?? { kind: "cody" },
+      reason: opts.reason?.trim() || null,
+      error: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+    }
+    this.resizes.set(boxId, r)
+    this.publishResize(r)
+    console.log(`[box-yard] resizing box ${boxId} ${from} -> ${to} (${mode})`)
+    void this.runResize(r, Boolean(opts.stopAgents))
+    return structuredClone(r)
+  }
+
+  private async runResize(r: BoxResize, stopAgents: boolean) {
+    try {
+      if (stopAgents && r.steps.some((s) => s.key === "stop")) {
+        await this.resizeStep(r, "stop", async () => {
+          await this.stopAgentsOn(r.boxId)
+          return null
+        })
+      }
+      // A cleanup may be parking workspaces right now; let it finish first.
+      while (this.janitor.isRunning(r.boxId)) await new Promise((res) => setTimeout(res, 200))
+      if (r.mode === "in-place") await this.resizeInPlace(r)
+      else await this.resizeByMigration(r)
+      this.finishResize(r, "done")
+    } catch (err) {
+      this.finishResize(r, "failed", errorMessage(err))
+    }
+  }
+
+  private async resizeInPlace(r: BoxResize) {
+    await this.resizeStep(r, "resize", async () => {
+      await this.provider.resize!(r.boxId, r.to)
+      this.store.meterBox(r.boxId, { size: r.to })
+      this.diskCache.delete(r.boxId)
+      this.lowBoxes.delete(r.boxId)
+      const space = await this.probeDisk(r.boxId, 0)
+      return space ? `now ${sizeSpecLine(r.to)}; ${diskLine({ freeBytes: space.freeBytes, totalBytes: space.totalBytes })}` : `now ${sizeSpecLine(r.to)}`
+    })
+  }
+
+  /**
+   * Resize without provider support: a new box of the target size takes over. Every workspace is archived first
+   * (the same archive a closed task gets; nothing moves if one can't be), then the tasks and the box's project are
+   * pointed at the new box and the old one is deleted. Workspaces restore from their archive on their next turn.
+   */
+  private async resizeByMigration(r: BoxResize) {
+    const old = this.store.getBox(r.boxId)!
+    const owner = this.store.getKv(boxOwnerKey(r.boxId))
+    let created: string | null = null
+    try {
+      await this.resizeStep(r, "create", async () => {
+        const id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
+        this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+        created = id
+        // Nothing lands on it until the move is done.
+        this.boxOps.set(id, "resize")
+        r.newBoxId = id
+        this.resizes.set(id, r)
+        void this.refreshBoxUsage(id, true).catch(() => {})
+        return id
+      })
+      await this.resizeStep(r, "archive", async () => {
+        const kept: string[] = []
+        const rows = this.store.listTaskRows({ boxId: r.boxId })
+        for (const row of rows) {
+          await this.archiveFresh(row.id)
+          const fresh = this.store.getTaskRow(row.id)
+          if (fresh?.box_id === r.boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
+        }
+        if (kept.length) {
+          const why = this.c.archiveWorkspaces ? "" : " Workspace archiving is off (BOXYARD_ARCHIVE=0)."
+          throw new ConflictError(`Couldn't archive ${kept.join(", ")}, so nothing moved and ${r.boxId} keeps its work.${why}`)
+        }
+        return rows.length ? `${rows.length} ${rows.length === 1 ? "workspace" : "workspaces"} archived` : "no workspaces on the box"
+      })
+    } catch (err) {
+      if (created) await this.dropBox(created)
+      throw err
+    }
+    const to = r.newBoxId!
+    await this.resizeStep(r, "move", async () => {
+      for (const row of this.store.listTaskRows({ boxId: r.boxId })) {
+        this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+        this.assign(row.id, to, { touch: false })
+        r.movedTasks.push(row.id)
+        this.addEvent(row.id, `Moved to box ${to} (${r.to}) while ${r.boxId} was resized. The workspace comes back from its archive on the next turn.`)
+        this.emitTask(row.id)
+      }
+      if (owner) this.store.setKv(boxOwnerKey(to), owner)
+      for (const p of this.store.listProjects()) if (this.store.getKv(projectBoxKey(p.id)) === r.boxId) this.store.setKv(projectBoxKey(p.id), to)
+      const n = r.movedTasks.length
+      return n ? `${n} ${n === 1 ? "task" : "tasks"} moved to ${to}` : `nothing to move; ${to} takes over`
+    })
+    await this.resizeStep(r, "delete", async () => {
+      await this.loseBox(r.boxId, `Box ${r.boxId} was resized.`, true)
+      try {
+        await this.provider.destroy(r.boxId)
+        return null
+      } catch (err) {
+        // The work already moved; a box the provider didn't delete is only a leftover.
+        console.warn(`destroy ${r.boxId}: ${errorMessage(err)}`)
+        return `couldn't delete it at the provider (${errorMessage(err)}); remove it there`
+      }
+    })
+  }
+
+  /** Remove a box Box Yard made but never used (a failed migration). */
+  private async dropBox(boxId: string) {
+    this.boxOps.delete(boxId)
+    this.resizes.delete(boxId)
+    this.store.setKv(boxOwnerKey(boxId), null)
+    this.store.removeBox(boxId)
+    await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
+    this.emitBoxes()
+  }
+
+  private async resizeStep(r: BoxResize, key: ResizeStep["key"], fn: () => Promise<string | null>) {
+    const s = r.steps.find((x) => x.key === key)!
+    s.status = "running"
+    this.publishResize(r)
+    try {
+      s.detail = await fn()
+      s.status = "done"
+    } catch (err) {
+      s.status = "failed"
+      s.detail = errorMessage(err)
+      throw err
+    } finally {
+      this.publishResize(r)
+    }
+  }
+
+  private publishResize(r: BoxResize) {
+    const copy = structuredClone(r)
+    for (const id of [r.boxId, r.newBoxId]) if (id) this.store.setKv(resizeKey(id), JSON.stringify(copy))
+    this.hub.broadcast({ type: "box.resize", resize: copy })
+    this.emitBoxes()
+  }
+
+  private finishResize(r: BoxResize, status: "done" | "failed", error: string | null = null) {
+    r.status = status
+    r.error = error
+    r.finishedAt = Date.now()
+    for (const s of r.steps) if (s.status === "pending" || s.status === "running") s.status = s.status === "running" ? "failed" : "skipped"
+    for (const id of [r.boxId, r.newBoxId]) {
+      if (!id) continue
+      if (this.boxOps.get(id) === "resize") this.boxOps.delete(id)
+      this.resizes.delete(id)
+    }
+    this.diskCache.delete(r.boxId)
+    this.publishResize(r)
+    console.log(`[box-yard] resize of ${r.boxId} ${status}${error ? `: ${error}` : ""}`)
+    if (r.by.kind !== "cody") this.announceResize(r)
+    this.schedule()
+  }
+
+  /** A resize the Coordinator or a Captain made: a notice for the Coordinator and the box's Captains, and a notification for Cody. */
+  private announceResize(r: BoxResize) {
+    const captainProject = r.by.kind === "captain" ? r.by.projectId : null
+    const who = initiatorLabel(r.by, captainProject ? this.store.getProject(captainProject)?.name : undefined)
+    const boxId = r.newBoxId && r.status === "done" ? r.newBoxId : r.boxId
+    const projectIds = [...new Set(this.store.listTaskRows({ boxId }).map((t) => t.project_id).concat(this.store.getKv(boxOwnerKey(boxId)) ?? []))].filter(
+      (id) => this.store.getProject(id),
+    )
+    const why = r.reason ? ` Reason: ${r.reason}` : ""
+    const content =
+      r.status === "done"
+        ? `📦 ${who} resized box ${r.boxId} ${r.from} → ${r.to}: ${resizeSummary(r)}.${why}`
+        : `⚠️ ${who} couldn't resize box ${r.boxId} ${r.from} → ${r.to}: ${r.error ?? "unknown error"}.${why}`
+    this.notice(content, { boxId, resizeId: r.id, projectIds, ...(captainProject ? { captainProjectId: captainProject } : {}) })
+    const names = projectIds.map((id) => this.store.getProject(id)!.name)
+    this.store.addBoxNotification({
+      boxId,
+      title: resizeTitle(r),
+      summary: `${who}${r.reason ? `: ${r.reason}` : ""}${r.status === "failed" ? ` (${r.error ?? "failed"})` : ""}`,
+      status: r.status === "done" ? "done" : "failed",
+      projectId: projectIds[0],
+      projectName: names.join(", "),
+    })
   }
 
   // ------------------------------------------------------------------ scheduler
@@ -757,7 +1104,7 @@ export class TaskManager {
       if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
     }
     for (const [projectId, n] of perProject) {
-      const need = Math.ceil(n / this.limits().slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
+      const need = Math.ceil(n / this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
       for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
   }
@@ -769,7 +1116,7 @@ export class TaskManager {
     const op = row.box_id ? this.boxOps.get(row.box_id) : undefined
     if (op) {
       // Its workspace is being archived off the box; it moves to another box once that's done.
-      this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : "deleted"}`)
+      this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : "deleted"}`)
       return null
     }
     if (row.box_id) {
@@ -780,7 +1127,7 @@ export class TaskManager {
           this.setWaitReason(row.id, `Waiting for disk cleanup on ${box.id}`)
           return null
         }
-        if (this.runningOn(box.id) < this.limits().slotsPerBox) return box.id
+        if (this.runningOn(box.id) < this.slotsFor(box.id)) return box.id
         // Its box is busy. Move to a free box if the archive is fresh enough.
         if (!this.hasFreshArchive(row)) return null
         const other = await this.pickBox(row.id, box.id)
@@ -825,9 +1172,10 @@ export class TaskManager {
         const others = residents.some((r) => r.project_id !== projectId) || Boolean(owner && owner !== projectId)
         // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
         const rank = mine ? 0 : others ? 2 : 1
-        return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length }
+        const limits = this.sizeLimits(normalizeBoxSize(b.size))
+        return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length, ...limits }
       })
-      .filter((b) => b.running < this.limits().slotsPerBox)
+      .filter((b) => b.running < b.slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     const low: { boxId: string; state: "running" | "exhausted" }[] = []
     for (const b of candidates) {
@@ -837,13 +1185,13 @@ export class TaskManager {
         this.holdForDisk(taskId, low)
         return null
       }
-      if (b.residents >= this.limits().maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
+      if (b.residents >= b.maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
       const room = row ? await this.diskRoom(b.id, row) : "ok"
       if (room !== "ok") {
         low.push({ boxId: b.id, state: room })
         continue
       }
-      if (b.residents < this.limits().maxResidentPerBox || this.evictOne(b.id, taskId)) {
+      if (b.residents < b.maxResidentPerBox || this.evictOne(b.id, taskId)) {
         this.wantsBox.delete(taskId)
         this.holdForDisk(taskId, [])
         return b.id
@@ -854,7 +1202,7 @@ export class TaskManager {
       // Its setup already ran out of space once and no box has room even after cleanup:
       // the threshold is cautious, so make the one retry on the cleaned box instead of waiting forever.
       const cleaned = this.diskRetried.has(taskId) ? low.find((l) => l.state === "exhausted") : undefined
-      if (cleaned && (this.store.listTaskRows({ boxId: cleaned.boxId }).filter((r) => r.id !== taskId).length < this.limits().maxResidentPerBox || this.evictOne(cleaned.boxId, taskId))) {
+      if (cleaned && (this.store.listTaskRows({ boxId: cleaned.boxId }).filter((r) => r.id !== taskId).length < this.residentsFor(cleaned.boxId) || this.evictOne(cleaned.boxId, taskId))) {
         this.holdForDisk(taskId, [])
         return cleaned.boxId
       }
@@ -918,6 +1266,8 @@ export class TaskManager {
     this.diskCache.set(boxId, { at: now, space })
     if (this.store.getBox(boxId)) {
       const before = this.store.getBox(boxId)
+      const size = normalizeBoxSize(before?.size)
+      if (space.totalBytes > 0 && this.store.getKv(diskTotalKey(size)) !== String(space.totalBytes)) this.store.setKv(diskTotalKey(size), String(space.totalBytes))
       this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now })
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
@@ -964,6 +1314,8 @@ export class TaskManager {
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleaned up.`)
+    const op = this.boxOps.get(boxId)
+    if (op && !this.janitor.isRunning(boxId)) throw new ConflictError(busyMessage(boxId, op))
     if (!this.janitor.isRunning(boxId)) void this.janitor.run(boxId, { reason: "manual", target: null, parkBelow: this.diskNeed(null) })
     return this.janitor.current(boxId)!
   }
@@ -1017,7 +1369,7 @@ export class TaskManager {
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */
-  private assign(taskId: string, boxId: string): string {
+  private assign(taskId: string, boxId: string, opts: { touch?: boolean } = {}): string {
     const used = new Set(
       this.store
         .listTaskRows({ boxId })
@@ -1026,7 +1378,7 @@ export class TaskManager {
     )
     let port = PORT_BASE
     while (used.has(port)) port += 10
-    this.store.updateTask(taskId, { boxId, portBase: port })
+    this.store.updateTask(taskId, { boxId, portBase: port }, opts)
     const projectId = this.store.getTaskRow(taskId)?.project_id
     if (projectId) this.store.setKv(projectBoxKey(projectId), boxId)
     return boxId
@@ -1060,18 +1412,24 @@ export class TaskManager {
     return true
   }
 
+  private boxLabels(projectId?: string | null) {
+    const project = projectId ? this.store.getProject(projectId) : null
+    return ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
+  }
+
   private async createBox(projectId?: string) {
     this.creatingBoxes++
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
-    this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size: this.settings.get().workerSize, keep_alive: 0, usage_source: "estimated" })
+    const size = this.newBoxSize(projectId)
+    this.store.upsertBox({ id: placeholder, provider: this.provider.name, status: "creating", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
     this.emitBoxes()
     const project = projectId ? this.store.getProject(projectId) : null
     try {
-      const labels = ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
-      const id = await this.provider.create({ labels, size: this.settings.get().workerSize })
+      const labels = this.boxLabels(projectId)
+      const id = await this.provider.create({ labels, size })
       this.store.removeBox(placeholder)
-      this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: this.settings.get().workerSize, keep_alive: 0, usage_source: "estimated" })
+      this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
       // The new box belongs to the project that asked for it, so its tasks land there.
       if (projectId && this.store.getProject(projectId)) {
         this.store.setKv(projectBoxKey(projectId), id)
@@ -2237,7 +2595,7 @@ export class TaskManager {
     const floor = this.diskNeed(null)
     for (const box of this.store.listBoxes()) {
       if (box.status !== "ready" || box.disk_free_bytes === null || box.disk_free_bytes === undefined) continue
-      if (box.disk_free_bytes < floor && !this.janitor.isRunning(box.id)) this.janitor.ensure(box.id, floor)
+      if (box.disk_free_bytes < floor && !this.janitor.isRunning(box.id) && !this.boxOps.has(box.id)) this.janitor.ensure(box.id, floor)
     }
     this.schedule()
   }

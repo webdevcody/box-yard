@@ -1,6 +1,6 @@
 import type { MouseEvent } from "react"
 import { navigate } from "wouter/use-browser-location"
-import { X } from "lucide-react"
+import { Loader2, X } from "lucide-react"
 import { dismiss, pauseToasts, resumeToasts, useToasts, type Toast, type ToastTone } from "../lib/toast"
 import { followAppLink } from "../lib/linkify"
 import { StatusBadge, cx } from "./ui"
@@ -77,6 +77,7 @@ function PlainToast({ t }: { t: Toast }) {
       )}
     >
       <div className="flex items-center gap-3">
+        {t.progress && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-300" aria-hidden />}
         <div className="min-w-0 flex-1">
           <div className="font-medium">{t.title}</div>
           {t.body && <div className="mt-0.5 truncate text-xs opacity-80">{t.body}</div>}

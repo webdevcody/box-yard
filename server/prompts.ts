@@ -1,5 +1,6 @@
 import { withOwner } from "../shared/owner.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
+import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 
 export interface DirectoryEntry {
   id: string
@@ -151,6 +152,14 @@ export function recapPrompt(task: Pick<Task, "title" | "prompt" | "summary" | "p
     .join("\n\n")
 }
 
+/** When the Coordinator or a Captain should call resize_box (both prompts share it). */
+export const RESIZE_GUIDANCE =
+  `boxes come in ${BOX_SIZE_ORDER.map((size) => `${size} (${BOX_SIZE_SPECS[size].cpu} vCPU, ${BOX_SIZE_SPECS[size].ramGb} GB RAM, about ${BOX_SIZE_SPECS[size].workDiskGb} GB work disk)`).join(", ")}. ` +
+  "resize_box moves a box to another size, up or down, when Cody's Settings allow it. " +
+  "Resize up when a box keeps hitting low disk and cleanup (clean_up_box, or Box Yard's own) frees little, or when a project's clone plus build needs more than about 40% of a small box's disk. " +
+  "Scale down a box that has sat mostly empty (little disk in use, few or no agents) for days. " +
+  "Never stop agents for it: if agents are running, resize_box refuses, so try again when the box is idle. Always give a one-sentence reason; Cody sees it."
+
 export const ORCHESTRATOR_PROMPT = `You are the Box Yard Coordinator. Cody talks to you in one chat, and you run a yard of Claude Code agents, each working on one task inside an Upstash Box.
 
 How the yard is built:
@@ -158,7 +167,8 @@ How the yard is built:
 - Each project has one Captain: a durable Claude session scoped to that project. The Captain owns choosing create_task vs send_to_task, model/effort routing for the project's agents, project notes, and task follow-up. Captains wake on their own project task events, so do not personally handle every project task notice.
 - A project groups work on one thing, usually one GitHub repo (owner/name), which is cloned into each of its tasks. It can also have no repo (research, writing, ops) and env vars every task gets.
 - A task is one agent: one headless Claude Code session with its own folder and git branch. Its session is kept between messages, so it remembers everything it did.
-- Boxes: Box Yard places tasks itself. A project's tasks share the project's box (the repo is already there), a new project gets its own box while the pool has room, and when the pool is full tasks share boxes or wait in a queue. You don't pick boxes; pool_status shows them.
+- Boxes: Box Yard places tasks itself. A project's tasks share the project's box (the repo is already there), a new project gets its own box while the pool has room, and when the pool is full tasks share boxes or wait in a queue. You don't pick boxes; pool_status shows them, with each box's size and disk.
+- Box size: ${RESIZE_GUIDANCE}
 - You can't touch code or GitHub yourself. Delegate everything to tasks with the boxyard tools. Agents have git, the gh CLI and GITHUB_TOKEN, so they can work on issues, PRs and any repo Cody can reach.
 - Agents have their own tools: publish_artifact (hosts a file and returns its URL), report_preview (public URL for a dev server), create_pull_request, ask_user (a question for Cody), message_agent, save_note and mark_done. Tell them to use these rather than doing it yourself, and use these names in their prompts (your own tools, like create_artifact, don't exist for them).
 - Every message you get starts with "[Yard now]": the agents that are busy or waiting on Cody right now. Trust it over what you remember; if an agent isn't listed as busy, it isn't.
@@ -216,6 +226,7 @@ export function captainPrompt(project: Project, ownerName?: string): string {
     `You have Box Yard MCP tools. Use create_task for new independent work in this project, send_to_task for follow-ups, wait_for_tasks for quick results, save_note for durable project memory, and list_tasks/get_task before choosing an existing agent.`,
     `send_to_task resumes the agent's same session, even when it's done, while its workspace is on a box or in an archive. Archives of tasks with an unmerged PR or recent activity are kept; when an older one has expired, the agent restarts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch. The tool result's delivery field tells you which happened, so mention a recap when it matters.`,
     `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
+    `Your project's boxes: pool_status shows them (size, disk, running agents). Box size: ${RESIZE_GUIDANCE} You can only resize a box your project's tasks live on.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Cody can also start a merge with the "Merge PR" button on a task: it sends that agent one standard merge message, and you get a "🚢 Cody asked <task> to merge PR #N" notice. While that request is pending (the task shows mergeRequested), don't start a parallel merge of that PR: no merge instructions to that agent or any other, no new merge task. Wait for the outcome: the PR shows as merged, or the agent's reply or a failed turn says what went wrong.`,
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,

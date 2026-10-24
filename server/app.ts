@@ -25,7 +25,7 @@ import { Scheduler } from "./scheduler.js"
 import { heavyDevRoutes, seedHeavy } from "./mockHeavy.js"
 import { QStash, verifyQStashSignature } from "./qstash.js"
 import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cron.js"
-import type { Health } from "../shared/types.js"
+import { BOX_SIZES, type Health } from "../shared/types.js"
 
 const idSchema = z
   .string()
@@ -46,6 +46,7 @@ const schemas = {
     repo: z.string().max(300).nullable().optional(),
     baseBranch: z.string().max(200).optional(),
     env: envSchema.optional(),
+    boxSize: z.enum(BOX_SIZES).nullable().optional(),
   }),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -54,6 +55,7 @@ const schemas = {
     baseBranch: z.string().max(200).optional(),
     env: envSchema.optional(),
     removeEnv: z.array(z.string()).optional(),
+    boxSize: z.enum(BOX_SIZES).nullable().optional(),
   }),
   note: z.object({ content: z.string().trim().min(1).max(4000) }),
   task: z.object({
@@ -519,6 +521,17 @@ export function createBoxYard(
   api.delete("/boxes/:id", async (req, res) => {
     await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1" })
     res.json({ ok: true })
+  })
+
+  /** What resizing to ?size= would do: in place or by migration, the running agents, and a scale-down's disk fit. */
+  api.get("/boxes/:id/resize", async (req, res) => {
+    const { size } = parse(z.object({ size: z.enum(BOX_SIZES) }), req.query)
+    res.json(await tasks.resizePlan(req.params.id!, size))
+  })
+  /** Resize a box up or down; answers right away with the running report (SSE box.resize follows). 409 while agents run, unless {stopAgents: true}. */
+  api.post("/boxes/:id/resize", async (req, res) => {
+    const body = parse(z.object({ size: z.enum(BOX_SIZES), stopAgents: z.boolean().optional() }), req.body ?? {})
+    res.status(202).json(await tasks.resizeBox(req.params.id!, body.size, { stopAgents: body.stopAgents, by: { kind: "cody" } }))
   })
 
   if (c.mockHeavy) api.use(heavyDevRoutes(store, hub))

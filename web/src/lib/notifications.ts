@@ -70,6 +70,12 @@ export type ToastPlan =
   | { kind: "single"; notification: AppNotification }
   | { kind: "batch"; items: AppNotification[]; status: NotifyStatus }
 
+/** Groups a task's notifications; a box notification stands alone. */
+export const notificationKey = (n: Pick<AppNotification, "id" | "taskId">) => n.taskId ?? n.id
+
+/** Where clicking a notification goes: its task, or (box notifications) the Boxes page. */
+export const notificationHref = (n: Pick<AppNotification, "taskId" | "href">) => n.href ?? `/tasks/${n.taskId}`
+
 /**
  * Turn a burst of notifications into at most one toast: the newest per task, and nothing for the task
  * Cody is looking at. Several tasks become one "N tasks finished" toast colored by the most urgent.
@@ -77,9 +83,9 @@ export type ToastPlan =
 export function planToast(burst: readonly AppNotification[], viewing: string | null): ToastPlan | null {
   const latest = new Map<string, AppNotification>()
   for (const n of burst) {
-    if (n.taskId === viewing || n.readAt) continue
-    const prev = latest.get(n.taskId)
-    if (!prev || n.createdAt >= prev.createdAt) latest.set(n.taskId, n)
+    if ((n.taskId && n.taskId === viewing) || n.readAt) continue
+    const prev = latest.get(notificationKey(n))
+    if (!prev || n.createdAt >= prev.createdAt) latest.set(notificationKey(n), n)
   }
   const items = [...latest.values()].sort((a, b) => b.createdAt - a.createdAt)
   if (!items.length) return null
@@ -99,7 +105,7 @@ export function batchBreakdown(items: readonly AppNotification[]): string {
 export function toastContent(plan: ToastPlan) {
   if (plan.kind === "single") {
     const n = plan.notification
-    return { title: n.title, body: n.summary ?? undefined, href: `/tasks/${n.taskId}`, tone: NOTIFY_TONE[n.status], status: n.status, context: n.projectName }
+    return { title: n.title, body: n.summary ?? undefined, href: notificationHref(n), tone: NOTIFY_TONE[n.status], status: n.status, context: n.projectName }
   }
   return {
     title: `${plan.items.length} tasks finished`,
@@ -135,7 +141,7 @@ let flushTimer: ReturnType<typeof setTimeout> | null = null
 /** A notification from the server event stream. */
 export function receiveNotification(qc: QueryClient, n: AppNotification) {
   qc.setQueryData<AppNotification[]>(keys.notifications, (list) => addNotification(list, n))
-  if (n.taskId === seenTaskId()) {
+  if (n.taskId && n.taskId === seenTaskId()) {
     void markRead(qc, { ids: [n.id] })
     return
   }
@@ -150,11 +156,10 @@ function flush(qc: QueryClient) {
   burst = []
   if (!plan) return
   const content = toastContent(plan)
-  const taskId = plan.kind === "single" ? plan.notification.taskId : null
-  toast.task({ ...content, onOpen: taskId ? () => void markRead(qc, { taskId }) : undefined })
-  if (!isVisible()) showBrowserNotification(content.title, [content.context, content.body].filter(Boolean).join(" · "), content.href, () => {
-    if (taskId) void markRead(qc, { taskId })
-  })
+  const single = plan.kind === "single" ? plan.notification : null
+  const read = single ? () => void markRead(qc, single.taskId ? { taskId: single.taskId } : { ids: [single.id] }) : undefined
+  toast.task({ ...content, onOpen: read })
+  if (!isVisible()) showBrowserNotification(content.title, [content.context, content.body].filter(Boolean).join(" · "), content.href, () => read?.())
 }
 
 // ------------------------------------------------------------------ browser notifications (opt-in)

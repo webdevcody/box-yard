@@ -20,6 +20,7 @@ import {
   type SettingsInfo,
   type WorkerSize,
 } from "../shared/types.js"
+import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 
 const KEY = "settings"
@@ -37,12 +38,14 @@ export const DEFAULT_SETTINGS: Settings = {
   // Off means the CLI's own default (compact near the model's window) applies.
   agentAutoCompact: { enabled: false, unit: "percent", value: 80 },
   workerSize: "small",
+  autoResizeEnabled: true,
+  autoResizeMaxSize: "large",
   maxBoxes: 5,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
   costRates: {
-    boxActiveCpuHourlyUsd: { small: 0.1, medium: 0.2, large: 0.4 },
-    boxKeepAliveMonthlyUsd: { small: 8, medium: 16, large: 32 },
+    boxActiveCpuHourlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].activeCpuHourlyUsd])) as Record<BoxSize, number>,
+    boxKeepAliveMonthlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].keepAliveMonthlyUsd])) as Record<BoxSize, number>,
     boxStorageGbMonthUsd: 0.1,
   },
   budget: { dailyUsd: 0, monthlyUsd: 0 },
@@ -102,6 +105,8 @@ export const settingsPatch = z
     agentRoutingConfig: z.string().max(50_000),
     agentAutoCompact: autoCompact,
     workerSize: z.enum(WORKER_SIZES),
+    autoResizeEnabled: z.boolean(),
+    autoResizeMaxSize: z.enum(BOX_SIZES),
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
@@ -202,6 +207,21 @@ export class SettingsStore {
 
   get(): Settings {
     return this.info().settings
+  }
+
+  /**
+   * Agents per box and task folders per box when set on purpose (saved in the UI, BOX_SLOTS / BOX_MAX_RESIDENT,
+   * or a config value that isn't the worker size's default); null means each box uses its own size's default.
+   */
+  boxLimitOverrides(): { slotsPerBox: number | null; maxResidentPerBox: number | null } {
+    const saved = this.saved()
+    const configWorkerSize = this.c.workerSize ?? DEFAULT_SETTINGS.workerSize
+    const d = SIZE_DEFAULTS[configWorkerSize]
+    const configSlots = this.c.slotsPerBox ?? d.slotsPerBox
+    const configResidents = this.c.maxResidentPerBox ?? d.maxResidentPerBox
+    const slots = saved.slotsPerBox ?? (process.env.BOX_SLOTS !== undefined || configSlots !== d.slotsPerBox ? configSlots : null)
+    const residents = saved.maxResidentPerBox ?? (process.env.BOX_MAX_RESIDENT !== undefined || configResidents !== d.maxResidentPerBox ? configResidents : null)
+    return { slotsPerBox: slots ?? null, maxResidentPerBox: residents ?? null }
   }
 
   update(patch: unknown): SettingsInfo {

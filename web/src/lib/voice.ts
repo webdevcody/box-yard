@@ -224,8 +224,9 @@ export function speakableEvents(burst: readonly AppNotification[], s: VoiceSetti
   for (const n of burst) {
     const ev = voiceEvent(n)
     if (!ev || !s.events[ev] || n.readAt) continue
-    const prev = latest.get(n.taskId)
-    if (!prev || n.createdAt >= prev.createdAt) latest.set(n.taskId, n)
+    const key = n.taskId ?? n.id
+    const prev = latest.get(key)
+    if (!prev || n.createdAt >= prev.createdAt) latest.set(key, n)
   }
   return [...latest.values()].sort((a, b) => a.createdAt - b.createdAt)
 }

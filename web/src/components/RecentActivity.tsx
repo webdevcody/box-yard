@@ -3,7 +3,7 @@ import { Link, useLocation } from "wouter"
 import { CheckCheck, ChevronDown, ChevronRight } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { useNotifications } from "../lib/queries"
-import { markRead, unreadCount } from "../lib/notifications"
+import { markRead, notificationHref, unreadCount } from "../lib/notifications"
 import { followAppLink } from "../lib/linkify"
 import { useStoredFlag } from "./TaskHeader"
 import { STATUS, cx, timeAgo } from "./ui"
@@ -64,14 +64,14 @@ export function RecentActivity({ onNavigate }: { onNavigate?: () => void }) {
         <div className="scroll-thin max-h-[min(13rem,28vh)] space-y-px overflow-y-auto">
           {items.length === 0 && <div className="px-2 py-1.5 text-xs text-zinc-600">Finished tasks show up here.</div>}
           {items.map((n) => {
-            const href = `/tasks/${n.taskId}`
+            const href = notificationHref(n)
             return (
               <a
                 key={n.id}
                 href={href}
                 onClick={(e) => {
                   followAppLink(e, href, navigate)
-                  void markRead(qc, { taskId: n.taskId })
+                  void markRead(qc, n.taskId ? { taskId: n.taskId } : { ids: [n.id] })
                   onNavigate?.()
                 }}
                 title={[`${n.title} · ${STATUS[n.status].label}`, n.projectName, n.summary].filter(Boolean).join("\n")}
