@@ -367,6 +367,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
+  const [depCache, setDepCache] = useState<"" | "on" | "off">(project.depCache === null || project.depCache === undefined ? "" : project.depCache ? "on" : "off")
   const [heavyTasks, setHeavyTasks] = useState<HeavyTasks>(project.heavyTasks ?? "off")
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
@@ -389,6 +390,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           boxSize: boxSize || null,
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
+          depCache: depCache ? depCache === "on" : null,
           heavyTasks,
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
@@ -442,6 +444,16 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="">Default ({settings.data?.settings.gitPushAtTurnEnd === false ? "off" : "on"}: Settings → Push at turn end)</option>
           <option value="on">On: push branch and WIP, small archives</option>
           <option value="off">Off: full archives</option>
+        </Select>
+      </Field>
+      <Field
+        label="Dependency cache"
+        hint="On: a task with a package-lock.json and no node_modules (a fresh clone, or one the idle cleanup emptied) gets the box's installed copy for that lockfile, hard-linked in under a second, so it needs no npm ci. Off: agents install as usual."
+      >
+        <Select className="w-full sm:w-80" value={depCache} onChange={(e) => setDepCache(e.target.value as "" | "on" | "off")} data-testid="project-dep-cache">
+          <option value="">Default ({settings.data?.settings.depCacheEnabled ? "on" : "off"}: Settings → Dependency cache)</option>
+          <option value="on">On: restore node_modules from the box cache</option>
+          <option value="off">Off: agents install dependencies</option>
         </Select>
       </Field>
       <Field

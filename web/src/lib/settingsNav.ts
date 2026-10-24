@@ -41,7 +41,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "Worker box size and resizing, capacity, disk and memory headroom, cleanup retention, repo mirrors and pushing work to git.",
+    description: "Worker box size and resizing, capacity, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
     fields: [
       "workerSize",
       "autoResizeEnabled",
@@ -61,6 +61,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "memoryMinFreeMb",
       "loadMaxPerCpu",
       "buildCleanupIdleMinutes",
+      "depCacheEnabled",
+      "depCacheMaxMb",
       "gitPartialClone",
       "gitPushAtTurnEnd",
     ],
