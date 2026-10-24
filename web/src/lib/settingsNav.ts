@@ -15,8 +15,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
     label: "Coordinator",
-    description: "The model behind the chat that runs the yard, the per-project Captains, and when they compact their context.",
-    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort"],
+    description: "The model behind the chat that runs the yard, the per-project Captains and the project notes they curate, and when they compact their context.",
+    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort", "notesRetroEnabled", "notesMaxCount", "notesMaxTokens"],
   },
   {
     key: "agents",
@@ -115,6 +115,8 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
+  notesMaxCount: "BOXYARD_NOTES_MAX",
+  notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
 /** Settings whose draft value differs from the one in effect. */

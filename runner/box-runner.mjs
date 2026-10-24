@@ -388,6 +388,15 @@ function translate(msg) {
 // ---------------------------------------------------------------------------
 // MCP mode: newline-delimited JSON-RPC over stdio.
 
+const NOTE_SCHEMA = {
+  type: "object",
+  properties: {
+    content: { type: "string", description: "The rule, in one or two sentences." },
+    why: { type: "string", description: "What a future agent would get wrong without it." },
+  },
+  required: ["content", "why"],
+}
+
 const TOOLS = [
   {
     name: "ask_user",
@@ -419,14 +428,20 @@ const TOOLS = [
     },
   },
   {
-    name: "save_note",
+    name: "suggest_note",
     description:
-      "Save a durable fact to the project's shared notes (decisions, gotchas, how to run things). Every future agent in this project sees these notes.",
-    inputSchema: { type: "object", properties: { content: { type: "string" } }, required: ["content"] },
+      "Suggest a lasting rule for the project's notes, which every future agent in this project starts with. The project's Captain curates them when your task is finished, so this is a suggestion, not a save. " +
+      "Only for environment or box gotchas, Cody's decisions and preferences, and project facts that aren't in the code. Run logs, merge reports and code tours go in the PR description instead.",
+    inputSchema: NOTE_SCHEMA,
+  },
+  {
+    name: "save_note",
+    description: "Old name of suggest_note: suggests a project note for the Captain to curate. Use suggest_note.",
+    inputSchema: NOTE_SCHEMA,
   },
   {
     name: "read_notes",
-    description: "Read the project's shared notes written by Cody and other agents.",
+    description: "Read the project's notes: the lasting rules Cody and the project's Captain keep.",
     inputSchema: { type: "object", properties: {} },
   },
   {
@@ -537,10 +552,12 @@ async function callTool(name, args = {}) {
           : "Message sent.",
       )
     }
+    case "suggest_note":
     case "save_note": {
       if (!args.content?.trim()) return text("content is required", true)
-      await emit({ t: "note", content: args.content.trim() })
-      return text("Saved to the project notes.")
+      if (!args.why?.trim()) return text("why is required: what would a future agent get wrong without this note?", true)
+      await emit({ t: "note", content: args.content.trim(), why: args.why.trim() })
+      return text("Suggested. The project's Captain decides whether it becomes a note when your task is finished.")
     }
     case "read_notes": {
       const notes = await liveNotes()

@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, Webhook, X } from "lucide-react"
+import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Plus, Settings, Trash2, Webhook, X } from "lucide-react"
 import {
   newClientId,
-  useAddNote,
   useAgentSettings,
   useArtifacts,
   useCaptainState,
@@ -33,8 +32,10 @@ import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, 
 import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
+import { NotesTab } from "./NotesTab"
 import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
+import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -134,12 +135,18 @@ export function ProjectView({ id }: { id: string }) {
       {tab === "captain" && <CaptainTab project={project} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
       {tab === "hooks" && <HooksPanel projectId={id} />}
-      {tab === "notes" && <Notes project={project} />}
+      {tab === "notes" && <NotesTab project={project} />}
       {tab === "files" && <Files files={files} tasks={list} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
       {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
   )
+}
+
+/** A number field's value, or null when it's blank (use the default). */
+function optionalInt(text: string): number | null {
+  const n = Number(text.trim())
+  return text.trim() && Number.isFinite(n) ? Math.round(n) : null
 }
 
 function repoUrl(repo: string) {
@@ -285,80 +292,6 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
   )
 }
 
-function Notes({ project }: { project: Project }) {
-  const add = useAddNote()
-  const [text, setText] = useState("")
-  const [filter, setFilter] = useState("")
-  const words = filter.toLowerCase().split(/\s+/).filter(Boolean)
-  const notes = [...project.notes]
-    .reverse()
-    .filter((n) => words.every((w) => `${n.author} ${n.content}`.toLowerCase().includes(w)))
-  const submit = () => {
-    if (!text.trim()) return
-    add.mutate({ projectId: project.id, content: text.trim() })
-    setText("")
-  }
-
-  return (
-    <section className="space-y-4">
-      <p className="text-sm text-zinc-500">Shared memory: every agent in this project reads these notes, and agents add their own.</p>
-      <form
-        className="flex flex-col gap-2 sm:flex-row sm:items-start"
-        onSubmit={(e) => {
-          e.preventDefault()
-          submit()
-        }}
-      >
-        <textarea
-          className={cx(inputClass, "min-h-[2.5rem] resize-y")}
-          rows={1}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-          placeholder="e.g. Use pnpm, not npm"
-        />
-        <Button type="submit" variant="primary" disabled={!text.trim()} className="shrink-0">
-          <Plus className="h-4 w-4" /> Add note
-        </Button>
-      </form>
-
-      {project.notes.length > 5 && (
-        <div className="relative">
-          <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-zinc-500" />
-          <input className={cx(inputClass, "pl-9")} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter notes" aria-label="Filter notes" />
-        </div>
-      )}
-
-      {project.notes.length === 0 ? (
-        <Empty icon={<NotebookPen className="h-8 w-8" />} title="No notes yet">
-          Save decisions, gotchas and how-to-run facts here so every agent starts with them.
-        </Empty>
-      ) : notes.length === 0 ? (
-        <p className="text-sm text-zinc-500">No notes match "{filter.trim()}".</p>
-      ) : (
-        <ul className="space-y-2">
-          {notes.map((n) => (
-            <li key={n.id} className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-4 py-3">
-              <div className="mb-1 flex items-center gap-2 text-xs text-zinc-500">
-                <span className="truncate font-medium text-zinc-400">{n.author}</span>
-                <span className="ml-auto shrink-0">
-                  <TimeAgo ts={n.createdAt} />
-                </span>
-              </div>
-              <p className="text-sm break-words whitespace-pre-wrap text-zinc-300">{n.content}</p>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  )
-}
-
 function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
   // `?task=<id>` (the task header's "Open in Files tab") shows only that task's files.
   const [params, setParams] = useSearchParams()
@@ -476,14 +409,29 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
+  const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
+  const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
+  const defaults = settings.data?.settings
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={(e) => {
         e.preventDefault()
-        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys, boxSize: boxSize || null, partialClone: partialClone ? partialClone === "on" : null })
+        update.mutate({
+          id: project.id,
+          name,
+          description,
+          repo: repo.trim() || null,
+          baseBranch,
+          env: parseEnv(env),
+          removeEnv: removeKeys,
+          boxSize: boxSize || null,
+          partialClone: partialClone ? partialClone === "on" : null,
+          notesMaxCount: optionalInt(notesMax),
+          notesMaxTokens: optionalInt(notesTokens),
+        })
         onDone()
       }}
     >
@@ -525,6 +473,35 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="off">Off: full mirror</option>
         </Select>
       </Field>
+      <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">
+        <Field label="Max notes" hint={`This project's own notes budget for agents' prompts. Blank: ${defaults?.notesMaxCount ?? DEFAULT_NOTE_BUDGET.maxNotes} (Settings → Max notes).`}>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={NOTE_BUDGET_LIMITS.maxNotes.min}
+            max={NOTE_BUDGET_LIMITS.maxNotes.max}
+            className={inputClass}
+            value={notesMax}
+            onChange={(e) => setNotesMax(e.target.value)}
+            placeholder={String(defaults?.notesMaxCount ?? DEFAULT_NOTE_BUDGET.maxNotes)}
+            data-testid="project-notes-max"
+          />
+        </Field>
+        <Field label="Max note tokens" hint={`About how many tokens they may take. Blank: ${(defaults?.notesMaxTokens ?? DEFAULT_NOTE_BUDGET.maxTokens).toLocaleString()} (Settings).`}>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={NOTE_BUDGET_LIMITS.maxTokens.min}
+            max={NOTE_BUDGET_LIMITS.maxTokens.max}
+            step={100}
+            className={inputClass}
+            value={notesTokens}
+            onChange={(e) => setNotesTokens(e.target.value)}
+            placeholder={String(defaults?.notesMaxTokens ?? DEFAULT_NOTE_BUDGET.maxTokens)}
+            data-testid="project-notes-max-tokens"
+          />
+        </Field>
+      </div>
       <Field label="Env vars" hint="Values are write-only. Add KEY=value lines to set or replace.">
         <div className="mb-2 flex flex-wrap gap-1.5">
           {project.envKeys.map((k) => (

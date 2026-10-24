@@ -25,7 +25,9 @@ import {
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
 import { BOX_SIZES, DEFAULT_EFFORT, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
-import { autocompactFlag, type SettingsStore } from "./settings.js"
+import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
+import { budgetNotes } from "../shared/notes.js"
+import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
@@ -79,6 +81,8 @@ const STALL_MS = 45_000
 const START_TIMEOUT_MS = 15 * 60_000
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
+/** Note suggestions one task can leave for its retro; past that the agent is logging, not suggesting. */
+const MAX_SUGGESTIONS_PER_TASK = 20
 const BRANCH_MARK = "boxyard-branch="
 const CLONE_SIZE_MARK = "boxyard-clone-kb="
 /** How often routine upkeep runs a light gc (`gc --auto`) on each box's repo mirrors. */
@@ -1681,6 +1685,8 @@ export class TaskManager {
       const firstTurn = !row.session_started
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
+      // The prompt gets the notes that fit the budget and says how many didn't; read_notes still has them all.
+      const budgeted = budgetNotes(notes, noteBudgetOf(this.settings.get(), project))
       const projectName = (id: string) => this.store.getProject(id)?.name
       const ownerName = this.owner()
       const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
@@ -1690,7 +1696,7 @@ export class TaskManager {
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [], ownerName })
+        ? firstTurnPrompt({ task: row, notes: budgeted.shown, hiddenNotes: budgeted.hidden.length, directory, extraInputs: inputs.length ? [followup] : [], ownerName })
         : recapped
         ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
         : followup
@@ -2178,11 +2184,22 @@ export class TaskManager {
       case "message_agent":
         return this.deliverAgentMessage(row, String(ev.to), String(ev.message ?? ""), Boolean(ev.expectReply))
       case "note": {
-        const note = this.store.addNote(row.project_id, `agent: ${row.title}`, String(ev.content ?? ""))
-        say("event", `Saved a project note: ${note.content}`)
-        const project = this.store.getProject(row.project_id)
-        if (project) this.hub.broadcast({ type: "project", project })
-        return this.publishNotes(row.project_id)
+        // Agents suggest notes; the project's Captain curates them in the notes retro (server/retro.ts).
+        const content = String(ev.content ?? "").trim().slice(0, MAX_NOTE_CHARS)
+        if (!content) return
+        if (this.store.listNoteSuggestions({ taskId, limit: MAX_SUGGESTIONS_PER_TASK }).length >= MAX_SUGGESTIONS_PER_TASK) {
+          return say("event", `Note suggestion not kept: this task already made ${MAX_SUGGESTIONS_PER_TASK}. ${content}`, { kind: "note_suggestion", dropped: true })
+        }
+        const suggestion = this.store.addNoteSuggestion({
+          projectId: row.project_id,
+          taskId,
+          taskTitle: row.title,
+          content,
+          why: String(ev.why ?? "").trim().slice(0, 1000),
+        })
+        say("event", `Suggested a project note: ${suggestion.content}`, { kind: "note_suggestion", suggestionId: suggestion.id })
+        this.hub.broadcast({ type: "note_suggestions", projectId: row.project_id })
+        return
       }
       case "pr": {
         const url = String(ev.url ?? "")

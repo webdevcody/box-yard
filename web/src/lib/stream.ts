@@ -112,6 +112,9 @@ export function useServerEvents(enabled: boolean): Connection {
         case "project":
           qc.setQueryData<Project[]>(keys.projects, (list) => (list ? upsert(list, ev.project) : list))
           break
+        case "note_suggestions":
+          void qc.invalidateQueries({ queryKey: ["note-suggestions", ev.projectId] })
+          break
         case "project.deleted":
           qc.setQueryData<Project[]>(keys.projects, (list) => list?.filter((p) => p.id !== ev.projectId))
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => list?.filter((s) => s.projectId !== ev.projectId))

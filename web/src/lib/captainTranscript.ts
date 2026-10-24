@@ -3,7 +3,7 @@
 import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
 import type { EntityIndex, EntityRef } from "./linkify"
 
-export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "info"
+export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "info"
 
 /** A piece of a notice's one-line summary: plain text, or a link (artifact, PR, page). */
 export type NoticeSegment = { text: string } | { href: string; label: string }
@@ -26,6 +26,8 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
   "📎": "artifact",
   "💬": "message",
   "⚠": "warning",
+  // The notes retro and the notes budget (server/retro.ts, server/notes.ts).
+  "📝": "notes",
 }
 
 const LEADING_EMOJI = /^\s*(\p{Extended_Pictographic})️?\s*/u
@@ -80,6 +82,8 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
     kind = EMOJI_KIND[emoji[1]!] ?? "info"
     rest = rest.slice(emoji[0].length)
   }
+  // A notes retro lists every suggestion below its first line; the row shows that line (the Notes tab has the rest).
+  if (kind === "notes") rest = rest.split("\n")[0]!
   if (meta?.kind === "compaction") {
     kind = "compaction"
     // The saved file path is server-local and not openable from the browser.

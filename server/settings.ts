@@ -15,6 +15,7 @@ import {
   type AutoCompact,
   type BoxSize,
   type CostRates,
+  type Project,
   type Settings,
   type SettingSource,
   type SettingsInfo,
@@ -22,6 +23,7 @@ import {
 } from "../shared/types.js"
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
@@ -72,6 +74,9 @@ export const DEFAULT_SETTINGS: Settings = {
   diskCloneFactor: 2,
   gitPartialClone: true,
   buildCleanupIdleMinutes: 15,
+  notesRetroEnabled: true,
+  notesMaxCount: DEFAULT_NOTE_BUDGET.maxNotes,
+  notesMaxTokens: DEFAULT_NOTE_BUDGET.maxTokens,
 }
 
 /** Settings that each box takes from its own size unless set on purpose (see SettingsStore.boxLimitInfo). */
@@ -104,6 +109,8 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
+  notesMaxCount: "BOXYARD_NOTES_MAX",
+  notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
 const autoCompact = z
@@ -154,6 +161,9 @@ export const settingsPatch = z
     diskCloneFactor: z.number().min(1).max(20),
     gitPartialClone: z.boolean(),
     buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    notesRetroEnabled: z.boolean(),
+    notesMaxCount: z.number().int().min(NOTE_BUDGET_LIMITS.maxNotes.min).max(NOTE_BUDGET_LIMITS.maxNotes.max),
+    notesMaxTokens: z.number().int().min(NOTE_BUDGET_LIMITS.maxTokens.min).max(NOTE_BUDGET_LIMITS.maxTokens.max),
   })
   .partial()
   .strict()
@@ -187,6 +197,8 @@ export class SettingsStore {
       | "diskCloneFactor"
       | "gitPartialClone"
       | "buildCleanupIdleMinutes"
+      | "notesMaxCount"
+      | "notesMaxTokens"
       >
     >,
   ) {}
@@ -233,6 +245,9 @@ export class SettingsStore {
       diskCloneFactor: this.c.diskCloneFactor ?? DEFAULT_SETTINGS.diskCloneFactor,
       gitPartialClone: this.c.gitPartialClone ?? DEFAULT_SETTINGS.gitPartialClone,
       buildCleanupIdleMinutes: this.c.buildCleanupIdleMinutes ?? DEFAULT_SETTINGS.buildCleanupIdleMinutes,
+      // BOXYARD_NOTES_MAX / BOXYARD_NOTES_MAX_TOKENS are only a fallback: Settings › Max notes wins.
+      notesMaxCount: within(this.c.notesMaxCount ?? DEFAULT_SETTINGS.notesMaxCount, NOTE_BUDGET_LIMITS.maxNotes),
+      notesMaxTokens: within(this.c.notesMaxTokens ?? DEFAULT_SETTINGS.notesMaxTokens, NOTE_BUDGET_LIMITS.maxTokens),
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings
@@ -288,6 +303,13 @@ export class SettingsStore {
     return this.info()
   }
 }
+
+/** A project's notes budget: its own override where it sets one, else Settings › Max notes and the token budget. */
+export const noteBudgetOf = (s: Pick<Settings, "notesMaxCount" | "notesMaxTokens">, project?: Pick<Project, "notesMaxCount" | "notesMaxTokens"> | null): NoteBudget =>
+  projectNoteBudget(s, project)
+
+/** An env var's number, kept inside the range Settings accepts. */
+const within = (n: number, r: { min: number; max: number }) => Math.min(r.max, Math.max(r.min, Math.round(n)))
 
 /** Tokens at which an auto-compact should happen, or null when it is off. */
 export function compactThreshold(ac: AutoCompact, window: number | null): number | null {

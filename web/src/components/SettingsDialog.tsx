@@ -22,6 +22,7 @@ import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
+import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -419,6 +420,50 @@ export function SettingsDialog({
               <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
                 <EffortOptions />
               </Select>
+            </Row>
+            <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project notes</h4>
+            <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+              Every agent in a project starts with its notes. Agents only suggest notes; each project's Captain curates them into a small set of lasting rules, and you can edit
+              them on the project's Notes tab.
+            </p>
+            <Row
+              id={fid("nre")}
+              label="Notes retro"
+              help="When a task's PR merges, or a task without a PR ends done, its project's Captain decides on each note suggestion the agent left: it accepts, merges or rejects it, with a one-line reason. Nobody needs to approve them; the Notes tab shows what was decided."
+              hint={hint("notesRetroEnabled")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("nre")} type="checkbox" checked={s.notesRetroEnabled} onChange={(e) => set("notesRetroEnabled", e.target.checked)} data-testid="notes-retro" />
+                {s.notesRetroEnabled ? "On: Captains curate suggestions" : "Off: suggestions stay pending until it's on again"}
+              </label>
+            </Row>
+            <Row
+              id={fid("nmc")}
+              label="Max notes"
+              help="Most notes an agent's first prompt gets; Captains keep their project under it. Over it, agents get the newest notes that fit, their prompt says how many were left out, and the Captain is asked to prune. A project can set its own on its Settings tab."
+              hint={hint("notesMaxCount")}
+            >
+              <input
+                id={fid("nmc")}
+                type="number"
+                min={NOTE_BUDGET_LIMITS.maxNotes.min}
+                max={NOTE_BUDGET_LIMITS.maxNotes.max}
+                className={inputClass}
+                value={s.notesMaxCount}
+                onChange={(e) => set("notesMaxCount", Math.trunc(Number(e.target.value)))}
+              />
+            </Row>
+            <Row id={fid("nmt")} label="Max note tokens" help="About how many tokens all the notes may take in that prompt, next to Max notes (4 characters is about 1 token)." hint={hint("notesMaxTokens")}>
+              <input
+                id={fid("nmt")}
+                type="number"
+                min={NOTE_BUDGET_LIMITS.maxTokens.min}
+                max={NOTE_BUDGET_LIMITS.maxTokens.max}
+                step={100}
+                className={inputClass}
+                value={s.notesMaxTokens}
+                onChange={(e) => set("notesMaxTokens", Math.trunc(Number(e.target.value)))}
+              />
             </Row>
           </Panel>
         ) : section === "agents" ? (

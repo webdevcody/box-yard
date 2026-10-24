@@ -1,12 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process"
-import { randomBytes, randomUUID } from "node:crypto"
+import { createHash, randomBytes, randomUUID } from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
-import type { Store } from "./store.js"
+import type { CaptainNoticeEntry, Store } from "./store.js"
 import { BadRequestError } from "./store.js"
-import { compactThreshold, type SettingsStore } from "./settings.js"
+import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
 import { uploadsDir } from "./uploads.js"
@@ -16,6 +16,7 @@ import { attachmentNote } from "./orchestrator.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { captainSourceOf } from "../shared/captain.js"
+import { budgetLine, budgetNotes, noteLine, pruneAdvice, shortTokens } from "../shared/notes.js"
 import {
   SUMMARY_PROMPT,
   captainCompactionsDir,
@@ -47,6 +48,8 @@ interface RunResult {
 const sessionKey = (projectId: string) => `captain_session:${projectId}`
 const startedKey = (projectId: string) => `captain_session_started:${projectId}`
 const usageKey = (projectId: string) => `captain_usage:${projectId}`
+/** A hash of the notes this Captain's session last saw, so an unchanged list isn't repeated every turn. */
+const notesSeenKey = (projectId: string) => `captain_notes_seen:${projectId}`
 
 function captainSummaryPrompt(project: Project, ownerName?: string) {
   return withOwner(SUMMARY_PROMPT, ownerName).replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
@@ -92,6 +95,8 @@ export class CaptainManager {
   /** Each Captain's own MCP bearer token, so the MCP server can scope it to its project. */
   private readonly tokens = new Map<string, string>()
   onReport: ((projectId: string, content: string) => void) | null = null
+  /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
+  onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -109,7 +114,17 @@ export class CaptainManager {
     let captain = this.captains.get(project.id)
     if (!captain) {
       const mcp = { url: this.mcp.url, token: this.tokenFor(project.id) }
-      captain = new Captain(this.c, this.store, this.hub, mcp, this.settings, project, (text) => this.onReport?.(project.id, text), this.tuning)
+      captain = new Captain(
+        this.c,
+        this.store,
+        this.hub,
+        mcp,
+        this.settings,
+        project,
+        (text) => this.onReport?.(project.id, text),
+        this.tuning,
+        (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
+      )
       this.captains.set(project.id, captain)
     }
     return captain
@@ -203,6 +218,18 @@ export class CaptainManager {
     return true
   }
 
+  /**
+   * A project-level notice for its Captain (a notes retro, the notes-over-budget signal), not about one task.
+   * With `wake` the Captain gets it in an automatic wake-up, which its WakeLoopGuard may hold back (never drop).
+   */
+  projectNotice(projectId: string, content: string, meta: Record<string, unknown> = {}, { wake = true }: { wake?: boolean } = {}) {
+    if (!this.store.getProject(projectId)) return null
+    const msg = this.store.addCaptainMessage(projectId, "notice", content, meta)
+    this.hub.broadcast({ type: "captain.message", message: msg })
+    if (wake) this.get(projectId).nudge()
+    return msg
+  }
+
   stop() {
     for (const c of this.captains.values()) c.stop()
   }
@@ -239,6 +266,7 @@ class Captain {
     private readonly project: Project,
     private readonly report: (content: string) => void,
     private readonly tuning: CaptainTuning,
+    private readonly noticesHandled: (notices: CaptainNoticeEntry[], ok: boolean) => void = () => {},
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
@@ -398,17 +426,29 @@ class Captain {
     const messages = this.unansweredUserMessages()
     if (!messages.length) return
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
-    const notices = this.store.takeUnseenCaptainNotices(this.project.id)
+    const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
+    const notices = entries.map((n) => n.content)
     const prompt = [notices.length ? `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "", messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
-    await this.runPrompt(prompt)
+    const result = await this.runPrompt(prompt)
+    this.handled(entries, result.ok)
+  }
+
+  /** Tell the manager which notices this turn covered (a notes retro's leftovers are settled then). */
+  private handled(entries: CaptainNoticeEntry[], ok: boolean) {
+    if (!entries.length) return
+    try {
+      this.noticesHandled(entries, ok)
+    } catch (err) {
+      console.error(`[captain ${this.project.id}] after-turn notice handling failed:`, err)
+    }
   }
 
   private async autoTurn() {
-    const queued = this.store.peekUnseenCaptainNotices(this.project.id)
+    const queued = this.store.peekUnseenCaptainNoticeEntries(this.project.id)
     if (!queued.length) return
-    const decision = this.loopGuard.check(queued)
+    const decision = this.loopGuard.check(queued.map((n) => n.loopKey))
     if (!decision.wake) {
       // Throttled, never dropped: the updates stay queued and go out with the next wake.
       this.holdUntil(decision.until)
@@ -423,10 +463,11 @@ class Captain {
       return
     }
     this.clearThrottleTimer()
-    const notices = this.store.takeUnseenCaptainNotices(this.project.id)
-    if (!notices.length) return
-    this.loopGuard.record(notices)
+    const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
+    if (!entries.length) return
+    this.loopGuard.record(entries.map((n) => n.loopKey))
     this.autoTurns++
+    const notices = entries.map((n) => n.content)
     const result = await this.runPrompt(
       [
         `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
@@ -437,6 +478,7 @@ class Captain {
       ].join("\n\n"),
       true,
     )
+    this.handled(entries, result.ok)
     if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
   }
 
@@ -450,34 +492,57 @@ class Captain {
     this.throttleTimer.unref?.()
   }
 
-  private projectNow(): string {
+  /**
+   * The project as it stands, at the top of every Captain prompt. The notes (exactly what agents get) are
+   * listed when they changed since this session last saw them; otherwise one line says they're unchanged.
+   */
+  private projectNow(): { text: string; notesHash: string } {
     const tasks = this.store
       .listTasks({ projectId: this.project.id })
       .filter((t) => t.status !== "done")
       .map((t) => briefTask(t, this.owner()))
-    const notes = this.store.listNotes(this.project.id).slice(-12).map((n) => `- (${n.author}) ${n.content}`)
-    return [
-      `[Project now: ${this.project.name}]`,
-      this.project.repo ? `Repo: ${this.project.repo} (${this.project.baseBranch})` : "No repo.",
-      notes.length ? `Notes:\n${notes.join("\n")}` : "Notes: none.",
-      tasks.length ? `Open tasks:\n${tasks.join("\n")}` : "No open tasks.",
-    ].join("\n")
+    const notes = this.notesNow()
+    return {
+      text: [
+        `[Project now: ${this.project.name}]`,
+        this.project.repo ? `Repo: ${this.project.repo} (${this.project.baseBranch})` : "No repo.",
+        notes.text,
+        tasks.length ? `Open tasks:\n${tasks.join("\n")}` : "No open tasks.",
+      ].join("\n"),
+      notesHash: notes.hash,
+    }
+  }
+
+  private notesNow(): { text: string; hash: string } {
+    const r = budgetNotes(this.store.listNotes(this.project.id), noteBudgetOf(this.settings.get(), this.store.getProject(this.project.id)))
+    const listed = r.shown.map(noteLine)
+    const hash = createHash("sha1").update(`${budgetLine(r)}\n${listed.join("\n")}`).digest("hex").slice(0, 16)
+    const lines: string[] = []
+    if (!r.count) lines.push(`Notes: none yet (budget: ${r.maxNotes} notes, ~${shortTokens(r.maxTokens)} tokens).`)
+    else if (this.store.getKv(notesSeenKey(this.project.id)) === hash) lines.push(`Notes: unchanged since you last saw them (${budgetLine(r)}). list_notes shows them with ids.`)
+    else lines.push(`Notes, as agents get them (${budgetLine(r)}; list_notes shows ids):`, ...listed)
+    if (r.over) lines.push(withOwner(pruneAdvice(r), this.owner()))
+    return { text: lines.join("\n"), hash }
   }
 
   private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string }> {
-    const prompt = `${this.projectNow()}\n\n${body}`
+    let now = this.projectNow()
     const s = this.session()
-    let result = await this.run(prompt, s.id, s.started)
+    let result = await this.run(`${now.text}\n\n${body}`, s.id, s.started)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
       const fresh = randomUUID()
       this.store.setKv(sessionKey(this.project.id), fresh)
+      // A new session hasn't seen the notes.
+      this.store.setKv(notesSeenKey(this.project.id), null)
+      now = this.projectNow()
       const recap = this.store
         .listCaptainMessages(this.project.id, 30)
         .filter((m) => m.role === "user" || m.role === "assistant")
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
-      result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
+      result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)
     }
+    if (result.ok) this.store.setKv(notesSeenKey(this.project.id), now.notesHash)
     if (!result.ok) {
       const msg = this.store.addCaptainMessage(this.project.id, "error", `The Captain hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "captain.message", message: msg })
@@ -527,6 +592,8 @@ class Captain {
       const after = report.ok ? parseContextReport(report.raw) : null
       this.setUsage(after?.tokens ?? null, after?.window)
       finishCompaction(file, after?.tokens ?? null)
+      // The summary may not carry every note: list them again on the next turn.
+      this.store.setKv(notesSeenKey(this.project.id), null)
       const msg = this.store.addCaptainMessage(
         this.project.id,
         "notice",
@@ -566,7 +633,7 @@ class Captain {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${captainPrompt(this.project, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
+      `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
       ...session,
       ...model,
       "--effort",

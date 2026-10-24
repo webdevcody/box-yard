@@ -47,6 +47,17 @@ describe("parseNotice", () => {
     expect(parseNotice("⚠️ Box create failed. Retrying in a minute.").title).toBeNull()
   })
 
+  it("reads the notes retro and the notes budget notice as notes, showing the retro's first line", () => {
+    const retro = parseNotice(
+      "📝 **Notes retro**: 1 finished task left 2 note suggestions to curate.\nNotes now: 3 of 25 notes, ~120 of 4k tokens.\n\n**[Fix login](/tasks/task_1)** (task_1) · done, no PR\n- `sug_1`: Use pnpm",
+      { kind: "retro" },
+    )
+    expect(retro).toEqual({ kind: "notes", title: "Notes retro", summary: [{ text: "1 finished task left 2 note suggestions to curate." }] })
+    const prune = parseNotice("📝 Project notes are over budget (30 of 25 notes, ~3k of 4k tokens). Prune them.")
+    expect(prune.kind).toBe("notes")
+    expect(prune.title).toBeNull()
+  })
+
   it("drops an empty status detail instead of showing a dangling colon", () => {
     expect(parseNotice("✅ **A** is done: ").summary).toEqual([{ text: "is done" }])
   })
