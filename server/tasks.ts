@@ -91,6 +91,8 @@ const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
 
 /** Statuses a task can sit in between turns. */
 const RESTING: TaskStatus[] = [...RESTING_STATUSES]
+/** A task that takes one of its box's agent slots: a turn id, or starting/working (the same rule as Store.slotsInUse). */
+const holdsSlot = (r: TaskRow) => Boolean(r.current_turn_id) || r.status === "starting" || r.status === "working"
 const PORT_BASE = 4000
 const MAX_INTERRUPTS = 2
 const STALL_MS = 45_000
@@ -289,6 +291,8 @@ export class TaskManager {
   private diskCache = new Map<string, { at: number; space: DiskSpace }>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
   private reserved = new Map<string, Map<string, number>>()
+  /** The box's slot limit when each running turn claimed its slot, by turn id (see limitLoweredFrom). */
+  private claimedSlots = new Map<string, number>()
   /** Boxes the last placement check found too full for a new workspace. */
   private lowBoxes = new Set<string>()
   /** When each box's root disk was last swept for being low (sweepRootDisks). */
@@ -856,6 +860,19 @@ export class TaskManager {
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
   }
 
+  /**
+   * When a box runs more agents than its slots because the limit was lowered under them (Settings › Agents per
+   * box, or the box's size default): the limit those turns started under, or null. Only turns started since
+   * this server came up are known.
+   */
+  private limitLoweredFrom(boxId: string, residents: TaskRow[]): number | null {
+    const running = residents.filter(holdsSlot)
+    const slots = this.slotsFor(boxId)
+    if (running.length <= slots) return null
+    const was = Math.max(0, ...running.map((r) => (r.current_turn_id ? (this.claimedSlots.get(r.current_turn_id) ?? 0) : 0)))
+    return was > slots ? was : null
+  }
+
   private residentsFor(boxId: string) {
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).maxResidentPerBox
   }
@@ -867,7 +884,7 @@ export class TaskManager {
 
   /** Agents (running turns) across all boxes. */
   runningTotal() {
-    return this.store.listTaskRows().filter((r) => r.current_turn_id).length
+    return this.store.listTaskRows().filter(holdsSlot).length
   }
 
   /**
@@ -911,7 +928,8 @@ export class TaskManager {
         size,
         keepAlive: Boolean(b.keep_alive),
         slots: this.slotsFor(b.id),
-        runningTurns: residents.filter((r) => r.current_turn_id).length,
+        runningTurns: residents.filter(holdsSlot).length,
+        limitLoweredFrom: this.limitLoweredFrom(b.id, residents),
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
         activeMs: b.active_ms ?? 0,
@@ -1520,8 +1538,9 @@ export class TaskManager {
       })
   }
 
+  /** Agent slots in use on a box: running turns plus tasks starting there (Store.slotsInUse). */
   private runningOn(boxId: string) {
-    return this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length
+    return this.store.slotsInUse(boxId)
   }
 
   private async schedulePass() {
@@ -1533,6 +1552,8 @@ export class TaskManager {
       .sort((a, b) => a.last_active_at - b.last_active_at)
 
     this.wantsBox.clear()
+    const live = new Set(this.store.listTaskRows().map((r) => r.current_turn_id).filter(Boolean))
+    for (const id of this.claimedSlots.keys()) if (!live.has(id)) this.claimedSlots.delete(id)
     for (const listed of waiting) {
       // Over the total agent cap: wait without growing the pool. Running work is never stopped.
       const cap = this.limits().maxAgents
@@ -1548,18 +1569,26 @@ export class TaskManager {
         continue
       }
       const turnId = randomUUID()
-      // A workspace about to be made here takes disk the next placement mustn't count on.
-      if (row.box_id !== boxId) this.reserve(boxId, row.id, this.cloneBytes(row) ?? 0)
-      // Reserve the slot before any await so parallel passes see it taken.
-      this.store.updateTask(row.id, {
+      // Check and take the slot in one transaction: placement awaited, and nothing else may have taken the last
+      // slot meanwhile (another start, another server on this database). Lost it: wait for the next pass.
+      const slots = this.slotsFor(boxId)
+      const claimed = this.store.claimTurnSlot(row.id, boxId, slots, {
         status: "starting",
-        boxId,
         currentTurnId: turnId,
         error: null,
         waitReason: null,
         waitBoxSize: null,
         ...(row.compact_pending ? { compactPrevStatus: row.status } : {}),
       })
+      if (!claimed) {
+        if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
+        this.setWaitReason(row.id, `Waiting for a free slot on ${boxId}`)
+        this.emitTask(row.id)
+        continue
+      }
+      this.claimedSlots.set(turnId, slots)
+      // A workspace about to be made here takes disk the next placement mustn't count on.
+      if (row.box_id !== boxId) this.reserve(boxId, row.id, this.cloneBytes(row) ?? 0)
       this.store.touchBox(boxId)
       this.emitTask(row.id)
       void this.launch(row.id, boxId, turnId)
@@ -1614,12 +1643,13 @@ export class TaskManager {
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
         const busy = full ? null : (this.heavyBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
         if (!full && !busy) return box.id
-        // Its box is busy. Move to a free box if the archive is fresh enough.
-        if (!this.hasFreshArchive(row)) {
-          if (busy) this.setWaitReason(row.id, `Waiting: ${busy}`)
+        // Its box is busy. Its workspace lives there, so it waits for a slot unless it can move without losing work.
+        const noSlot = full ? `Waiting for a free slot on ${box.id}` : null
+        if (!this.canMove(row)) {
+          this.setWaitReason(row.id, busy ? `Waiting: ${busy}` : noSlot)
           return null
         }
-        const other = await this.pickBox(row.id, box.id, busy)
+        const other = await this.pickBox(row.id, box.id, busy, noSlot)
         if (!other) return null
         const oldBox = box.id
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
@@ -1633,6 +1663,16 @@ export class TaskManager {
     }
     const boxId = await this.pickBox(row.id)
     return boxId ? this.assign(row.id, boxId) : null
+  }
+
+  /**
+   * A task whose box is busy may restore on another box (of its project's size, through `pickBox`) only when
+   * nothing would be lost: its turn-end archive is fresh (git-first: the branch and WIP ref are on origin and
+   * the archive holds the rest), or it never ran. One being archived right now waits for that to finish.
+   */
+  private canMove(row: TaskRow): boolean {
+    if (this.archiving.has(row.id)) return false
+    return !row.session_started || this.hasFreshArchive(row)
   }
 
   /**
@@ -1673,7 +1713,7 @@ export class TaskManager {
    * (or new one) can take it.
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
-  private async pickBox(taskId: string, exclude?: string, busyHere: string | null = null): Promise<string | null> {
+  private async pickBox(taskId: string, exclude?: string, busyHere: string | null = null, waitHere: string | null = null): Promise<string | null> {
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -1690,7 +1730,7 @@ export class TaskManager {
         // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
         const rank = mine ? 0 : others ? 2 : 1
         const limits = this.sizeLimits(normalizeBoxSize(b.size))
-        return { id: b.id, rank, running: residents.filter((r) => r.current_turn_id).length, residents: residents.length, ...limits }
+        return { id: b.id, rank, running: residents.filter(holdsSlot).length, residents: residents.length, ...limits }
       })
       .filter((b) => b.running < b.slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
@@ -1701,7 +1741,7 @@ export class TaskManager {
       if (b.rank === 2 && this.poolHasRoom()) {
         // Rather than crowd another project's box, make one for this project.
         this.wantsBox.add(taskId)
-        this.holdForDisk(taskId, low, busy[0])
+        this.holdForDisk(taskId, low, busy[0], waitHere)
         return null
       }
       if (b.residents >= b.maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
@@ -1736,7 +1776,7 @@ export class TaskManager {
         return null
       }
     }
-    this.holdForDisk(taskId, low, busy[0])
+    this.holdForDisk(taskId, low, busy[0], waitHere)
     return null
   }
 
@@ -1835,11 +1875,15 @@ export class TaskManager {
     return this.janitor.ensure(boxId, need + pending)
   }
 
-  /** Say on a queued task why it's waiting when that's about disk space (or else `busy`: heavy tasks, memory), or clear it. */
-  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: string | null) {
+  /**
+   * Say on a queued task why it's waiting when that's about disk space (or else `busy`: heavy tasks, memory; or
+   * else `waitHere`: no free slot on the box its workspace is on), or clear it.
+   */
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: string | null, waitHere?: string | null) {
     const first = low[0]
     let reason: string | null = null
     if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy}` : `Waiting: ${busy}`
+    else if (!first && waitHere) reason = this.wantsBox.has(taskId) ? `${waitHere} or a new box` : waitHere
     if (first) {
       if (this.wantsBox.has(taskId)) reason = `Waiting for a new box: ${first.boxId} is low on disk`
       else if (first.state === "running" || low.some((l) => this.janitor.isRunning(l.boxId))) {
@@ -2288,6 +2332,9 @@ export class TaskManager {
       )
 
       if (this.stopRequested.has(taskId)) throw new StoppedBeforeStart()
+      // Setup ran long enough for maintain() to give up on this start: its slot is free again, so no agent may run.
+      const superseded = () => this.store.getTaskRow(taskId)?.current_turn_id !== turnId
+      if (superseded()) throw new TurnSuperseded()
       this.store.startTaskTurn({
         id: turnId,
         taskId,
@@ -2306,6 +2353,11 @@ export class TaskManager {
         `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
+      if (superseded()) {
+        await this.provider.exec(boxId, `cd ${q(dir)} && [ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; true`).catch(() => {})
+        this.store.finishTaskTurn(turnId, { status: "stopped", error: "Its start timed out." })
+        throw new TurnSuperseded()
+      }
 
       const merge = this.store.mergeRequestOf(row)
       if (merge && !merge.deliveredAt && queued.some((i) => i.id === merge.inputId)) {
@@ -2333,6 +2385,12 @@ export class TaskManager {
     } catch (err) {
       this.release(boxId, taskId)
       this.store.releaseInputs(turnId)
+      // The task already moved on (failed by the start timeout, maybe started again): nothing here is ours to change.
+      if (err instanceof TurnSuperseded) {
+        console.warn(`[box-yard] launch ${taskId} on ${boxId}: turn ${turnId} was given up on before its agent started`)
+        this.schedule()
+        return
+      }
       const stopped = err instanceof StoppedBeforeStart
       const cancelled = stopped && err.cancelled
       if (cancelled) this.cancelledAll.delete(taskId)
@@ -4049,6 +4107,13 @@ export class TaskManager {
     if (!this.redis) return
     const notes = this.store.listNotes(projectId).map((n) => ({ author: n.author, content: n.content }))
     void this.redis.cmd("SET", `boxyard:notes:${projectId}`, JSON.stringify(notes)).catch(() => {})
+  }
+}
+
+/** The turn this launch was for is no longer the task's (its start timed out, or it was reset): leave the task alone. */
+class TurnSuperseded extends Error {
+  constructor() {
+    super("turn superseded")
   }
 }
 

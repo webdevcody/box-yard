@@ -1106,6 +1106,32 @@ export class Store {
     return task
   }
 
+  /**
+   * Agent slots in use on a box: turns that hold a turn id, plus any task starting or working there (a turn
+   * id that isn't written yet, or a launch that outlived it, still runs an agent). `except` leaves one task out.
+   */
+  slotsInUse(boxId: string, except?: string): number {
+    const row = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM tasks WHERE box_id = ? AND id != ? AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .get(boxId, except ?? "") as { n: number }
+    return row.n
+  }
+
+  /**
+   * The one way a turn starts: check that `boxId` has a free slot (`slots`) and claim it, in one write
+   * transaction (BEGIN IMMEDIATE), so two starts in the same tick, or two servers on one database, can't both take
+   * the last slot. Refused (false) when the box is full or the task already has a turn; nothing changes then.
+   */
+  claimTurnSlot(taskId: string, boxId: string, slots: number, patch: TaskPatch): boolean {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT current_turn_id, status FROM tasks WHERE id = ?").get(taskId) as { current_turn_id: string | null; status: TaskStatus } | undefined
+      if (!row || row.current_turn_id || row.status === "starting" || row.status === "working") return false
+      if (this.slotsInUse(boxId, taskId) >= slots) return false
+      this.updateTask(taskId, { ...patch, boxId })
+      return true
+    }).immediate()
+  }
+
   deleteTask(id: string) {
     this.db.prepare("DELETE FROM tasks WHERE id = ?").run(id)
   }
