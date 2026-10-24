@@ -1,5 +1,5 @@
 // Pure helpers for the Settings › Voice provider picker: filtering and describing voices.
-import { openAiVoiceWorks, type TtsVoice } from "../../../shared/tts"
+import type { TtsVoice } from "../../../shared/tts"
 
 /** "British · middle aged · narration": a voice's labels, short enough for one line. */
 export function voiceMeta(v: TtsVoice): string {
@@ -21,8 +21,3 @@ export function filterVoices(voices: readonly TtsVoice[], query: string): TtsVoi
   })
 }
 
-/** Why a voice can't be picked with this model, or null. */
-export function voiceUnavailable(v: TtsVoice, provider: "elevenlabs" | "openai", model: string): string | null {
-  if (provider === "openai" && !openAiVoiceWorks(v.id, model)) return "gpt-4o-mini-tts only"
-  return null
-}

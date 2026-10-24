@@ -1,11 +1,13 @@
 // Cloud text-to-speech in the browser: which provider the server is set to (GET /api/tts/settings,
 // kept fresh by the `tts` event), and CloudSynth, a SynthLike that the existing SpeechQueue drives
-// exactly like window.speechSynthesis. It fetches each line from POST /api/tts and plays it through
-// one shared <audio> element; on any failure it says the line with the browser's own voice instead
-// and shows the error once.
+// exactly like window.speechSynthesis. It fetches each line from POST /api/tts and plays it: mp3
+// (ElevenLabs) through one shared <audio> element, OpenAI's streamed PCM through Web Audio as it
+// arrives (pcm.ts). On any failure it says the line with the browser's own voice instead and shows
+// the error once.
 import { useEffect, useState, useSyncExternalStore } from "react"
 import { TTS_PROVIDER_LABEL, type CloudProvider, type TtsInfo, type TtsProvider, type TtsRequest } from "../../../shared/tts"
 import type { SynthLike, UtteranceLike } from "./speech"
+import { audioContext, isPcm, pcmRate, pcmToWav, type PcmPlayback, type PcmPlayerLike, type PcmStream } from "./pcm"
 import { toast } from "./toast"
 
 const browser = typeof window !== "undefined"
@@ -61,10 +63,14 @@ export class TtsFetchError extends Error {
 /** Covers the server's own 20 s provider timeout plus the download. */
 export const CLIENT_TIMEOUT_MS = 25_000
 
-/** POST /api/tts → the mp3. Errors carry the server's (and so the provider's) exact message. */
-export async function fetchTts(req: TtsRequest, signal?: AbortSignal): Promise<Blob> {
-  const timeout = AbortSignal.timeout(CLIENT_TIMEOUT_MS)
-  const both = signal ? AbortSignal.any([signal, timeout]) : timeout
+/**
+ * POST /api/tts → the mp3, or OpenAI's PCM still streaming (resolves at the first bytes). Errors
+ * carry the server's (and so the provider's) exact message.
+ */
+export async function fetchTts(req: TtsRequest, signal?: AbortSignal): Promise<Blob | PcmStream> {
+  const timeout = new AbortController()
+  const timer = setTimeout(() => timeout.abort(), CLIENT_TIMEOUT_MS)
+  const both = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal
   let res: Response
   try {
     res = await fetch("/api/tts", {
@@ -75,15 +81,23 @@ export async function fetchTts(req: TtsRequest, signal?: AbortSignal): Promise<B
       signal: both,
     })
   } catch (err) {
+    clearTimeout(timer)
     if (signal?.aborted) throw err
-    if (timeout.aborted) throw new TtsFetchError("Box Yard's text-to-speech didn't answer in time.", 0)
+    if (timeout.signal.aborted) throw new TtsFetchError("Box Yard's text-to-speech didn't answer in time.", 0)
     throw new TtsFetchError("Can't reach the Box Yard server.", 0)
   }
   if (!res.ok) {
+    clearTimeout(timer)
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new TtsFetchError(data?.error ?? `Text-to-speech failed (HTTP ${res.status})`, res.status)
   }
-  return res.blob()
+  const rate = pcmRate(res.headers.get("content-type"))
+  // A stream may outlast the timeout (a long line); the server stops it if OpenAI goes quiet.
+  if (rate && res.body) {
+    clearTimeout(timer)
+    return { kind: "pcm", sampleRate: rate, body: res.body }
+  }
+  return res.blob().finally(() => clearTimeout(timer))
 }
 
 // ------------------------------------------------------------------ the shared audio element
@@ -138,6 +152,9 @@ export function primeAudio() {
   const a = audioElement()
   if (!a) return
   primed = true
+  // Web Audio (OpenAI's streamed voice) needs its own unlock, also inside the tap.
+  const ctx = audioContext()
+  if (ctx && ctx.state !== "running") void ctx.resume().catch(() => {})
   // Already playing, so already allowed to: don't cut it off.
   if (!a.paused) return
   try {
@@ -202,7 +219,9 @@ export interface CloudDeps {
   os: SynthLike | null
   osUtter: (text: string) => UtteranceLike
   audio: () => AudioLike | null
-  fetchAudio: (text: string, signal: AbortSignal) => Promise<Blob>
+  fetchAudio: (text: string, signal: AbortSignal) => Promise<Blob | PcmStream>
+  /** Plays streamed PCM as it arrives; without one, PCM is buffered into a WAV for `audio`. */
+  pcm?: () => PcmPlayerLike | null
   objectUrl?: { create(b: Blob): string; revoke(url: string): void }
   onFallback: (provider: CloudProvider, message: string) => void
 }
@@ -215,6 +234,7 @@ export class CloudSynth implements SynthLike {
   private seq = 0
   private ctl: AbortController | null = null
   private url: string | null = null
+  private stream: PcmPlayback | null = null
   private playing = false
   private readonly urls: NonNullable<CloudDeps["objectUrl"]>
 
@@ -256,31 +276,58 @@ export class CloudSynth implements SynthLike {
       this.d.onFallback(provider, message)
       this.speakOs(u)
     }
-    this.d.fetchAudio(u.text, ctl.signal).then(
-      (blob) => {
+    const playBlob = (blob: Blob) => {
+      if (id !== this.seq) return
+      this.revoke()
+      this.url = this.urls.create(blob)
+      audio.onplaying = () => id === this.seq && u.onstart?.({})
+      audio.onended = () => {
         if (id !== this.seq) return
-        this.revoke()
-        this.url = this.urls.create(blob)
-        audio.onplaying = () => id === this.seq && u.onstart?.({})
-        audio.onended = () => {
+        this.release()
+        u.onend?.({})
+      }
+      audio.onerror = () => fallback("This browser couldn't play the audio it got back.")
+      audio.src = this.url
+      audio.volume = u.volume
+      audio.play().catch((err: { name?: string; message?: string }) => {
+        if (id !== this.seq) return
+        if (err?.name === "NotAllowedError") {
+          // No tap yet: the queue stops and the "Click to enable voice" chip appears, as with speechSynthesis.
+          this.release()
+          u.onerror?.({ error: "not-allowed" })
+          return
+        }
+        if (err?.name === "AbortError") return
+        fallback(err?.message || "This browser couldn't play the audio it got back.")
+      })
+    }
+    const playPcm = (pcm: PcmStream, player: PcmPlayerLike) => {
+      this.stream = player.play(pcm, {
+        volume: u.volume,
+        onstart: () => id === this.seq && u.onstart?.({}),
+        onend: () => {
           if (id !== this.seq) return
           this.release()
           u.onend?.({})
-        }
-        audio.onerror = () => fallback("This browser couldn't play the audio it got back.")
-        audio.src = this.url
-        audio.volume = u.volume
-        audio.play().catch((err: { name?: string; message?: string }) => {
+        },
+        onblocked: () => {
           if (id !== this.seq) return
-          if (err?.name === "NotAllowedError") {
-            // No tap yet: the queue stops and the "Click to enable voice" chip appears, as with speechSynthesis.
-            this.release()
-            u.onerror?.({ error: "not-allowed" })
-            return
-          }
-          if (err?.name === "AbortError") return
-          fallback(err?.message || "This browser couldn't play the audio it got back.")
-        })
+          this.release()
+          u.onerror?.({ error: "not-allowed" })
+        },
+        onerror: (message) => fallback(message),
+      })
+    }
+    this.d.fetchAudio(u.text, ctl.signal).then(
+      (clip) => {
+        if (id !== this.seq) {
+          if (isPcm(clip)) void clip.body.cancel().catch(() => {})
+          return
+        }
+        if (!isPcm(clip)) return playBlob(clip)
+        const player = this.d.pcm?.()
+        if (player) return playPcm(clip, player)
+        pcmToWav(clip).then(playBlob, (err: Error) => id === this.seq && fallback(err?.message || String(err)))
       },
       (err: Error) => {
         if (ctl.signal.aborted && id !== this.seq) return
@@ -315,11 +362,13 @@ export class CloudSynth implements SynthLike {
   private release() {
     this.playing = false
     this.ctl = null
+    this.stream = null
   }
 
   cancel() {
     this.seq++
     this.ctl?.abort()
+    this.stream?.stop()
     this.release()
     const audio = this.d.audio()
     if (audio && !audio.paused) audio.pause()
@@ -378,7 +427,9 @@ export async function playPreview(id: string, source: { url: string } | { reques
   setPreviewing(id)
   let url: string | null = null
   try {
-    const src = "url" in source ? source.url : (url = URL.createObjectURL(await fetchTts(source.request)))
+    // A preview is one short line, so streamed PCM is simply buffered into a WAV for the element.
+    const clip = "url" in source ? null : await fetchTts(source.request)
+    const src = "url" in source ? source.url : (url = URL.createObjectURL(isPcm(clip) ? await pcmToWav(clip) : clip!))
     if (seq !== previewSeq) return
     await new Promise<void>((resolve, reject) => {
       a.onplaying = null
