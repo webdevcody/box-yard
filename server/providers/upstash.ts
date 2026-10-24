@@ -4,6 +4,7 @@ import type { Config } from "../config.js"
 import type { WorkerSize } from "../../shared/types.js"
 import { retry } from "../util/retry.js"
 import type { CredentialStore } from "../credentials.js"
+import { UPSTASH_MAX_UPLOAD_BYTES } from "../upload.js"
 import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
 
 const ROOT = "/workspace/home"
@@ -27,6 +28,7 @@ export class UpstashProvider implements BoxProvider {
   readonly name = "upstash"
   readonly nodeBin = "node"
   readonly claudeBin = "claude"
+  readonly maxUploadBytes = UPSTASH_MAX_UPLOAD_BYTES
   private cache = new Map<string, Box>()
   private cacheFor = ""
 
