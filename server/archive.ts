@@ -88,7 +88,9 @@ export function archiveScript(o: ArchiveScript): string {
     lines.push(
       `  m=(); for f in claude events.jsonl events.seq; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
       `  if [ -e ${id}/work/.git ]; then`,
-      `    stage=$(mktemp -d /tmp/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${thinSnapshot(o.taskId, o.mirror)}) || wip=failed`,
+      // Staged like the partial archive's snapshot, on whichever of /tmp and the work disk has more room.
+      `    ${stageBaseScript(o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
+      `    stage=$(mktemp -d "$bybase"/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${thinSnapshot(o.taskId, o.mirror)}) || wip=failed`,
       `  else echo "no git repo in work/ to archive thin" >>"$err"; wip=failed; fi`,
       `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
       `  tar czf - ${excludes} "\${m[@]}" "\${x[@]}" "\${k[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
