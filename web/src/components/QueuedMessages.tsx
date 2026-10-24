@@ -317,7 +317,7 @@ export function QueuedChatMessage({ m, projectId, who, children }: { m: ChatMess
       <div className="flex min-h-6 items-center gap-1">
         <QueuedLabel who={who} />
         {settled && !editing && (
-          <span className="-my-2.5 flex shrink-0 sm:-my-0.5">
+          <span className="-my-2.5 -mr-3.5 flex shrink-0 sm:-my-0.5 sm:-mr-1">
             <button type="button" className={ICON_BUTTON} title="Edit" aria-label="Edit queued message" onClick={() => setEditing(true)}>
               <Pencil className="h-3.5 w-3.5" />
             </button>
