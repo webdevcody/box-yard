@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
@@ -10,7 +10,7 @@ import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { memoryMeter, memoryShort } from "../lib/memoryMeter"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
+import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
@@ -791,9 +791,11 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
           <div className="shrink-0 truncate text-xs text-zinc-500">{projectName}</div>
         </div>
         {note && (
-          <div className="mt-0.5 flex items-center gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
-            <HardDrive className="h-3 w-3 shrink-0" />
-            <span className="truncate">{note}</span>
+          <div className="mt-0.5 flex items-start gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
+            <LineIcon icon={waitIconOf(task)} className="h-3 w-3" />
+            <span className="line-clamp-2 min-w-0 wrap-anywhere sm:truncate" title={note}>
+              {note}
+            </span>
           </div>
         )}
       </div>

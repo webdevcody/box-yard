@@ -602,6 +602,7 @@ export function useCreateTask() {
           summary: null,
           error: null,
           waitReason: null,
+          waitBoxSize: null,
           turnCount: 0,
           pendingCount: 0,
           lastArchivedAt: null,

@@ -1,11 +1,11 @@
 import { memo } from "react"
 import { Link } from "wouter"
-import { Activity, AlarmClock, Check, Globe, HardDrive, MessageCircleQuestion } from "lucide-react"
+import { Activity, AlarmClock, Check, Globe, MessageCircleQuestion } from "lucide-react"
 import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
+import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
@@ -61,8 +61,8 @@ export const TaskCard = memo(function TaskCard({
             <span className="line-clamp-2 break-words">{task.question}</span>
           </div>
         ) : task.status === "queued" && task.waitReason ? (
-          <p className="line-clamp-2 break-words text-amber-200/80">
-            <HardDrive className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
+          <p className="line-clamp-2 break-words text-amber-200/80" data-testid="wait-reason">
+            <WaitIcon task={task} className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
             {task.waitReason}
           </p>
         ) : task.status === "failed" && task.error ? (

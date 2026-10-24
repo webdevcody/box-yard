@@ -185,6 +185,12 @@ const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
 const queuedFromKey = (taskId: string) => `queued_from:${taskId}`
 /** The claim on a queued input handed to the agent mid-turn (Store.lockInput). */
 const handoffClaim = (turnId: string) => `handoff:${turnId}`
+/** Is a box of size `size` big enough for a project that needs `min` (null: any box is)? */
+const sizeFits = (size: unknown, min: BoxSize | null) => !min || compareSizes(normalizeBoxSize(size), min) >= 0
+
+/** How long placement leaves a box alone after its automatic resize failed. */
+const AUTO_RESIZE_RETRY_MS = 15 * 60_000
+
 /** The running or last resize of a box (old and new box both point at it). */
 const resizeKey = (boxId: string) => `box_resize:${boxId}`
 /** A box row's last memory and load reading, or null before the first. */
@@ -291,6 +297,8 @@ export class TaskManager {
   private boxOps = new Map<string, BoxOp>()
   /** Resizes in progress, by box (the old box and, once made, the new one). */
   private resizes = new Map<string, BoxResize>()
+  /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive). */
+  private smallBoxNoted = new Set<string>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
@@ -1470,7 +1478,8 @@ export class TaskManager {
     const captainProject = r.by.kind === "captain" ? r.by.projectId : null
     const who = initiatorLabel(r.by, captainProject ? this.store.getProject(captainProject)?.name : undefined)
     const boxId = r.newBoxId && r.status === "done" ? r.newBoxId : r.boxId
-    const projectIds = [...new Set(this.store.listTaskRows({ boxId }).map((t) => t.project_id).concat(this.store.getKv(boxOwnerKey(boxId)) ?? []))].filter(
+    const forProject = r.by.kind === "scheduler" ? [r.by.projectId] : []
+    const projectIds = [...new Set(this.store.listTaskRows({ boxId }).map((t) => t.project_id).concat(this.store.getKv(boxOwnerKey(boxId)) ?? [], forProject))].filter(
       (id) => this.store.getProject(id),
     )
     const why = r.reason ? ` Reason: ${r.reason}` : ""
@@ -1548,6 +1557,7 @@ export class TaskManager {
         currentTurnId: turnId,
         error: null,
         waitReason: null,
+        waitBoxSize: null,
         ...(row.compact_pending ? { compactPrevStatus: row.status } : {}),
       })
       this.store.touchBox(boxId)
@@ -1595,6 +1605,11 @@ export class TaskManager {
           this.setWaitReason(row.id, `Waiting for disk cleanup on ${box.id}`)
           return null
         }
+        const min = this.minBoxSize(row.project_id)
+        if (!sizeFits(box.size, min)) {
+          const moved = await this.leaveSmallBox(row, box.id, min!)
+          if (moved !== "stay") return moved
+        }
         // Busy: no free slot, or a free one its project's heavy-tasks setting or the box's memory rules out.
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
         const busy = full ? null : (this.heavyBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
@@ -1621,11 +1636,38 @@ export class TaskManager {
   }
 
   /**
+   * A resting task whose folder is on a box smaller than its project's size (placed before the size was set, or
+   * by an older Box Yard): it moves to a box of the size through `pickBox`, like a restore, when its archive is
+   * fresh, and waits (with the reason) until there is one. Without a fresh archive moving would lose work, so it
+   * stays and the task's log says so: "stay" means place it there as usual.
+   */
+  private async leaveSmallBox(row: TaskRow, boxId: string, min: BoxSize): Promise<string | null | "stay"> {
+    // Its turn-end archive is being written right now; it's fresh in a moment.
+    if (this.archiving.has(row.id)) return null
+    if (row.session_started && !this.hasFreshArchive(row)) {
+      const note = `Running on ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) though its project needs ${min} boxes: its workspace has no fresh archive to move.`
+      if (!this.smallBoxNoted.has(`${row.id}:${boxId}`)) {
+        this.smallBoxNoted.add(`${row.id}:${boxId}`)
+        this.addEvent(row.id, note)
+      }
+      return "stay"
+    }
+    const other = await this.pickBox(row.id, boxId)
+    if (!other) return null
+    this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    void this.removeTaskDir(boxId, row.id).catch(() => {})
+    this.addEvent(row.id, `Moved from ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) to ${other}: its project needs ${min} boxes.`)
+    return this.assign(row.id, other)
+  }
+
+  /**
    * Pick a box for a task. A project keeps its work together, so the order is:
    * 1. a box that already hosts this project (warm repo mirror, shared files),
    * 2. an empty box,
    * 3. nothing yet, when the pool has room: a new box is made for the project,
    * 4. a free slot on a box another project uses (the pool is full).
+   * Only boxes of at least the project's box size count (`minBoxSize`); when none has a free slot and the pool
+   * is full, `ensureSizedBox` grows an idle box or the task waits with the reason.
    * A box without enough free disk for a new workspace is skipped and cleaned up
    * in the background; the task waits for that cleanup only when no other box
    * (or new one) can take it.
@@ -1635,9 +1677,10 @@ export class TaskManager {
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
+    const min = this.minBoxSize(projectId)
     const candidates = this.store
       .listBoxes()
-      .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id))
+      .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id) && sizeFits(b.size, min))
       .map((b) => {
         const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
         // A box made for a project belongs to it, even before its first task lands.
@@ -1687,9 +1730,83 @@ export class TaskManager {
         this.holdForDisk(taskId, [])
         return cleaned.boxId
       }
+      // No box of the project's size has a free slot and the pool can't grow.
+      if (min && !candidates.length && row) {
+        await this.ensureSizedBox(row, min)
+        return null
+      }
     }
     this.holdForDisk(taskId, low, busy[0])
     return null
+  }
+
+  /**
+   * The smallest box a project's tasks may run on: the project's own box size (projects.box_size, set on the
+   * project's settings), or null when it has none and any box will do. Boxes go small < medium < large.
+   */
+  private minBoxSize(projectId?: string | null): BoxSize | null {
+    return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? null
+  }
+
+  /**
+   * A task of a project with a box size, the pool full and no box of at least that size with a free slot.
+   * The rule: when an idle box exists (ready, no agent running or starting on it, no other operation or cleanup
+   * on it), it's resized up to the size through the usual resize (in place, or by migration: archive every
+   * workspace, move them to a new box, delete the old one), and the task waits for it. The box with the least on
+   * its disk goes first, since that's the least to archive; agents are never stopped. With no idle box the task
+   * waits. Either way the reason is on the task, and it never falls back to a smaller box.
+   */
+  private async ensureSizedBox(row: TaskRow, min: BoxSize) {
+    const waitFor = `Waiting for a ${min} box`
+    const pending = this.sizedBoxComing(min)
+    if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
+    const idle = this.idleBoxesBelow(min)
+    for (const box of idle) {
+      const project = this.store.getProject(row.project_id)
+      try {
+        await this.resizeBox(box.id, min, {
+          by: { kind: "scheduler", projectId: row.project_id, taskId: row.id },
+          reason: `${project?.name ?? row.project_id} needs ${min} boxes, the pool is at its limit and ${box.id} was idle`,
+        })
+      } catch (err) {
+        console.warn(`[box-yard] couldn't resize idle box ${box.id} to ${min} for ${row.id}: ${errorMessage(err)}`)
+        continue
+      }
+      return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
+    }
+    this.setWaitReason(row.id, `${waitFor}: the pool is full and no box is idle to resize`, min)
+  }
+
+  /** A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. */
+  private sizedBoxComing(size: BoxSize): string | null {
+    // A migration's old box leaves the list before its resize is over, so the resizes are read on their own.
+    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size)) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
+    return this.store.listBoxes().some((b) => b.status === "creating" && sizeFits(b.size, size)) ? "a new one is being created" : null
+  }
+
+  /**
+   * Boxes smaller than `size` that can be resized without stopping anything: ready, no turn running or starting,
+   * no clear/delete/resize or cleanup on them, and no resize by placement that failed in the last 15 minutes
+   * (it'd only fail again). Least disk in use first (the least to archive), then fewest task folders.
+   */
+  private idleBoxesBelow(size: BoxSize) {
+    const now = Date.now()
+    return this.store
+      .listBoxes()
+      .filter((b) => b.status === "ready" && !sizeFits(b.size, size) && !this.boxOps.has(b.id) && !this.janitor.isRunning(b.id))
+      .filter((b) => {
+        const last = this.resizeReport(b.id)
+        return !(last?.status === "failed" && last.by.kind === "scheduler" && now - (last.finishedAt ?? 0) < AUTO_RESIZE_RETRY_MS)
+      })
+      .map((b) => ({ box: b, rows: this.store.listTaskRows({ boxId: b.id }) }))
+      .filter(({ rows }) => rows.every((r) => !r.current_turn_id && r.status !== "starting" && r.status !== "working"))
+      .map(({ box, rows }) => ({
+        box,
+        rows: rows.length,
+        used: box.disk_free_bytes != null && box.disk_total_bytes != null ? box.disk_total_bytes - box.disk_free_bytes : Number.POSITIVE_INFINITY,
+      }))
+      .sort((a, b) => a.used - b.used || a.rows - b.rows)
+      .map(({ box }) => box)
   }
 
   /**
@@ -1729,10 +1846,10 @@ export class TaskManager {
     this.setWaitReason(taskId, reason)
   }
 
-  private setWaitReason(taskId: string, reason: string | null) {
+  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null) {
     const row = this.store.getTaskRow(taskId)
-    if (!row || (row.wait_reason ?? null) === reason) return
-    this.store.updateTask(taskId, { waitReason: reason }, { touch: false })
+    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null))) return
+    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null }, { touch: false })
     if (reason) this.addEvent(taskId, `${reason}.`)
     this.emitTask(taskId)
   }

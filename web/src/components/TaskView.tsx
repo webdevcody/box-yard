@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { Link } from "wouter"
-import { Bot, HardDrive, MessageCircleQuestion, Users, Webhook } from "lucide-react"
+import { Bot, MessageCircleQuestion, Users, Webhook } from "lucide-react"
 import {
   newClientId,
   useArtifacts,
@@ -13,7 +13,7 @@ import {
 } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
-import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown, WaitIcon } from "./ui"
 import { StickyScroll } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -74,8 +74,10 @@ export function TaskView({ id }: { id: string }) {
       )}
       {task.status === "queued" && task.waitReason && (
         <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
-          <HardDrive className="h-4 w-4 shrink-0 text-amber-300" />
-          <span>{task.waitReason}. It starts on its own once there is room.</span>
+          <WaitIcon task={task} className="h-4 w-4 shrink-0 text-amber-300" />
+          <span>
+            {task.waitReason}. It starts on its own once there is room{task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.
+          </span>
         </div>
       )}
       {task.status === "failed" && task.error && (

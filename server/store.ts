@@ -97,6 +97,7 @@ export interface TaskRow {
   summary: string | null
   error: string | null
   wait_reason: string | null
+  wait_box_size: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -325,6 +326,7 @@ type TaskPatch = Partial<{
   summary: string | null
   error: string | null
   waitReason: string | null
+  waitBoxSize: BoxSize | null
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -365,6 +367,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   summary: "summary",
   error: "error",
   waitReason: "wait_reason",
+  waitBoxSize: "wait_box_size",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -892,6 +895,7 @@ export class Store {
       activity: row.summary === null ? this.taskActivity(row.id) : null,
       error: row.error,
       waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
+      waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
       turnCount: row.turn_count,
       pendingCount: pending.n,
       queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",

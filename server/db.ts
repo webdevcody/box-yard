@@ -638,6 +638,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE task_inputs ADD COLUMN message_json TEXT;
   ALTER TABLE task_inputs ADD COLUMN updated_at INTEGER;
   `,
+  `
+  -- Size-aware placement: the box size a queued task waits for (its project's box size), shown with wait_reason.
+  ALTER TABLE tasks ADD COLUMN wait_box_size TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
