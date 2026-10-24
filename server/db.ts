@@ -454,6 +454,30 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN disk_total_bytes INTEGER;
   ALTER TABLE boxes ADD COLUMN disk_checked_at INTEGER;
   `,
+  `
+  -- Box resize: a project's preferred size for new boxes, and notifications about a box rather than a task
+  -- (a resize the Coordinator or a Captain made), so task_id becomes optional.
+  ALTER TABLE projects ADD COLUMN box_size TEXT;
+  CREATE TABLE notifications_new (
+    id TEXT PRIMARY KEY,
+    task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    created_at INTEGER NOT NULL,
+    read_at INTEGER,
+    box_id TEXT,
+    href TEXT
+  );
+  INSERT INTO notifications_new (id, task_id, project_id, title, project_name, status, summary, created_at, read_at)
+    SELECT id, task_id, project_id, title, project_name, status, summary, created_at, read_at FROM notifications;
+  DROP TABLE notifications;
+  ALTER TABLE notifications_new RENAME TO notifications;
+  CREATE INDEX notifications_recent ON notifications(created_at);
+  CREATE INDEX notifications_task ON notifications(task_id);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

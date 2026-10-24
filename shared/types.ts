@@ -1,8 +1,10 @@
 // Types shared by the API server and the React app.
 import type { TaskOutcome } from "./quiet.js"
 import type { BoxCleanup } from "./disk.js"
+import type { BoxResize } from "./boxSizes.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
+export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
 
 export const TASK_STATUSES = [
   "queued", // waiting for a free box slot
@@ -35,6 +37,8 @@ export interface Project {
   /** Env var names only; values never leave the server. */
   envKeys: string[]
   notes: ProjectNote[]
+  /** Size for new boxes made for this project; null uses Settings → Worker size. */
+  boxSize: BoxSize | null
   createdAt: number
   updatedAt: number
 }
@@ -245,15 +249,17 @@ export interface BoxInfo {
   diskLow: boolean
   /** The running cleanup, or the last one. */
   cleanup: BoxCleanup | null
-  /** What is being done to the box right now; its Clean up, Clear and Delete buttons wait for it. */
+  /** What is being done to the box right now; its Clean up, Clear, Resize and Delete buttons wait for it. */
   operation: BoxOperation | null
+  /** The running resize, or the last one (on a migrated-to box: the one that made it). */
+  resize: BoxResize | null
   estimatedCostUsd: number
   usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
 }
 
-export type BoxOperation = "cleanup" | "clear" | "delete"
+export type BoxOperation = "cleanup" | "clear" | "delete" | "resize"
 
 /** What Clear box and Delete box would touch, for their confirmations. */
 export interface BoxContents {
@@ -309,6 +315,7 @@ export type UiEvent =
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
+  | { type: "box.resize"; resize: BoxResize }
   | { type: "schedule"; schedule: Schedule }
   | { type: "schedule.run"; run: ScheduleRun }
   | { type: "schedule.deleted"; scheduleId: string }
@@ -333,7 +340,12 @@ export function shouldNotify(prev: TaskStatus, next: TaskStatus): next is Notify
 /** A task that finished or needs attention, as shown in toasts and the sidebar's Recent list. */
 export interface AppNotification {
   id: string
-  taskId: string
+  /** The task it's about; null for a box notification (e.g. a resize the Coordinator made). */
+  taskId: string | null
+  /** The box it's about, for box notifications. */
+  boxId?: string | null
+  /** Where a click goes when it isn't the task page. */
+  href?: string | null
   projectId: string
   /** Task title and project name as they were when it fired. */
   title: string
@@ -407,11 +419,15 @@ export interface Settings {
   agentRoutingConfig: string
   /** When enabled, passed to the CLI as --autocompact; otherwise the CLI's own default applies. */
   agentAutoCompact: AutoCompact
-  /** Upstash Box size used for new worker boxes. */
+  /** Upstash Box size used for new worker boxes (a project's preferred size wins). */
   workerSize: WorkerSize
+  /** The Coordinator and Captains may resize boxes with resize_box. */
+  autoResizeEnabled: boolean
+  /** The largest size resize_box may pick. */
+  autoResizeMaxSize: BoxSize
   /** Most worker boxes alive at once. */
   maxBoxes: number
-  /** Claude turns that may run at once inside one box. */
+  /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
   maxAgents: number

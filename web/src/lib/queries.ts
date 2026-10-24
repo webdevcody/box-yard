@@ -163,6 +163,7 @@ export function useCreateProject() {
           baseBranch: input.baseBranch || "main",
           envKeys: Object.keys(input.env ?? {}),
           notes: [],
+          boxSize: null,
           createdAt: now,
           updatedAt: now,
         }),
