@@ -25,6 +25,7 @@
 // [pr] ends the turn without mark_done, like an agent that opened a PR and waits for review.
 // The Merge PR button's standard message ("Merge your pull request #N") stands in for `gh pr merge` when
 // FAKE_GH_STATE names a file: the worker writes {"state":"MERGED"} there for a test's fake GitHub to read.
+// FAKE_CLAUDE_COMPACT_FAIL=1 makes /compact fail (after the summary was written), FAKE_CLAUDE_BAD_SUMMARY=1 the summary.
 
 import fs from "node:fs"
 import os from "node:os"
@@ -316,6 +317,7 @@ process.stdin.on("end", async () => {
     if (/^\s*\/compact\b/.test(prompt)) {
       // Like the real CLI: same session, much smaller context, nothing printed as a message.
       if (!session.turns.length) throw new Error("Nothing to compact")
+      if (process.env.FAKE_CLAUDE_COMPACT_FAIL) throw new Error("fake /compact failure (FAKE_CLAUDE_COMPACT_FAIL)")
       session.tokens = 2000
       result = ""
     } else if (/^\s*\/context\b/.test(prompt)) {

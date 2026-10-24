@@ -340,4 +340,25 @@ describe("Captain loop guard (#45)", () => {
     await waitFor(() => !state().busy && unseen().length === 0, "message turn")
     expect(state()).toMatchObject({ throttledUntil: null, autoTurns: 0 })
   }, 60_000)
+
+  it("a hook's message gets a turn but doesn't lift the throttle or reset the count: it's an automation", async () => {
+    const { r, p, state, unseen, notice, settled } = await setup({ maxRepeats: 1, windowMs: 60_000, throttleMs: 60_000, maxThrottleMs: 60_000 })
+    const loop = "💬 **Overnight job** finished its turn: (no reply)"
+    notice(loop)
+    await settled(1)
+    notice(loop)
+    const throttled = await waitFor(() => state().throttledUntil, "throttle")
+    const replies = () => r.yard.store.listCaptainMessages(p.id, 200).filter((m) => m.role === "assistant").length
+    const before = replies()
+    r.yard.captains.send(p.id, "nightly check", { source: "hook", meta: { hookId: "hook_nightly01", hookName: "nightly" } })
+    // Its turn reads the queued update like any turn does...
+    await waitFor(() => !state().busy && unseen().length === 0, "hook turn")
+    expect(replies()).toBeGreaterThan(before)
+    // ...but the loop guard keeps holding the automatic wake-ups.
+    expect(state()).toMatchObject({ throttledUntil: throttled, autoTurns: 1 })
+    notice(loop)
+    await new Promise((res) => setTimeout(res, 300))
+    expect(state().autoTurns).toBe(1)
+    expect(unseen()).toEqual([loop])
+  }, 60_000)
 })
