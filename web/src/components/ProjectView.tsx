@@ -1,12 +1,10 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Plus, Settings, Trash2, Webhook, X } from "lucide-react"
+import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Settings, Trash2, Webhook, X } from "lucide-react"
 import {
-  newClientId,
   useAgentSettings,
   useArtifacts,
   useCaptainState,
-  useCreateTask,
   useDeleteProject,
   useHooks,
   useProjects,
@@ -24,12 +22,12 @@ import {
   parseSort,
   type TaskFilter,
 } from "../lib/projectTasks"
-import { Modal } from "./Modal"
 import { Button, Empty, Field, NewTabLink, STATUS, Select, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
+import { NewTaskButton } from "./NewTask"
 import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
@@ -84,10 +82,10 @@ export function ProjectView({ id }: { id: string }) {
   // The task page breadcrumb returns to this tab.
   useEffect(() => rememberProjectTab(id, tab), [id, tab])
 
-  // A new task dialog left open shouldn't follow you to another project.
+  // A new task popover left open shouldn't follow you to another project.
   useEffect(() => setShowNew(false), [id])
 
-  // `?new=task` (from the command palette) opens the new task dialog once.
+  // `?new=task` (from the command palette) opens the new task popover once.
   const wantsNew = params.get("new") === "task"
   useEffect(() => {
     if (!wantsNew) return
@@ -116,7 +114,8 @@ export function ProjectView({ id }: { id: string }) {
       <ProjectHeader
         project={project}
         tasks={list}
-        onNewTask={() => setShowNew(true)}
+        newTaskOpen={showNew}
+        onNewTaskOpen={setShowNew}
       />
 
       <TabBar
@@ -131,14 +130,13 @@ export function ProjectView({ id }: { id: string }) {
         }))}
       />
 
-      {tab === "tasks" && <TasksTab tasks={list} />}
+      {tab === "tasks" && <TasksTab tasks={list} projectId={id} />}
       {tab === "captain" && <CaptainTab project={project} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
       {tab === "hooks" && <HooksPanel projectId={id} />}
       {tab === "notes" && <NotesTab project={project} />}
       {tab === "files" && <Files files={files} tasks={list} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
-      {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
   )
 }
@@ -153,7 +151,17 @@ function repoUrl(repo: string) {
   return repo.includes("://") ? repo : `https://github.com/${repo}`
 }
 
-function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks: Task[]; onNewTask: () => void }) {
+function ProjectHeader({
+  project,
+  tasks,
+  newTaskOpen,
+  onNewTaskOpen,
+}: {
+  project: Project
+  tasks: Task[]
+  newTaskOpen: boolean
+  onNewTaskOpen: (open: boolean) => void
+}) {
   const count = (statuses: TaskStatus[]) => tasks.filter((t) => statuses.includes(t.status)).length
   const stats: { label: string; n: number; dot: string; filter: TaskFilter }[] = [
     { label: "working", n: count(["working", "starting", "waiting", "queued"]), dot: STATUS.working.dot, filter: "active" },
@@ -193,14 +201,12 @@ function ProjectHeader({ project, tasks, onNewTask }: { project: Project; tasks:
           ))}
         </div>
       </div>
-      <Button variant="primary" onClick={onNewTask} className="w-full sm:w-auto">
-        <Plus className="h-4 w-4" /> New task
-      </Button>
+      <NewTaskButton projectId={project.id} open={newTaskOpen} onOpenChange={onNewTaskOpen} className="w-full sm:w-auto" />
     </header>
   )
 }
 
-function TasksTab({ tasks }: { tasks: Task[] }) {
+function TasksTab({ tasks, projectId }: { tasks: Task[]; projectId: string }) {
   const [params] = useSearchParams()
   const filter = parseFilter(params.get("status"))
   const sort = parseSort(params.get("sort"))
@@ -224,7 +230,8 @@ function TasksTab({ tasks }: { tasks: Task[] }) {
     <div className="space-y-4 pb-6">
       {tasks.length === 0 ? (
         <Empty icon={<ListTodo className="h-8 w-8" />} title="No tasks yet">
-          Add one with New task, or ask the Coordinator to split up some work.
+          <p>Start one here, or ask the Coordinator to split up some work.</p>
+          <NewTaskButton projectId={projectId} variant="subtle" size="sm" className="mt-3" />
         </Empty>
       ) : (
         <>
@@ -343,57 +350,6 @@ function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
           ))}
       </ul>
     </div>
-  )
-}
-
-function NewTaskDialog({ projectId, onDone }: { projectId: string; onDone: () => void }) {
-  const create = useCreateTask()
-  const [, navigate] = useLocation()
-  const [title, setTitle] = useState("")
-  const [prompt, setPrompt] = useState("")
-  const [env, setEnv] = useState("")
-  const [showEnv, setShowEnv] = useState(false)
-  return (
-    <Modal
-      size="lg"
-      title="New task"
-      dirty={Boolean(title || prompt || env)}
-      onClose={onDone}
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (!title.trim() || !prompt.trim()) return
-        const id = newClientId("task")
-        create.mutate({ id, projectId, title: title.trim(), prompt: prompt.trim(), env: parseEnv(env) })
-        onDone()
-        navigate(`/tasks/${id}`)
-      }}
-      footer={
-        <>
-          <Button type="button" variant="ghost" onClick={onDone}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary" disabled={!title.trim() || !prompt.trim()}>
-            Start agent
-          </Button>
-        </>
-      }
-    >
-      <Field label="Title">
-        <input autoFocus className={inputClass} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Add a dark mode toggle" />
-      </Field>
-      <Field label="What should the agent do?">
-        <textarea className={inputClass} rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Goal, constraints, and what done looks like." />
-      </Field>
-      {showEnv ? (
-        <Field label="Extra env vars for this task" hint="KEY=value per line; added to the project's env.">
-          <textarea className={`${inputClass} font-mono text-xs`} rows={2} value={env} onChange={(e) => setEnv(e.target.value)} />
-        </Field>
-      ) : (
-        <button type="button" className="min-h-11 text-left text-xs whitespace-nowrap text-zinc-500 hover:text-zinc-300 sm:min-h-0" onClick={() => setShowEnv(true)}>
-          + env vars
-        </button>
-      )}
-    </Modal>
   )
 }
 
