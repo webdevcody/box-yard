@@ -2685,7 +2685,7 @@ export class TaskManager {
    * orchestrator's disk. Git-first (server/gitFirst.ts): once origin has the branch and the WIP ref, the archive
    * holds the Claude session, the log, runner state and gitignored files, with a manifest and a pack of the
    * task's own objects. Otherwise the whole folder, then (too big) only .git and a WIP snapshot, then a thin
-   * archive (manifest and a pack of everything origin's base branch lacks). Archives stream off the box
+   * archive (HEAD, the refs and a bundle of the commits GitHub lacks; server/archive.ts). Archives stream off the box
    * (server/archive.ts), so this works on a box whose work disk is full. A failure is kept for `archiveProblem`.
    * `closing`: the task is done, so its WIP ref is removed from origin once an archive has the work.
    */
@@ -2704,7 +2704,7 @@ export class TaskManager {
     let pushed: GitPrepResult | null = null
     try {
       if (push) {
-        pushed = await this.prepGit(row, project!, boxId, { push: true, packMaxBytes: this.c.archiveWorkspaces ? Math.floor(maxBytes / 2) : 0 })
+        pushed = await this.prepGit(row, project!, boxId, { packMaxBytes: this.c.archiveWorkspaces ? Math.floor(maxBytes / 2) : 0 })
         this.recordPush(taskId, pushed)
       }
       if (!this.c.archiveWorkspaces) return
@@ -2788,8 +2788,8 @@ export class TaskManager {
     return project.pushAtTurnEnd ?? this.settings.get().gitPushAtTurnEnd
   }
 
-  /** Snapshot a task's git work on its box, pushing it to origin with `push` (server/gitFirst.ts). */
-  private async prepGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, o: { push: boolean; packMaxBytes: number }): Promise<GitPrepResult> {
+  /** Snapshot a task's git work on its box and push it to origin (server/gitFirst.ts). */
+  private async prepGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, o: { packMaxBytes: number }): Promise<GitPrepResult> {
     const { spec, env } = this.mirrorSpec(boxId, project)
     const last = this.store.getTask(row.id)?.pushState?.wip ?? null
     const script = gitPrepScript({
@@ -2798,7 +2798,6 @@ export class TaskManager {
       taskId: row.id,
       branch: row.branch,
       baseBranch: project.baseBranch,
-      push: o.push,
       lastWip: last,
       packMaxBytes: o.packMaxBytes,
       git: spec.git,
@@ -2818,10 +2817,9 @@ export class TaskManager {
    */
   private recordPush(taskId: string, r: GitPrepResult) {
     const prev = this.store.getTask(taskId)?.pushState ?? null
-    const status = r.status === "local" ? "skipped" : r.status
     // A push that didn't happen leaves origin's WIP ref as it was; remember it, so it's still deleted later.
     const wip = r.status === "pushed" ? r.pushedWip : (r.pushedWip ?? prev?.wip ?? null)
-    const state: PushState = { status, at: Date.now(), branch: r.branch, head: r.head, wip, reason: r.reason }
+    const state: PushState = { status: r.status, at: Date.now(), branch: r.branch, head: r.head, wip, reason: r.reason }
     this.store.updateTask(taskId, { pushState: state }, { touch: false })
     this.emitTask(taskId)
     // The same problem with other commits in its message is still the same problem.
