@@ -85,6 +85,23 @@ describe("Coordinator: a message sent mid-turn", () => {
     expect(delivered).toBeTruthy()
   })
 
+  it("several sent mid-turn are answered together and keep their send order", async () => {
+    const r = await start()
+    await call(r, "POST", "/api/chat", { id: "chat_first0002", content: "status [slow:2]" })
+    await waitFor(async () => (await call<{ busy: boolean }>(r, "GET", "/api/orchestrator")).busy || null, "busy")
+    for (const id of ["chat_stack0001", "chat_stack0002", "chat_stack0003"]) {
+      const sent = await call<ChatMessage>(r, "POST", "/api/chat", { id, content: `note ${id}` })
+      expect(sent.meta?.queued).toBe(true)
+    }
+    const during = (await call<ChatMessage[]>(r, "GET", "/api/chat")).filter((m) => m.meta?.queued).map((m) => m.id)
+    expect(during).toEqual(["chat_stack0001", "chat_stack0002", "chat_stack0003"])
+
+    await waitFor(async () => (await call<ChatMessage[]>(r, "GET", "/api/chat")).filter((m) => m.role === "assistant").length >= 2 || null, "second reply")
+    await idle(r)
+    const order = (await call<ChatMessage[]>(r, "GET", "/api/chat")).map((m) => (m.role === "user" ? m.id : m.role))
+    expect(order).toEqual(["chat_first0002", "tool", "assistant", "chat_stack0001", "chat_stack0002", "chat_stack0003", "tool", "assistant"])
+  })
+
   it("a message sent while idle isn't queued", async () => {
     const r = await start()
     const sent = await call<ChatMessage>(r, "POST", "/api/chat", { id: "chat_idle00001", content: "status" })

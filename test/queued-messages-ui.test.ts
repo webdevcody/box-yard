@@ -85,7 +85,7 @@ beforeEach(() => {
     const json = (data: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify(data), { status }))
     if (path === "/api/chat" && init?.method === "POST") {
       const body = JSON.parse(init.body!) as { id: string; content: string }
-      posted = msg(body.id, "user", body.content, now - 1500, { queued: true })
+      posted = msg(body.id, "user", body.content, now - 1500 + server.filter((m) => m.meta?.queued).length, { queued: true })
       server = [...server, posted]
       return json(posted, 201)
     }
@@ -147,6 +147,38 @@ describe("Coordinator chat: a message sent mid-stream", () => {
     expect(queuedLabels()).toBe(0)
 
     // A refetch (reconnect, reload) gives the same thread.
+    await act(() => qc.refetchQueries({ queryKey: keys.chat }))
+    expect(rows()).toEqual(expected)
+  })
+})
+
+describe("Coordinator chat: several messages sent mid-stream", () => {
+  it("stack under the streaming reply in send order, and keep it through delivery and a refetch", async () => {
+    renderApp()
+    type("first thought")
+    await flush()
+    type("second thought")
+    await flush()
+    const stream = "Here is a long reply that is still"
+    expect(rows().slice(-3)).toEqual([stream, expect.stringContaining("first thought"), expect.stringContaining("second thought")])
+    expect(queuedLabels()).toBe(2)
+    await act(() => qc.refetchQueries({ queryKey: keys.chat }))
+    expect(rows().slice(-3)).toEqual([stream, expect.stringContaining("first thought"), expect.stringContaining("second thought")])
+
+    // The reply lands; the next turn reads both at once, so they share its start time.
+    const reply = msg("chat_reply0001", "assistant", "Here is a long reply that is still going. Done.", now - 1000)
+    const [q1, q2] = server.filter((m) => m.meta?.queued)
+    const at = now - 500
+    const d1 = { ...q1!, createdAt: at, meta: { queuedAt: q1!.createdAt } }
+    const d2 = { ...q2!, createdAt: at, meta: { queuedAt: q2!.createdAt } }
+    const answer = msg("chat_reply0002", "assistant", "Noted both.", now - 100)
+    server = [...server.filter((m) => !m.meta?.queued), reply, d1, d2, answer]
+    await emit({ type: "chat.message", message: reply }, { type: "chat.turn", startedAt: now - 2500, replyId: reply.id })
+    expect(rows().slice(-3)).toEqual([expect.stringContaining("Done."), expect.stringContaining("first thought"), expect.stringContaining("second thought")])
+    await emit({ type: "chat.message", message: d1 }, { type: "chat.message", message: d2 }, { type: "chat.message", message: answer }, { type: "chat.busy", busy: false })
+    const expected = ["Build the thing", "list_tasks", expect.stringContaining("Done."), "first thought", "second thought", "Noted both."]
+    expect(rows()).toEqual(expected)
+    expect(queuedLabels()).toBe(0)
     await act(() => qc.refetchQueries({ queryKey: keys.chat }))
     expect(rows()).toEqual(expected)
   })
