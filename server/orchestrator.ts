@@ -6,6 +6,7 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
+import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
 import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
@@ -472,7 +473,7 @@ export class Orchestrator {
     const notices = this.store.takeUnseenNotices()
     const notes = this.runNotes.get(queued.id)
     const prompt = [
-      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      updatesBlock("Box Yard updates since your last turn", notices),
       queued.prompt,
       `(${withOwner("This is a scheduled message from Box Yard, not a new message from Cody.", this.owner())} ${notes ?? ""} ${withOwner("Handle it as if Cody had sent it: do the work, and reply with what Cody should see.", this.owner())})`,
     ]
@@ -508,7 +509,7 @@ export class Orchestrator {
     this.autoTurns++
     await this.runPrompt(
       [
-        `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        updatesBlock("Box Yard updates since your last turn", notices),
         withOwner(
           `(Automatic wake-up: there is no new message from Cody. Tell Cody in a line or two what finished, failed or needs Cody, with links. ` +
           `If an update completes a step of work Cody already asked for and the next step is clear, start it. ` +
@@ -525,7 +526,7 @@ export class Orchestrator {
     this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
     const notices = this.store.takeUnseenNotices()
     const prompt = [
-      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      updatesBlock("Box Yard updates since your last turn", notices),
       messages.join("\n\n"),
     ]
       .filter(Boolean)
