@@ -6,6 +6,7 @@ import { withActivity } from "./taskSummary"
 import { announceCleanup, withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
+import { loadTtsInfo, setTtsInfo } from "./tts"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
 export type Connection = "connecting" | "live" | "offline"
@@ -58,6 +59,8 @@ export function useServerEvents(enabled: boolean): Connection {
       es = new EventSource("/api/stream")
       es.onopen = () => {
         setState("live")
+        // Which voice to speak with lives on the server (Settings › Voice).
+        void loadTtsInfo(true)
         // Anything could have changed while we were away.
         if (wasOffline) void qc.invalidateQueries()
         wasOffline = false
@@ -147,6 +150,10 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "captain.state":
           qc.setQueryData(keys.captain(ev.state.projectId), ev.state)
+          break
+        case "tts":
+          setTtsInfo(ev.info)
+          qc.setQueryData(keys.tts, ev.info)
           break
         case "settings":
           qc.setQueryData(keys.agentSettings, ev.info)

@@ -59,7 +59,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "voice",
     label: "Voice",
-    description: "Spoken updates when work finishes, and push-to-talk dictation in message boxes, using this browser's speech features. Saved in this browser only.",
+    description:
+      "Spoken updates when work finishes, in the browser's own voice or an ElevenLabs or OpenAI one, and push-to-talk dictation in message boxes. Most of it is saved in this browser only.",
     fields: [],
   },
   { key: "about", label: "About", description: "What this Box Yard is running on.", fields: [] },

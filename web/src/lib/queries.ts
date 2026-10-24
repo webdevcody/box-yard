@@ -6,6 +6,8 @@ import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
+import type { TtsInfo } from "../../../shared/tts"
+import { setTtsInfo } from "./tts"
 import type {
   BoxCleanup,
   BoxContents,
@@ -59,6 +61,7 @@ export const keys = {
   captainMessages: (projectId: string) => ["captain-messages", projectId] as const,
   captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
+  tts: ["tts-settings"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
 }
@@ -123,6 +126,28 @@ export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = () =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
+/** Settings › Voice text-to-speech choices; keys only as set/unset. Also feeds lib/speech's engine choice. */
+export const useTtsSettings = () =>
+  useQuery({
+    queryKey: keys.tts,
+    queryFn: async () => {
+      const info = await api<TtsInfo>("/api/tts/settings")
+      setTtsInfo(info)
+      return info
+    },
+    staleTime: Infinity,
+  })
+export function useSaveTts() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (patch: Record<string, unknown>) => api<TtsInfo>("/api/tts/settings", { method: "PUT", body: patch }),
+    onSuccess: (info) => {
+      qc.setQueryData(keys.tts, info)
+      setTtsInfo(info)
+    },
+    onError: fail("Couldn't save the voice settings"),
+  })
+}
 /** What Box Yard calls its human (Settings › Box agents › Your name). */
 export const useOwnerName = () => useAgentSettings().data?.settings.ownerName ?? DEFAULT_OWNER_NAME
 /** Newest first; kept live by the event stream (see lib/notifications.ts). */
