@@ -16,11 +16,15 @@
 //   status
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
 // Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
+// A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
+// [reply] (reply_to_agent) or [reply-task] (send_to_task), after any [slow:<seconds>]; otherwise it doesn't reply.
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
 // replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
 //   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
 // [note] suggests a project note (suggest_note) for the Captain's notes retro.
+// A line "message captain: <msg>" sends <msg> with message_captain (fire-and-forget); "message captain wait: <msg>"
+// or "message captain wait <seconds>: <msg>" waits (default 30 s). The final reply quotes each tool result.
 // [hang] keeps the turn running for two minutes (until it's stopped).
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
@@ -243,6 +247,14 @@ async function orchestrator(mcp, prompt) {
   }
   if (/\[slow\]/i.test(text)) await sleep(2000)
   if ((m = text.match(/\[slow:(\d+)\]/i))) await sleep(Number(m[1]) * 1000)
+  // Agents' message_captain messages: reply when they ask for it.
+  const agentRe = /^\[From task .*?\((task_[\w-]+)\), an agent[^\n]*\]\n([^\n]*)/gm
+  while ((m = agentRe.exec(text))) {
+    if (/\[reply\]/i.test(m[2])) await useTool(mcp, "reply_to_agent", { task: m[1], message: "Captain reply: go ahead, that's in scope." })
+    else if (/\[reply-task\]/i.test(m[2])) await useTool(mcp, "send_to_task", { task: m[1], message: "Captain reply via send_to_task: go ahead." })
+    else continue
+    lines.push(`Answered ${m[1]}.`)
+  }
   await say(withNextSteps(lines.join("\n"), ["Check the latest yard status", "Start a related task", "Summarize open decisions"]))
   return lines.join("\n")
 }
@@ -279,6 +291,13 @@ async function worker(mcp, prompt) {
   if (agent) {
     await useTool(mcp, "message_agent", { to: agent[1], message: "Hi from another agent! What are you working on?", expect_reply: false })
   }
+  const captainNotes = []
+  const captainRe = /^message captain(?: (wait)(?: (\d+))?)?:\s*(.+)$/gim
+  let cm
+  while ((cm = captainRe.exec(prompt))) {
+    const wait = cm[1] ? Number(cm[2] ?? 30) : 0
+    captainNotes.push(await useTool(mcp, "message_captain", { message: cm[3].trim(), ...(wait ? { wait_seconds: wait } : {}) }))
+  }
   if (/\[note\]/i.test(prompt))
     await useTool(mcp, "suggest_note", { content: "The mock agent says: tests run with npm test.", why: "A future agent would guess the wrong test command." })
   if (/\[preview\]/i.test(prompt)) {
@@ -295,7 +314,7 @@ async function worker(mcp, prompt) {
   else if (!/\[(ask|preview|pr)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
     await useTool(mcp, "mark_done", { summary: "The mock agent wrote box-yard-demo.md." })
   }
-  const reply = "Done for now. I wrote box-yard-demo.md."
+  const reply = ["Done for now. I wrote box-yard-demo.md.", ...captainNotes.map((r) => `message_captain: ${r}`)].join("\n\n")
   await say(withNextSteps(reply, ["Review the mock result", "Run a broader check", "Ask for a PR-ready summary"]))
   return reply
 }

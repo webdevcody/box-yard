@@ -19,6 +19,7 @@ import {
   NotebookPen,
   Paperclip,
   UserRound,
+  Users,
   Webhook,
   XCircle,
   type LucideIcon,
@@ -202,6 +203,35 @@ const INBOUND: Record<CaptainSource, { label: string; icon: LucideIcon; box: str
   coordinator: { label: "From Coordinator", icon: Bot, box: "rounded-bl-md border border-sky-500/25 bg-sky-500/5", head: "text-sky-300" },
   schedule: { label: "Scheduled", icon: AlarmClock, box: "rounded-bl-md border border-violet-500/25 bg-violet-500/5", head: "text-violet-300" },
   hook: { label: "Hook", icon: Webhook, box: "rounded-bl-md border border-teal-500/25 bg-teal-500/5", head: "text-teal-300" },
+  agent: { label: "From task", icon: Users, box: "rounded-bl-md border border-amber-500/25 bg-amber-500/5", head: "text-amber-300" },
+}
+
+/** "From task <title>" for an agent's message_captain: the title links to the task, and a waiting agent says so. */
+function AgentSource({ meta }: { meta: CaptainMessage["meta"] }) {
+  const taskId = typeof meta?.taskId === "string" ? meta.taskId : null
+  const title = typeof meta?.taskTitle === "string" && meta.taskTitle.trim() ? meta.taskTitle : (taskId ?? "unknown task")
+  const wait = typeof meta?.waitSeconds === "number" ? meta.waitSeconds : 0
+  const held = typeof meta?.heldUntil === "number"
+  return (
+    <>
+      <span className="shrink-0">From task</span>
+      {taskId ? (
+        <AppLink href={`/tasks/${taskId}`} className="min-w-0 truncate font-semibold tracking-normal normal-case hover:underline" title={`${title} (${taskId})`}>
+          {title}
+        </AppLink>
+      ) : (
+        <span className="min-w-0 truncate tracking-normal normal-case">{title}</span>
+      )}
+      {(held || wait > 0) && (
+        <span
+          className="shrink-0 rounded bg-amber-500/15 px-1 font-normal tracking-normal normal-case"
+          title={held ? "The Captain's loop guard held this repeated message back for a while" : `The agent waited up to ${wait} s mid-turn for a reply`}
+        >
+          {held ? "held by loop guard" : `waits ${wait}s`}
+        </span>
+      )}
+    </>
+  )
 }
 
 /** A message to the Captain, labelled by who sent it: Cody (right), the Coordinator or a schedule (left). Long ones fold. */
@@ -209,14 +239,16 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   const source = captainSourceOf(m)
   const s = INBOUND[source]
   const Icon = s.icon
-  const tool = typeof m.meta?.tool === "string" ? m.meta.tool : null
+  // An agent's message is always message_captain, and "From task" says so: the room goes to the task title.
+  const tool = source !== "agent" && typeof m.meta?.tool === "string" ? m.meta.tool : null
   return (
     <div id={`captain-${m.id}`} data-testid="captain-inbound" data-source={source} className={cx("flex", source === "cody" && "justify-end")}>
       <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
         <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
-          <Icon className="h-3 w-3" /> {source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
+          <Icon className="h-3 w-3 shrink-0" />{" "}
+          {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
           {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
-          <span className="ml-auto pl-2 font-normal tracking-normal normal-case text-zinc-500">
+          <span className="ml-auto shrink-0 pl-2 font-normal tracking-normal whitespace-nowrap normal-case text-zinc-500">
             <TimeAgo ts={m.createdAt} />
           </span>
         </div>
