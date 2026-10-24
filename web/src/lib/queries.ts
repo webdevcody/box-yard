@@ -101,8 +101,15 @@ function snapshot<T>(qc: QueryClient, key: readonly unknown[]) {
 export const useMe = () => useQuery({ queryKey: keys.me, queryFn: () => api<{ authed: boolean; authRequired: boolean }>("/api/me") })
 export const useHealth = () =>
   useQuery({ queryKey: keys.health, queryFn: () => api<Health>("/api/health"), refetchInterval: 30_000 })
-export const useProjects = () => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects") })
-export const useTasks = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks") })
+/**
+ * For views that read a list once, like the command palette: re-render when the list loads, not on every live update.
+ * `data` is still current whenever the view renders for another reason (a keystroke).
+ */
+type Quiet = { notifyOnChangeProps?: ["status"] }
+export const QUIET: Quiet = { notifyOnChangeProps: ["status"] }
+
+export const useProjects = (o?: Quiet) => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects"), notifyOnChangeProps: o?.notifyOnChangeProps })
+export const useTasks = (o?: Quiet) => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), notifyOnChangeProps: o?.notifyOnChangeProps })
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
@@ -111,8 +118,8 @@ export function useTask(id: string) {
 export const useTaskMessages = (id: string) =>
   useQuery({ queryKey: keys.taskMessages(id), queryFn: () => api<TaskMessage[]>(`/api/tasks/${id}/messages`) })
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
-export const useArtifacts = () => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts") })
-export const useSchedules = () => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules") })
+export const useArtifacts = (o?: Quiet) => useQuery({ queryKey: keys.artifacts, queryFn: () => api<Artifact[]>("/api/artifacts"), notifyOnChangeProps: o?.notifyOnChangeProps })
+export const useSchedules = (o?: Quiet) => useQuery({ queryKey: keys.schedules, queryFn: () => api<Schedule[]>("/api/schedules"), notifyOnChangeProps: o?.notifyOnChangeProps })
 export const useScheduleRuns = () => useQuery({ queryKey: keys.scheduleRuns, queryFn: () => api<ScheduleRun[]>("/api/schedule-runs") })
 export const useCompactions = () => useQuery({ queryKey: keys.compactions, queryFn: () => api<OrchestratorCompactionRecord[]>("/api/compactions") })
 export const useCompaction = (id: string | null) =>
@@ -162,7 +169,7 @@ export const useOwnerName = () => useAgentSettings().data?.settings.ownerName ??
 /** Newest first; kept live by the event stream (see lib/notifications.ts). */
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
-export const useBoxes = () => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes") })
+export const useBoxes = (o?: Quiet) => useQuery({ queryKey: keys.boxes, queryFn: () => api<BoxInfo[]>("/api/boxes"), notifyOnChangeProps: o?.notifyOnChangeProps })
 /** The usage report; with a range it includes `period` for it. Live events invalidate every range (prefix key). */
 export const useUsage = (range?: { from: number; to: number; live: boolean }) =>
   useQuery({
