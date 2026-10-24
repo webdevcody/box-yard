@@ -121,6 +121,9 @@ export const toast = {
     push({ kind: "task", ...t }, duration),
 }
 
+/** Worth interrupting Zen mode for: errors, and tasks that failed. Everything else waits until Zen is left. */
+export const isCritical = (t: Toast) => t.kind === "error" || (t.kind === "task" && t.tone === "red")
+
 /** What is on screen now (for tests; components use useToasts). */
 export const currentToasts = () => toasts
 

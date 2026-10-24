@@ -60,6 +60,20 @@ body {
   scrollbar-color: rgb(63 63 70) transparent;
 }
 
+/*
+ * Zen mode's column (ChatPanel with `zen`): the header, the transcript and the composer each span the window
+ * and pad themselves in to the same centered 48rem column, so the scroll area and the borders run edge to edge.
+ * Every row reserves the transcript's (thin) scrollbar gutter on both sides, so the column lines up to the pixel
+ * whether or not the scrollbar takes room. The gutter only applies to scroll containers: give rows that don't
+ * scroll overflow-hidden.
+ */
+.zen-column {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable both-edges;
+  padding-left: max(1rem, env(safe-area-inset-left), calc((100% - 48rem) / 2));
+  padding-right: max(1rem, env(safe-area-inset-right), calc((100% - 48rem) / 2));
+}
+
 .prose-chat p {
   @apply my-1.5 leading-relaxed;
 }

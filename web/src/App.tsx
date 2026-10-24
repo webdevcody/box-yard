@@ -25,6 +25,7 @@ import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
 import { BrandLogo } from "./components/BrandLogo"
+import { useZen, useZenHotkeys } from "./lib/zen"
 
 export function App() {
   const me = useMe()
@@ -37,6 +38,14 @@ export function App() {
   const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
   const closeNav = useCallback(() => setNavOpen(false), [])
   const closeChat = useCallback(() => setChatOpen(false), [])
+  const zen = useZen()
+  useZenHotkeys(zen)
+  // Drawers close behind Zen, so leaving it (Esc, back or a link) shows the page, not a drawer over it.
+  useEffect(() => {
+    if (!zen) return
+    setNavOpen(false)
+    setChatOpen(false)
+  }, [zen])
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })
@@ -49,49 +58,58 @@ export function App() {
     return <div className="grid h-full place-items-center text-sm text-zinc-500">Can't reach the Box Yard server. Is it running?</div>
   if (!authed) return <Login />
 
+  // Zen (/zen) drops everything but the chat. The chat keeps its slot in the tree either way, so entering or
+  // leaving Zen keeps the same ChatPanel: its draft, attachments and scroll position survive the switch.
   return (
     <div className="flex h-[100dvh] min-h-0 overflow-hidden">
       {/* Projects sidebar: fixed on wide screens, a drawer on small ones */}
-      <div className={cx("fixed inset-y-0 left-0 z-40 w-[min(20rem,calc(100vw-2rem))] transition-transform lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
-        style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
-      >
-        <Sidebar connection={connection} onNavigate={closeNav} />
-        <ResizeHandle {...sidebarSize.handle} className="lg:block" />
-      </div>
-      {navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
-
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-        <HealthBanner />
-        <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-zinc-900 px-3 pt-[env(safe-area-inset-top)] lg:hidden">
-          <button onClick={() => setNavOpen(true)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800" aria-label="Open navigation">
-            <Menu className="h-5 w-5" />
-          </button>
-          <BrandLogo markClassName="h-6 w-6" textClassName="font-semibold text-zinc-100" />
-          <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 xl:hidden" aria-label="Open orchestrator">
-            <MessageSquare className="h-5 w-5" />
-          </button>
+      {!zen && (
+        <div className={cx("fixed inset-y-0 left-0 z-40 w-[min(20rem,calc(100vw-2rem))] transition-transform lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
+          style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
+        >
+          <Sidebar connection={connection} onNavigate={closeNav} />
+          <ResizeHandle {...sidebarSize.handle} className="lg:block" />
         </div>
-        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-          <div className={`mx-auto h-full max-w-6xl ${PAGE_PADDING}`}>
-            <Routes />
+      )}
+      {!zen && navOpen && <div className="fixed inset-0 z-30 bg-black/50 lg:hidden" onClick={() => setNavOpen(false)} />}
+
+      {!zen && (
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          <HealthBanner />
+          <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-zinc-900 px-3 pt-[env(safe-area-inset-top)] lg:hidden">
+            <button onClick={() => setNavOpen(true)} className="grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800" aria-label="Open navigation">
+              <Menu className="h-5 w-5" />
+            </button>
+            <BrandLogo markClassName="h-6 w-6" textClassName="font-semibold text-zinc-100" />
+            <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 xl:hidden" aria-label="Open orchestrator">
+              <MessageSquare className="h-5 w-5" />
+            </button>
           </div>
-        </div>
-        {/* Clear of the floating orchestrator button, which shows between lg and xl */}
-        <Toasts className={chatOpen ? undefined : "lg:bottom-20 xl:bottom-4"} />
-      </main>
+          <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+            <div className={`mx-auto h-full max-w-6xl ${PAGE_PADDING}`}>
+              <Routes />
+            </div>
+          </div>
+          {/* Clear of the floating orchestrator button, which shows between lg and xl */}
+          <Toasts className={chatOpen ? undefined : "lg:bottom-20 xl:bottom-4"} />
+        </main>
+      )}
 
-      {/* The global orchestrator chat: always visible on wide screens */}
+      {/* The global orchestrator chat: always visible on wide screens, the whole window in Zen */}
       <div
+        data-zen={zen || undefined}
         className={cx(
-          "fixed inset-y-0 right-0 z-40 w-full max-w-none border-l border-zinc-900 transition-transform sm:max-w-md xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
-          chatOpen ? "translate-x-0" : "translate-x-full",
+          zen
+            ? "relative min-w-0 flex-1"
+            : "fixed inset-y-0 right-0 z-40 w-full max-w-none border-l border-zinc-900 transition-transform sm:max-w-md xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
+          !zen && (chatOpen ? "translate-x-0" : "translate-x-full"),
         )}
-        style={{ "--panel-w": `${chatSize.width}px` } as CSSProperties}
+        style={zen ? undefined : ({ "--panel-w": `${chatSize.width}px` } as CSSProperties)}
       >
-        <ResizeHandle {...chatSize.handle} className="xl:block" />
-        <ChatPanel onClose={closeChat} />
+        {!zen && <ResizeHandle {...chatSize.handle} className="xl:block" />}
+        <ChatPanel onClose={closeChat} zen={zen} />
       </div>
-      {!chatOpen && (
+      {!zen && !chatOpen && (
         <button
           onClick={() => setChatOpen(true)}
           className="fixed right-4 bottom-4 z-30 hidden rounded-full bg-yard-500 p-3 text-zinc-950 shadow-lg hover:bg-yard-400 lg:block xl:hidden"
@@ -100,6 +118,7 @@ export function App() {
           <MessageSquare className="h-5 w-5" />
         </button>
       )}
+      {zen && <Toasts quiet />}
       <CommandPalette />
       <SettingsHost />
       <ConfirmHost />
