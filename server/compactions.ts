@@ -134,14 +134,23 @@ export function finishCompaction(file: string, tokensAfter: number | null) {
   }
 }
 
-/** Log files, oldest first (the names sort chronologically; compare without ".md" so `<stamp>-2` follows `<stamp>`). */
+/** `<stamp>.md`, then `<stamp>-2.md`, `-3`…: plain string order puts `-2` before the first one and `-10` before `-2`. */
+function compactionOrder(name: string): [string, number] {
+  const m = /^(.*Z)(?:-(\d+))?\.md$/.exec(name)
+  return m ? [m[1]!, Number(m[2] ?? 1)] : [name, 0]
+}
+
+/** Log files, oldest first. */
 export function listCompactions(dir: string): string[] {
-  const stem = (f: string) => f.slice(0, -3)
   try {
     return fs
       .readdirSync(dir)
       .filter((f) => f.endsWith(".md"))
-      .sort((a, b) => (stem(a) < stem(b) ? -1 : stem(a) > stem(b) ? 1 : 0))
+      .sort((a, b) => {
+        const [x, i] = compactionOrder(a)
+        const [y, j] = compactionOrder(b)
+        return x < y ? -1 : x > y ? 1 : i - j
+      })
   } catch {
     return []
   }
