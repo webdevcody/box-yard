@@ -195,16 +195,16 @@ function parse<T extends z.ZodTypeAny>(schema: T, body: unknown): z.infer<T> {
  * boxes are folders on this machine until an Upstash key is saved in Settings › Credentials, then Upstash boxes,
  * with no restart. Without `credentials` (scripts), only the env counts.
  */
-/** The local runner: agents of "Runs on: This computer" projects, in `<data>/local-workspaces/<task_id>`. */
-export function localRunner(c: Config): LocalRunnerProvider {
-  return new LocalRunnerProvider(path.join(c.dataDir, "local-workspaces"), c.claudeBin)
-}
-
 export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvider {
   if (c.provider === "upstash") return new UpstashProvider(c, credentials)
   const local = new LocalProvider(path.join(c.dataDir, "local-boxes"), c.claudeBin)
   if (!credentials || c.mock || c.boxProvider === "local") return local
   return new AutoProvider(local, new UpstashProvider(c, credentials), () => Boolean(credentials.get("upstashBoxApiKey")))
+}
+
+/** The local runner: agents of "Runs on: This computer" projects, in `<data>/local-workspaces/<task_id>`. */
+export function localRunner(c: Config): LocalRunnerProvider {
+  return new LocalRunnerProvider(path.join(c.dataDir, "local-workspaces"), c.claudeBin)
 }
 
 export interface BoxYard {
