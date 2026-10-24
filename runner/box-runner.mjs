@@ -161,6 +161,8 @@ process.on("SIGTERM", () => {
 async function runTurn() {
   const turn = readJson(path.join(taskDir, "turn.json"))
   fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
+  // Answers to message_captain waits that ran out last turn; their replies come as this turn's messages.
+  for (const f of fs.readdirSync(taskDir)) if (/^captain-reply-.*\.json$/.test(f)) fs.rmSync(path.join(taskDir, f), { force: true })
   await emit({ t: "turn_start", runner: RUNNER_VERSION })
 
   const mcpConfigFile = path.join(taskDir, "mcp.json")
