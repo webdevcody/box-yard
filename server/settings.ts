@@ -31,6 +31,7 @@ import {
   OPENAI_SPEED,
   TTS_DEFAULTS,
   TTS_PROVIDERS,
+  migrateOpenAiTts,
   type CloudProvider,
   type ElevenLabsTts,
   type KeyStatus,
@@ -411,7 +412,17 @@ export class TtsSettingsStore {
   }
 
   private saved(): SavedTts {
-    const parsed = ttsPatch.safeParse(this.json(TTS_KEY))
+    const raw = this.json<Record<string, unknown>>(TTS_KEY)
+    // Choices saved for OpenAI's retired speech models (tts-1, gpt-4o-mini-tts, fable/nova/onyx,
+    // speeds over 1.5×) move to their Realtime equivalents, once, so the rest still parses.
+    if (raw.openai && typeof raw.openai === "object") {
+      const migrated = migrateOpenAiTts(raw.openai as Partial<OpenAiTts>)
+      if (JSON.stringify(migrated) !== JSON.stringify(raw.openai)) {
+        raw.openai = migrated
+        this.store.setKv(TTS_KEY, JSON.stringify(raw))
+      }
+    }
+    const parsed = ttsPatch.safeParse(raw)
     return parsed.success ? (parsed.data as SavedTts) : {}
   }
 
@@ -471,7 +482,7 @@ export class TtsSettingsStore {
         ...saved,
         ...(prefs.provider ? { provider: prefs.provider } : {}),
         ...(prefs.elevenlabs ? { elevenlabs: { ...saved.elevenlabs, ...prefs.elevenlabs } } : {}),
-        ...(prefs.openai ? { openai: { ...saved.openai, ...prefs.openai } } : {}),
+        ...(prefs.openai ? { openai: { ...saved.openai, ...migrateOpenAiTts(prefs.openai) } } : {}),
       }),
     )
     if (elevenlabsApiKey !== undefined || openaiApiKey !== undefined) {

@@ -44,38 +44,55 @@ export interface ElevenLabsTts {
 
 // ------------------------------------------------------------------ OpenAI
 
-/** From https://developers.openai.com/api/docs/guides/text-to-speech (checked 2026-10-24). The first one is the default. */
+/**
+ * OpenAI's speech models (tts-1, tts-1-hd, gpt-4o-mini-tts on /v1/audio/speech) shut down on
+ * 2027-01-06, and its named replacement, gpt-realtime-2.1-mini, only runs on the Realtime API
+ * (https://developers.openai.com/api/docs/deprecations, checked 2026-10-24). So OpenAI voice goes
+ * over a server-side Realtime WebSocket: text in, 24 kHz PCM out. The first one is the default.
+ */
 export const OPENAI_TTS_MODELS: TtsModelOption[] = [
-  { id: "gpt-4o-mini-tts", label: "gpt-4o-mini-tts", note: "Follows voice instructions (tone, accent, pace). All 13 voices." },
-  { id: "tts-1", label: "tts-1", note: "Lowest latency, lower quality. 9 voices, no instructions." },
-  { id: "tts-1-hd", label: "tts-1-hd", note: "Higher quality, slower. 9 voices, no instructions." },
+  { id: "gpt-realtime-2.1-mini", label: "gpt-realtime-2.1-mini", note: "OpenAI's replacement for its retired speech models. Follows voice instructions. 10 voices." },
+  { id: "gpt-realtime-2.1", label: "gpt-realtime-2.1", note: "The larger Realtime model: about 3× the audio price, for little gain on read-aloud." },
 ]
+
+/** Realtime's PCM output: 16-bit little-endian mono, and 24 kHz is the only rate it offers. */
+export const OPENAI_PCM_RATE = 24_000
+export const PCM_CONTENT_TYPE = `audio/pcm;rate=${OPENAI_PCM_RATE}`
 
 export interface OpenAiVoice {
   id: string
   name: string
-  /** tts-1 and tts-1-hd support only some voices. */
-  allModels: boolean
 }
 
-const OPENAI_VOICE_IDS = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "marin", "cedar"]
-const TTS1_VOICES = new Set(["alloy", "ash", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer"])
-export const OPENAI_VOICES: OpenAiVoice[] = OPENAI_VOICE_IDS.map((id) => ({ id, name: id[0]!.toUpperCase() + id.slice(1), allModels: TTS1_VOICES.has(id) }))
+/** The Realtime API's built-in voices (https://developers.openai.com/api/docs/guides/realtime-conversations, checked 2026-10-24). */
+const OPENAI_VOICE_IDS = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+export const OPENAI_VOICES: OpenAiVoice[] = OPENAI_VOICE_IDS.map((id) => ({ id, name: id[0]!.toUpperCase() + id.slice(1) }))
 
-/** OpenAI recommends marin or cedar "for best quality"; coral is the fallback on tts-1. */
+/** OpenAI recommends marin or cedar "for best quality". */
 export const OPENAI_DEFAULT_VOICE = "marin"
-export const OPENAI_SPEED = { min: 0.25, max: 4 }
+export const OPENAI_SPEED = { min: 0.25, max: 1.5 }
 export const MAX_INSTRUCTIONS = 500
 
-export const openAiSupportsInstructions = (model: string) => !/^tts-1/.test(model)
-export const openAiVoiceWorks = (voice: string, model: string) => !/^tts-1/.test(model) || TTS1_VOICES.has(voice)
+/** Voices only the retired speech models had, and the nearest Realtime voice (same register and accent). */
+export const RETIRED_OPENAI_VOICES: Record<string, string> = { fable: "ballad", nova: "coral", onyx: "cedar" }
+/** tts-1, tts-1-hd, gpt-4o-mini-tts and their dated snapshots. */
+export const isRetiredOpenAiModel = (model: string) => /^(tts-1|gpt-4o-mini-tts)/.test(model)
 
 export interface OpenAiTts {
   voice: string
   model: string
-  /** Only gpt-4o-mini-tts reads these; "" = none. */
+  /** Tone, accent, pace; "" = none. */
   instructions: string
   speed: number
+}
+
+/** Move saved or requested choices off the retired speech models: model, voice and the speed range. */
+export function migrateOpenAiTts<T extends Partial<OpenAiTts>>(o: T): T {
+  const out = { ...o }
+  if (typeof out.model === "string" && isRetiredOpenAiModel(out.model)) out.model = OPENAI_TTS_MODELS[0]!.id
+  if (typeof out.voice === "string" && RETIRED_OPENAI_VOICES[out.voice]) out.voice = RETIRED_OPENAI_VOICES[out.voice]
+  if (typeof out.speed === "number" && Number.isFinite(out.speed)) out.speed = Math.min(OPENAI_SPEED.max, Math.max(OPENAI_SPEED.min, out.speed))
+  return out
 }
 
 // ------------------------------------------------------------------ settings
@@ -117,8 +134,6 @@ export interface TtsVoice {
   /** A sample hosted by the provider; without one, the picker synthesizes previewLine(). */
   previewUrl?: string | null
   labels?: Record<string, string>
-  /** OpenAI voices tts-1 can't use. */
-  allModels?: boolean
 }
 
 export interface TtsVoiceList {

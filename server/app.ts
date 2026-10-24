@@ -14,7 +14,7 @@ import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
-import { TtsError, TtsService } from "./tts.js"
+import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
@@ -212,8 +212,8 @@ export function createBoxYard(
     qstash?: QStash | null
     now?: () => number
     github?: TaskManagerDeps["github"]
-    /** Stand-ins for the ElevenLabs / OpenAI HTTP APIs (tests). */
-    tts?: { fetch?: typeof fetch; timeoutMs?: number; voicesTtlMs?: number }
+    /** Stand-ins for ElevenLabs' HTTP API and OpenAI's Realtime socket (tests). */
+    tts?: Pick<TtsOptions, "fetch" | "WebSocket" | "timeoutMs" | "voicesTtlMs">
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -574,7 +574,7 @@ export function createBoxYard(
       ttsFailed(res, err)
     }
   })
-  /** Synthesize `text` with the saved provider (or the one given) and stream the mp3 back. */
+  /** Synthesize `text` with the saved provider (or the one given) and stream the audio back as it arrives (mp3, or OpenAI's PCM). */
   api.post("/tts", async (req, res) => {
     const body = parse(schemas.tts, req.body) as Parameters<TtsService["synthesize"]>[0]
     let audio: Awaited<ReturnType<TtsService["synthesize"]>>
