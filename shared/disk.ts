@@ -8,7 +8,20 @@ export const CLEANUP_STEPS = [
   { key: "git", label: "git gc and unused repo mirrors" },
   { key: "archive", label: "Done workspaces parked in the archive" },
 ] as const
-export type CleanupStepKey = (typeof CLEANUP_STEPS)[number]["key"]
+
+/**
+ * With the work disk all but full (under EMERGENCY_FREE_BYTES free) these run before CLEANUP_STEPS: they need no
+ * room to work, and leave enough for the steps after them (installing the runner, git gc, archiving).
+ */
+export const EMERGENCY_STEPS = [
+  { key: "temp", label: "Session temp files and leftover restore/archive files" },
+  { key: "merged", label: "Done workspaces whose PR is merged and fully pushed" },
+] as const
+
+/** A box's work disk with less free than this gets the emergency steps first. */
+export const EMERGENCY_FREE_BYTES = 100 * 1024 * 1024
+
+export type CleanupStepKey = (typeof CLEANUP_STEPS)[number]["key"] | (typeof EMERGENCY_STEPS)[number]["key"]
 
 /** Clear box: every workspace is archived and leaves the box first, then the leftovers, caches and repo mirrors go. */
 export const CLEAR_STEPS: readonly { key: CleanupStepKey; label: string }[] = [

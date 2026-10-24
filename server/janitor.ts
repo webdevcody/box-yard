@@ -4,11 +4,37 @@ import type { BoxProvider } from "./providers/types.js"
 import { q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { RESTING_STATUSES } from "../shared/types.js"
-import { CLEANUP_STEPS, CLEAR_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
+import { CLEANUP_STEPS, CLEAR_STEPS, EMERGENCY_FREE_BYTES, EMERGENCY_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
 
 /** After a low-disk cleanup that couldn't reach its target, don't run another for this long (unless a launch hit ENOSPC). */
 const COOLDOWN_MS = 10 * 60_000
 const kvKey = (boxId: string) => `box_cleanup:${boxId}`
+/**
+ * Claude Code's per-session scratch in a task's config dir (claude/): shell snapshots, env, debug logs, paste and
+ * file-history caches, config backups. A resume needs none of them; the transcripts in projects/ are never touched.
+ */
+export const SESSION_TEMP_DIRS = ["shell-snapshots", "session-env", "debug", "statsig", "paste-cache", "file-history", "backups"]
+/** What the pushed check prints first; "yes" or "no <why>" follows. */
+const PUSHED_MARK = "boxyard-pushed="
+
+/**
+ * Prints whether a work folder holds anything GitHub doesn't: one repo (no nested ones), nothing uncommitted or
+ * stashed, and no commit on HEAD or any local branch that isn't on a remote branch. Always exits 0.
+ */
+export function pushedCheck(work: string): string {
+  const no = (why: string) => `{ echo "${PUSHED_MARK}no ${why}"; exit 0; }`
+  return [
+    `cd ${q(work)} 2>/dev/null || ${no("no work folder")}`,
+    `[ -d .git ] || ${no("not a git repo")}`,
+    `[ -z "$(find . -mindepth 2 -maxdepth 6 -name .git -print -quit 2>/dev/null)" ] || ${no("it holds more than one repo")}`,
+    `s=$(git --no-optional-locks status --porcelain 2>/dev/null) || ${no("git status failed")}`,
+    `[ -z "$s" ] || ${no("uncommitted changes")}`,
+    `[ -z "$(git stash list 2>/dev/null)" ] || ${no("stashed changes")}`,
+    `n=$(git rev-list --count HEAD --branches --not --remotes 2>/dev/null) || ${no("couldn't compare with origin")}`,
+    `[ "$n" = 0 ] || ${no(`$n unpushed commits`)}`,
+    `echo "${PUSHED_MARK}yes"`,
+  ].join("\n")
+}
 
 /** What the janitor needs from the task manager. */
 export interface JanitorHost {
@@ -26,6 +52,8 @@ export interface JanitorHost {
   archiveProblem(taskId: string): string
   /** Remove a resting task's folder from its box; it comes back from the archive on its next message. */
   park(taskId: string, boxId: string, note: string): Promise<void>
+  /** Remove a done task's folder without an archive (GitHub has all of it); it comes back from a recap. */
+  dropPushed(taskId: string, boxId: string): Promise<void>
   /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs; with `owner`, also the box's own project's. */
   mirrorsToKeep(boxId: string, owner?: boolean): Set<string>
   /** A run ended (ok or not). */
@@ -72,6 +100,11 @@ export function buildCleanupOrder(rows: TaskRow[], boxId: string, hasInputs: (id
 /** Every workspace on a box that Clear box archives and removes: all but running ones, least recently active first. */
 export function clearOrder(rows: TaskRow[], boxId: string): TaskRow[] {
   return rows.filter((r) => r.box_id === boxId && !r.current_turn_id && r.status !== "starting" && r.status !== "working").sort((a, b) => a.last_active_at - b.last_active_at)
+}
+
+/** Done tasks with a merged PR, whose folders may go without an archive once they hold nothing unpushed. Oldest first. */
+export function mergedOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
+  return parkOrder(rows, boxId, hasInputs).filter((r) => r.pr_state === "merged")
 }
 
 export function parkOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
@@ -204,7 +237,9 @@ export class BoxJanitor {
     report.freeAfter = free
     report.enough = enough()
 
-    for (const step of opts.clear ? CLEAR_STEPS : CLEANUP_STEPS) {
+    // Nearly full: first the steps that need no room, so the rest (runner install, git gc, archives) can work.
+    const emergency = !opts.clear && free !== null && free < EMERGENCY_FREE_BYTES
+    for (const step of opts.clear ? CLEAR_STEPS : emergency ? [...EMERGENCY_STEPS, ...CLEANUP_STEPS] : CLEANUP_STEPS) {
       const entry: CleanupStepReport = { key: step.key, label: step.label, freedBytes: 0, removed: [], skipped: null }
       report.steps.push(entry)
       if (enough()) {
@@ -246,6 +281,55 @@ export class BoxJanitor {
     const cloning = () => onBox().some((r) => r.status === "starting")
 
     switch (key) {
+      case "temp": {
+        const resting = onBox().filter((r) => !r.current_turn_id && RESTING_STATUSES.includes(r.status) && !this.busy.has(r.id))
+        const dirs = resting.flatMap((r) => SESSION_TEMP_DIRS.map((d) => q(`${this.host.taskDir(boxId, r.id)}/claude/${d}`)))
+        const parts = dirs.length ? [`for d in ${dirs.join(" ")}; do [ -e "$d" ] && rm -rf "$d" && echo "$d"; done`] : []
+        // A restore in progress belongs to a starting task.
+        if (!cloning()) parts.push(`find ${q(root + "/.boxyard")} -maxdepth 1 -name 'restore-*.tgz' -print -delete 2>/dev/null`)
+        // Archive leftovers in the box's /tmp (local boxes share this machine's /tmp, so not there). Archives in flight are newer.
+        if (provider.name !== "local") parts.push(`find /tmp -maxdepth 1 \\( -name 'boxyard-archive-*' -o -name 'boxyard-wip.*' \\) -mmin +30 -print -exec rm -rf {} + 2>/dev/null`)
+        const out = await exec(`${parts.join("; ")}; true`)
+        const gone = out.split("\n").filter(Boolean)
+        const session = gone.filter((l) => l.includes("/claude/"))
+        const tasks = new Set(session.map((l) => resting.find((r) => l.includes(`/${r.id}/claude/`))?.id).filter(Boolean))
+        if (session.length) entry.removed.push(`session temp files of ${tasks.size} ${tasks.size === 1 ? "task" : "tasks"}`)
+        const other = gone.length - session.length
+        if (other) entry.removed.push(`${other} restore/archive temp ${other === 1 ? "file" : "files"}`)
+        return gone.length ? null : "no temp files"
+      }
+
+      case "merged": {
+        const order = mergedOrder(rows(), boxId, (id) => store.hasInputs(id))
+        if (!order.length) return "no done tasks with a merged PR on this box"
+        const kept: string[] = []
+        for (const candidate of order) {
+          this.busy.add(candidate.id)
+          try {
+            const row = store.getTaskRow(candidate.id)
+            if (!row || row.box_id !== boxId || row.current_turn_id || row.status !== "done" || row.pr_state !== "merged" || store.hasInputs(row.id)) continue
+            if (this.host.hasFreshArchive(row)) {
+              // Nothing to lose either way; parking keeps the Claude session too.
+              await this.host.park(row.id, boxId, `Workspace parked in the archive to free disk on box ${boxId}. It comes back on the next message.`)
+              entry.removed.push(`${row.id} (archived)`)
+            } else {
+              const out = await exec(pushedCheck(`${this.host.taskDir(boxId, row.id)}/work`))
+              const verdict = out.split("\n").find((l) => l.startsWith(PUSHED_MARK))?.slice(PUSHED_MARK.length) ?? "no check failed"
+              if (verdict !== "yes") {
+                kept.push(`${row.id} (${verdict.replace(/^no /, "")})`)
+                continue
+              }
+              await this.host.dropPushed(row.id, boxId)
+              entry.removed.push(`${row.id} (PR merged, nothing unpushed)`)
+            }
+          } finally {
+            this.busy.delete(candidate.id)
+          }
+          if (await progress()) break
+        }
+        return kept.length && !entry.removed.length ? `kept ${kept.join(", ")}` : null
+      }
+
       case "partials": {
         const out = await exec(`ls -1 ${q(root + "/tasks")} 2>/dev/null; true`)
         for (const name of out.split("\n").map((s) => s.trim())) {
