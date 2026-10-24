@@ -542,6 +542,14 @@ export const MIGRATIONS: string[] = [
   -- Shared git objects: a project's own choice of partial-clone (blob:none) box mirrors. NULL uses Settings.
   ALTER TABLE projects ADD COLUMN partial_clone INTEGER;
   `,
+  `
+  -- Git-first archives: a project's own choice of pushing at turn end (NULL uses Settings), each task's last push,
+  -- and free space on a box's root disk (/tmp, HOME) when it isn't the workspace disk.
+  ALTER TABLE projects ADD COLUMN push_at_turn_end INTEGER;
+  ALTER TABLE tasks ADD COLUMN push_state_json TEXT;
+  ALTER TABLE boxes ADD COLUMN root_free_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN root_total_bytes INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

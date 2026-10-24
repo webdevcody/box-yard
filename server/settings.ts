@@ -71,6 +71,7 @@ export const DEFAULT_SETTINGS: Settings = {
   diskMinFreeMb: 1024,
   diskCloneFactor: 2,
   gitPartialClone: true,
+  gitPushAtTurnEnd: true,
   buildCleanupIdleMinutes: 15,
 }
 
@@ -88,6 +89,7 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   diskMinFreeMb: "BOXYARD_DISK_MIN_FREE_MB",
   diskCloneFactor: "BOXYARD_DISK_CLONE_FACTOR",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
+  gitPushAtTurnEnd: "BOXYARD_GIT_PUSH_AT_TURN_END",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
 }
 
@@ -138,6 +140,7 @@ export const settingsPatch = z
     diskMinFreeMb: z.number().int().min(0).max(1_000_000),
     diskCloneFactor: z.number().min(1).max(20),
     gitPartialClone: z.boolean(),
+    gitPushAtTurnEnd: z.boolean(),
     buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
   })
   .partial()
@@ -171,6 +174,7 @@ export class SettingsStore {
       | "diskMinFreeMb"
       | "diskCloneFactor"
       | "gitPartialClone"
+      | "gitPushAtTurnEnd"
       | "buildCleanupIdleMinutes"
       >
     >,
@@ -217,6 +221,7 @@ export class SettingsStore {
       diskMinFreeMb: this.c.diskMinFreeMb ?? DEFAULT_SETTINGS.diskMinFreeMb,
       diskCloneFactor: this.c.diskCloneFactor ?? DEFAULT_SETTINGS.diskCloneFactor,
       gitPartialClone: this.c.gitPartialClone ?? DEFAULT_SETTINGS.gitPartialClone,
+      gitPushAtTurnEnd: this.c.gitPushAtTurnEnd ?? DEFAULT_SETTINGS.gitPushAtTurnEnd,
       buildCleanupIdleMinutes: this.c.buildCleanupIdleMinutes ?? DEFAULT_SETTINGS.buildCleanupIdleMinutes,
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }

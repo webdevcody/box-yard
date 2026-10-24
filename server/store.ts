@@ -22,6 +22,7 @@ import type {
   OrchestratorCompactionRecord,
   PrState,
   PreviewLink,
+  PushState,
   Project,
   ProjectNote,
   CatchUp,
@@ -119,6 +120,7 @@ export interface TaskRow {
   pr_head_sha: string | null
   pr_labels_json: string | null
   merge_request_json: string | null
+  push_state_json: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -217,6 +219,7 @@ interface ProjectRow {
   env_json: string
   box_size: string | null
   partial_clone: number | null
+  push_at_turn_end: number | null
   created_at: number
   updated_at: number
 }
@@ -237,6 +240,8 @@ export interface BoxRow {
   disk_free_bytes: number | null
   disk_total_bytes: number | null
   disk_checked_at: number | null
+  root_free_bytes: number | null
+  root_total_bytes: number | null
 }
 
 /** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
@@ -322,6 +327,7 @@ type TaskPatch = Partial<{
   prHeadSha: string | null
   prLabels: string[]
   mergeRequest: StoredMergeRequest | null
+  pushState: PushState | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -361,6 +367,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   prHeadSha: "pr_head_sha",
   prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
+  pushState: "push_state_json",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -450,6 +457,7 @@ export class Store {
       notes: this.listNotes(row.id),
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
+      pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -486,6 +494,7 @@ export class Store {
     env?: Record<string, string>
     boxSize?: BoxSize | null
     partialClone?: boolean | null
+    pushAtTurnEnd?: boolean | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -506,6 +515,7 @@ export class Store {
       )
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
+    if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     return this.getProject(id)!
   }
 
@@ -522,6 +532,8 @@ export class Store {
       boxSize?: BoxSize | null
       /** null clears it (Settings → Partial clone mirrors applies). */
       partialClone?: boolean | null
+      /** null clears it (Settings → Push at turn end applies). */
+      pushAtTurnEnd?: boolean | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -531,7 +543,7 @@ export class Store {
     for (const k of patch.removeEnv ?? []) delete env[k]
     this.db
       .prepare(
-        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, partial_clone = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, partial_clone = ?, push_at_turn_end = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         patch.name?.trim() || current.name,
@@ -541,6 +553,7 @@ export class Store {
         JSON.stringify(env),
         patch.boxSize === undefined ? current.box_size : patch.boxSize,
         patch.partialClone === undefined ? current.partial_clone : patch.partialClone === null ? null : patch.partialClone ? 1 : 0,
+        patch.pushAtTurnEnd === undefined ? current.push_at_turn_end : patch.pushAtTurnEnd === null ? null : patch.pushAtTurnEnd ? 1 : 0,
         Date.now(),
         id,
       )
@@ -614,6 +627,7 @@ export class Store {
       routingRule: row.routing_rule ?? null,
       routingReason: row.routing_reason ?? null,
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
+      pushState: json<PushState | null>(row.push_state_json, null),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -785,7 +799,7 @@ export class Store {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
       if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
-      else if (key === "mergeRequest") args.push(value === null ? null : JSON.stringify(value))
+      else if (key === "mergeRequest" || key === "pushState") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
     }
@@ -1707,6 +1721,8 @@ export class Store {
       diskFreeBytes: number | null
       diskTotalBytes: number | null
       diskCheckedAt: number | null
+      rootFreeBytes: number | null
+      rootTotalBytes: number | null
     }>,
   ) {
     const sets: string[] = []
@@ -1722,6 +1738,8 @@ export class Store {
       diskFreeBytes: "disk_free_bytes",
       diskTotalBytes: "disk_total_bytes",
       diskCheckedAt: "disk_checked_at",
+      rootFreeBytes: "root_free_bytes",
+      rootTotalBytes: "root_total_bytes",
     } as const
     for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
       if (v === undefined) continue

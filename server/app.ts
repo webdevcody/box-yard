@@ -76,6 +76,7 @@ const schemas = {
     env: envSchema.optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
+    pushAtTurnEnd: z.boolean().nullable().optional(),
   }),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -86,6 +87,7 @@ const schemas = {
     removeEnv: z.array(z.string()).optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
+    pushAtTurnEnd: z.boolean().nullable().optional(),
   }),
   note: z.object({ content: z.string().trim().min(1).max(4000) }),
   task: z.object({
