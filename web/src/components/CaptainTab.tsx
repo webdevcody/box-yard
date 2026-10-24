@@ -16,6 +16,7 @@ import {
   MessageSquare,
   Minimize2,
   MoreHorizontal,
+  NotebookPen,
   Paperclip,
   UserRound,
   Webhook,
@@ -59,6 +60,7 @@ const NOTICE_ICON: Record<NoticeKind, { icon: LucideIcon; className: string; lab
   message: { icon: MessageSquare, className: "text-sky-400", label: "Update" },
   warning: { icon: AlertTriangle, className: "text-amber-400", label: "Warning" },
   compaction: { icon: Minimize2, className: "text-zinc-500", label: "Compacted" },
+  notes: { icon: NotebookPen, className: "text-amber-300", label: "Project notes" },
   info: { icon: Info, className: "text-zinc-500", label: "Notice" },
 }
 

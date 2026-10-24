@@ -29,7 +29,10 @@ body {
   @apply bg-zinc-950 text-zinc-200 antialiased;
   min-width: 320px;
   overflow-x: hidden;
-  overscroll-behavior: none;
+  /* Only the y axis: no page bounce or pull-to-refresh. The x axis must stay auto, or the browser's
+     swipe-back (trackpad two-finger swipe, edge swipe) never starts: body is a scroll container here
+     (html's overflow-x stops the viewport propagation), so every gesture chains through it. */
+  overscroll-behavior-y: none;
   -webkit-text-size-adjust: 100%;
 }
 

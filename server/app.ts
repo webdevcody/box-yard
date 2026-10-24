@@ -13,9 +13,11 @@ import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
-import { SettingsStore, TtsSettingsStore } from "./settings.js"
+import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
 import { TtsError, TtsService } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
+import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
+import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
 import { LocalProvider } from "./providers/local.js"
@@ -30,6 +32,7 @@ import { HookStore } from "./hookStore.js"
 import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, type Health } from "../shared/types.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
@@ -40,6 +43,12 @@ const idSchema = z
 const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var names must be like MY_VAR"), z.string())
 
 const attachmentIds = z.array(z.string()).max(20).optional()
+
+/** A project's own notes budget; null goes back to the one in Settings. */
+const projectNotesBudget = {
+  notesMaxCount: z.number().int().min(NOTE_BUDGET_LIMITS.maxNotes.min).max(NOTE_BUDGET_LIMITS.maxNotes.max).nullable().optional(),
+  notesMaxTokens: z.number().int().min(NOTE_BUDGET_LIMITS.maxTokens.min).max(NOTE_BUDGET_LIMITS.maxTokens.max).nullable().optional(),
+}
 
 const labelList = z.array(z.string().trim().min(1).max(100)).max(30).optional()
 const hookFilters = z.object({
@@ -77,6 +86,7 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    ...projectNotesBudget,
   }),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -88,8 +98,9 @@ const schemas = {
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
+    ...projectNotesBudget,
   }),
-  note: z.object({ content: z.string().trim().min(1).max(4000) }),
+  note: z.object({ content: z.string().trim().min(1).max(MAX_NOTE_CHARS) }),
   task: z.object({
     id: idSchema,
     projectId: z.string().min(1),
@@ -178,6 +189,8 @@ export interface BoxYard {
   ttsSettings: TtsSettingsStore
   tts: TtsService
   hooks: HookEngine
+  notes: ProjectNotes
+  retro: NotesRetro
   start(): Promise<void>
   stop(): void
 }
@@ -233,6 +246,28 @@ export function createBoxYard(
     ownerName: () => settings.get().ownerName,
   })
   hooks.start()
+  const notes = new ProjectNotes({
+    store,
+    hub,
+    settings,
+    publish: (projectId) => tasks.publishNotes(projectId),
+    tellCaptain: (projectId, content, meta) => captains.projectNotice(projectId, content, meta),
+  })
+  const retro = new NotesRetro({
+    store,
+    subscribe: (listener) => tasks.subscribe(listener),
+    enabled: () => settings.get().notesRetroEnabled,
+    deliver: (projectId, content, meta) => captains.projectNotice(projectId, content, meta),
+    budget: (projectId) => notes.budgetStatus(projectId),
+    ownerName: () => settings.get().ownerName,
+    changed: (projectId) => notes.suggestionsChanged(projectId),
+  })
+  retro.start()
+  // The Captain's turn that read a retro is over: whatever it left pending is rejected, so nothing waits.
+  captains.onNoticesHandled = (projectId, notices, ok) => {
+    const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
+    if (ids.length) retro.settle(projectId, ids, ok)
+  }
   captains.onReport = (projectId, content) => {
     const project = store.getProject(projectId)
     const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
@@ -256,7 +291,7 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -333,6 +368,8 @@ export function createBoxYard(
   api.patch("/projects/:id", (req, res) => {
     const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))
     hub.broadcast({ type: "project", project })
+    // A smaller notes budget for this project can put it over: its Captain hears about it.
+    notes.checkBudget(project.id)
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
@@ -343,14 +380,35 @@ export function createBoxYard(
     hub.broadcast({ type: "project.deleted", projectId: id })
     res.json({ ok: true })
   })
+  // ---- project notes (curated by the Captain) and agents' note suggestions
+  const ownerEditor = () => ({ by: settings.get().ownerName })
+  /** A note or suggestion, only through the project it belongs to. */
+  const ofProject = <T extends { projectId: string }>(item: T, projectId: string): T => {
+    if (item.projectId !== projectId) throw new BadRequestError("That belongs to another project")
+    return item
+  }
   api.post("/projects/:id/notes", (req, res) => {
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
-    store.addNote(id, settings.get().ownerName, parse(schemas.note, req.body).content)
-    tasks.publishNotes(id)
-    const project = store.getProject(id)!
-    hub.broadcast({ type: "project", project })
-    res.status(201).json(project)
+    notes.add(id, parse(schemas.note, req.body).content, ownerEditor())
+    res.status(201).json(store.getProject(id)!)
+  })
+  api.patch("/projects/:id/notes/:noteId", (req, res) => {
+    const id = req.params.id!
+    const note = ofProject(notes.require(req.params.noteId!), id)
+    notes.update(note.id, parse(schemas.note, req.body).content, ownerEditor())
+    res.json(store.getProject(id)!)
+  })
+  api.delete("/projects/:id/notes/:noteId", (req, res) => {
+    const id = req.params.id!
+    notes.remove(ofProject(notes.require(req.params.noteId!), id).id, ownerEditor())
+    res.json(store.getProject(id)!)
+  })
+  api.get("/projects/:id/suggestions", (req, res) => {
+    const id = req.params.id!
+    if (!store.getProject(id)) throw new BadRequestError("No such project")
+    const all = req.query.status === "all"
+    res.json(store.listNoteSuggestions({ projectId: id, status: all ? undefined : ["pending"], limit: all ? 200 : 500 }))
   })
   api.get("/projects/:id/captain", (req, res) => {
     const id = req.params.id!
@@ -650,12 +708,19 @@ export function createBoxYard(
     const info = settings.update(req.body)
     hub.broadcast({ type: "settings", info })
     applyPoolChange()
+    // A smaller notes budget can put projects over it: their Captains hear about it.
+    notes.checkAllBudgets()
+    // Turning the notes retro on picks up what finished while it was off.
+    retro.catchUp()
     res.json(info)
   })
-  api.delete("/agent-settings", (_req, res) => {
-    const info = settings.reset()
+  // No `keys`: forget every saved value. `?keys=slotsPerBox,maxResidentPerBox`: forget only those (unknown keys are a 400).
+  api.delete("/agent-settings", (req, res) => {
+    const info = settings.reset(req.query.keys === undefined ? undefined : parseSettingKeys(req.query.keys))
     hub.broadcast({ type: "settings", info })
     applyPoolChange()
+    notes.checkAllBudgets()
+    retro.catchUp()
     res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {
@@ -767,6 +832,8 @@ export function createBoxYard(
     ttsSettings,
     tts,
     hooks,
+    notes,
+    retro,
     async start() {
       await tasks.start()
       scheduler.start()
@@ -785,6 +852,7 @@ export function createBoxYard(
       })
     },
     stop() {
+      retro.stop()
       hooks.stop()
       scheduler.stop()
       tasks.stop()

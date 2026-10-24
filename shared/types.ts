@@ -38,7 +38,12 @@ export interface Project {
   baseBranch: string
   /** Env var names only; values never leave the server. */
   envKeys: string[]
+  /** The curated notes every agent in the project starts with (the Captain keeps them within the notes budget). */
   notes: ProjectNote[]
+  /** This project's own notes budget (most notes in a prompt); null uses Settings › Max notes. */
+  notesMaxCount: number | null
+  /** This project's own notes token budget; null uses Settings › Notes token budget. */
+  notesMaxTokens: number | null
   /** Size for new boxes made for this project; null uses Settings → Worker size. */
   boxSize: BoxSize | null
   /** Box mirrors of its repo are partial clones (blob:none); null uses Settings → Partial clone mirrors. */
@@ -52,9 +57,43 @@ export interface Project {
 export interface ProjectNote {
   id: string
   projectId: string
+  /** Who created it: the owner's name, "captain", "orchestrator", or "agent: <task title>" for older agent notes. */
   author: string
   content: string
   createdAt: number
+  /** The last edit; createdAt until someone edits it. */
+  updatedAt: number
+  /** Who made the last edit, or null when it was never edited. */
+  updatedBy: string | null
+}
+
+export const NOTE_SUGGESTION_STATUSES = ["pending", "accepted", "merged", "rejected"] as const
+export type NoteSuggestionStatus = (typeof NOTE_SUGGESTION_STATUSES)[number]
+
+/**
+ * A note an agent proposed with suggest_note. It never reaches a prompt by itself: the project's Captain
+ * accepts it as a note, merges it into one, or rejects it in the notes retro after the task. Nobody else
+ * approves it; the Notes tab only shows the history.
+ */
+export interface NoteSuggestion {
+  id: string
+  projectId: string
+  /** The task whose agent suggested it; null once that task is deleted. */
+  taskId: string | null
+  taskTitle: string
+  content: string
+  /** What a future agent would get wrong without this note. */
+  why: string
+  status: NoteSuggestionStatus
+  /** The note it became (accepted) or was merged into. */
+  noteId: string | null
+  resolvedBy: string | null
+  /** The Captain's one-line reason for its decision. */
+  reason: string | null
+  createdAt: number
+  resolvedAt: number | null
+  /** When a notes retro handed it to the Captain; each suggestion goes out in one retro at most. */
+  retroAt: number | null
 }
 
 export interface PreviewLink {
@@ -346,6 +385,8 @@ export type UiEvent =
   | { type: "task.deleted"; taskId: string }
   | { type: "task.message"; message: TaskMessage }
   | { type: "project"; project: Project }
+  /** A project's note suggestions changed (one was added or resolved). */
+  | { type: "note_suggestions"; projectId: string }
   | { type: "project.deleted"; projectId: string }
   | { type: "chat.message"; message: ChatMessage }
   | { type: "chat.delta"; text: string }
@@ -509,6 +550,12 @@ export interface Settings {
   gitPushAtTurnEnd: boolean
   /** Remove a resting task's git-ignored build output (node_modules, dist, caches…) after this many idle minutes. 0 = off. */
   buildCleanupIdleMinutes: number
+  /** Notes retro: when a task's PR merges, or a task without a PR ends done, its Captain curates the agent's note suggestions. */
+  notesRetroEnabled: boolean
+  /** Max notes: at most this many notes go into each agent's prompt (a project can set its own)... */
+  notesMaxCount: number
+  /** ...and at most about this many tokens of them. Over either, the Captain is told to prune. */
+  notesMaxTokens: number
 }
 
 /** Agents that can run at once under a set of limits. */

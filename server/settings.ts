@@ -15,6 +15,7 @@ import {
   type AutoCompact,
   type BoxSize,
   type CostRates,
+  type Project,
   type Settings,
   type SettingSource,
   type SettingsInfo,
@@ -22,6 +23,7 @@ import {
 } from "../shared/types.js"
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
@@ -73,6 +75,24 @@ export const DEFAULT_SETTINGS: Settings = {
   gitPartialClone: true,
   gitPushAtTurnEnd: true,
   buildCleanupIdleMinutes: 15,
+  notesRetroEnabled: true,
+  notesMaxCount: DEFAULT_NOTE_BUDGET.maxNotes,
+  notesMaxTokens: DEFAULT_NOTE_BUDGET.maxTokens,
+}
+
+/** Settings that each box takes from its own size unless set on purpose (see SettingsStore.boxLimitInfo). */
+export const BOX_LIMIT_KEYS = ["slotsPerBox", "maxResidentPerBox"] as const
+export type BoxLimitKey = (typeof BOX_LIMIT_KEYS)[number]
+/** Why a box limit replaces the size defaults: saved in the UI, an env var, or a config value off the size default. */
+export type BoxLimitSource = "ui" | "env" | "config"
+
+/** Settings keys a reset may name: `?keys=slotsPerBox,maxResidentPerBox`, or repeated `keys`. Anything else is a 400. */
+export function parseSettingKeys(raw: unknown): (keyof Settings)[] {
+  const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((v) => (typeof v === "string" ? v.split(",") : [])).map((k) => k.trim()).filter(Boolean)
+  if (parts.length === 0) throw new BadRequestError("Name at least one setting to reset, e.g. ?keys=slotsPerBox")
+  const unknown = parts.filter((k) => !Object.hasOwn(DEFAULT_SETTINGS, k))
+  if (unknown.length) throw new BadRequestError(`Unknown setting${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}`)
+  return [...new Set(parts)] as (keyof Settings)[]
 }
 
 /** Env vars that seed box/pool settings; saved settings win over them. */
@@ -91,6 +111,8 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
   gitPushAtTurnEnd: "BOXYARD_GIT_PUSH_AT_TURN_END",
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
+  notesMaxCount: "BOXYARD_NOTES_MAX",
+  notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
 const autoCompact = z
@@ -142,6 +164,9 @@ export const settingsPatch = z
     gitPartialClone: z.boolean(),
     gitPushAtTurnEnd: z.boolean(),
     buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    notesRetroEnabled: z.boolean(),
+    notesMaxCount: z.number().int().min(NOTE_BUDGET_LIMITS.maxNotes.min).max(NOTE_BUDGET_LIMITS.maxNotes.max),
+    notesMaxTokens: z.number().int().min(NOTE_BUDGET_LIMITS.maxTokens.min).max(NOTE_BUDGET_LIMITS.maxTokens.max),
   })
   .partial()
   .strict()
@@ -176,6 +201,8 @@ export class SettingsStore {
       | "gitPartialClone"
       | "gitPushAtTurnEnd"
       | "buildCleanupIdleMinutes"
+      | "notesMaxCount"
+      | "notesMaxTokens"
       >
     >,
   ) {}
@@ -223,6 +250,9 @@ export class SettingsStore {
       gitPartialClone: this.c.gitPartialClone ?? DEFAULT_SETTINGS.gitPartialClone,
       gitPushAtTurnEnd: this.c.gitPushAtTurnEnd ?? DEFAULT_SETTINGS.gitPushAtTurnEnd,
       buildCleanupIdleMinutes: this.c.buildCleanupIdleMinutes ?? DEFAULT_SETTINGS.buildCleanupIdleMinutes,
+      // BOXYARD_NOTES_MAX / BOXYARD_NOTES_MAX_TOKENS are only a fallback: Settings › Max notes wins.
+      notesMaxCount: within(this.c.notesMaxCount ?? DEFAULT_SETTINGS.notesMaxCount, NOTE_BUDGET_LIMITS.maxNotes),
+      notesMaxTokens: within(this.c.notesMaxTokens ?? DEFAULT_SETTINGS.notesMaxTokens, NOTE_BUDGET_LIMITS.maxTokens),
     }
     const defaults = { ...DEFAULT_SETTINGS, workerSize, ...sizeDefaults, ...pool }
     const settings = { ...defaults, ...env, ...saved } as Settings
@@ -239,18 +269,28 @@ export class SettingsStore {
   }
 
   /**
-   * Agents per box and task folders per box when set on purpose (saved in the UI, BOX_SLOTS / BOX_MAX_RESIDENT,
-   * or a config value that isn't the worker size's default); null means each box uses its own size's default.
+   * Agents per box and task folders per box when set on purpose, and why: saved in the UI, BOX_SLOTS /
+   * BOX_MAX_RESIDENT, or a config value that isn't the worker size's default. A null value means each
+   * box uses its own size's default.
    */
-  boxLimitOverrides(): { slotsPerBox: number | null; maxResidentPerBox: number | null } {
+  boxLimitInfo(): Record<BoxLimitKey, { value: number | null; source: BoxLimitSource | null }> {
     const saved = this.saved()
-    const configWorkerSize = this.c.workerSize ?? DEFAULT_SETTINGS.workerSize
-    const d = SIZE_DEFAULTS[configWorkerSize]
-    const configSlots = this.c.slotsPerBox ?? d.slotsPerBox
-    const configResidents = this.c.maxResidentPerBox ?? d.maxResidentPerBox
-    const slots = saved.slotsPerBox ?? (process.env.BOX_SLOTS !== undefined || configSlots !== d.slotsPerBox ? configSlots : null)
-    const residents = saved.maxResidentPerBox ?? (process.env.BOX_MAX_RESIDENT !== undefined || configResidents !== d.maxResidentPerBox ? configResidents : null)
-    return { slotsPerBox: slots ?? null, maxResidentPerBox: residents ?? null }
+    const d = SIZE_DEFAULTS[this.c.workerSize ?? DEFAULT_SETTINGS.workerSize]
+    const one = (k: BoxLimitKey) => {
+      const fromSaved = saved[k]
+      if (fromSaved !== undefined) return { value: fromSaved, source: "ui" as const }
+      const configured = this.c[k] ?? d[k]
+      if (process.env[BOX_ENV[k]!] !== undefined) return { value: configured, source: "env" as const }
+      if (configured !== d[k]) return { value: configured, source: "config" as const }
+      return { value: null, source: null }
+    }
+    return { slotsPerBox: one("slotsPerBox"), maxResidentPerBox: one("maxResidentPerBox") }
+  }
+
+  /** The values of boxLimitInfo(); null means each box uses its own size's default. */
+  boxLimitOverrides(): Record<BoxLimitKey, number | null> {
+    const info = this.boxLimitInfo()
+    return { slotsPerBox: info.slotsPerBox.value, maxResidentPerBox: info.maxResidentPerBox.value }
   }
 
   update(patch: unknown): SettingsInfo {
@@ -268,6 +308,13 @@ export class SettingsStore {
     return this.info()
   }
 }
+
+/** A project's notes budget: its own override where it sets one, else Settings › Max notes and the token budget. */
+export const noteBudgetOf = (s: Pick<Settings, "notesMaxCount" | "notesMaxTokens">, project?: Pick<Project, "notesMaxCount" | "notesMaxTokens"> | null): NoteBudget =>
+  projectNoteBudget(s, project)
+
+/** An env var's number, kept inside the range Settings accepts. */
+const within = (n: number, r: { min: number; max: number }) => Math.min(r.max, Math.max(r.min, Math.round(n)))
 
 /** Tokens at which an auto-compact should happen, or null when it is off. */
 export function compactThreshold(ac: AutoCompact, window: number | null): number | null {

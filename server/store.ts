@@ -25,6 +25,8 @@ import type {
   PushState,
   Project,
   ProjectNote,
+  NoteSuggestion,
+  NoteSuggestionStatus,
   CatchUp,
   Schedule,
   ScheduleRun,
@@ -210,6 +212,13 @@ const SCHEDULE_COLUMNS: Record<keyof SchedulePatch, string> = {
   qstashId: "qstash_id",
 }
 
+/** An unseen Captain notice, with what its WakeLoopGuard counts it by and its meta (a notes retro's suggestion ids). */
+export interface CaptainNoticeEntry {
+  content: string
+  loopKey: string
+  meta: Record<string, unknown> | null
+}
+
 interface ProjectRow {
   id: string
   name: string
@@ -220,6 +229,8 @@ interface ProjectRow {
   box_size: string | null
   partial_clone: number | null
   push_at_turn_end: number | null
+  notes_max_count?: number | null
+  notes_max_tokens?: number | null
   created_at: number
   updated_at: number
 }
@@ -438,6 +449,56 @@ const oneLine = (text: string | null | undefined, max = 200) => {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t
 }
 
+interface NoteRow {
+  id: string
+  project_id: string
+  author: string
+  content: string
+  created_at: number
+  updated_at: number | null
+  updated_by: string | null
+}
+const noteFromRow = (r: NoteRow): ProjectNote => ({
+  id: r.id,
+  projectId: r.project_id,
+  author: r.author,
+  content: r.content,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at ?? r.created_at,
+  updatedBy: r.updated_by ?? null,
+})
+
+interface SuggestionRow {
+  id: string
+  project_id: string
+  task_id: string | null
+  task_title: string
+  content: string
+  why: string
+  status: NoteSuggestionStatus
+  note_id: string | null
+  resolved_by: string | null
+  reason: string | null
+  retro_at: number | null
+  created_at: number
+  resolved_at: number | null
+}
+const suggestionFromRow = (r: SuggestionRow): NoteSuggestion => ({
+  id: r.id,
+  projectId: r.project_id,
+  taskId: r.task_id,
+  taskTitle: r.task_title,
+  content: r.content,
+  why: r.why,
+  status: r.status,
+  noteId: r.note_id,
+  resolvedBy: r.resolved_by,
+  reason: r.reason,
+  createdAt: r.created_at,
+  resolvedAt: r.resolved_at,
+  retroAt: r.retro_at,
+})
+
 export class Store {
   constructor(readonly db: DB) {}
 
@@ -455,6 +516,8 @@ export class Store {
       baseBranch: row.base_branch,
       envKeys: Object.keys(json<Record<string, string>>(row.env_json, {})),
       notes: this.listNotes(row.id),
+      notesMaxCount: row.notes_max_count ?? null,
+      notesMaxTokens: row.notes_max_tokens ?? null,
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
@@ -495,6 +558,8 @@ export class Store {
     boxSize?: BoxSize | null
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
+    notesMaxCount?: number | null
+    notesMaxTokens?: number | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -516,6 +581,7 @@ export class Store {
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
+    this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
   }
 
@@ -534,6 +600,10 @@ export class Store {
       partialClone?: boolean | null
       /** null clears it (Settings → Push at turn end applies). */
       pushAtTurnEnd?: boolean | null
+      /** null clears it (Settings › Max notes applies). */
+      notesMaxCount?: number | null
+      /** null clears it (Settings › Notes token budget applies). */
+      notesMaxTokens?: number | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -557,7 +627,14 @@ export class Store {
         Date.now(),
         id,
       )
+    this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
+  private setProjectNotesBudget(id: string, b: { notesMaxCount?: number | null; notesMaxTokens?: number | null }) {
+    if (b.notesMaxCount !== undefined) this.db.prepare("UPDATE projects SET notes_max_count = ? WHERE id = ?").run(b.notesMaxCount, id)
+    if (b.notesMaxTokens !== undefined) this.db.prepare("UPDATE projects SET notes_max_tokens = ? WHERE id = ?").run(b.notesMaxTokens, id)
   }
 
   deleteProject(id: string) {
@@ -565,24 +642,101 @@ export class Store {
   }
 
   listNotes(projectId: string): ProjectNote[] {
-    const rows = this.db
-      .prepare("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at ASC")
-      .all(projectId) as { id: string; project_id: string; author: string; content: string; created_at: number }[]
-    return rows.map((r) => ({
-      id: r.id,
-      projectId: r.project_id,
-      author: r.author,
-      content: r.content,
-      createdAt: r.created_at,
-    }))
+    const rows = this.db.prepare("SELECT * FROM project_notes WHERE project_id = ? ORDER BY created_at ASC, rowid ASC").all(projectId) as NoteRow[]
+    return rows.map(noteFromRow)
+  }
+
+  getNote(id: string): ProjectNote | null {
+    const row = this.db.prepare("SELECT * FROM project_notes WHERE id = ?").get(id) as NoteRow | undefined
+    return row ? noteFromRow(row) : null
   }
 
   addNote(projectId: string, author: string, content: string): ProjectNote {
-    const note = { id: newId("note"), projectId, author, content: content.trim(), createdAt: Date.now() }
+    const now = Date.now()
+    const note: ProjectNote = { id: newId("note"), projectId, author, content: content.trim(), createdAt: now, updatedAt: now, updatedBy: null }
     this.db
-      .prepare("INSERT INTO project_notes (id, project_id, author, content, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(note.id, projectId, author, note.content, note.createdAt)
+      .prepare("INSERT INTO project_notes (id, project_id, author, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(note.id, projectId, author, note.content, now, now)
     return note
+  }
+
+  updateNote(id: string, content: string, by: string): ProjectNote {
+    const res = this.db.prepare("UPDATE project_notes SET content = ?, updated_at = ?, updated_by = ? WHERE id = ?").run(content.trim(), Date.now(), by, id)
+    if (!res.changes) throw new NotFoundError(`Note ${id} not found`)
+    return this.getNote(id)!
+  }
+
+  deleteNote(id: string) {
+    this.db.prepare("DELETE FROM project_notes WHERE id = ?").run(id)
+  }
+
+  // ---------- note suggestions ----------
+
+  addNoteSuggestion(input: { projectId: string; taskId: string | null; taskTitle: string; content: string; why: string }): NoteSuggestion {
+    const s: NoteSuggestion = {
+      id: newId("sug"),
+      projectId: input.projectId,
+      taskId: input.taskId,
+      taskTitle: input.taskTitle,
+      content: input.content.trim(),
+      why: input.why.trim(),
+      status: "pending",
+      noteId: null,
+      resolvedBy: null,
+      reason: null,
+      createdAt: Date.now(),
+      resolvedAt: null,
+      retroAt: null,
+    }
+    this.db
+      .prepare("INSERT INTO note_suggestions (id, project_id, task_id, task_title, content, why, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)")
+      .run(s.id, s.projectId, s.taskId, s.taskTitle, s.content, s.why, s.createdAt)
+    return s
+  }
+
+  getNoteSuggestion(id: string): NoteSuggestion | null {
+    const row = this.db.prepare("SELECT * FROM note_suggestions WHERE id = ?").get(id) as SuggestionRow | undefined
+    return row ? suggestionFromRow(row) : null
+  }
+
+  /** Oldest first. `unsent` keeps only the ones no retro has handed to the Captain yet. */
+  listNoteSuggestions(filter: { projectId?: string; taskId?: string; status?: NoteSuggestionStatus[]; unsent?: boolean; limit?: number } = {}): NoteSuggestion[] {
+    const where: string[] = []
+    const args: unknown[] = []
+    if (filter.projectId) where.push("project_id = ?"), args.push(filter.projectId)
+    if (filter.taskId) where.push("task_id = ?"), args.push(filter.taskId)
+    if (filter.status?.length) where.push(`status IN (${filter.status.map(() => "?").join(", ")})`), args.push(...filter.status)
+    if (filter.unsent) where.push("retro_at IS NULL")
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid FROM note_suggestions ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, rowid DESC LIMIT ?)
+         ORDER BY created_at ASC, rid ASC`,
+      )
+      .all(...args, filter.limit ?? 500) as SuggestionRow[]
+    return rows.map(suggestionFromRow)
+  }
+
+  pendingSuggestionCount(projectId: string): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM note_suggestions WHERE project_id = ? AND status = 'pending'").get(projectId) as { n: number }).n
+  }
+
+  /** Settle a pending suggestion. Throws a ConflictError when someone already did. */
+  resolveNoteSuggestion(id: string, r: { status: Exclude<NoteSuggestionStatus, "pending">; noteId?: string | null; by: string; reason?: string | null }): NoteSuggestion {
+    const res = this.db
+      .prepare("UPDATE note_suggestions SET status = ?, note_id = ?, resolved_by = ?, reason = ?, resolved_at = ? WHERE id = ? AND status = 'pending'")
+      .run(r.status, r.noteId ?? null, r.by, r.reason?.trim() || null, Date.now(), id)
+    const s = this.getNoteSuggestion(id)
+    if (!s) throw new NotFoundError(`Suggestion ${id} not found`)
+    if (!res.changes) throw new ConflictError(`Suggestion ${id} was already ${s.status}${s.resolvedBy ? ` by ${s.resolvedBy}` : ""}.`)
+    return s
+  }
+
+  /** A retro handed these suggestions to the Captain. */
+  markSuggestionsInRetro(ids: string[], at = Date.now()) {
+    const stmt = this.db.prepare("UPDATE note_suggestions SET retro_at = ? WHERE id = ? AND retro_at IS NULL")
+    this.db.transaction(() => {
+      for (const id of ids) stmt.run(at, id)
+    })()
   }
 
   // ---------- tasks ----------
@@ -1220,20 +1374,34 @@ export class Store {
   }
 
   takeUnseenCaptainNotices(projectId: string): string[] {
-    return this.db.transaction(() => {
-      const rows = this.db
-        .prepare("SELECT content FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC")
-        .all(projectId) as { content: string }[]
-      this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE project_id = ? AND seen_by_captain = 0").run(projectId)
-      return rows.map((r) => r.content)
-    })()
+    return this.takeUnseenCaptainNoticeEntries(projectId).map((n) => n.content)
   }
 
   peekUnseenCaptainNotices(projectId: string): string[] {
+    return this.peekUnseenCaptainNoticeEntries(projectId).map((n) => n.content)
+  }
+
+  /**
+   * Unseen notices with the key the Captain's WakeLoopGuard counts them by: meta.loopKey when the notice has one
+   * (a notes retro is keyed by its tasks, since its text changes every time), else the text itself.
+   */
+  takeUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
+    return this.db.transaction(() => {
+      const entries = this.peekUnseenCaptainNoticeEntries(projectId)
+      this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE project_id = ? AND seen_by_captain = 0").run(projectId)
+      return entries
+    })()
+  }
+
+  peekUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
     const rows = this.db
-      .prepare("SELECT content FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC")
-      .all(projectId) as { content: string }[]
-    return rows.map((r) => r.content)
+      .prepare("SELECT content, meta_json FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
+      .all(projectId) as { content: string; meta_json: string | null }[]
+    return rows.map((r) => {
+      const meta = json<Record<string, unknown> | null>(r.meta_json, null)
+      const loopKey = typeof meta?.loopKey === "string" && meta.loopKey ? meta.loopKey : r.content
+      return { content: r.content, loopKey, meta }
+    })
   }
 
   unseenCaptainNoticeTasks(projectId: string): (string | null)[] {

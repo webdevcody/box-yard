@@ -58,7 +58,7 @@ type ToolRes = { content: { text: string }[]; isError?: boolean }
 /** An in-process MCP client as the Coordinator or as one project's Captain. */
 async function mcpAs(r: Running, caller: McpCaller) {
   const y = r.yard
-  const deps = { store: y.store, tasks: y.tasks, hub: y.hub, artifacts: null as never, publicUrl: () => "", scheduler: y.scheduler, captains: y.captains, settings: y.settings, uploads: new Uploads(uploadsDir(r.dataDir), 1024 * 1024) }
+  const deps = { store: y.store, tasks: y.tasks, hub: y.hub, artifacts: null as never, publicUrl: () => "", scheduler: y.scheduler, captains: y.captains, settings: y.settings, notes: y.notes, uploads: new Uploads(uploadsDir(r.dataDir), 1024 * 1024) }
   const mcp = buildMcpServer(deps, caller)
   const [a, b] = InMemoryTransport.createLinkedPair()
   await mcp.connect(a)
@@ -76,7 +76,7 @@ function parkedTask(r: Running, projectId: string, title: string): Task {
   return r.yard.store.getTask(t.id)!
 }
 
-const COORDINATOR_ONLY = ["create_project", "update_project", "delete_project", "send_to_captain", "ask_captain", "wait_for_captain", "list_compactions", "read_compaction", "clean_up_box"]
+const COORDINATOR_ONLY = ["create_project", "update_project", "delete_project", "send_to_captain", "ask_captain", "wait_for_captain", "list_compactions", "read_compaction", "clean_up_box", "save_note"]
 
 describe("Captain MCP scoping (#43)", () => {
   async function twoProjects() {
@@ -122,7 +122,10 @@ describe("Captain MCP scoping (#43)", () => {
       ["find_compactions_by_task", { task: tb.id }],
       ["create_task", { project: b.id, title: "sneaky", prompt: "x" }],
       ["create_task", { project: "alpha", title: "sneaky", prompt: "x", related_tasks: [tb.id] }],
-      ["save_note", { project: "beta", content: "x" }],
+      ["add_note", { project: "beta", content: "x" }],
+      ["list_notes", { project: "beta" }],
+      ["list_note_suggestions", { project: "beta" }],
+      ["list_note_suggestions", { task: tb.id }],
       ["list_tasks", { project: "beta" }],
       ["list_artifacts", { project: "beta" }],
       ["create_artifact", { title: "x", filename: "x.md", content: "x", task: tb.id }],
@@ -176,7 +179,7 @@ describe("Captain MCP scoping (#43)", () => {
     expect(JSON.parse(await ok("list_projects")).map((p: Project) => p.name)).toEqual(["alpha"])
     // No project filter means "my project".
     expect(JSON.parse(await ok("list_tasks")).map((t: Task) => t.id)).toEqual([ta.id])
-    await ok("save_note", { project: "alpha", content: "Captain note" })
+    await ok("add_note", { content: "Captain note" })
     expect(r.yard.store.listNotes(a.id).map((n) => n.author)).toEqual(["captain"])
     await ok("set_task_model", { task: ta.id, effort: "low" })
     // Schedules default to the Captain's project.

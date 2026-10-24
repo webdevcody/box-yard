@@ -2,6 +2,7 @@ import path from "node:path"
 import fs from "node:fs"
 import { fileURLToPath } from "node:url"
 import { EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
+import { DEFAULT_NOTE_BUDGET } from "../shared/notes.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
 function loadDotEnv(file: string) {
@@ -124,6 +125,9 @@ export const config = {
   /** Per-project Captains' model and effort; empty means the Settings default. */
   captainModel: env.CAPTAIN_MODEL?.trim() ?? "",
   captainEffort: envEffort(env.CAPTAIN_EFFORT),
+  /** The notes budget when Settings › Max notes doesn't set one. */
+  notesMaxCount: int("BOXYARD_NOTES_MAX", DEFAULT_NOTE_BUDGET.maxNotes),
+  notesMaxTokens: int("BOXYARD_NOTES_MAX_TOKENS", DEFAULT_NOTE_BUDGET.maxTokens),
 
   /** Text-to-speech keys (Settings › Voice); a key saved in the UI wins. They never reach the browser. */
   elevenlabsApiKey: env.ELEVENLABS_API_KEY?.trim() ?? "",

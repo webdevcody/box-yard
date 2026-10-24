@@ -15,8 +15,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
     label: "Coordinator",
-    description: "The model behind the chat that runs the yard, the per-project Captains, and when they compact their context.",
-    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort"],
+    description: "The model behind the chat that runs the yard, the per-project Captains and the project notes they curate, and when they compact their context.",
+    fields: ["orchestratorModel", "orchestratorEffort", "orchestratorAutoCompact", "captainModel", "captainEffort", "notesRetroEnabled", "notesMaxCount", "notesMaxTokens"],
   },
   {
     key: "agents",
@@ -117,6 +117,8 @@ export const SETTING_ENV: Partial<Record<keyof Settings, string>> = {
   buildCleanupIdleMinutes: "BOXYARD_BUILD_CLEANUP_IDLE_MINUTES",
   gitPartialClone: "BOXYARD_GIT_PARTIAL_CLONE",
   gitPushAtTurnEnd: "BOXYARD_GIT_PUSH_AT_TURN_END",
+  notesMaxCount: "BOXYARD_NOTES_MAX",
+  notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
 /** Settings whose draft value differs from the one in effect. */
@@ -149,9 +151,13 @@ const POOL_KEYS = [
   "gitPushAtTurnEnd",
 ] as const
 
-/** What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them over env changes. */
-export function savePatch(draft: Settings, current: Settings | null | undefined): Partial<Settings> {
+/**
+ * What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them
+ * over env changes. `keep` names fields typed in on purpose even if the value matches what's in effect (a box limit
+ * typed over the size default).
+ */
+export function savePatch(draft: Settings, current: Settings | null | undefined, keep: readonly (keyof Settings)[] = []): Partial<Settings> {
   const patch: Partial<Settings> = { ...draft }
-  for (const k of POOL_KEYS) if (current && draft[k] === current[k]) delete patch[k]
+  for (const k of POOL_KEYS) if (current && draft[k] === current[k] && !keep.includes(k)) delete patch[k]
   return patch
 }
