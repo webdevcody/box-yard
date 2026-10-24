@@ -722,7 +722,9 @@ export function useSaveSettings() {
 export function useResetSettings() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => api<SettingsInfo>("/api/agent-settings", { method: "DELETE" }),
+    /** No keys: forget every saved value. Keys: forget only those, so env vars or defaults apply to them again. */
+    mutationFn: (keys?: (keyof Settings)[]) =>
+      api<SettingsInfo>(keys ? `/api/agent-settings?keys=${keys.map(encodeURIComponent).join(",")}` : "/api/agent-settings", { method: "DELETE" }),
     onSuccess: (info) => qc.setQueryData(keys.agentSettings, info),
     onError: fail("Couldn't reset the settings"),
   })
