@@ -111,7 +111,11 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         )}
       >
         <Bot className="h-4 w-4 shrink-0 text-yard-400" />
-        <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">Coordinator</div>
+        <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
+          {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+          {zen && <span className="max-sm:hidden">Box Yard </span>}
+          Coordinator
+        </div>
         {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
