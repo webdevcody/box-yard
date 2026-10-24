@@ -449,7 +449,7 @@ const noteFromRow = (r: NoteRow): ProjectNote => ({
   content: r.content,
   createdAt: r.created_at,
   updatedAt: r.updated_at ?? r.created_at,
-  updatedBy: r.updated_by,
+  updatedBy: r.updated_by ?? null,
 })
 
 interface SuggestionRow {
@@ -680,7 +680,13 @@ export class Store {
   }
 
   pendingSuggestionCount(projectId: string): number {
-    return (this.db.prepare("SELECT COUNT(*) AS n FROM note_suggestions WHERE project_id = ? AND status = 'pending'").get(projectId) as { n: number }).n
+    try {
+      return (this.db.prepare("SELECT COUNT(*) AS n FROM note_suggestions WHERE project_id = ? AND status = 'pending'").get(projectId) as { n: number }).n
+    } catch (err) {
+      // A database stopped before the notes migration (tests that pin MIGRATIONS) has no suggestions to count.
+      if (err instanceof Error && err.message.includes("no such table")) return 0
+      throw err
+    }
   }
 
   /** Settle a pending suggestion. Throws a ConflictError when someone already did. */
