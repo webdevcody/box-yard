@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plug,
   RefreshCcw,
+  ShieldAlert,
   Trash2,
   Wrench,
 } from "lucide-react"
@@ -30,6 +31,7 @@ import { badgeStatus } from "../lib/prState"
 import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
+import { LOCAL_UNSANDBOXED, isLocalRunnerBox } from "../../../shared/runner"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
@@ -94,7 +96,7 @@ export function TaskHeader({
           <TaskMenu task={task} project={project} schedule={schedule} primary={primary} showTools={showTools} onShowTools={onShowTools} />
         </div>
       </div>
-      <TaskMetaRow task={task} files={files} />
+      <TaskMetaRow task={task} files={files} local={runsLocally(task, project)} />
     </header>
   )
 }
@@ -105,8 +107,8 @@ export function TaskHeader({
  * then the chips, which scroll sideways inside their line. Everything else (model, times, box, branch, id, full
  * context numbers) is in the ⋯ details.
  */
-export function TaskMetaRow({ task, files }: { task: Task; files: Artifact[] }) {
-  const hasChips = Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
+export function TaskMetaRow({ task, files, local = false }: { task: Task; files: Artifact[]; local?: boolean }) {
+  const hasChips = local || Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
   return (
     <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
       <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
@@ -118,6 +120,7 @@ export function TaskMetaRow({ task, files }: { task: Task; files: Artifact[] }) 
       </StatusDot>
       {hasChips && (
         <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
+          {local && <LocalChip />}
           <MergePrChip task={task} className={META_CHIP} />
           <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
           {task.previews.map((p) => (
@@ -127,6 +130,26 @@ export function TaskMetaRow({ task, files }: { task: Task; files: Artifact[] }) 
       )}
       <ContextSlot task={task} />
     </div>
+  )
+}
+
+/** Its agent runs on this computer (the local runner): on it now, or there next turn because its project runs locally. */
+export function runsLocally(task: Task, project: Project | undefined): boolean {
+  return isLocalRunnerBox(task.boxId) || (project?.runner === "local" && !task.boxId)
+}
+
+/** The unsandboxed warning on a local task's header; a tap shows it in full (phones have no hover title). */
+function LocalChip() {
+  return (
+    <button
+      type="button"
+      title={LOCAL_UNSANDBOXED}
+      onClick={() => toast.info("Runs on this computer, unsandboxed", LOCAL_UNSANDBOXED, { duration: 10_000 })}
+      className={cx(META_CHIP, "border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20")}
+      data-testid="local-warning"
+    >
+      <ShieldAlert className="h-3 w-3 shrink-0" /> This computer · unsandboxed
+    </button>
   )
 }
 
@@ -316,7 +339,9 @@ function TaskMenu({
                 </Detail>
               )}
               <Detail label="Box">
-                {task.boxId ? (
+                {isLocalRunnerBox(task.boxId) ? (
+                  <span className="min-w-0 truncate text-amber-200">This computer (unsandboxed)</span>
+                ) : task.boxId ? (
                   <Link href={`/boxes#${encodeURIComponent(task.boxId)}`} className="min-w-0 truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
                     {task.boxId}
                   </Link>
