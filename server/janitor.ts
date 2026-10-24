@@ -282,14 +282,25 @@ export class BoxJanitor {
 
     switch (key) {
       case "temp": {
+        // Marked busy so no turn starts in these folders meanwhile; re-checked under the mark.
         const resting = onBox().filter((r) => !r.current_turn_id && RESTING_STATUSES.includes(r.status) && !this.busy.has(r.id))
-        const dirs = resting.flatMap((r) => SESSION_TEMP_DIRS.map((d) => q(`${this.host.taskDir(boxId, r.id)}/claude/${d}`)))
-        const parts = dirs.length ? [`for d in ${dirs.join(" ")}; do [ -e "$d" ] && rm -rf "$d" && echo "$d"; done`] : []
-        // A restore in progress belongs to a starting task.
-        if (!cloning()) parts.push(`find ${q(root + "/.boxyard")} -maxdepth 1 -name 'restore-*.tgz' -print -delete 2>/dev/null`)
-        // Archive leftovers in the box's /tmp (local boxes share this machine's /tmp, so not there). Archives in flight are newer.
-        if (provider.name !== "local") parts.push(`find /tmp -maxdepth 1 \\( -name 'boxyard-archive-*' -o -name 'boxyard-wip.*' \\) -mmin +30 -print -exec rm -rf {} + 2>/dev/null`)
-        const out = await exec(`${parts.join("; ")}; true`)
+        for (const r of resting) this.busy.add(r.id)
+        let out: string
+        try {
+          const idle = resting.filter((r) => {
+            const row = store.getTaskRow(r.id)
+            return row?.box_id === boxId && !row.current_turn_id && RESTING_STATUSES.includes(row.status)
+          })
+          const dirs = idle.flatMap((r) => SESSION_TEMP_DIRS.map((d) => q(`${this.host.taskDir(boxId, r.id)}/claude/${d}`)))
+          const parts = dirs.length ? [`for d in ${dirs.join(" ")}; do [ -e "$d" ] && rm -rf "$d" && echo "$d"; done`] : []
+          // A restore in progress belongs to a starting task.
+          if (!cloning()) parts.push(`find ${q(root + "/.boxyard")} -maxdepth 1 -name 'restore-*.tgz' -print -delete 2>/dev/null`)
+          // Archive leftovers in the box's /tmp (local boxes share this machine's /tmp, so not there). Archives in flight are newer.
+          if (provider.name !== "local") parts.push(`find /tmp -maxdepth 1 \\( -name 'boxyard-archive-*' -o -name 'boxyard-wip.*' \\) -mmin +30 -print -exec rm -rf {} + 2>/dev/null`)
+          out = await exec(`${parts.join("; ")}; true`)
+        } finally {
+          for (const r of resting) this.busy.delete(r.id)
+        }
         const gone = out.split("\n").filter(Boolean)
         const session = gone.filter((l) => l.includes("/claude/"))
         const tasks = new Set(session.map((l) => resting.find((r) => l.includes(`/${r.id}/claude/`))?.id).filter(Boolean))
