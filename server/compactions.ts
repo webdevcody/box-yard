@@ -134,10 +134,14 @@ export function finishCompaction(file: string, tokensAfter: number | null) {
   }
 }
 
-/** Log files, oldest first (the names sort chronologically). */
+/** Log files, oldest first (the names sort chronologically; compare without ".md" so `<stamp>-2` follows `<stamp>`). */
 export function listCompactions(dir: string): string[] {
+  const stem = (f: string) => f.slice(0, -3)
   try {
-    return fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort()
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith(".md"))
+      .sort((a, b) => (stem(a) < stem(b) ? -1 : stem(a) > stem(b) ? 1 : 0))
   } catch {
     return []
   }
