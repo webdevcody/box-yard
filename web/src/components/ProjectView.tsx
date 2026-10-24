@@ -35,6 +35,7 @@ import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
 import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
+import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -127,11 +128,6 @@ export function ProjectView({ id }: { id: string }) {
           count: counts[t.key],
           ...(t.key === "tasks" && needsYou && { dot: "bg-amber-400", title: "A task needs you" }),
           ...(t.key === "captain" && captain.data?.busy && { dot: "bg-sky-400 animate-pulse", title: "Captain is working" }),
-          ...(t.key === "notes" &&
-            project.pendingSuggestions > 0 && {
-              dot: "bg-amber-400",
-              title: `${project.pendingSuggestions} note suggestion${project.pendingSuggestions === 1 ? "" : "s"} waiting`,
-            }),
         }))}
       />
 
@@ -145,6 +141,12 @@ export function ProjectView({ id }: { id: string }) {
       {showNew && <NewTaskDialog projectId={id} onDone={() => setShowNew(false)} />}
     </div>
   )
+}
+
+/** A number field's value, or null when it's blank (use the default). */
+function optionalInt(text: string): number | null {
+  const n = Number(text.trim())
+  return text.trim() && Number.isFinite(n) ? Math.round(n) : null
 }
 
 function repoUrl(repo: string) {
@@ -407,14 +409,29 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
+  const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
+  const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
+  const defaults = settings.data?.settings
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={(e) => {
         e.preventDefault()
-        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys, boxSize: boxSize || null, partialClone: partialClone ? partialClone === "on" : null })
+        update.mutate({
+          id: project.id,
+          name,
+          description,
+          repo: repo.trim() || null,
+          baseBranch,
+          env: parseEnv(env),
+          removeEnv: removeKeys,
+          boxSize: boxSize || null,
+          partialClone: partialClone ? partialClone === "on" : null,
+          notesMaxCount: optionalInt(notesMax),
+          notesMaxTokens: optionalInt(notesTokens),
+        })
         onDone()
       }}
     >
@@ -456,6 +473,35 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="off">Off: full mirror</option>
         </Select>
       </Field>
+      <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">
+        <Field label="Max notes" hint={`This project's own notes budget for agents' prompts. Blank: ${defaults?.notesMaxCount ?? DEFAULT_NOTE_BUDGET.maxNotes} (Settings → Max notes).`}>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={NOTE_BUDGET_LIMITS.maxNotes.min}
+            max={NOTE_BUDGET_LIMITS.maxNotes.max}
+            className={inputClass}
+            value={notesMax}
+            onChange={(e) => setNotesMax(e.target.value)}
+            placeholder={String(defaults?.notesMaxCount ?? DEFAULT_NOTE_BUDGET.maxNotes)}
+            data-testid="project-notes-max"
+          />
+        </Field>
+        <Field label="Max note tokens" hint={`About how many tokens they may take. Blank: ${(defaults?.notesMaxTokens ?? DEFAULT_NOTE_BUDGET.maxTokens).toLocaleString()} (Settings).`}>
+          <input
+            type="number"
+            inputMode="numeric"
+            min={NOTE_BUDGET_LIMITS.maxTokens.min}
+            max={NOTE_BUDGET_LIMITS.maxTokens.max}
+            step={100}
+            className={inputClass}
+            value={notesTokens}
+            onChange={(e) => setNotesTokens(e.target.value)}
+            placeholder={String(defaults?.notesMaxTokens ?? DEFAULT_NOTE_BUDGET.maxTokens)}
+            data-testid="project-notes-max-tokens"
+          />
+        </Field>
+      </div>
       <Field label="Env vars" hint="Values are write-only. Add KEY=value lines to set or replace.">
         <div className="mb-2 flex flex-wrap gap-1.5">
           {project.envKeys.map((k) => (

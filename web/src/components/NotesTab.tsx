@@ -1,21 +1,19 @@
 // A project's Notes tab: the small, curated set of lasting rules every agent in the project starts with, the
-// notes budget, and the note suggestions agents left for the Captain's notes retro (accept or reject them here too).
+// notes budget, and a read-only history of the note suggestions agents left and what the Captain decided.
 import { useState } from "react"
-import { Link } from "wouter"
-import { Check, GitMerge, History, Lightbulb, NotebookPen, Pencil, Plus, Search, Settings, Trash2, X } from "lucide-react"
-import { useAddNote, useAgentSettings, useDeleteNote, useNoteSuggestions, useResolveSuggestion, useUpdateNote } from "../lib/queries"
+import { Link, useLocation } from "wouter"
+import { ChevronDown, ChevronUp, Lightbulb, NotebookPen, Pencil, Plus, Search, Settings, Trash2 } from "lucide-react"
+import { useAddNote, useAgentSettings, useDeleteNote, useNoteSuggestions, useUpdateNote } from "../lib/queries"
 import { confirmDialog } from "../lib/confirm"
-import { Modal } from "./Modal"
-import { Button, Empty, Field, Select, TimeAgo, cx, inputClass } from "./ui"
+import { Button, Empty, TimeAgo, cx, inputClass } from "./ui"
 import { useOpenSettings } from "./SettingsDialog"
-import { DEFAULT_NOTE_BUDGET, MAX_NOTE_CHARS, budgetLine, budgetNotes, noteAuthorLabel, type NoteBudget } from "../../../shared/notes"
-import type { NoteSuggestion, Project, ProjectNote, Settings as AppSettings } from "../../../shared/types"
-
-const budgetOf = (s: AppSettings | undefined): NoteBudget => (s ? { maxNotes: s.notesMaxCount, maxTokens: s.notesMaxTokens } : DEFAULT_NOTE_BUDGET)
+import { MAX_NOTE_CHARS, budgetLine, budgetNotes, noteAuthorLabel, projectNoteBudget } from "../../../shared/notes"
+import type { NoteSuggestion, Project, ProjectNote } from "../../../shared/types"
 
 export function NotesTab({ project }: { project: Project }) {
   const settings = useAgentSettings().data?.settings
-  const report = budgetNotes(project.notes, budgetOf(settings))
+  const own = project.notesMaxCount !== null || project.notesMaxTokens !== null
+  const report = budgetNotes(project.notes, projectNoteBudget(settings, project))
   const leftOut = new Set(report.hidden.map((n) => n.id))
   const [filter, setFilter] = useState("")
   const words = filter.toLowerCase().split(/\s+/).filter(Boolean)
@@ -24,16 +22,15 @@ export function NotesTab({ project }: { project: Project }) {
   return (
     <section className="space-y-6">
       <p className="text-sm text-zinc-500">
-        Lasting rules every agent in this project starts with. Agents suggest notes, and the Captain curates them when a task finishes
-        {settings && !settings.notesRetroEnabled && " (the notes retro is off in Settings, so suggestions wait for you here)"}.
+        Lasting rules every agent in this project starts with. Agents suggest notes, and the Captain decides which to keep when their task finishes
+        {settings && !settings.notesRetroEnabled && " (the notes retro is off in Settings, so new suggestions stay pending until it's on)"}. You can add, edit or
+        delete notes here at any time.
       </p>
-
-      <Suggestions project={project} />
 
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h3 className="text-sm font-semibold text-zinc-200">Notes</h3>
-          <BudgetMeter report={report} />
+          <BudgetMeter report={report} projectId={project.id} own={own} />
         </div>
         {report.over && (
           <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-200" data-testid="notes-over-budget">
@@ -62,12 +59,16 @@ export function NotesTab({ project }: { project: Project }) {
           </ul>
         )}
       </div>
+
+      <RecentSuggestions projectId={project.id} />
     </section>
   )
 }
 
-function BudgetMeter({ report }: { report: ReturnType<typeof budgetNotes> }) {
+/** How full the notes budget is. It's Settings › Max notes unless the project has its own (its Settings tab). */
+function BudgetMeter({ report, projectId, own }: { report: ReturnType<typeof budgetNotes>; projectId: string; own: boolean }) {
   const openSettings = useOpenSettings()
+  const [, navigate] = useLocation()
   const share = Math.min(1, Math.max(report.count / report.maxNotes, report.tokens / report.maxTokens))
   return (
     <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-500">
@@ -81,8 +82,17 @@ function BudgetMeter({ report }: { report: ReturnType<typeof budgetNotes> }) {
       >
         <div className={cx("h-full rounded-full", report.over ? "bg-amber-400" : share > 0.8 ? "bg-yellow-500/80" : "bg-yard-500")} style={{ width: `${share * 100}%` }} />
       </div>
-      <span className={cx("tabular-nums", report.over && "text-amber-300")}>{budgetLine(report)}</span>
-      <Button variant="ghost" size="sm" onClick={() => openSettings("orchestrator")} title="Change the notes budget in Settings" aria-label="Notes budget settings">
+      <span className={cx("tabular-nums", report.over && "text-amber-300")}>
+        {budgetLine(report)}
+        {own && " (this project's)"}
+      </span>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => (own ? navigate(`/projects/${projectId}?tab=settings`) : openSettings("orchestrator"))}
+        title={own ? "Change this project's notes budget on its Settings tab" : "Change Max notes in Settings (or give this project its own on its Settings tab)"}
+        aria-label="Notes budget settings"
+      >
         <Settings className="h-3.5 w-3.5" />
       </Button>
     </div>
@@ -208,65 +218,72 @@ function NoteRow({ note, leftOut }: { note: ProjectNote; leftOut: boolean }) {
   )
 }
 
-function Suggestions({ project }: { project: Project }) {
-  const pending = useNoteSuggestions(project.id)
-  const [history, setHistory] = useState(false)
-  const [editing, setEditing] = useState<NoteSuggestion | null>(null)
-  const list = pending.data ?? []
-  if (!list.length && !history) {
-    return (
-      <div className="flex items-center gap-2 text-xs text-zinc-500">
-        <Lightbulb className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 flex-1">No note suggestions waiting.</span>
-        <Button variant="ghost" size="sm" onClick={() => setHistory(true)}>
-          <History className="h-3.5 w-3.5" /> Past suggestions
-        </Button>
-      </div>
-    )
-  }
+const STATUS_LABEL: Record<NoteSuggestion["status"], { label: string; chip: string; title: string }> = {
+  pending: { label: "Pending", chip: "bg-amber-500/15 text-amber-300", title: "Waiting for the Captain's notes retro after its task" },
+  accepted: { label: "Accepted", chip: "bg-yard-500/15 text-yard-300", title: "Became a note" },
+  merged: { label: "Merged", chip: "bg-sky-500/15 text-sky-300", title: "Merged into a note" },
+  rejected: { label: "Rejected", chip: "bg-zinc-800 text-zinc-400", title: "Not kept as a note" },
+}
+
+const SHOWN = 5
+
+/** What agents suggested and what the Captain decided, newest first. Read-only: the Captain settles every one. */
+function RecentSuggestions({ projectId }: { projectId: string }) {
+  const all = useNoteSuggestions(projectId)
+  const [expanded, setExpanded] = useState(false)
+  const list = [...(all.data ?? [])].reverse()
+  const shown = expanded ? list : list.slice(0, SHOWN)
   return (
-    <section aria-labelledby={`sug-${project.id}`} className="space-y-2 rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-3 sm:p-4">
+    <section aria-labelledby={`sug-${projectId}`} className="space-y-2 border-t border-zinc-800/80 pt-5">
       <div className="flex items-center gap-2">
-        <Lightbulb className="h-4 w-4 shrink-0 text-amber-300" />
-        <h3 id={`sug-${project.id}`} className="text-sm font-semibold text-zinc-200">
-          Suggestions
+        <Lightbulb className="h-4 w-4 shrink-0 text-zinc-500" />
+        <h3 id={`sug-${projectId}`} className="text-sm font-semibold text-zinc-200">
+          Recent suggestions
         </h3>
-        {list.length > 0 && <span className="rounded-full bg-amber-500/15 px-1.5 text-[11px] text-amber-300 tabular-nums">{list.length}</span>}
-        <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setHistory((h) => !h)} aria-pressed={history}>
-          <History className="h-3.5 w-3.5" /> {history ? "Hide past" : "Past"}
-        </Button>
       </div>
-      {list.length > 0 ? (
+      <p className="text-xs text-zinc-500">Notes agents suggested, and what the Captain decided in its notes retro. Nothing here needs you.</p>
+      {all.isLoading ? (
+        <p className="text-xs text-zinc-500">Loading…</p>
+      ) : !list.length ? (
+        <p className="text-xs text-zinc-500">No suggestions yet.</p>
+      ) : (
         <>
-          <p className="text-xs text-zinc-500">From agents, waiting for the Captain's notes retro. Accept one to make it a note, or reject it.</p>
-          <ul className="divide-y divide-zinc-800/80">
-            {list.map((s) => (
-              <SuggestionRow key={s.id} suggestion={s} onEdit={() => setEditing(s)} />
+          <ul className="divide-y divide-zinc-800/80" aria-label="Recent suggestions">
+            {shown.map((s) => (
+              <SuggestionRow key={s.id} suggestion={s} />
             ))}
           </ul>
+          {list.length > SHOWN && (
+            <Button variant="ghost" size="sm" onClick={() => setExpanded((e) => !e)} aria-expanded={expanded}>
+              {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />} {expanded ? "Show fewer" : `Show ${list.length - SHOWN} more`}
+            </Button>
+          )}
         </>
-      ) : (
-        <p className="text-xs text-zinc-500">No note suggestions waiting.</p>
       )}
-      {history && <PastSuggestions projectId={project.id} />}
-      {editing && <AcceptDialog project={project} suggestion={editing} onClose={() => setEditing(null)} />}
     </section>
   )
 }
 
-function SuggestionRow({ suggestion: s, onEdit }: { suggestion: NoteSuggestion; onEdit: () => void }) {
-  const resolve = useResolveSuggestion()
+function SuggestionRow({ suggestion: s }: { suggestion: NoteSuggestion }) {
+  const status = STATUS_LABEL[s.status]
   return (
-    <li className="flex flex-col gap-2 py-3 first:pt-1 last:pb-1 sm:flex-row sm:items-start sm:gap-3" data-testid="suggestion">
-      <div className="min-w-0 flex-1 space-y-1">
-        <p className="text-sm break-words whitespace-pre-wrap text-zinc-200">{s.content}</p>
-        {s.why && (
-          <p className="text-xs break-words text-zinc-400">
-            <span className="text-zinc-500">Why: </span>
-            {s.why}
-          </p>
+    <li className="flex items-start gap-2.5 py-2.5 text-xs first:pt-1 last:pb-1" data-testid="suggestion">
+      <span className={cx("mt-0.5 shrink-0 rounded-full px-1.5 text-[11px]", status.chip)} title={status.title}>
+        {status.label}
+      </span>
+      <div className="min-w-0 flex-1 space-y-0.5">
+        <p className="text-sm break-words whitespace-pre-wrap text-zinc-300">{s.content}</p>
+        {s.status === "pending" ? (
+          <p className="text-zinc-500">{s.retroAt ? "With the Captain now, in its notes retro." : "Waits for its task to finish, then the Captain decides."}</p>
+        ) : (
+          s.reason && (
+            <p className="break-words text-zinc-400">
+              <span className="text-zinc-500">{noteAuthorLabel(s.resolvedBy ?? "captain")}: </span>
+              {s.reason}
+            </p>
+          )
         )}
-        <p className="truncate text-xs text-zinc-500">
+        <p className="truncate text-zinc-500">
           {s.taskId ? (
             <Link href={`/tasks/${s.taskId}`} className="text-zinc-400 hover:text-zinc-200 hover:underline">
               {s.taskTitle}
@@ -274,116 +291,9 @@ function SuggestionRow({ suggestion: s, onEdit }: { suggestion: NoteSuggestion; 
           ) : (
             s.taskTitle
           )}{" "}
-          · <TimeAgo ts={s.createdAt} />
-          {s.retroAt && " · sent to the Captain"}
+          · <TimeAgo ts={s.resolvedAt ?? s.createdAt} />
         </p>
       </div>
-      <div className="flex shrink-0 gap-1.5 sm:pt-0.5">
-        <Button variant="primary" size="sm" onClick={() => resolve.mutate({ projectId: s.projectId, id: s.id, action: "accept" })} aria-label={`Accept: ${s.content.slice(0, 60)}`}>
-          <Check className="h-3.5 w-3.5" /> Accept
-        </Button>
-        <Button variant="subtle" size="sm" onClick={onEdit} title="Reword it, or merge it into a note" aria-label="Edit before accepting">
-          <Pencil className="h-3.5 w-3.5" /> <span className="sm:hidden">Edit</span>
-        </Button>
-        <Button variant="ghost" size="sm" onClick={() => resolve.mutate({ projectId: s.projectId, id: s.id, action: "reject" })} aria-label={`Reject: ${s.content.slice(0, 60)}`}>
-          <X className="h-3.5 w-3.5" /> Reject
-        </Button>
-      </div>
     </li>
-  )
-}
-
-/** Accept a suggestion reworded, or merge it into one of the project's notes. */
-function AcceptDialog({ project, suggestion, onClose }: { project: Project; suggestion: NoteSuggestion; onClose: () => void }) {
-  const resolve = useResolveSuggestion()
-  const [target, setTarget] = useState("")
-  const [text, setText] = useState(suggestion.content)
-  const note = project.notes.find((n) => n.id === target)
-  const pick = (id: string) => {
-    setTarget(id)
-    const n = project.notes.find((x) => x.id === id)
-    setText(n ? `${n.content}\n${suggestion.content}` : suggestion.content)
-  }
-  return (
-    <Modal
-      onClose={onClose}
-      title={note ? "Merge into a note" : "Accept as a note"}
-      description={suggestion.why ? `Why: ${suggestion.why}` : undefined}
-      dirty={text !== suggestion.content || Boolean(target)}
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (!text.trim()) return
-        resolve.mutate(
-          note
-            ? { projectId: project.id, id: suggestion.id, action: "merge", noteId: note.id, content: text.trim() }
-            : { projectId: project.id, id: suggestion.id, action: "accept", content: text.trim() },
-        )
-        onClose()
-      }}
-      footer={
-        <>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary" disabled={!text.trim()}>
-            {note ? <GitMerge className="h-4 w-4" /> : <Check className="h-4 w-4" />} {note ? "Merge" : "Accept"}
-          </Button>
-        </>
-      }
-    >
-      <div className="space-y-4">
-        {project.notes.length > 0 && (
-          <Field label="Becomes">
-            <Select className="w-full" value={target} onChange={(e) => pick(e.target.value)}>
-              <option value="">A new note</option>
-              {[...project.notes].reverse().map((n) => (
-                <option key={n.id} value={n.id}>
-                  Merged into: {n.content.length > 70 ? `${n.content.slice(0, 70)}…` : n.content}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        )}
-        <Field label={note ? "The merged note" : "Note"} hint="One short, lasting rule.">
-          <textarea className={cx(inputClass, "min-h-32 resize-y")} value={text} maxLength={MAX_NOTE_CHARS} onChange={(e) => setText(e.target.value)} />
-        </Field>
-      </div>
-    </Modal>
-  )
-}
-
-const STATUS_LABEL: Record<NoteSuggestion["status"], { label: string; chip: string }> = {
-  pending: { label: "Pending", chip: "bg-amber-500/15 text-amber-300" },
-  accepted: { label: "Accepted", chip: "bg-yard-500/15 text-yard-300" },
-  merged: { label: "Merged", chip: "bg-sky-500/15 text-sky-300" },
-  rejected: { label: "Rejected", chip: "bg-zinc-800 text-zinc-400" },
-}
-
-function PastSuggestions({ projectId }: { projectId: string }) {
-  const all = useNoteSuggestions(projectId, "all")
-  const past = (all.data ?? []).filter((s) => s.status !== "pending").reverse().slice(0, 30)
-  if (all.isLoading) return <p className="text-xs text-zinc-500">Loading…</p>
-  if (!past.length) return <p className="text-xs text-zinc-500">No past suggestions yet.</p>
-  return (
-    <ul className="space-y-1.5 border-t border-zinc-800/80 pt-3" aria-label="Past suggestions">
-      {past.map((s) => (
-        <li key={s.id} className="flex items-start gap-2 text-xs">
-          <span className={cx("mt-0.5 shrink-0 rounded-full px-1.5 text-[11px]", STATUS_LABEL[s.status].chip)}>{STATUS_LABEL[s.status].label}</span>
-          <div className="min-w-0 flex-1">
-            <p className="break-words text-zinc-300">{s.content}</p>
-            <p className="text-zinc-500">
-              {s.resolvedBy && `by ${noteAuthorLabel(s.resolvedBy)}`}
-              {s.reason && ` · ${s.reason}`}
-              {s.resolvedAt && (
-                <>
-                  {" · "}
-                  <TimeAgo ts={s.resolvedAt} />
-                </>
-              )}
-            </p>
-          </div>
-        </li>
-      ))}
-    </ul>
   )
 }

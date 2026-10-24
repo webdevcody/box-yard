@@ -73,7 +73,7 @@ export const keys = {
   hookRuns: (scope: string) => ["hook-runs", scope] as const,
   hookTemplates: ["hook-templates"] as const,
   /** A project's note suggestions from agents: "pending", or "all" for the resolved ones too. */
-  noteSuggestions: (projectId: string, status: "pending" | "all" = "pending") => ["note-suggestions", projectId, status] as const,
+  noteSuggestions: (projectId: string) => ["note-suggestions", projectId] as const,
 }
 
 /** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
@@ -260,7 +260,8 @@ export function useCreateProject() {
           baseBranch: input.baseBranch || "main",
           envKeys: Object.keys(input.env ?? {}),
           notes: [],
-          pendingSuggestions: 0,
+          notesMaxCount: null,
+          notesMaxTokens: null,
           boxSize: null,
           partialClone: null,
           createdAt: now,
@@ -280,7 +281,22 @@ export function useCreateProject() {
 export function useUpdateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, ...patch }: { id: string; name?: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; removeEnv?: string[]; boxSize?: BoxSize | null; partialClone?: boolean | null }) =>
+    mutationFn: ({
+      id,
+      ...patch
+    }: {
+      id: string
+      name?: string
+      description?: string
+      repo?: string | null
+      baseBranch?: string
+      env?: Record<string, string>
+      removeEnv?: string[]
+      boxSize?: BoxSize | null
+      partialClone?: boolean | null
+      notesMaxCount?: number | null
+      notesMaxTokens?: number | null
+    }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -389,36 +405,12 @@ export function useDeleteNote() {
   })
 }
 
-export const useNoteSuggestions = (projectId: string, status: "pending" | "all" = "pending") =>
+/** The project's suggestion history, newest 200 (the Captain settles them in its notes retros). */
+export const useNoteSuggestions = (projectId: string) =>
   useQuery({
-    queryKey: keys.noteSuggestions(projectId, status),
-    queryFn: () => api<NoteSuggestion[]>(`/api/projects/${projectId}/suggestions?status=${status}`),
+    queryKey: keys.noteSuggestions(projectId),
+    queryFn: () => api<NoteSuggestion[]>(`/api/projects/${projectId}/suggestions?status=all`),
   })
-
-export function useResolveSuggestion() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ projectId, id, ...input }: { projectId: string; id: string; action: "accept" | "merge" | "reject"; content?: string; noteId?: string; reason?: string }) =>
-      api<{ project: Project; suggestion: NoteSuggestion }>(`/api/projects/${projectId}/suggestions/${id}/resolve`, { body: input }),
-    onMutate: async ({ projectId, id }) => {
-      const key = keys.noteSuggestions(projectId)
-      await qc.cancelQueries({ queryKey: key })
-      const undoList = snapshot<NoteSuggestion[]>(qc, key)
-      const undoProjects = snapshot<Project[]>(qc, keys.projects)
-      qc.setQueryData<NoteSuggestion[]>(key, (list) => list?.filter((s) => s.id !== id))
-      qc.setQueryData<Project[]>(keys.projects, (list) =>
-        list?.map((p) => (p.id === projectId ? { ...p, pendingSuggestions: Math.max(0, p.pendingSuggestions - 1) } : p)),
-      )
-      return { undo: () => (undoList(), undoProjects()) }
-    },
-    onError: (err, _v, ctx) => {
-      ctx?.undo()
-      fail("Couldn't resolve the suggestion")(err)
-    },
-    onSuccess: ({ project }) => qc.setQueryData<Project[]>(keys.projects, (list) => upsert(list, project)),
-    onSettled: (_r, _e, { projectId }) => void qc.invalidateQueries({ queryKey: ["note-suggestions", projectId] }),
-  })
-}
 
 export function useCreateTask() {
   const qc = useQueryClient()
