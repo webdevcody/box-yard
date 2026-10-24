@@ -109,7 +109,7 @@ export class BoxHistory {
         input.freedBytes ?? null,
         input.detail?.trim() || null,
       )
-    this.prune(at)
+    this.prune()
     return this.get(Number(res.lastInsertRowid))!
   }
 
