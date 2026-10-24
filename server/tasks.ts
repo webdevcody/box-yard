@@ -2714,10 +2714,14 @@ export class TaskManager {
   private recordPush(taskId: string, r: GitPrepResult) {
     const prev = this.store.getTask(taskId)?.pushState ?? null
     const status = r.status === "local" ? "skipped" : r.status
-    const state: PushState = { status, at: Date.now(), branch: r.branch, head: r.head, wip: r.pushedWip, reason: r.reason }
+    // A push that didn't happen leaves origin's WIP ref as it was; remember it, so it's still deleted later.
+    const wip = r.status === "pushed" ? r.pushedWip : (r.pushedWip ?? prev?.wip ?? null)
+    const state: PushState = { status, at: Date.now(), branch: r.branch, head: r.head, wip, reason: r.reason }
     this.store.updateTask(taskId, { pushState: state }, { touch: false })
     this.emitTask(taskId)
-    if (prev && prev.status === state.status && prev.reason === state.reason) return
+    // The same problem with other commits in its message is still the same problem.
+    const gist = (s: PushState) => `${s.status} ${(s.reason ?? "").replace(/\b[0-9a-f]{7,64}\b/g, "…")}`
+    if (prev && gist(prev) === gist(state)) return
     if (state.status === "pushed") {
       if (state.reason) this.addEvent(taskId, `Turn-end push: ${state.reason}.`)
       else if (prev) this.addEvent(taskId, "Turn-end push works again: origin has this task's branch and uncommitted work, so its archive is small.")

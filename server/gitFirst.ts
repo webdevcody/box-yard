@@ -117,7 +117,7 @@ export function gitPrepScript(o: GitPrepOptions): string {
     `bys=; bystatus=; bywhy=; byhead=-; bycur=-; byW=-; byI=-; bypw=-; bypack=-; bybp=-; bydirty=0`,
     `byout() { echo "${GIT_PREP_MARK} status=$bystatus stage=\${bys:--} head=$byhead branch=$bycur wip=$byW index=$byI pushed=$bypw dirty=$bydirty pack=$bypack branchpush=$bybp why=$(printf '%s' "$bywhy" | tail -c 600 | base64 | tr -d '\\n')"; }`,
     `byend() { bystatus=$1; bywhy=$2; byout; exit 0; }`,
-    `byerr() { tail -c 400 "$bys/err" 2>/dev/null | tr '\\n' ' '; }`,
+    `byerr() { tail -c 400 "$bys/err" 2>/dev/null; }`,
     `byto=; command -v timeout >/dev/null 2>&1 && byto="timeout 180"`,
     stageBaseScript(o.root),
     `bys="$bybase"/${q(gitStageName(id))}`,
@@ -243,9 +243,19 @@ export function parseGitPrep(stdout: string, stderr = ""): GitPrepResult {
     reason: why || null,
   }
   // No write access isn't a failure to fix: the archive keeps everything, quietly.
-  if (status === "failed" && why && NO_WRITE.test(why)) return { ...result, status: "skipped", reason: `no write access to origin (${why.replace(/x-access-token:[^@\s]+/g, "x-access-token:***").slice(0, 200)})` }
-  return { ...result, reason: result.reason?.replace(/x-access-token:[^@\s]+/g, "x-access-token:***") ?? null }
+  // Its line from git ("remote: Permission to o/r.git denied to bot."), not the rest, which names commits.
+  const denied = status === "failed" ? why.split("\n").find((l) => NO_WRITE.test(l)) : undefined
+  if (denied) return { ...result, status: "skipped", reason: `no write access to origin (${redact(denied.replace(/^remote:\s*/, "").trim()).slice(0, 200)})` }
+  return { ...result, reason: why ? redact(oneLine(why)) : null }
 }
+
+const redact = (s: string) => s.replace(/x-access-token:[^@\s]+/g, "x-access-token:***")
+const oneLine = (s: string) =>
+  s
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join("; ")
 
 /** git push errors that mean the token can't write to the repo. */
 const NO_WRITE = /permission to .* denied|\b403\b|authentication failed|could not read username|terminal prompts disabled|write access to repository not granted/i
@@ -279,7 +289,8 @@ export function gitRestoreScript(o: GitRestoreOptions): string {
     `export GIT_TERMINAL_PROMPT=0`,
     `byok() { echo "${RESTORE_MARK} $1 -"; exit 0; }`,
     `byno() { echo "${RESTORE_MARK} failed $(printf '%s' "$1" | tail -c 600 | base64 | tr -d '\\n')"; exit 0; }`,
-    `byerr() { tail -c 400 "$byt/err" 2>/dev/null | tr '\\n' ' '; }`,
+    // The last lines that say something (git ends a failed fetch with a generic hint).
+    `byerr() { grep -v -e '^[[:space:]]*$' -e 'Please make sure you have the correct access' -e '^and the repository exists' "$byt/err" 2>/dev/null | tail -n 2 | tail -c 400 | tr '\\n' ' '; }`,
     `cd ${d} 2>/dev/null || byno "the task folder is missing"`,
     `mkdir -p work && byt=$(mktemp -d "\${TMPDIR:-/tmp}/boxyard-restore.XXXXXX" 2>/dev/null || { mkdir -p .boxyard-restore && echo "$PWD/.boxyard-restore"; }) || byno "couldn't make a temp folder"`,
     `trap 'rm -rf "$byt"' EXIT`,
@@ -318,7 +329,7 @@ export function gitRestoreScript(o: GitRestoreOptions): string {
     `if [ -n "$bywant" ]; then`,
     // One fetch per ref: a branch origin doesn't have would fail them all.
     `  [ "$bybranch" != - ] && ${g} fetch -q origin "+refs/heads/$bybranch:refs/remotes/origin/$bybranch" >/dev/null 2>&1`,
-    `  [ -n "$byref" ] && ${g} fetch -q origin "+$byref:$byref" >/dev/null 2>&1`,
+    `  [ -n "$byref" ] && ${g} fetch -q origin "$byref" >/dev/null 2>&1`,
     `  bywant=$(for c in $bywant; do byhas "$c" || echo "$c"; done)`,
     `  [ -n "$bywant" ] && ${g} fetch -q origin $bywant >/dev/null 2>"$byt/err"`,
     `  bywant=$(for c in $bywant; do byhas "$c" || echo "$c"; done)`,
@@ -361,7 +372,7 @@ export function parseGitRestore(stdout: string, stderr = ""): { ok: boolean; fro
   try {
     why = Buffer.from(b64 ?? "", "base64").toString("utf8").trim()
   } catch {}
-  return { ok: false, from: null, reason: (why || "unknown error").replace(/x-access-token:[^@\s]+/g, "x-access-token:***") }
+  return { ok: false, from: null, reason: redact(why || "unknown error") }
 }
 
 /** Delete a task's WIP ref on origin from its work/ (best effort). */
