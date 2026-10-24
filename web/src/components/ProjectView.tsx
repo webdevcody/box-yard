@@ -383,8 +383,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         e.preventDefault()
         if (runner === "local" && project.runner !== "local") {
           const ok = await confirmDialog({
-            title: `Run ${project.name}'s agents on this computer?`,
-            body: `${LOCAL_UNSANDBOXED} Its tasks move off their boxes here when nothing would be lost.`,
+            title: "Run agents on this computer?",
+            body: `${project.name}'s agents will run here, not in Upstash boxes. ${LOCAL_UNSANDBOXED} Its tasks move off their boxes when nothing would be lost.`,
             confirmLabel: "Run on this computer",
             danger: true,
           })
