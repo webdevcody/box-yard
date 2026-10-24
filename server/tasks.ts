@@ -661,7 +661,8 @@ export class TaskManager {
     const rates = this.settings.get().costRates
     const floor = this.diskNeed(null)
     const now = Date.now()
-    return this.store.listBoxes().map((b) => {
+    // Boxes still being deleted show too: they exist (and bill) until the provider confirms.
+    return [...this.store.listBoxes(), ...this.store.listDeletingBoxes()].map((b) => {
       const residents = this.store.listTaskRows({ boxId: b.id })
       const size = normalizeBoxSize(b.size)
       const uptimeMs = Math.max(0, now - b.created_at)
@@ -1083,7 +1084,7 @@ export class TaskManager {
    * that are still here (a restart mid-resize, or a failure from before failed resizes cleaned up after themselves).
    */
   private async reclaimUnusedBoxes(now: number) {
-    for (const box of this.store.listBoxes()) {
+    for (const box of [...this.store.listDeletingBoxes(), ...this.store.listBoxes()]) {
       if (this.boxOps.has(box.id) || this.store.listTaskRows({ boxId: box.id }).length) continue
       if (box.status === "deleting") {
         if (now - (this.lastReclaimAt.get(box.id) ?? 0) < 5 * 60_000) continue
@@ -2489,6 +2490,8 @@ export class TaskManager {
       // Too big: keep the Claude session, the log and git history, with any uncommitted work as a WIP commit on a side ref.
       const partial = !res.ok && res.tooBig
       if (partial) res = await this.streamArchive(boxId, taskId, part, true)
+      if (!res.ok && res.tooBig)
+        throw new Error(`workspace is too large to archive even without its files (Claude session, log and git history are over ${this.c.archiveMaxMb} MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`)
       if (!res.ok) throw new Error(res.error)
       fs.renameSync(part, file)
       this.archiveErrors.delete(taskId)
