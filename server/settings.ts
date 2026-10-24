@@ -20,10 +20,12 @@ import {
   type SettingsInfo,
   type WorkerSize,
 } from "../shared/types.js"
+import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 
 const KEY = "settings"
 
 export const DEFAULT_SETTINGS: Settings = {
+  ownerName: DEFAULT_OWNER_NAME,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorEffort: DEFAULT_EFFORT,
   orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
@@ -89,6 +91,7 @@ const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 
 export const settingsPatch = z
   .object({
+    ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
     orchestratorModel: model,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
@@ -117,7 +120,7 @@ export const settingsPatch = z
 
 /**
  * Settings saved in the UI live in SQLite (kv). Precedence: saved in the UI >
- * ORCHESTRATOR_MODEL / WORKER_MODEL / CAPTAIN_MODEL / CAPTAIN_EFFORT env vars > built-in defaults.
+ * BOXYARD_OWNER_NAME / ORCHESTRATOR_MODEL / WORKER_MODEL / CAPTAIN_MODEL / CAPTAIN_EFFORT env vars > built-in defaults.
  * Every turn reads them fresh, so a change applies from the next turn on.
  */
 export class SettingsStore {
@@ -126,6 +129,7 @@ export class SettingsStore {
     private readonly c: Partial<
       Pick<
       Config,
+      | "ownerName"
       | "orchestratorModel"
       | "workerModel"
       | "captainModel"
@@ -159,6 +163,7 @@ export class SettingsStore {
   info(): SettingsInfo {
     const saved = this.saved()
     const env: Partial<Settings> = {}
+    if (this.c.ownerName) env.ownerName = this.c.ownerName
     if (this.c.orchestratorModel) env.orchestratorModel = this.c.orchestratorModel
     if (this.c.workerModel) env.agentModel = this.c.workerModel
     if (this.c.captainModel) env.captainModel = this.c.captainModel

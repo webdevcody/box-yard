@@ -15,7 +15,8 @@ import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
 import { AppLink, Empty, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { StickyScroll } from "./StickyScroll"
-import { Composer } from "./Composer"
+import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
 import { PublishedFile } from "./TaskFiles"
 import { AttachmentList } from "./Attachments"
@@ -24,6 +25,7 @@ import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
+import { useOwnerName } from "../lib/queries"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -54,7 +56,8 @@ export function TaskView({ id }: { id: string }) {
   const running = task.status === "working" || task.status === "starting"
 
   return (
-    <div ref={panel} className="relative flex h-full min-w-0 flex-col">
+    // Runs through the page's bottom padding so the composer lines up with the Coordinator panel's.
+    <div ref={panel} className={cx("relative flex min-w-0 flex-col", PAGE_BLEED_BOTTOM)}>
       <TaskHeader task={task} project={project} schedule={schedule} files={files} showTools={showTools} onShowTools={setShowTools} />
 
       {task.status === "needs_input" && task.question && (
@@ -86,7 +89,7 @@ export function TaskView({ id }: { id: string }) {
       />
 
       <Composer
-        className="sticky bottom-0 z-10 mt-3 border-t border-zinc-900 bg-zinc-950/95 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur"
+        className={cx(COMPOSER_FOOTER, "mt-3")}
         onSubmit={submit}
         panelRef={panel}
         placeholder={
@@ -153,6 +156,7 @@ const TaskThread = memo(function TaskThread({
 })
 
 const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
+  const ownerName = useOwnerName()
   const time = (
     <span className="ml-2 text-[10px] text-zinc-600">
       <TimeAgo ts={m.createdAt} />
@@ -163,7 +167,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       return (
         <div className={cx("rounded-lg border-l-2 border-yard-500 bg-yard-500/5 px-3 py-2", m.meta?.pending ? "opacity-60" : "")}>
           <div className="mb-0.5 text-[11px] font-semibold text-yard-400">
-            {userMessageLabel(m.meta)}
+            {userMessageLabel(m.meta, ownerName)}
             {time}
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}

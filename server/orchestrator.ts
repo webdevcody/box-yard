@@ -6,6 +6,7 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
+import { withOwner } from "../shared/owner.js"
 import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
@@ -86,10 +87,10 @@ interface RunResult {
 type RunKind = "turn" | "summary" | "compact" | "context"
 
 /** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
-export function attachmentNote(files: unknown): string {
+export function attachmentNote(files: unknown, ownerName?: string): string {
   if (!Array.isArray(files) || !files.length) return ""
   const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
-  return `\n\n[Cody attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
+  return `\n\n[${withOwner("Cody", ownerName)} attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
 }
 
 /**
@@ -349,7 +350,7 @@ export class Orchestrator {
       const s = this.session()
       const before = this.usage().tokens
       const model = this.settings.get().orchestratorModel
-      const summary = await this.run(SUMMARY_PROMPT, s.id, true, "summary")
+      const summary = await this.run(withOwner(SUMMARY_PROMPT, this.owner()), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
@@ -461,12 +462,16 @@ export class Orchestrator {
     const prompt = [
       notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
       queued.prompt,
-      `(This is a scheduled message from Box Yard, not a new message from Cody. ${notes ?? ""} Handle it as if Cody had sent it: do the work, and reply with what he should see.)`,
+      `(${withOwner("This is a scheduled message from Box Yard, not a new message from Cody.", this.owner())} ${notes ?? ""} ${withOwner("Handle it as if Cody had sent it: do the work, and reply with what Cody should see.", this.owner())})`,
     ]
       .filter(Boolean)
       .join("\n\n")
     const result = await this.runPrompt(prompt)
     this.finishScheduledRun(queued.id, result.ok ? undefined : result.error.slice(0, 500))
+  }
+
+  private owner(): string {
+    return this.settings.get().ownerName
   }
 
   /** Messages Cody sent since the orchestrator last replied. */
@@ -475,7 +480,7 @@ export class Orchestrator {
     return this.store
       .listChat(200)
       .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => m.content + attachmentNote(m.meta?.attachments))
+      .map((m) => m.content + attachmentNote(m.meta?.attachments, this.owner()))
       .filter((text) => text.trim())
   }
 
@@ -488,9 +493,12 @@ export class Orchestrator {
     await this.runPrompt(
       [
         `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
-        `(Automatic wake-up: there is no new message from Cody. Tell him in a line or two what finished, failed or needs him, with links. ` +
+        withOwner(
+          `(Automatic wake-up: there is no new message from Cody. Tell Cody in a line or two what finished, failed or needs Cody, with links. ` +
           `If an update completes a step of work Cody already asked for and the next step is clear, start it. ` +
-          `Don't start unrelated work, and don't repeat things you already told him. If there's nothing new for him, reply with exactly ${NO_UPDATE} and nothing else.)`,
+          `Don't start unrelated work, and don't repeat things you already told Cody. If there's nothing new for Cody, reply with exactly ${NO_UPDATE} and nothing else.)`,
+          this.owner(),
+        ),
       ].join("\n\n"),
     )
   }
@@ -565,7 +573,7 @@ export class Orchestrator {
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${ORCHESTRATOR_PROMPT}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${compactionsPrompt(this.compactionsDir)}`,
+      `${withOwner(ORCHESTRATOR_PROMPT, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
       ...session,
       ...model,
       "--effort",

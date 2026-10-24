@@ -4,6 +4,7 @@ import { api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
+import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type {
   BoxCleanup,
   BoxContents,
@@ -118,6 +119,8 @@ export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = () =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity })
+/** What Box Yard calls its human (Settings › Box agents › Your name). */
+export const useOwnerName = () => useAgentSettings().data?.settings.ownerName ?? DEFAULT_OWNER_NAME
 /** Newest first; kept live by the event stream (see lib/notifications.ts). */
 export const useNotifications = () =>
   useQuery({ queryKey: keys.notifications, queryFn: () => api<AppNotification[]>("/api/notifications?limit=50"), staleTime: Infinity })
@@ -234,7 +237,7 @@ export function useAddNote() {
       qc.setQueryData<Project[]>(keys.projects, (list) =>
         list?.map((p) =>
           p.id === projectId
-            ? { ...p, notes: [...p.notes, { id: `tmp-${Date.now()}`, projectId, author: "Cody", content, createdAt: Date.now() }] }
+            ? { ...p, notes: [...p.notes, { id: `tmp-${Date.now()}`, projectId, author: qc.getQueryData<SettingsInfo>(keys.agentSettings)?.settings.ownerName ?? DEFAULT_OWNER_NAME, content, createdAt: Date.now() }] }
             : p,
         ),
       )

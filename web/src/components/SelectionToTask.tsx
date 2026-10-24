@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { MessageSquarePlus } from "lucide-react"
 import { buildSelectionTaskPrompt, type SelectionTaskSource } from "../lib/selectionTask"
 import { toast } from "../lib/toast"
+import { useOwnerName } from "../lib/queries"
 import { Button, cx } from "./ui"
 import { Modal } from "./Modal"
 
@@ -93,7 +94,7 @@ export function SelectionToTask({
             setDraft(null)
             setSelection(null)
             window.getSelection()?.removeAllRanges()
-            toast.info("Sent to orchestrator", "Cody will decide where this task belongs.")
+            toast.info("Sent to orchestrator", "The Coordinator will decide where this task belongs.")
           }}
         />
       )}
@@ -113,6 +114,7 @@ function SelectionPrompt({
   onSubmit: (prompt: string) => void
 }) {
   const [instructions, setInstructions] = useState("")
+  const ownerName = useOwnerName()
   const preview = useMemo(() => selection.text.replace(/\s+/g, " ").trim().slice(0, 260), [selection.text])
   return (
     <Modal
@@ -122,7 +124,7 @@ function SelectionPrompt({
       onClose={onClose}
       onSubmit={(e) => {
         e.preventDefault()
-        onSubmit(buildSelectionTaskPrompt({ source, selectedText: selection.text, instructions }))
+        onSubmit(buildSelectionTaskPrompt({ source, selectedText: selection.text, instructions, ownerName }))
       }}
       footer={
         <>
