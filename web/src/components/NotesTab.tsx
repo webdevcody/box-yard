@@ -274,7 +274,7 @@ function SuggestionRow({ suggestion: s }: { suggestion: NoteSuggestion }) {
       <div className="min-w-0 flex-1 space-y-0.5">
         <p className="text-sm break-words whitespace-pre-wrap text-zinc-300">{s.content}</p>
         {s.status === "pending" ? (
-          <p className="text-zinc-500">{s.retroAt ? "With the Captain now, in its notes retro." : "Waits for its task to finish, then the Captain decides."}</p>
+          <p className="text-zinc-500">{s.retroAt ? "With the Captain now, in its notes retro." : "Goes to the Captain's notes retro once its task is finished."}</p>
         ) : (
           s.reason && (
             <p className="break-words text-zinc-400">
