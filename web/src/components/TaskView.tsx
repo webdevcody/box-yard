@@ -198,6 +198,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}
           <AttachmentList files={m.meta?.attachments} />
+          {m.meta?.undelivered === true && <div className="mt-1 text-[11px] text-zinc-500">Not delivered: the task was stopped or marked done first.</div>}
         </div>
       )
     }

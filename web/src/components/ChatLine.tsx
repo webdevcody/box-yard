@@ -2,7 +2,7 @@
 // tool calls (ToolLine) and notices. Shared by the Coordinator panel and the project Captain tab.
 import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
-import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
+import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Clock, Loader2, Webhook, Wrench } from "lucide-react"
 import { AppLink, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { toolMentions } from "../lib/linkify"
@@ -175,6 +175,15 @@ export function NoticeCard({ taskId, children }: { taskId: string; children: Rea
   )
 }
 
+/** Under a message sent mid-turn: it reaches `who` when the current turn ends. */
+export function QueuedLabel({ who, className }: { who: string; className?: string }) {
+  return (
+    <div data-testid="queued-label" title={`Sent while ${who} was busy. It goes in with the next turn.`} className={cx("flex items-center gap-1 text-[11px] text-zinc-500", className)}>
+      <Clock className="h-3 w-3" /> Queued · delivered when this turn ends
+    </div>
+  )
+}
+
 export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
@@ -192,23 +201,25 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   if (m.role === "user" && m.meta?.source === "hook") {
     // A hook's message_coordinator action (server/hooks.ts), not typed by Cody.
     return (
-      <div id={`chat-${m.id}`} className="flex justify-end">
+      <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
         <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
           <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-teal-300 uppercase">
             <Webhook className="h-3 w-3" /> Hook: {String(m.meta.hookName ?? "")}
           </div>
           {m.content}
         </div>
+        {m.meta.queued === true && <QueuedLabel who="the Coordinator" />}
       </div>
     )
   }
   if (m.role === "user") {
     return (
-      <div id={`chat-${m.id}`} className="flex justify-end">
+      <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
         <div className={cx("max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
           {m.content}
           <AttachmentList files={m.meta?.attachments} />
         </div>
+        {m.meta?.queued === true && <QueuedLabel who="the Coordinator" />}
       </div>
     )
   }

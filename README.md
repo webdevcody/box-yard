@@ -90,7 +90,7 @@ Box Yard resolves each turn's model and effort when the turn starts (model and e
 
 A task is not stuck on its first route. `send_to_task` accepts a new model and effort for the next turn, so a Haiku/low task can resume the same Claude session with Sonnet or Opus. `set_task_model` changes the next-turn route without sending a message. The orchestrator prompt tells it to escalate failed or looping tasks when the routing rules call for it.
 
-**Tasks and turns.** A task's agent runs one headless turn per incoming message (`claude -p --session-id` the first time, then `--resume`). Messages that arrive while it's busy wait in a queue and go out together in the next turn. Each task's Claude config lives in its own folder (`CLAUDE_CONFIG_DIR`), so the session moves with the task.
+**Tasks and turns.** A task's agent runs one headless turn per incoming message (`claude -p --session-id` the first time, then `--resume`). Messages that arrive while it's busy wait in a queue and go out together in the next turn. The same goes for the Coordinator and the Captains. In every chat, a message sent mid-turn shows at once at the bottom, under the live turn, labelled "Queued". When the turn that reads it starts, it moves to that point, so it sits right after the reply it was typed over and right before the reply that answers it. It stays there after a reload (`meta.queuedAt` keeps when it was sent). Each task's Claude config lives in its own folder (`CLAUDE_CONFIG_DIR`), so the session moves with the task.
 
 **Statuses.** A task is in one of these states:
 

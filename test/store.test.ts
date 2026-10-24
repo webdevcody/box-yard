@@ -120,3 +120,39 @@ describe("store", () => {
     expect(s.listTaskMessages(t.id, 5).map((m) => m.content)).toEqual(["m15", "m16", "m17", "m18", "m19"])
   })
 })
+
+describe("queued messages", () => {
+  it("delivering moves a queued message after everything already in the thread, even in the same millisecond", () => {
+    const s = store()
+    const q = s.addChat("user", "k it works perfect", { queued: true }, "chat_queued001")
+    const reply = s.addChat("assistant", "the long reply")
+    // The reply landed in this very millisecond (or the clock went back).
+    const moved = s.deliverQueued("chat_messages", [q.id, reply.id], undefined, reply.createdAt - 5)
+    expect(moved).toEqual([{ id: q.id, createdAt: reply.createdAt + 1, meta: { queuedAt: q.createdAt } }])
+    // A row of the next turn that ties with it still comes after it.
+    const next = s.addChat("assistant", "answer")
+    s.db.prepare("UPDATE chat_messages SET created_at = ? WHERE id = ?").run(reply.createdAt + 1, next.id)
+    expect(s.listChat().map((m) => m.content)).toEqual(["the long reply", "k it works perfect", "answer"])
+    // Delivered once: a second call changes nothing.
+    expect(s.deliverQueued("chat_messages", [q.id])).toEqual([])
+    expect(s.queuedChatIds()).toEqual([])
+  })
+
+  it("task feedback gets its transcript line at delivery (queuedAt = sent), or marked undelivered when its inputs are dropped", () => {
+    const s = store()
+    const p = s.createProject({ name: "q" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    s.queueInput(t.id, "cody", "a", [], { message: { source: "cody" } })
+    s.claimInputs(t.id, "turn1")
+    s.queueInput(t.id, "cody", "b", [], { message: { source: "cody" } })
+    s.queueInput(t.id, "agent:x", "c")
+    const c = s.queueInput(t.id, "cody", "gone", [], { message: { source: "cody" } })
+    s.cancelInput(t.id, c)
+    const delivered = s.deliverInputs("turn1")
+    expect(delivered.map((m) => [m.content, m.meta])).toEqual([["a", { source: "cody", queuedAt: expect.any(Number) }]])
+    const dropped = s.dropInputs(t.id)
+    expect(dropped.map((m) => [m.content, m.meta])).toEqual([["b", { source: "cody", undelivered: true }]])
+    expect(s.hasInputs(t.id)).toBe(false)
+  })
+
+})

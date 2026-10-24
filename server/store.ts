@@ -1320,7 +1320,10 @@ export class Store {
     return this.db.transaction(() => {
       const rows = this.db.prepare(`SELECT * FROM task_inputs WHERE claim = ? AND status = 'delivering' ${INPUT_ORDER}`).all(turnId) as InputRow[]
       this.db.prepare("DELETE FROM task_inputs WHERE claim = ? AND status = 'delivering'").run(turnId)
-      return rows.flatMap((r) => (r.message_json ? [this.addTaskMessage(r.task_id, "user", r.content, JSON.parse(r.message_json) as Record<string, unknown>)] : []))
+      // meta.queuedAt: when it was sent, like the chats' queued messages (see deliverQueued).
+      return rows.flatMap((r) =>
+        r.message_json ? [this.addTaskMessage(r.task_id, "user", r.content, { ...(JSON.parse(r.message_json) as Record<string, unknown>), queuedAt: r.created_at })] : [],
+      )
     })()
   }
 
@@ -1385,13 +1388,69 @@ export class Store {
     return ok && row ? { ok: true, row } : { ok: false, row }
   }
 
-  clearInputs(taskId: string) {
-    this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
+  /**
+   * The task stopped or closed before a turn read its queue: drop every input. The messages from people get their
+   * transcript line anyway, marked undelivered, so nothing Cody sent just vanishes. Returns those lines.
+   */
+  dropInputs(taskId: string): TaskMessage[] {
+    return this.db.transaction(() => {
+      const rows = this.db.prepare(`SELECT * FROM task_inputs WHERE task_id = ? AND status != 'cancelled' ${INPUT_ORDER}`).all(taskId) as InputRow[]
+      this.db.prepare("DELETE FROM task_inputs WHERE task_id = ?").run(taskId)
+      return rows.flatMap((r) =>
+        r.message_json ? [this.addTaskMessage(taskId, "user", r.content, { ...(JSON.parse(r.message_json) as Record<string, unknown>), undelivered: true })] : [],
+      )
+    })()
   }
 
   /** Inputs waiting for a turn (queued or being delivered; cancelled ones don't count). */
   hasInputs(taskId: string) {
     return Boolean(this.db.prepare("SELECT 1 FROM task_inputs WHERE task_id = ? AND status != 'cancelled' LIMIT 1").get(taskId))
+  }
+
+  // ---------- queued messages ----------
+  //
+  // (Task feedback waits in task_inputs instead and gets its transcript line at delivery; see claimInputs.)
+  // A message sent while the Coordinator or a Captain is mid-turn waits for the next turn. It is stored
+  // right away with meta.queued, and the UI shows it under the live turn, labelled "Queued". When the turn that
+  // reads it starts, deliverQueued moves it to that moment (created_at = delivery, meta.queuedAt = when it was
+  // sent), so it sits right before that turn's output, after the reply it was typed over, and stays there after a reload.
+
+  /**
+   * Deliver these queued messages now; returns the ones that moved, with their new createdAt and meta. `thread`
+   * names the Captain's project or the task, for captain_messages and task_messages.
+   */
+  deliverQueued(
+    table: "chat_messages" | "captain_messages" | "task_messages",
+    ids: string[],
+    thread?: string,
+    now = Date.now(),
+  ): { id: string; createdAt: number; meta: Record<string, unknown> }[] {
+    if (!ids.length) return []
+    const scope = table === "captain_messages" ? "WHERE project_id = ?" : table === "task_messages" ? "WHERE task_id = ?" : ""
+    return this.db.transaction(() => {
+      // Strictly after everything already in the thread (the previous turn may have ended in this very millisecond).
+      // Later rows that tie still sort after it, by rowid.
+      const last = (this.db.prepare(`SELECT MAX(created_at) AS t FROM ${table} ${scope}`).get(...(scope ? [thread] : [])) as { t: number | null }).t ?? 0
+      const at = Math.max(now, last + 1)
+      const get = this.db.prepare(`SELECT meta_json, created_at FROM ${table} WHERE id = ?`)
+      const set = this.db.prepare(`UPDATE ${table} SET meta_json = ?, created_at = ? WHERE id = ?`)
+      const moved: { id: string; createdAt: number; meta: Record<string, unknown> }[] = []
+      for (const id of ids) {
+        const r = get.get(id) as { meta_json: string | null; created_at: number } | undefined
+        const prev = json<Record<string, unknown> | null>(r?.meta_json, null)
+        if (!r || !prev?.queued) continue
+        const { queued: _, ...rest } = prev
+        const meta = { ...rest, queuedAt: r.created_at }
+        set.run(JSON.stringify(meta), at, id)
+        moved.push({ id, createdAt: at, meta })
+      }
+      return moved
+    })()
+  }
+
+  /** Ids of Coordinator chat messages still waiting for a turn (after a restart, say). */
+  queuedChatIds(): string[] {
+    return (this.db.prepare("SELECT id FROM chat_messages WHERE json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC").all() as { id: string }[]).map((r) => r.id)
   }
 
   // ---------- task transcript ----------

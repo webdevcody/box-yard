@@ -676,7 +676,7 @@ export class TaskManager {
       if (row.status === "working") await this.killTurn(row).catch(() => {})
       // The runner writes turn_end after it stops; that settles the status.
     } else if (row.status === "queued" || row.status === "starting") {
-      this.store.clearInputs(row.id)
+      this.dropQueuedMessages(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
     this.addEvent(row.id, withOwner("Stopped by Cody.", this.owner()))
@@ -684,11 +684,16 @@ export class TaskManager {
     return this.store.getTask(row.id)!
   }
 
+  /** The queue is dropped (stop, close): what people sent lands in the transcript marked undelivered. */
+  private dropQueuedMessages(taskId: string) {
+    for (const m of this.store.dropInputs(taskId)) this.hub.broadcast({ type: "task.message", message: m })
+  }
+
   /** Finish a task: stop it, archive it, free its box folder. */
   async closeTask(taskId: string): Promise<Task> {
     const row = this.requireRow(taskId)
     if (row.current_turn_id) await this.stopTask(taskId)
-    this.store.clearInputs(row.id)
+    this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
     this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
