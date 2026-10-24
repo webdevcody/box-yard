@@ -123,6 +123,7 @@ describe("Zen mode", () => {
     expect(chat()!.querySelector("textarea")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Leave Zen mode']")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Zen mode']")).toBeNull()
+    expect(chat()!.querySelector("header")!.textContent).toContain("Box Yard Coordinator")
     // Every row pads in to the one centered column.
     expect(chat()!.querySelectorAll(".zen-column").length).toBe(3)
   })
@@ -159,8 +160,10 @@ describe("Zen mode", () => {
     expect(ctx.querySelector("[role=menu]")).toBeNull()
   })
 
-  it("the side panel keeps its own context meter row", () => {
+  it("the side panel keeps its own context meter row and its short title", () => {
     render("/")
+    expect(chat()!.querySelector("header")!.textContent).toContain("Coordinator")
+    expect(chat()!.querySelector("header")!.textContent).not.toContain("Box Yard Coordinator")
     expect(chat()!.querySelector("[data-testid=context-meter]")).not.toBeNull()
     expect(chat()!.querySelector("[data-testid=zen-context]")).toBeNull()
   })

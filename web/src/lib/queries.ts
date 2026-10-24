@@ -23,6 +23,7 @@ import type {
   CaptainMessage,
   CaptainState,
   ChatMessage,
+  Effort,
   Health,
   OrchestratorCompactionRecord,
   OrchestratorState,
@@ -506,7 +507,17 @@ export const useNoteSuggestions = (projectId: string) =>
 export function useCreateTask() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; projectId: string; title: string; prompt: string; env?: Record<string, string> }) =>
+    mutationFn: (input: {
+      id: string
+      projectId: string
+      title: string
+      prompt: string
+      env?: Record<string, string>
+      model?: string
+      effort?: Effort
+      /** Upload ids. */
+      attachments?: string[]
+    }) =>
       api<Task>("/api/tasks", { body: input }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.tasks })
