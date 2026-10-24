@@ -4,6 +4,7 @@ import type { BoxProvider } from "./providers/types.js"
 import { q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { RESTING_STATUSES } from "../shared/types.js"
+import { mirrorGcScript } from "./gitShare.js"
 import { CLEANUP_STEPS, CLEAR_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
 
 /** After a low-disk cleanup that couldn't reach its target, don't run another for this long (unless a launch hit ENOSPC). */
@@ -43,6 +44,12 @@ export interface CleanupOptions {
   clear?: boolean
   /** Runs first, inside the report: a throw fails the run before any step (e.g. agents that won't stop). */
   before?: () => Promise<void>
+  /** Only these steps (in their usual order). */
+  steps?: CleanupStepKey[]
+  /** The builds step only cleans these tasks. */
+  builds?: string[]
+  /** The git step only runs `gc --auto` and never removes a mirror in `keep`. */
+  light?: boolean
 }
 
 /**
@@ -86,7 +93,7 @@ export function parkOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string
  * only once its archive is fresh.
  */
 export class BoxJanitor {
-  private running = new Map<string, Promise<BoxCleanup>>()
+  private running = new Map<string, { reason: CleanupReason; done: Promise<BoxCleanup> }>()
   private reports = new Map<string, BoxCleanup>()
   /** Tasks whose folder a step is working in right now; they don't start a turn until it's done. */
   private busy = new Set<string>()
@@ -95,6 +102,16 @@ export class BoxJanitor {
 
   isRunning(boxId: string) {
     return this.running.has(boxId)
+  }
+
+  /** Why the running cleanup on a box runs, or null when none is. */
+  runningReason(boxId: string): CleanupReason | null {
+    return this.running.get(boxId)?.reason ?? null
+  }
+
+  /** Wait for the running cleanup on a box, if any. */
+  async settle(boxId: string) {
+    await this.running.get(boxId)?.done
   }
 
   isBusy(taskId: string) {
@@ -127,7 +144,10 @@ export class BoxJanitor {
    * Returns what the caller should tell the waiting task.
    */
   ensure(boxId: string, target: number, reason: CleanupReason = "low-disk", force = false): "running" | "exhausted" {
-    if (this.running.has(boxId)) return "running"
+    const going = this.running.get(boxId)
+    // Routine upkeep is short and only cleans idle tasks: the low-disk run follows right after it.
+    if (going?.reason === "routine") void going.done.then(() => this.ensure(boxId, target, reason, force))
+    if (going) return "running"
     const last = this.current(boxId)
     const recent = last?.finishedAt && Date.now() - last.finishedAt < COOLDOWN_MS
     if (!force && recent && last && last.reason !== "manual" && !last.enough && (last.targetFreeBytes ?? 0) >= target) return "exhausted"
@@ -138,7 +158,7 @@ export class BoxJanitor {
   /** Start a cleanup (or join the running one). Resolves with its report. */
   run(boxId: string, opts: CleanupOptions): Promise<BoxCleanup> {
     const going = this.running.get(boxId)
-    if (going) return going
+    if (going) return going.done
     const report: BoxCleanup = {
       boxId,
       reason: opts.reason,
@@ -169,12 +189,17 @@ export class BoxJanitor {
         this.host.finished(report)
         return report
       })
-    this.running.set(boxId, p)
+    this.running.set(boxId, { reason: opts.reason, done: p })
     return p
   }
 
-  /** The current report, broadcast and saved so the Boxes page shows it after a reload. */
+  /**
+   * The current report, broadcast and saved so the Boxes page shows it after a reload. Routine upkeep stays
+   * quiet: it shows up only once it's done, and only when it removed or freed something.
+   */
   private publish(report: BoxCleanup) {
+    const idle = report.status === "running" || (report.status === "done" && !(report.freedBytes > 0 || report.steps.some((s) => s.removed.length)))
+    if (report.reason === "routine" && idle) return
     const copy = { ...report, steps: report.steps.map((s) => ({ ...s, removed: [...s.removed] })) }
     this.reports.set(report.boxId, copy)
     if (copy.status !== "running") this.host.store.setKv(kvKey(report.boxId), JSON.stringify(copy))
@@ -202,7 +227,8 @@ export class BoxJanitor {
     report.freeAfter = free
     report.enough = enough()
 
-    for (const step of opts.clear ? CLEAR_STEPS : CLEANUP_STEPS) {
+    const plan = (opts.clear ? CLEAR_STEPS : CLEANUP_STEPS).filter((s) => !opts.steps || opts.steps.includes(s.key))
+    for (const step of plan) {
       const entry: CleanupStepReport = { key: step.key, label: step.label, freedBytes: 0, removed: [], skipped: null }
       report.steps.push(entry)
       if (enough()) {
@@ -294,8 +320,8 @@ export class BoxJanitor {
       }
 
       case "builds": {
-        const order = buildCleanupOrder(rows(), boxId, (id) => store.hasInputs(id))
-        if (!order.length) return "no resting tasks on this box"
+        const order = buildCleanupOrder(rows(), boxId, (id) => store.hasInputs(id)).filter((r) => !opts.builds || opts.builds.includes(r.id))
+        if (!order.length) return opts.builds ? "no idle resting tasks on this box" : "no resting tasks on this box"
         const runner = await this.host.installRunner(boxId)
         for (const candidate of order) {
           this.busy.add(candidate.id)
@@ -317,11 +343,8 @@ export class BoxJanitor {
 
       case "git": {
         if (cloning()) return "a task is cloning on this box"
-        const keep = [...this.host.mirrorsToKeep(boxId, !opts.clear)].join(" ")
-        const repos = `${root}/.boxyard/repos`
-        const out = await exec(
-          `[ -d ${q(repos)} ] || exit 0; for d in ${q(repos)}/*.git; do [ -e "$d" ] || continue; b=$(basename "$d"); case " ${keep} " in *" $b "*) git -C "$d" gc --prune=now --quiet >/dev/null 2>&1 && echo "gc $b";; *) rm -rf "$d" && echo "removed $b";; esac; done; true`,
-        )
+        // Mirrors task folders borrow objects from are repacked but never pruned, and never removed.
+        const out = await exec(mirrorGcScript(root, [...this.host.mirrorsToKeep(boxId, !opts.clear)], Boolean(opts.light)))
         entry.removed.push(...out.split("\n").filter(Boolean))
         return null
       }

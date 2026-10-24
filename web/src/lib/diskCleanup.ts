@@ -35,6 +35,7 @@ const REASON: Record<BoxCleanup["reason"], string> = {
   "out-of-space": "a task ran out of space",
   manual: "Clean up now",
   clear: "Clear box",
+  routine: "routine upkeep",
 }
 
 /** Workspaces a Clear box run archived and took off the box. */
@@ -51,14 +52,15 @@ export function cleanupLine(c: BoxCleanup): string {
   }
   if (c.status === "failed") return `${clear ? "Clear" : "Cleanup"} failed: ${c.error ?? "unknown error"}`
   if (clear) return `Cleared: archived and removed ${workspaces(clearedCount(c))}, ${cleanupSummary(c)}`
-  const why = c.reason === "manual" ? "Cleaned up" : `Cleaned up because ${REASON[c.reason]}`
+  const why = c.reason === "manual" ? "Cleaned up" : c.reason === "routine" ? "Routine upkeep (idle build output, mirror gc)" : `Cleaned up because ${REASON[c.reason]}`
   const short = c.targetFreeBytes !== null && !c.enough ? `; still short of the ${formatBytes(c.targetFreeBytes)} new workspaces need` : ""
   return `${why}: ${cleanupSummary(c)}${short}`
 }
 
 /** The toast for a finished cleanup, or null while it's still running. */
 export function cleanupToast(c: BoxCleanup): { kind: "info" | "error"; title: string; body: string } | null {
-  if (c.status === "running") return null
+  // Routine upkeep is Box Yard's own housekeeping: it shows on the box card, not as a toast.
+  if (c.status === "running" || c.reason === "routine") return null
   const clear = c.reason === "clear"
   if (c.status === "failed") return { kind: "error", title: `${clear ? "Clearing" : "Cleanup on"} ${c.boxId} failed`, body: c.error ?? "Unknown error" }
   const free = c.freeAfter !== null ? ` ${formatBytes(c.freeAfter)} free now.` : ""

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process"
 import path from "node:path"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
-import type { Project, Task } from "../shared/types.js"
+import type { BoxCleanup, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 interface Running {
@@ -198,8 +198,8 @@ describe("resuming after retention", () => {
 })
 
 describe("workspace retention", () => {
-  it("removes generated directories after a resting task is safely archived", async () => {
-    const r = await start()
+  it("removes generated directories once a resting task has been idle past buildCleanupIdleMinutes, and reports it", async () => {
+    const r = await start({ buildCleanupIdleMinutes: 15 })
     const p = await project(r, "alpha")
     const first = await archivedDone(r, (await task(r, p.id, "cleanup")).id)
     const dir = r.yard.tasks.taskDir(first.boxId!, first.id)
@@ -209,10 +209,34 @@ describe("workspace retention", () => {
 
     await send(r, first.id, "continue")
     const second = await archivedDone(r, first.id, 2)
-
     expect(second.boxId).toBe(first.boxId)
+    // Just finished: a follow-up turn would still want its node_modules.
+    await r.yard.tasks.maintain()
+    expect(fs.existsSync(path.join(dir, "work", "node_modules"))).toBe(true)
+
+    age(r, first.id, Date.now() - 16 * 60_000, false)
+    await r.yard.tasks.maintain()
     expect(fs.existsSync(path.join(dir, "work", "box-yard-demo.md"))).toBe(true)
     expect(fs.existsSync(path.join(dir, "work", "node_modules"))).toBe(false)
+    const report = JSON.parse(r.yard.store.getKv(`box_cleanup:${first.boxId}`)!) as BoxCleanup
+    expect(report.reason).toBe("routine")
+    expect(report.steps.find((s) => s.key === "builds")?.removed).toEqual([`${first.id}: 1 dir`])
+
+    // Once per idle stretch: nothing new to clean, so no new report.
+    r.yard.store.setKv(`box_cleanup:${first.boxId}`, null)
+    await r.yard.tasks.maintain()
+    expect(r.yard.store.getKv(`box_cleanup:${first.boxId}`)).toBeNull()
+  })
+
+  it("leaves build output alone when idle cleanup is off", async () => {
+    const r = await start({ buildCleanupIdleMinutes: 0 })
+    const p = await project(r, "alpha")
+    const done = await archivedDone(r, (await task(r, p.id, "keep deps")).id)
+    const work = path.join(r.yard.tasks.taskDir(done.boxId!, done.id), "work")
+    put(path.join(work, "node_modules", "left-pad", "index.js"))
+    age(r, done.id, Date.now() - 2 * DAY, false)
+    await r.yard.tasks.maintain()
+    expect(fs.existsSync(path.join(work, "node_modules"))).toBe(true)
   })
 
   it("only removes dirs git ignores and does not track, keeping committed build output", async () => {
@@ -239,6 +263,8 @@ describe("workspace retention", () => {
 
     await send(r, first.id, "continue")
     await archivedDone(r, first.id, 2)
+    age(r, first.id, Date.now() - 60 * 60_000, false)
+    await r.yard.tasks.maintain()
 
     const exists = (rel: string) => fs.existsSync(path.join(work, rel))
     expect(exists("app/build/index.html")).toBe(true)
