@@ -4,7 +4,7 @@ import type { BoxProvider } from "./providers/types.js"
 import { q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { RESTING_STATUSES } from "../shared/types.js"
-import { CLEANUP_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
+import { CLEANUP_STEPS, CLEAR_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
 
 /** After a low-disk cleanup that couldn't reach its target, don't run another for this long (unless a launch hit ENOSPC). */
 const COOLDOWN_MS = 10 * 60_000
@@ -24,8 +24,8 @@ export interface JanitorHost {
   archive(taskId: string): Promise<void>
   /** Remove a resting task's folder from its box; it comes back from the archive on its next message. */
   park(taskId: string, boxId: string, note: string): Promise<void>
-  /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs. */
-  mirrorsToKeep(boxId: string): Set<string>
+  /** Repo mirror folder names (in .boxyard/repos) some task on the box still needs; with `owner`, also the box's own project's. */
+  mirrorsToKeep(boxId: string, owner?: boolean): Set<string>
   /** A run ended (ok or not). */
   finished(report: BoxCleanup): void
 }
@@ -36,6 +36,13 @@ export interface CleanupOptions {
   target: number | null
   /** Done workspaces are only parked while free space is below this. */
   parkBelow: number
+  /**
+   * Clear box: archive and remove every workspace that isn't running (any status), then leftovers, caches and
+   * every repo mirror nothing on the box needs. A workspace whose archive can't be made stays.
+   */
+  clear?: boolean
+  /** Runs first, inside the report: a throw fails the run before any step (e.g. agents that won't stop). */
+  before?: () => Promise<void>
 }
 
 /**
@@ -60,6 +67,11 @@ export function buildCleanupOrder(rows: TaskRow[], boxId: string, hasInputs: (id
 }
 
 /** Done tasks whose folders may be parked in the archive, least recently active first. */
+/** Every workspace on a box that Clear box archives and removes: all but running ones, least recently active first. */
+export function clearOrder(rows: TaskRow[], boxId: string): TaskRow[] {
+  return rows.filter((r) => r.box_id === boxId && !r.current_turn_id && r.status !== "starting" && r.status !== "working").sort((a, b) => a.last_active_at - b.last_active_at)
+}
+
 export function parkOrder(rows: TaskRow[], boxId: string, hasInputs: (id: string) => boolean): TaskRow[] {
   return rows
     .filter((r) => r.box_id === boxId && !r.current_turn_id && r.status === "done" && !hasInputs(r.id))
@@ -171,6 +183,7 @@ export class BoxJanitor {
 
   private async steps(report: BoxCleanup, opts: CleanupOptions) {
     const boxId = report.boxId
+    if (opts.before) await opts.before()
     const start = await this.host.probe(boxId)
     report.freeBefore = start?.freeBytes ?? null
     report.totalBytes = start?.totalBytes ?? null
@@ -189,7 +202,7 @@ export class BoxJanitor {
     report.freeAfter = free
     report.enough = enough()
 
-    for (const step of CLEANUP_STEPS) {
+    for (const step of opts.clear ? CLEAR_STEPS : CLEANUP_STEPS) {
       const entry: CleanupStepReport = { key: step.key, label: step.label, freedBytes: 0, removed: [], skipped: null }
       report.steps.push(entry)
       if (enough()) {
@@ -202,7 +215,7 @@ export class BoxJanitor {
       }
       try {
         // A step that works task by task measures after each one, so it stops once there's room.
-        entry.skipped = await this.step(step.key, boxId, entry, async () => {
+        entry.skipped = await this.step(step.key, boxId, entry, opts, async () => {
           entry.freedBytes += await measure()
           return enough()
         })
@@ -218,7 +231,7 @@ export class BoxJanitor {
   }
 
   /** Run one step. `progress` re-measures and says whether there is enough room now. Returns a skip reason, or null. */
-  private async step(key: CleanupStepKey, boxId: string, entry: CleanupStepReport, progress: () => Promise<boolean>): Promise<string | null> {
+  private async step(key: CleanupStepKey, boxId: string, entry: CleanupStepReport, opts: CleanupOptions, progress: () => Promise<boolean>): Promise<string | null> {
     const { store, provider } = this.host
     const root = provider.root(boxId)
     const rows = () => store.listTaskRows()
@@ -304,7 +317,7 @@ export class BoxJanitor {
 
       case "git": {
         if (cloning()) return "a task is cloning on this box"
-        const keep = [...this.host.mirrorsToKeep(boxId)].join(" ")
+        const keep = [...this.host.mirrorsToKeep(boxId, !opts.clear)].join(" ")
         const repos = `${root}/.boxyard/repos`
         const out = await exec(
           `[ -d ${q(repos)} ] || exit 0; for d in ${q(repos)}/*.git; do [ -e "$d" ] || continue; b=$(basename "$d"); case " ${keep} " in *" $b "*) git -C "$d" gc --prune=now --quiet >/dev/null 2>&1 && echo "gc $b";; *) rm -rf "$d" && echo "removed $b";; esac; done; true`,
@@ -314,6 +327,7 @@ export class BoxJanitor {
       }
 
       case "archive": {
+        if (opts.clear) return this.archiveAll(boxId, entry)
         const order = parkOrder(rows(), boxId, (id) => store.hasInputs(id))
         if (!order.length) return "no done workspaces on this box"
         for (const candidate of order) {
@@ -328,5 +342,31 @@ export class BoxJanitor {
         return null
       }
     }
+  }
+
+  /** Clear box's first step: archive each workspace that isn't running, then take it off the box. */
+  private async archiveAll(boxId: string, entry: CleanupStepReport): Promise<string | null> {
+    const { store } = this.host
+    const order = clearOrder(store.listTaskRows(), boxId)
+    if (!order.length) return "no workspaces on this box"
+    const kept: string[] = []
+    for (const candidate of order) {
+      this.busy.add(candidate.id)
+      try {
+        if (!this.host.hasFreshArchive(candidate)) await this.host.archive(candidate.id)
+        const row = store.getTaskRow(candidate.id)
+        if (!row || row.box_id !== boxId || row.current_turn_id) continue
+        // A task that never ran a turn has nothing to lose; everything else leaves only with a fresh archive.
+        if (row.session_started && !this.host.hasFreshArchive(row)) {
+          kept.push(row.id)
+          continue
+        }
+        await this.host.park(row.id, boxId, `Workspace archived and removed when Cody cleared box ${boxId}. It comes back from the archive on the next message.`)
+        entry.removed.push(row.id)
+      } finally {
+        this.busy.delete(candidate.id)
+      }
+    }
+    return kept.length ? `kept ${kept.join(", ")}: couldn't archive ${kept.length === 1 ? "it" : "them"}` : null
   }
 }

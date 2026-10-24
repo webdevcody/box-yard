@@ -93,3 +93,28 @@ describe("withCleanup", () => {
     expect(withCleanup(undefined, cleanup())).toBeUndefined()
   })
 })
+
+describe("clear box report", () => {
+  const cleared = (over: Partial<BoxCleanup> = {}) =>
+    cleanup({
+      reason: "clear",
+      targetFreeBytes: null,
+      steps: [
+        { key: "archive", label: "Archive every workspace, then remove it from the box", freedBytes: 1.25 * GB, removed: ["task_a", "task_b"], skipped: null },
+        { key: "git", label: "Repo mirrors", freedBytes: 0, removed: [], skipped: null },
+      ],
+      ...over,
+    })
+
+  it("says how many workspaces were archived and what it freed", () => {
+    expect(cleanupLine(cleared())).toBe("Cleared: archived and removed 2 workspaces, freed 1.3 GB (archive 1.3 GB)")
+    expect(cleanupToast(cleared())).toEqual({ kind: "info", title: "Cleared pleasing-shepherd-27426", body: "Archived and removed 2 workspaces; freed 1.3 GB (archive 1.3 GB). 1.5 GB free now." })
+  })
+
+  it("flags workspaces it had to keep, and running and failed clears", () => {
+    const kept = cleared({ steps: [{ key: "archive", label: "x", freedBytes: 0, removed: [], skipped: "kept task_a: couldn't archive it" }] })
+    expect(cleanupToast(kept)).toMatchObject({ kind: "error", body: "Archived and removed 0 workspaces; freed 1.3 GB. 1.5 GB free now. Kept task_a: couldn't archive it." })
+    expect(cleanupLine(cleared({ status: "running", freedBytes: 0 }))).toBe("Clearing…")
+    expect(cleanupLine(cleared({ status: "failed", error: "1 agent is running" }))).toBe("Clear failed: 1 agent is running")
+  })
+})
