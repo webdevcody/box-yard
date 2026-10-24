@@ -27,6 +27,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
   return {
     ...baseConfig,
     dataDir,
+    localDir: path.join(dataDir, "local-workspaces"),
     host: "127.0.0.1",
     password: "",
     provider: "local",

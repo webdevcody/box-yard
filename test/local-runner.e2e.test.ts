@@ -12,7 +12,7 @@ import type { BoxInfo, Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // The local runner end to end: a project set to "Runs on: This computer" runs its turns as child processes of the
-// server in <data>/local-workspaces/<task>, under its own Settings › Local agents limit, pushes at turn end without
+// server in <BOXYARD_LOCAL_DIR>/<task>, under its own Settings › Local agents limit, pushes at turn end without
 // archives, resumes a turn this computer's sleep cut off (#104), and moves to and off boxes without losing work.
 // Projects left on boxes work as before.
 
@@ -41,6 +41,8 @@ interface Running {
   boxes: Boxes
   local: HookedLocal
   dataDir: string
+  /** config.localDir: this computer's task folders. */
+  localRoot: string
 }
 const running: Running[] = []
 /** Temp folders a test made: removed once its servers stop. */
@@ -56,13 +58,13 @@ async function start(overrides: Partial<Config> = {}): Promise<Running> {
   const boxes = new Boxes(scratchDir("boxes-"), FAKE_CLAUDE)
   const config = testConfig({ port, ...overrides })
   scratch.push(config.dataDir)
-  const local = new HookedLocal(path.join(config.dataDir, "local-workspaces"), FAKE_CLAUDE)
+  const local = new HookedLocal(config.localDir, FAKE_CLAUDE)
   const yard = createBoxYard(config, { webDir: "/nonexistent", provider: boxes, localRunner: local })
   const server = await new Promise<Server>((resolve) => {
     const s = yard.app.listen(port, "127.0.0.1", () => resolve(s))
   })
   await yard.start()
-  const r = { yard, server, base: `http://127.0.0.1:${port}`, boxes, local, dataDir: config.dataDir }
+  const r = { yard, server, base: `http://127.0.0.1:${port}`, boxes, local, dataDir: config.dataDir, localRoot: config.localDir }
   running.push(r)
   return r
 }
@@ -124,7 +126,7 @@ const events = (r: Running, id: string) =>
     .listTaskMessages(id, 500)
     .filter((m) => m.role === "event")
     .map((m) => m.content)
-const localDir = (r: Running, taskId: string) => path.join(r.dataDir, "local-workspaces", taskId)
+const localDir = (r: Running, taskId: string) => path.join(r.localRoot, taskId)
 const archiveFile = (r: Running, taskId: string) => path.join(r.dataDir, "archives", `${taskId}.tgz`)
 
 const git = (cwd: string, ...args: string[]) =>
@@ -155,7 +157,7 @@ async function repoProject(r: Running, name: string, runner: "box" | "local", ur
 }
 
 describe("local runner", () => {
-  it("runs a local project's turns on this computer in <data>/local-workspaces, and box projects as before", async () => {
+  it("runs a local project's turns on this computer in BOXYARD_LOCAL_DIR, and box projects as before", async () => {
     const r = await start()
     const mac = await project(r, "survive-the-night", "local")
     const cloud = await project(r, "cloud", "box")
@@ -170,7 +172,7 @@ describe("local runner", () => {
     expect(ta.boxId).toBe(LOCAL_BOX_ID)
     expect(r.yard.tasks.taskDir(LOCAL_BOX_ID, a.id)).toBe(localDir(r, a.id))
     expect(fs.readFileSync(path.join(localDir(r, a.id), "work", "box-yard-demo.md"), "utf8")).toContain("write a haiku")
-    expect(fs.existsSync(path.join(r.dataDir, "local-workspaces", ".boxyard", "box-runner.mjs"))).toBe(true)
+    expect(fs.existsSync(path.join(r.localRoot, ".boxyard", "box-runner.mjs"))).toBe(true)
     const turn = JSON.parse(fs.readFileSync(path.join(localDir(r, a.id), "turn.json"), "utf8")) as { systemPrompt: string }
     expect(turn.systemPrompt).toContain("Box Yard's local runner), not in a sandbox")
     const taskJson = JSON.parse(fs.readFileSync(path.join(localDir(r, a.id), "task.json"), "utf8")) as { claudeBin: string; isolateConfig: boolean; boxId: string }

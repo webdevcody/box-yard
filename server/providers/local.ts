@@ -17,8 +17,9 @@ export class LocalProvider implements BoxProvider {
   constructor(
     private readonly baseDir: string,
     readonly claudeBin = "claude",
+    makeDir = true,
   ) {
-    fs.mkdirSync(baseDir, { recursive: true })
+    if (makeDir) fs.mkdirSync(baseDir, { recursive: true })
   }
 
   root(boxId: string) {
@@ -147,8 +148,9 @@ export function agentEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * The local runner: a project set to "Runs on: This computer" runs its agents straight on the machine running Box Yard
  * (Cody's Mac), with its real GPU, its logged-in `claude` and `gh`, and no sandbox. It has one virtual box,
  * LOCAL_BOX_ID, which is never a `boxes` row (shared/runner.ts). Task folders are `<dir>/<task_id>` (dir is
- * `<data>/local-workspaces`); Box Yard's runner, repo mirrors and dependency cache sit beside them in `<dir>/.boxyard`.
- * A turn is box-runner.mjs as a child process of this server, in a session of its own so it outlives a server restart.
+ * BOXYARD_LOCAL_DIR, `~/boxyard-workspaces` unless set); Box Yard's runner, repo mirrors and dependency cache sit
+ * beside them in `<dir>/.boxyard`. A turn is box-runner.mjs as a child process of this server, in a session of its own
+ * so it outlives a server restart.
  */
 export class LocalRunnerProvider extends LocalProvider {
   protected override readonly detached = true
@@ -156,7 +158,24 @@ export class LocalRunnerProvider extends LocalProvider {
     private readonly dir: string,
     claudeBin = "claude",
   ) {
-    super(dir, claudeBin)
+    // Made on first use: most Box Yards never run a local agent, and starting one mustn't leave a folder in $HOME.
+    super(dir, claudeBin, false)
+  }
+
+  /** Commands run in the folder, so it's made first (on first use, or again if someone removed it). */
+  override exec(boxId: string, command: string) {
+    fs.mkdirSync(this.dir, { recursive: true })
+    return super.exec(boxId, command)
+  }
+
+  override execStream(boxId: string, command: string, onOutput: (chunk: string) => void) {
+    fs.mkdirSync(this.dir, { recursive: true })
+    return super.execStream(boxId, command, onOutput)
+  }
+
+  override hold(boxId: string, command: string, signal: AbortSignal) {
+    fs.mkdirSync(this.dir, { recursive: true })
+    return super.hold(boxId, command, signal)
   }
 
   override root(_boxId: string) {

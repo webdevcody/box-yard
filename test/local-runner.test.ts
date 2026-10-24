@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import Database from "better-sqlite3"
 import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter, agentEnv } from "../server/providers/local.js"
@@ -11,6 +12,7 @@ import { Store } from "../server/store.js"
 import { DEFAULT_SETTINGS, SettingsStore } from "../server/settings.js"
 import { LOCAL_BOX_ID, isLocalRunnerBox, normalizeRunner } from "../shared/runner.js"
 import type { Project } from "../shared/types.js"
+import { config, homePath, tildePath } from "../server/config.js"
 import { FAKE_CLAUDE, testConfig, tmpDir } from "./helpers.js"
 
 // The local runner (a project's "Runs on: This computer"): its provider, the router that fronts the box provider,
@@ -20,6 +22,8 @@ describe("LocalRunnerProvider", () => {
   it("is one folder: task folders sit right in it, Box Yard's own files in .boxyard", async () => {
     const dir = path.join(tmpDir(), "local-workspaces")
     const p = new LocalRunnerProvider(dir, "claude --x")
+    // Made on first use, so a Box Yard that never runs a local agent leaves no folder behind.
+    expect(fs.existsSync(dir)).toBe(false)
     expect(p.name).toBe("local")
     expect(p.claudeBin).toBe("claude --x")
     expect(p.root(LOCAL_BOX_ID)).toBe(dir)
@@ -64,6 +68,21 @@ describe("LocalRunnerProvider", () => {
       for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]
       Object.assign(process.env, saved)
     }
+  })
+
+  it("lives outside Box Yard's checkout and data folder by default, where no CLAUDE.md of Box Yard's is above it", () => {
+    // Claude Code reads every CLAUDE.md above the folder it runs in: under ./data, Box Yard's own agent rules would
+    // reach every local agent.
+    const outside = (dir: string, root: string) => path.relative(root, dir).startsWith("..")
+    expect(outside(config.localDir, process.cwd())).toBe(true)
+    expect(outside(config.localDir, config.dataDir)).toBe(true)
+    expect(homePath("~/boxyard-workspaces")).toBe(path.join(os.homedir(), "boxyard-workspaces"))
+    expect(homePath("~")).toBe(os.homedir())
+    expect(homePath("/Volumes/fast/agents")).toBe("/Volumes/fast/agents")
+    expect(homePath("~cody/x")).toBe(path.resolve("~cody/x"))
+    expect(tildePath(path.join(os.homedir(), "boxyard-workspaces"))).toBe("~/boxyard-workspaces")
+    expect(tildePath("/Volumes/fast/agents")).toBe("/Volumes/fast/agents")
+    expect(tildePath(`${os.homedir()}-other/x`)).toBe(`${os.homedir()}-other/x`)
   })
 
   it("agentEnv keeps the user's own environment", () => {

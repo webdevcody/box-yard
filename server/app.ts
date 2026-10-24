@@ -4,7 +4,7 @@ import path from "node:path"
 import { randomBytes } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
-import { configProblems, qstashEnabled, redisEnabled, type Config } from "./config.js"
+import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
@@ -202,9 +202,9 @@ export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvi
   return new AutoProvider(local, new UpstashProvider(c, credentials), () => Boolean(credentials.get("upstashBoxApiKey")))
 }
 
-/** The local runner: agents of "Runs on: This computer" projects, in `<data>/local-workspaces/<task_id>`. */
+/** The local runner: agents of "Runs on: This computer" projects, in `<localDir>/<task_id>` (BOXYARD_LOCAL_DIR). */
 export function localRunner(c: Config): LocalRunnerProvider {
-  return new LocalRunnerProvider(path.join(c.dataDir, "local-workspaces"), c.claudeBin)
+  return new LocalRunnerProvider(c.localDir, c.claudeBin)
 }
 
 export interface BoxYard {
@@ -614,7 +614,7 @@ export function createBoxYard(
   })
   api.get("/settings", (_req, res) => {
     // Text-to-speech keys appear only as set/unset plus where they come from.
-    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys })
+    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys, localDir: tildePath(c.localDir) })
   })
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.
