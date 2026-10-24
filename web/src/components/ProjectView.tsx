@@ -9,6 +9,7 @@ import {
   useHooks,
   useProjects,
   useSchedules,
+  useSettings,
   useTasks,
   useUpdateProject,
 } from "../lib/queries"
@@ -374,6 +375,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
+  const server = useSettings()
   const defaults = settings.data?.settings
 
   return (
@@ -431,7 +433,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), in Box Yard's data folder under local-workspaces, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (

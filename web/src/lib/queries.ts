@@ -253,7 +253,7 @@ export const useTaskCompactions = (taskId: string) =>
 export const useSettings = () =>
   useQuery({
     queryKey: keys.settings,
-    queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash"; maxUploadMb: number }>("/api/settings"),
+    queryFn: () => api<{ defaultTimezone: string; scheduler: "local" | "qstash"; maxUploadMb: number; localDir?: string }>("/api/settings"),
     staleTime: Infinity,
   })
 export const useOrchestratorState = () =>

@@ -585,6 +585,7 @@ function LimitsPanel({
   resetting: (keyof Settings)[] | null
 }) {
   const health = useHealth()
+  const server = useSettings()
   const int =
     (k: "maxBoxes" | "maxAgents" | "localAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -680,7 +681,7 @@ function LimitsPanel({
       <Row
         id={fid("la")}
         label="Local agents"
-        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here. They have their own queue: they never take a box slot or count toward Max agents. ${LOCAL_UNSANDBOXED}`}
+        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
         hint={hint("localAgents")}
       >
         <input
