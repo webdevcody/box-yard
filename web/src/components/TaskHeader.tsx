@@ -228,6 +228,7 @@ export function usePopover() {
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return
+      e.preventDefault()
       setOpen(false)
       trigger.current?.focus()
     }

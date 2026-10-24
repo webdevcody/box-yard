@@ -20,6 +20,9 @@ export type ModalSize = keyof typeof MODAL_SIZES
 /** Open modals, oldest first. Only the last one reacts to Esc and Tab. */
 const stack: string[] = []
 
+/** Some modal is open (it gets Esc first; Zen mode leaves only when none is). */
+export const isModalOpen = () => stack.length > 0
+
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
