@@ -25,6 +25,7 @@ import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
+import { useOwnerName } from "../lib/queries"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -155,6 +156,7 @@ const TaskThread = memo(function TaskThread({
 })
 
 const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
+  const ownerName = useOwnerName()
   const time = (
     <span className="ml-2 text-[10px] text-zinc-600">
       <TimeAgo ts={m.createdAt} />
@@ -168,7 +170,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
         <div className={cx("rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
           <div className={cx("mb-0.5 flex items-center gap-1 text-[11px] font-semibold", hook ? "text-teal-300" : "text-yard-400")}>
             {hook && <Webhook className="h-3 w-3" />}
-            {userMessageLabel(m.meta)}
+            {userMessageLabel(m.meta, ownerName)}
             {time}
           </div>
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}

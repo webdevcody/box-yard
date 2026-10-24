@@ -16,15 +16,25 @@ export function contextLabel(tokens: number | null, window: number | null): stri
   return window ? `${formatTokens(tokens)} / ${formatTokens(window)} · ${contextPct(tokens, window)}%` : `${formatTokens(tokens)} tokens`
 }
 
-/** A tiny bar showing how full the context window is; the numbers are in its tooltip. */
-export function ContextMiniBar({ tokens, window, className }: { tokens: number | null; window: number | null; className?: string }) {
+export const CONTEXT_HINT = "How much of this agent's context window is used. Compact when it gets high."
+
+/**
+ * A tiny bar plus its label: "Context 84k / 1m · 8%" on desktop, "8% ctx" on phones.
+ * Not clickable; Compact lives in the ⋯ menu.
+ */
+export function ContextMiniBar({ tokens, window, hint = CONTEXT_HINT, className }: { tokens: number | null; window: number | null; hint?: string; className?: string }) {
   const pct = contextPct(tokens, window)
   if (pct === null) return null
   const bar = pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-400" : "bg-yard-500"
+  const text = pct >= 90 ? "text-red-300" : pct >= 70 ? "text-amber-300" : "text-zinc-400"
   const label = `Context ${contextLabel(tokens, window)}`
   return (
-    <span role="img" aria-label={label} title={label} className={cx("block h-1.5 w-6 shrink-0 overflow-hidden rounded-full bg-zinc-800", className)}>
-      <span className={cx("block h-full rounded-full", bar)} style={{ width: `${Math.max(pct, 4)}%` }} />
+    <span title={`${label}. ${hint}`} className={cx("inline-flex shrink-0 items-center gap-1.5 text-xs whitespace-nowrap tabular-nums", text, className)} data-testid="context-mini">
+      <span aria-hidden className="block h-1.5 w-6 shrink-0 overflow-hidden rounded-full bg-zinc-800">
+        <span className={cx("block h-full rounded-full", bar)} style={{ width: `${Math.max(pct, 4)}%` }} />
+      </span>
+      <span aria-hidden className="sm:hidden">{pct}% ctx</span>
+      <span className="max-sm:sr-only">{label}</span>
     </span>
   )
 }
@@ -54,7 +64,7 @@ export function ContextMeter({
   return (
     <div className={cx("flex items-center gap-2 text-xs text-zinc-400", className)} data-testid="context-meter">
       <div className="min-w-0">
-        <div className="whitespace-nowrap tabular-nums" title="Tokens in the Claude session's context window">
+        <div className="whitespace-nowrap tabular-nums" title={CONTEXT_HINT}>
           {label}
         </div>
         <div className="mt-1 h-1 w-28 overflow-hidden rounded-full bg-zinc-800">

@@ -753,7 +753,7 @@ export class Store {
   }
 
   /**
-   * `quiet` skips the notification for a status change Cody caused himself (stop, close).
+   * `quiet` skips the notification for a status change Cody caused themselves (stop, close).
    * Compaction turns never notify: they hand back the status from before the compaction.
    * `touch: false` keeps updated_at (the "last active" time) as it was.
    */
@@ -2038,6 +2038,7 @@ export class BadRequestError extends Error {
   status = 400
 }
 
+/** The request is fine but the thing is busy or in the way right now (e.g. agents running on a box). */
 export class ConflictError extends Error {
   status = 409
 }

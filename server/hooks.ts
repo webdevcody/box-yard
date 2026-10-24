@@ -7,6 +7,7 @@ import { BadRequestError, ConflictError, NotFoundError } from "./store.js"
 import { prNumber } from "./prs.js"
 import { preview } from "./replies.js"
 import { isQuietRun } from "../shared/quiet.js"
+import { withOwner } from "../shared/owner.js"
 import {
   ACTION_INFO,
   TRIGGER_INFO,
@@ -63,6 +64,8 @@ export interface HookEngineDeps {
   messageCaptain: (projectId: string, content: string, meta: HookMeta) => void
   /** Send a hook's prompt to the Coordinator chat. */
   messageCoordinator: (content: string, meta: HookMeta) => void
+  /** What Box Yard calls its human (Settings.ownerName). */
+  ownerName?: () => string | undefined
   now?: () => number
 }
 
@@ -126,8 +129,8 @@ export function fireKey(event: TaskEvent, row: Pick<TaskRow, "pr_head_sha" | "pr
 }
 
 /** How a hook names itself to the agent, Captain or Coordinator it messages. */
-export function hookLabel(hook: Pick<Hook, "name" | "trigger" | "createdBy">) {
-  return `Message from the Box Yard hook "${hook.name}" (an automation that runs on "${TRIGGER_INFO[hook.trigger].label}", set up by ${hook.createdBy}; not a new message from Cody)`
+export function hookLabel(hook: Pick<Hook, "name" | "trigger" | "createdBy">, ownerName?: string) {
+  return `Message from the Box Yard hook "${hook.name}" (an automation that runs on "${TRIGGER_INFO[hook.trigger].label}", set up by ${hook.createdBy}; ${withOwner("not a new message from Cody", ownerName)})`
 }
 
 export class HookEngine {
@@ -320,7 +323,7 @@ export class HookEngine {
     // Logged before acting, so the fire counts toward the caps even if the action throws.
     let run = hooks.addRun({ ...this.base(hook, task, row, event, key, prompt), status: "fired", result: "Firing…" })
     const meta: HookMeta = { source: "hook", hookId: hook.id, hookName: hook.name, trigger: hook.trigger, taskId: task.id, hookRunId: run.id }
-    const labelled = `${hookLabel(hook)}:\n\n${prompt}`
+    const labelled = `${hookLabel(hook, this.deps.ownerName?.())}:\n\n${prompt}`
     const pr = task.prUrl ? ` (PR #${prNumber(task.prUrl) ?? "?"}${row.pr_head_sha ? ` at ${shortSha(row.pr_head_sha)}` : ""})` : ""
     try {
       let result: string

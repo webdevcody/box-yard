@@ -4,8 +4,8 @@ import {
   HOOK_VARIABLES,
   PR_TRIGGERS,
   SAMPLE_HOOK_VARS,
-  SOURCE_INFO,
   hookProblems,
+  sourceLabel,
   normalizeFilters,
   unknownVariables,
   type Hook,
@@ -196,12 +196,12 @@ export function insertVariable(text: string, name: string, start = text.length, 
 export const isVariable = (name: string) => (HOOK_VARIABLES as readonly string[]).includes(name)
 
 /** Short chips that say what a hook's filters do, in a list row. */
-export function filterChips(f: HookFilters, projectName: (id: string) => string | undefined = () => undefined): string[] {
+export function filterChips(f: HookFilters, projectName: (id: string) => string | undefined = () => undefined, ownerName?: string): string[] {
   const out: string[] = []
   if (f.projectId) out.push(`Only ${projectName(f.projectId) ?? f.projectId}`)
   if (f.titleRegex) out.push(`Title ~ /${f.titleRegex}/`)
   if (f.promptRegex) out.push(`Prompt ~ /${f.promptRegex}/`)
-  if (f.sources?.length) out.push(`Started by ${f.sources.map((s) => SOURCE_INFO[s]).join(" or ")}`)
+  if (f.sources?.length) out.push(`Started by ${f.sources.map((s) => sourceLabel(s, ownerName)).join(" or ")}`)
   if (f.labels?.length) out.push(`Label ${f.labels.join(" or ")}`)
   if (f.excludeLabels?.length) out.push(`Not ${f.excludeLabels.join(", ")}`)
   if (f.includeDrafts) out.push("Drafts too")

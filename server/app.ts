@@ -28,6 +28,7 @@ import { describeCron, nextRuns, parseCron, isValidTimeZone } from "../shared/cr
 import { HookStore } from "./hookStore.js"
 import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TRIGGERS } from "../shared/hooks.js"
+import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import type { Health } from "../shared/types.js"
 
 const idSchema = z
@@ -194,6 +195,7 @@ export function createBoxYard(
     hub,
     messageCaptain: (projectId, content, meta) => void captains.get(projectId).send(content, { source: "hook", meta }),
     messageCoordinator: (content, meta) => void orchestrator.hookMessage(content, meta),
+    ownerName: () => settings.get().ownerName,
   })
   hooks.start()
   captains.onReport = (projectId, content) => {
@@ -309,7 +311,7 @@ export function createBoxYard(
   api.post("/projects/:id/notes", (req, res) => {
     const id = req.params.id!
     if (!store.getProject(id)) throw new BadRequestError("No such project")
-    store.addNote(id, "Cody", parse(schemas.note, req.body).content)
+    store.addNote(id, settings.get().ownerName, parse(schemas.note, req.body).content)
     tasks.publishNotes(id)
     const project = store.getProject(id)!
     hub.broadcast({ type: "project", project })
@@ -432,6 +434,7 @@ export function createBoxYard(
   })
 
   // ---- hooks: `?projectId=<id>` for a project's hooks, `?scope=global` for the Coordinator's, neither for all
+  const owner = () => settings.get().ownerName?.trim() || DEFAULT_OWNER_NAME
   const hookScope = (q: Request["query"]) => (q.scope === "global" ? null : typeof q.projectId === "string" ? q.projectId : undefined)
   api.get("/hooks", (req, res) => {
     res.json(hooks.list({ projectId: hookScope(req.query) }))
@@ -453,11 +456,11 @@ export function createBoxYard(
     )
   })
   api.post("/hooks", (req, res) => {
-    res.status(201).json(hooks.create({ ...parse(schemas.hook, req.body), createdBy: "Cody" }))
+    res.status(201).json(hooks.create({ ...parse(schemas.hook, req.body), createdBy: owner() }))
   })
   api.post("/hooks/from-template", (req, res) => {
     const body = parse(schemas.hookTemplate, req.body)
-    res.status(201).json(hooks.fromTemplate(body.template, { projectId: body.projectId, createdBy: "Cody", enabled: body.enabled }))
+    res.status(201).json(hooks.fromTemplate(body.template, { projectId: body.projectId, createdBy: owner(), enabled: body.enabled }))
   })
   api.patch("/hooks/:id", (req, res) => {
     res.json(hooks.update(req.params.id!, parse(schemas.hookPatch, req.body)))
@@ -597,8 +600,18 @@ export function createBoxYard(
   api.post("/boxes/:id/cleanup", async (req, res) => {
     res.status(202).json(await tasks.cleanBox(req.params.id!))
   })
+  /** What Clear box / Delete box would touch: tasks by status, uncommitted files, disk in use. */
+  api.get("/boxes/:id/contents", async (req, res) => {
+    res.json(await tasks.boxContents(req.params.id!))
+  })
+  /** Archive every workspace and remove it from the box; the box stays. 409 while agents run, unless {stopAgents: true}. */
+  api.post("/boxes/:id/clear", async (req, res) => {
+    const body = parse(z.object({ stopAgents: z.boolean().optional() }), req.body ?? {})
+    res.json(await tasks.clearBox(req.params.id!, { stopAgents: body.stopAgents }))
+  })
+  /** Archive every workspace, then destroy the box. 409 while agents run, unless ?stopAgents=1. */
   api.delete("/boxes/:id", async (req, res) => {
-    await tasks.destroyBox(req.params.id!)
+    await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1" })
     res.json({ ok: true })
   })
 

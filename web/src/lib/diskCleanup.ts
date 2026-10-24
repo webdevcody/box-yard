@@ -34,15 +34,23 @@ const REASON: Record<BoxCleanup["reason"], string> = {
   "low-disk": "it was low on disk",
   "out-of-space": "a task ran out of space",
   manual: "Clean up now",
+  clear: "Clear box",
 }
+
+/** Workspaces a Clear box run archived and took off the box. */
+const clearedCount = (c: BoxCleanup) => c.steps.find((s) => s.key === "archive")?.removed.length ?? 0
+const workspaces = (n: number) => `${n} ${n === 1 ? "workspace" : "workspaces"}`
 
 /** One line about a cleanup for the box card, without its time. */
 export function cleanupLine(c: BoxCleanup): string {
+  const clear = c.reason === "clear"
   if (c.status === "running") {
     const done = c.steps.filter((s) => !s.skipped || s.freedBytes > 0).length
-    return c.freedBytes > 0 ? `Cleaning up: freed ${formatBytes(c.freedBytes)} so far (${done} of 5 steps)` : "Cleaning up…"
+    const verb = clear ? "Clearing" : "Cleaning up"
+    return c.freedBytes > 0 ? `${verb}: freed ${formatBytes(c.freedBytes)} so far (${done} of ${clear ? 4 : 5} steps)` : `${verb}…`
   }
-  if (c.status === "failed") return `Cleanup failed: ${c.error ?? "unknown error"}`
+  if (c.status === "failed") return `${clear ? "Clear" : "Cleanup"} failed: ${c.error ?? "unknown error"}`
+  if (clear) return `Cleared: archived and removed ${workspaces(clearedCount(c))}, ${cleanupSummary(c)}`
   const why = c.reason === "manual" ? "Cleaned up" : `Cleaned up because ${REASON[c.reason]}`
   const short = c.targetFreeBytes !== null && !c.enough ? `; still short of the ${formatBytes(c.targetFreeBytes)} new workspaces need` : ""
   return `${why}: ${cleanupSummary(c)}${short}`
@@ -51,11 +59,15 @@ export function cleanupLine(c: BoxCleanup): string {
 /** The toast for a finished cleanup, or null while it's still running. */
 export function cleanupToast(c: BoxCleanup): { kind: "info" | "error"; title: string; body: string } | null {
   if (c.status === "running") return null
-  if (c.status === "failed") return { kind: "error", title: `Cleanup on ${c.boxId} failed`, body: c.error ?? "Unknown error" }
+  const clear = c.reason === "clear"
+  if (c.status === "failed") return { kind: "error", title: `${clear ? "Clearing" : "Cleanup on"} ${c.boxId} failed`, body: c.error ?? "Unknown error" }
   const free = c.freeAfter !== null ? ` ${formatBytes(c.freeAfter)} free now.` : ""
   const short = c.targetFreeBytes !== null && !c.enough ? " Still low: tasks that can't go elsewhere wait for room." : ""
   const summary = cleanupSummary(c)
-  return { kind: c.enough || c.targetFreeBytes === null ? "info" : "error", title: `Cleaned up ${c.boxId}`, body: `${summary[0]!.toUpperCase()}${summary.slice(1)}.${free}${short}` }
+  const kept = clear ? c.steps.find((s) => s.key === "archive")?.skipped : null
+  const lead = clear ? `Archived and removed ${workspaces(clearedCount(c))}; ${summary}` : `${summary[0]!.toUpperCase()}${summary.slice(1)}`
+  const note = kept?.startsWith("kept ") ? ` ${kept[0]!.toUpperCase()}${kept.slice(1)}.` : ""
+  return { kind: (c.enough || c.targetFreeBytes === null) && !note ? "info" : "error", title: `${clear ? "Cleared" : "Cleaned up"} ${c.boxId}`, body: `${lead}.${free}${short}${note}` }
 }
 
 /** Toast a finished cleanup (SSE box.cleanup). */

@@ -15,7 +15,8 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 // Worker prompts understand these markers anywhere in the text:
-//   [ask] [fail] [slow] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
+//   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
+// [hang] keeps the turn running for two minutes (until it's stopped).
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
 // [pr] ends the turn without mark_done, like an agent that opened a PR and waits for review.
@@ -231,6 +232,7 @@ async function orchestrator(mcp, prompt) {
 async function worker(mcp, prompt) {
   const cwd = process.cwd()
   if (/\[slow\]/i.test(prompt)) await sleep(3000)
+  if (/\[hang\]/i.test(prompt)) await sleep(120_000)
   const noop = /\[noop\]/i.test(prompt)
   const markNoop = () => useTool(mcp, "mark_done", { summary: "Nothing to do this run.", outcome: "noop" })
   if (/\[fail\]/i.test(prompt)) {

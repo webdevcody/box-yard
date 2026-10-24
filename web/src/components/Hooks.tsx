@@ -11,6 +11,7 @@ import {
   useHookRuns,
   useHookTemplates,
   useHooks,
+  useOwnerName,
   useProjects,
   useTasks,
   useToggleHook,
@@ -41,12 +42,12 @@ import {
   HOOK_SOURCES,
   HOOK_TRIGGERS,
   HOOK_VARIABLES,
-  SOURCE_INFO,
   TRIGGER_INFO,
   VARIABLE_INFO,
   hookSummary,
   renderHookTemplate,
   shortSha,
+  sourceLabel,
   type Hook,
   type HookRun,
   type HookRunStatus,
@@ -259,8 +260,9 @@ function HookRow({ hook: h, scope, onEdit }: { hook: HookWithLastRun; scope: str
   const toggle = useToggleHook(scope)
   const remove = useDeleteHook()
   const projects = useProjects()
+  const ownerName = useOwnerName()
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name
-  const chips = filterChips(h.filters, projectName)
+  const chips = filterChips(h.filters, projectName, ownerName)
   const last = h.lastRun
   return (
     <li id={h.id} className={cx("rounded-xl border bg-zinc-900/40 p-3 sm:p-4", h.enabled ? "border-zinc-800/80" : "border-zinc-900 opacity-75")} data-testid="hook-row">
@@ -445,6 +447,7 @@ function HookEditor({
 }) {
   const projects = useProjects()
   const tasks = useTasks()
+  const ownerName = useOwnerName()
   const create = useCreateHook()
   const update = useUpdateHook()
   const [d, setD] = useState(initial)
@@ -590,7 +593,7 @@ function HookEditor({
                 <div className="flex flex-wrap gap-1.5">
                   {HOOK_SOURCES.map((s) => (
                     <Chip key={s} on={d.sources.includes(s)} onClick={() => set("sources", d.sources.includes(s) ? d.sources.filter((x) => x !== s) : [...d.sources, s])}>
-                      {SOURCE_INFO[s]}
+                      {sourceLabel(s, ownerName)}
                     </Chip>
                   ))}
                 </div>
@@ -672,7 +675,7 @@ function HookEditor({
           <div className="max-h-56 overflow-y-auto text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{rendered || <span className="text-zinc-600">The prompt shows here with its variables filled in.</span>}</div>
           <p className="text-[11px] text-zinc-500">
             {d.action === "send_to_task"
-              ? "The agent gets it as a message from the hook (not from Cody); its transcript labels it like this."
+              ? `The agent gets it as a message from the hook (not from ${ownerName}); its transcript labels it like this.`
               : d.action === "create_task"
                 ? "The new task starts with this prompt."
                 : `The ${d.action === "message_captain" ? "Captain" : "Coordinator"} gets it as a message from the hook.`}{" "}

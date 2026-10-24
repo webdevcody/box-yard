@@ -120,7 +120,7 @@ export interface MergeRequest {
   requestedAt: number
   /** When the message went out in a turn; null while it waits for the agent's current turn to end. */
   deliveredAt: number | null
-  /** Who asked, when it wasn't Cody's Merge button: a hook, as `hook "On PR ready → merge"`. */
+  /** Who asked, when it wasn't the owner's Merge button: a hook, as `hook "On PR ready → merge"`. */
   requestedBy?: string | null
 }
 
@@ -262,10 +262,36 @@ export interface BoxInfo {
   diskLow: boolean
   /** The running cleanup, or the last one. */
   cleanup: BoxCleanup | null
+  /** What is being done to the box right now; its Clean up, Clear and Delete buttons wait for it. */
+  operation: BoxOperation | null
   estimatedCostUsd: number
   usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
+}
+
+export type BoxOperation = "cleanup" | "clear" | "delete"
+
+/** What Clear box and Delete box would touch, for their confirmations. */
+export interface BoxContents {
+  boxId: string
+  tasks: {
+    id: string
+    title: string
+    projectId: string
+    status: TaskStatus
+    /** A turn is running (or setting up) on the box right now. */
+    running: boolean
+    /** Changed or untracked files in the workspace (git status), null when it couldn't tell. Archived before anything is removed. */
+    uncommitted: number | null
+    /** The workspace already has an archive newer than its last activity. */
+    archived: boolean
+  }[]
+  /** Agents running on the box: Clear and Delete refuse unless asked to stop them. */
+  running: number
+  /** Disk in use on the box (df), and how much of it is Box Yard's folders (du). */
+  diskUsedBytes: number | null
+  diskBytes: number | null
 }
 
 export interface Health {
@@ -388,6 +414,8 @@ export interface BudgetSettings {
 }
 
 export interface Settings {
+  /** What Box Yard calls its human in prompts and labels (default "Cody"). */
+  ownerName: string
   orchestratorModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */

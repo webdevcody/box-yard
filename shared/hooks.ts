@@ -11,7 +11,7 @@ export const TRIGGER_INFO: Record<HookTrigger, { label: string; description: str
   "task.finished": { label: "Task finished", description: "A turn ended and the agent is resting: idle, PR ready, or done (mark_done)." },
   "task.pr_ready": { label: "PR ready", description: "The agent opened or pushed to a pull request and its turn ended. Fires once per head commit." },
   "task.failed": { label: "Task failed", description: "A turn failed, or the agent couldn't start." },
-  "task.needs_input": { label: "Needs input", description: "The agent asked Cody a question (ask_user) and is waiting." },
+  "task.needs_input": { label: "Needs input", description: "The agent asked a question (ask_user) and is waiting for the answer." },
   "pr.merged": { label: "PR merged", description: "The task's pull request was merged on GitHub." },
   "schedule.run_finished": { label: "Schedule run finished", description: "A project schedule's run ended. Quiet no-op runs are skipped unless you include them." },
 }
@@ -32,6 +32,9 @@ export type HookSource = (typeof HOOK_SOURCES)[number]
 export type TaskSource = HookSource | "hook"
 
 export const SOURCE_INFO: Record<HookSource, string> = { cody: "Cody", captain: "Captain", coordinator: "Coordinator", schedule: "Schedule" }
+
+/** How the "started by" filter names a source; "cody" is the owner, by their configured name (Settings.ownerName). */
+export const sourceLabel = (s: HookSource, ownerName?: string) => (s === "cody" && ownerName?.trim() ? ownerName.trim() : SOURCE_INFO[s])
 
 export interface HookFilters {
   /** Global hooks only: just this project's tasks. */
@@ -73,7 +76,7 @@ export interface Hook {
   /** Most times this hook fires for one task. */
   maxFiresPerTask: number
   template: HookTemplate | null
-  /** "Cody", "Coordinator" or "<project> Captain". */
+  /** The owner's name (Cody by default), "the Coordinator" or "the <project> Captain". */
   createdBy: string
   createdAt: number
   updatedAt: number

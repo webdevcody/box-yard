@@ -23,8 +23,9 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxInfo, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
+import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
+import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
@@ -193,6 +194,8 @@ export class TaskManager {
   private reserved = new Map<string, Map<string, number>>()
   /** Boxes the last placement check found too full for a new workspace. */
   private lowBoxes = new Set<string>()
+  /** Boxes being cleared or deleted: nothing is placed on them and their tasks wait. */
+  private boxOps = new Map<string, "clear" | "delete">()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
@@ -233,9 +236,9 @@ export class TaskManager {
         return runnerPath
       },
       hasFreshArchive: (row) => this.hasFreshArchive(row),
-      archive: (taskId) => this.archive(taskId),
-      park: (taskId, boxId, note) => this.park(taskId, boxId, note),
-      mirrorsToKeep: (boxId) => this.mirrorsToKeep(boxId),
+      archive: (taskId) => this.archiveFresh(taskId),
+      park: (taskId, boxId, note) => this.park(taskId, boxId, withOwner(note, this.owner())),
+      mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
   }
@@ -432,16 +435,17 @@ export class TaskManager {
       ? this.enqueue(row, by.prompt, by.source, [], null, by.hook)
       : this.enqueue(row, mergeRequestPrompt(n), MERGE_BUTTON_SOURCE, [])
     const requestedBy = by ? by.who : null
+    const owner = this.owner()?.trim() || DEFAULT_OWNER_NAME
     this.store.updateTask(row.id, { mergeRequest: { prNumber: n, prUrl: row.pr_url, requestedAt: Date.now(), deliveredAt: null, inputId, requestedBy } }, { quiet: true })
     const hookRef = by?.hook ? { hookId: by.hook.meta.hookId, hookName: by.hook.meta.hookName, hookRunId: by.hook.meta.hookRunId } : {}
     const meta = { kind: "merge_requested", prNumber: n, prUrl: row.pr_url, ...hookRef }
     const later = busy ? "; it goes out when the current turn ends" : ""
-    this.addEvent(row.id, by ? `The ${by.who} asked for a merge of PR #${n}${later}.` : `Cody asked for a merge of PR #${n} with the Merge button${later}.`, meta)
+    this.addEvent(row.id, by ? `The ${by.who} asked for a merge of PR #${n}${later}.` : `${owner} asked for a merge of PR #${n} with the Merge button${later}.`, meta)
     this.emitTask(row.id)
     this.schedule()
     // The Captain wakes on it once the task's turn ends; the Coordinator reads it with its next updates.
     this.notice(
-      by ? `🚢 The ${by.who} asked **${row.title}** to merge PR #${n}: ${row.pr_url}` : `🚢 Cody asked **${row.title}** to merge PR #${n} (Merge button): ${row.pr_url}`,
+      by ? `🚢 The ${by.who} asked **${row.title}** to merge PR #${n}: ${row.pr_url}` : `🚢 ${owner} asked **${row.title}** to merge PR #${n} (Merge button): ${row.pr_url}`,
       { taskId: row.id, ...meta },
       { coordinator: true, wake: by ? false : undefined },
     )
@@ -479,7 +483,7 @@ export class TaskManager {
       this.store.clearInputs(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
-    this.addEvent(row.id, "Stopped by Cody.")
+    this.addEvent(row.id, withOwner("Stopped by Cody.", this.owner()))
     this.emitTask(row.id)
     return this.store.getTask(row.id)!
   }
@@ -600,6 +604,7 @@ export class TaskManager {
         diskCheckedAt: b.disk_checked_at ?? null,
         diskLow: this.lowBoxes.has(b.id) || (b.disk_free_bytes !== null && b.disk_free_bytes !== undefined && b.disk_free_bytes < floor),
         cleanup: this.janitor.current(b.id),
+        operation: this.boxOperation(b.id),
         estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
         usageSource: b.usage_source ?? "estimated",
         createdAt: b.created_at,
@@ -608,14 +613,141 @@ export class TaskManager {
     })
   }
 
-  async destroyBox(boxId: string) {
+  /** Clear, delete or a disk cleanup in progress on a box. */
+  private boxOperation(boxId: string): BoxOperation | null {
+    const op = this.boxOps.get(boxId)
+    if (op) return op
+    if (!this.janitor.isRunning(boxId)) return null
+    return this.janitor.current(boxId)?.reason === "clear" ? "clear" : "cleanup"
+  }
+
+  /** What Clear box and Delete box would touch: each task with its status and uncommitted files, and the disk in use. */
+  async boxContents(boxId: string): Promise<BoxContents> {
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
-    for (const row of this.store.listTaskRows({ boxId })) {
-      if (row.current_turn_id) await this.killTurn(row).catch(() => {})
+    const rows = this.store.listTaskRows({ boxId }).sort((a, b) => a.created_at - b.created_at)
+    const changed = new Map<string, number>()
+    if (box.status === "ready" && rows.length) {
+      // One exec for the whole box: "<taskId> <changed files>" per workspace that is a git repo.
+      const root = `${this.provider.root(boxId)}/tasks`
+      const script = rows
+        .map((r) => `[ -d ${q(`${root}/${r.id}/work/.git`)} ] && echo ${q(r.id)} $(git -C ${q(`${root}/${r.id}/work`)} status --porcelain 2>/dev/null | wc -l)`)
+        .join("; ")
+      const res = await this.provider.exec(boxId, `${script}; true`).catch(() => null)
+      for (const line of res?.stdout.split("\n") ?? []) {
+        const [id, n] = line.trim().split(/\s+/)
+        if (id && n && /^\d+$/.test(n)) changed.set(id, Number(n))
+      }
     }
-    await this.loseBox(boxId, "Box deleted by Cody.")
-    await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
+    return {
+      boxId,
+      tasks: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        projectId: r.project_id,
+        status: r.status,
+        running: Boolean(r.current_turn_id),
+        uncommitted: changed.get(r.id) ?? null,
+        archived: this.hasFreshArchive(r),
+      })),
+      running: rows.filter((r) => r.current_turn_id).length,
+      diskUsedBytes: box.disk_free_bytes != null && box.disk_total_bytes != null ? Math.max(0, box.disk_total_bytes - box.disk_free_bytes) : null,
+      diskBytes: box.disk_bytes ?? null,
+    }
+  }
+
+  /**
+   * Clear box: archive every workspace (the same archive a closed task gets), take it off the box, then drop
+   * leftovers, caches and repo mirrors. The box stays. Resting tasks restore from their archive on the next
+   * message. Refuses while agents are running unless `stopAgents`. Resolves with the finished report.
+   */
+  async clearBox(boxId: string, opts: { stopAgents?: boolean } = {}): Promise<BoxCleanup> {
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleared.`)
+    this.claimBox(boxId, "clear", Boolean(opts.stopAgents))
+    try {
+      return await this.janitor.run(boxId, {
+        reason: "clear",
+        target: null,
+        parkBelow: Number.POSITIVE_INFINITY,
+        clear: true,
+        before: opts.stopAgents ? () => this.stopAgentsOn(boxId) : undefined,
+      })
+    } finally {
+      this.boxOps.delete(boxId)
+      this.diskCache.delete(boxId)
+      this.emitBoxes()
+      this.schedule()
+    }
+  }
+
+  /**
+   * Delete a box at the provider. A reachable box first gets every workspace archived (the same archive a
+   * closed task gets); if one can't be archived nothing is deleted. Refuses while agents are running unless
+   * `stopAgents`. Its tasks go to other or new boxes on their next turn.
+   */
+  async destroyBox(boxId: string, opts: { stopAgents?: boolean } = {}) {
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status === "ready") {
+      this.claimBox(boxId, "delete", Boolean(opts.stopAgents))
+      try {
+        if (opts.stopAgents) await this.stopAgentsOn(boxId)
+        // A cleanup may be parking workspaces right now; let it finish first.
+        while (this.janitor.isRunning(boxId)) await new Promise((r) => setTimeout(r, 200))
+        const kept: string[] = []
+        for (const row of this.store.listTaskRows({ boxId })) {
+          await this.archiveFresh(row.id)
+          const fresh = this.store.getTaskRow(row.id)
+          if (fresh?.box_id === boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
+        }
+        if (kept.length) {
+          const why = this.c.archiveWorkspaces ? "" : " Workspace archiving is off (BOXYARD_ARCHIVE=0)."
+          throw new ConflictError(`Couldn't archive ${kept.join(", ")}, so ${boxId} was not deleted.${why}`)
+        }
+      } catch (err) {
+        this.boxOps.delete(boxId)
+        this.emitBoxes()
+        this.schedule()
+        throw err
+      }
+    } else {
+      // Lost or still being created: there's no workspace to reach, only turns to end.
+      for (const row of this.store.listTaskRows({ boxId })) {
+        if (row.current_turn_id) await this.killTurn(row).catch(() => {})
+      }
+    }
+    try {
+      await this.loseBox(boxId, withOwner("Box deleted by Cody.", this.owner()))
+      await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
+    } finally {
+      this.boxOps.delete(boxId)
+    }
+  }
+
+  /** Mark a box for clear/delete, or say why not: another operation on it, or agents running without `stopAgents`. */
+  private claimBox(boxId: string, op: "clear" | "delete", stopAgents: boolean) {
+    const busy = this.boxOperation(boxId)
+    if (busy) throw new ConflictError(`Box ${boxId} is busy: ${busy === "cleanup" ? "a disk cleanup" : busy === "clear" ? "clearing" : "deleting"} is in progress.`)
+    const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length
+    if (running && !stopAgents) throw new ConflictError(`${running} ${running === 1 ? "agent is" : "agents are"} running on ${boxId}: stop ${running === 1 ? "it" : "them"} first.`)
+    this.boxOps.set(boxId, op)
+    this.emitBoxes()
+  }
+
+  /** Stop every agent on a box and wait for their turns to end (they're archived afterwards like any stop). */
+  private async stopAgentsOn(boxId: string, timeoutMs = 60_000) {
+    const runningRows = () => this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id)
+    for (const row of runningRows()) {
+      await this.stopTask(row.id).catch(() => {})
+      this.addEvent(row.id, withOwner(`Stopped so Cody could ${this.boxOps.get(boxId) === "delete" ? "delete" : "clear"} box ${boxId}.`, this.owner()))
+    }
+    const until = Date.now() + timeoutMs
+    while (runningRows().length) {
+      if (Date.now() > until) throw new ConflictError(`Agents on ${boxId} didn't stop within ${Math.round(timeoutMs / 1000)}s; nothing was removed.`)
+      await new Promise((r) => setTimeout(r, 200))
+    }
   }
 
   // ------------------------------------------------------------------ scheduler
@@ -696,6 +828,12 @@ export class TaskManager {
   private async place(row: TaskRow): Promise<string | null> {
     // A cleanup step is working in its folder right now.
     if (this.janitor.isBusy(row.id)) return null
+    const op = row.box_id ? this.boxOps.get(row.box_id) : undefined
+    if (op) {
+      // Its workspace is being archived off the box; it moves to another box once that's done.
+      this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : "deleted"}`)
+      return null
+    }
     if (row.box_id) {
       const box = this.store.getBox(row.box_id)
       if (box?.status === "ready") {
@@ -740,7 +878,7 @@ export class TaskManager {
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
     const candidates = this.store
       .listBoxes()
-      .filter((b) => b.status === "ready" && b.id !== exclude)
+      .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id))
       .map((b) => {
         const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
         // A box made for a project belongs to it, even before its first task lands.
@@ -911,13 +1049,13 @@ export class TaskManager {
   }
 
   /** Repo mirrors a box still needs: those of its tasks' projects and of the project it was made for. */
-  private mirrorsToKeep(boxId: string): Set<string> {
+  private mirrorsToKeep(boxId: string, includeOwner = true): Set<string> {
     const keep = new Set<string>()
     for (const row of this.store.listTaskRows({ boxId })) {
       const name = this.repoMirrorName(this.store.getProject(row.project_id)?.repo ?? null)
       if (name) keep.add(name)
     }
-    const owner = this.store.getKv(boxOwnerKey(boxId))
+    const owner = includeOwner ? this.store.getKv(boxOwnerKey(boxId)) : null
     if (owner) {
       const name = this.repoMirrorName(this.store.getProject(owner)?.repo ?? null)
       if (name) keep.add(name)
@@ -1062,14 +1200,15 @@ export class TaskManager {
       const directory = this.directory()
       const notes = this.store.listNotes(project.id)
       const projectName = (id: string) => this.store.getProject(id)?.name
-      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName)
+      const ownerName = this.owner()
+      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
       if (recapped) {
         row = this.recapSession(row, prepared!.branch, project.baseBranch)
       }
       const prompt = compact
         ? "/compact"
         : firstTurn
-        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [] })
+        ? firstTurnPrompt({ task: row, notes, directory, extraInputs: inputs.length ? [followup] : [], ownerName })
         : recapped
         ? `${recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60), { workspace: recapWorkspaceNote(row.branch, prepared!.branch, project.baseBranch) })}\n\n---\n\n${followup}`
         : followup
@@ -1088,7 +1227,7 @@ export class TaskManager {
           resume: !firstTurn && !recapped,
           compact,
           ...agent,
-          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE }),
+          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
           recap: recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60)),
@@ -1226,6 +1365,11 @@ export class TaskManager {
     return this.requireRow(row.id)
   }
 
+  /** What Box Yard calls its human (Settings.ownerName). */
+  owner(): string {
+    return this.settings.get().ownerName
+  }
+
   /** Model, effort and auto-compact window for a turn, from the saved settings (read fresh each turn). */
   private agentSettings(row: TaskRow) {
     const s = this.settings.get()
@@ -1292,6 +1436,8 @@ export class TaskManager {
       // isolate when we have a token to log in with.
       isolateConfig: !local || Boolean(this.c.claudeOauthToken || this.c.anthropicApiKey),
       port: row.port_base ?? PORT_BASE,
+      // The runner puts it into its MCP tool descriptions and replies.
+      ownerName: this.owner(),
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
       publicUrl: this.c.publicUrl || null,
@@ -1505,7 +1651,7 @@ export class TaskManager {
       case "ask_user": {
         const question = String(ev.question ?? "")
         this.store.updateTask(taskId, { turnFlags: { ...flags, asked: question }, question })
-        say("event", `Asked Cody: ${question}`, { kind: "question" })
+        say("event", `${withOwner("Asked Cody:", this.owner())} ${question}`, { kind: "question" })
         return this.emitTask(taskId)
       }
       case "message_agent":
@@ -1656,7 +1802,7 @@ export class TaskManager {
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
     const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
     const more = this.store.hasInputs(row.id) ? " (more messages are queued for it)" : ""
-    if (noopIgnored.length) this.addEvent(row.id, `The agent marked this run a no-op, but it isn't quiet: ${noopIgnored.join(", ")}.`)
+    if (noopIgnored.length) this.addEvent(row.id, withOwner(`The agent marked this run a no-op, but it isn't quiet: ${noopIgnored.join(", ")}.`, this.owner()))
     const finished = this.store.getTask(row.id)
     if (finished && isQuietRun(finished)) {
       // Nothing happened: no notice for the Captain or Coordinator, and the run's start notice is dropped too.
@@ -1801,14 +1947,14 @@ export class TaskManager {
     }
     if (log.length >= AGENT_MSG_LIMIT) {
       say(from.id, `Message to ${to} not delivered: too many agent messages in 10 minutes.`, { to, blocked: true })
-      this.store.queueInput(from.id, "system", `Your message to ${to} was not delivered because you sent too many agent messages recently. Ask Cody with ask_user if you are stuck.`)
+      this.store.queueInput(from.id, "system", withOwner(`Your message to ${to} was not delivered because you sent too many agent messages recently. Ask Cody with ask_user if you are stuck.`, this.owner()))
       return
     }
     log.push(now)
     this.agentMsgLog.set(from.id, log)
 
     if (/^(cody|user|human|orchestrator)$/i.test(to)) {
-      say(from.id, `→ Cody: ${message}`, { to: "cody" })
+      say(from.id, `→ ${this.owner()}: ${message}`, { to: "cody" })
       this.notice(`💬 **${from.title}** says: ${message}`, { taskId: from.id })
       return
     }
@@ -1852,6 +1998,13 @@ export class TaskManager {
 
   private hasFreshArchive(row: TaskRow) {
     return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
+  }
+
+  /** Archive a task unless its archive is already fresh, waiting for one that's being written right now. */
+  private async archiveFresh(taskId: string) {
+    while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
+    const row = this.store.getTaskRow(taskId)
+    if (row && !this.hasFreshArchive(row)) await this.archive(taskId)
   }
 
   private async archiveAndClean(taskId: string) {
@@ -2174,7 +2327,7 @@ export class TaskManager {
     const idleDelete = this.limits().boxIdleDeleteMinutes
     if (idleDelete > 0) {
       for (const box of this.store.listBoxes()) {
-        if (box.status !== "ready") continue
+        if (box.status !== "ready" || this.boxOps.has(box.id)) continue
         if (now - box.last_used_at < idleDelete * 60_000) continue
         const residents = this.store.listTaskRows({ boxId: box.id })
         if (residents.some((r) => r.current_turn_id || this.store.hasInputs(r.id))) continue

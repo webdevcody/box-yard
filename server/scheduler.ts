@@ -7,6 +7,7 @@ import { QStash } from "./qstash.js"
 import { describeCron, expandCron, isValidTimeZone, nextRun, parseCron, CronError } from "../shared/cron.js"
 import { errorMessage } from "./util/retry.js"
 import type { CatchUp, Schedule, ScheduleRun, ScheduleTarget, Task, TaskStatus } from "../shared/types.js"
+import { withOwner } from "../shared/owner.js"
 
 /** A run that is still going blocks the next one unless overlap is allowed. */
 const ACTIVE: TaskStatus[] = ["queued", "starting", "working", "waiting"]
@@ -67,6 +68,11 @@ export class Scheduler {
   private readonly now: () => number
   private timer: NodeJS.Timeout | null = null
   private ticking = false
+
+  /** Box Yard's own run notes, with the configured owner name. */
+  private owned(text: string): string {
+    return withOwner(text, this.tasks.owner?.())
+  }
 
   constructor(deps: SchedulerDeps) {
     this.c = deps.config
@@ -277,7 +283,7 @@ export class Scheduler {
       `This task is run #${runNumber} of the Box Yard schedule "${s.name}" (${describeCron(s.cron).toLowerCase()}, ${s.timezone}), ` +
         `for ${fmtTime(at, s.timezone)}.`,
     ]
-    if (opts.reason === "manual") lines.push("Cody started this run by hand.")
+    if (opts.reason === "manual") lines.push(this.owned("Cody started this run by hand."))
     if (opts.reason === "catch-up") {
       lines.push(
         `Box Yard was offline at the planned time${opts.missed && opts.missed > 1 ? ` and missed ${opts.missed} runs` : ""}; this one run catches up.`,
@@ -291,8 +297,10 @@ export class Scheduler {
     }
     lines.push(
       "Do this run's work, then call mark_done. Save anything later runs should know with save_note.",
-      'If this run found nothing to do and changed nothing (no commits, pull request, artifact, preview or question for Cody), call mark_done with outcome "noop" and a one-line summary, e.g. "No open PRs, nothing to merge". ' +
+      this.owned(
+        'If this run found nothing to do and changed nothing (no commits, pull request, artifact, preview or question for Cody), call mark_done with outcome "noop" and a one-line summary, e.g. "No open PRs, nothing to merge". ' +
         "Box Yard then files it as a quiet run and doesn't notify anyone. Don't use noop if anything failed or needs Cody.",
+      ),
     )
 
     const task = this.tasks.createTask({
@@ -321,7 +329,7 @@ export class Scheduler {
     if (!this.orchestrator) throw new BadRequestError("The orchestrator isn't available to run this schedule")
     const parts = [`[Scheduled: ${s.name}] ${s.prompt}`]
     const notes = [`Run #${runNumber} of the schedule "${s.name}" (${describeCron(s.cron).toLowerCase()}, ${s.timezone}), for ${fmtTime(at, s.timezone)}.`]
-    if (reason === "manual") notes.push("Cody started this run by hand.")
+    if (reason === "manual") notes.push(this.owned("Cody started this run by hand."))
     if (reason === "catch-up") notes.push(`Box Yard was offline at the planned time${missed && missed > 1 ? ` and missed ${missed} runs` : ""}; this one run catches up.`)
     const run = this.store.createScheduleRun({ scheduleId: s.id, prompt: parts[0]!, reason, dueAt: at })
     // The notes go to the model only (the chat shows just the labeled prompt).
