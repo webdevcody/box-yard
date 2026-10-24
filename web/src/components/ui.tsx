@@ -40,6 +40,22 @@ export function StatusBadge({ status }: { status: BadgeStatus }) {
   )
 }
 
+/** The shape every chip in the task header's meta row shares, so they line up: 44px tall on phones, 24px from sm. */
+export const META_CHIP =
+  "inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md border px-2 text-xs font-medium whitespace-nowrap transition sm:h-6 sm:min-h-0 sm:px-1.5"
+
+/** The quiet form of StatusBadge for header meta rows: a colored dot and the label, no pill. */
+export function StatusDot({ status, title, children, className }: { status: BadgeStatus; title?: string; children?: ReactNode; className?: string }) {
+  const s = status === "merged" ? MERGED_BADGE : STATUS[status]
+  return (
+    <span title={title} data-status={status} className={cx("inline-flex shrink-0 items-center gap-1.5 text-xs font-medium whitespace-nowrap text-zinc-200", className)}>
+      <span className={cx("h-2 w-2 shrink-0 rounded-full", s.dot)} aria-hidden />
+      {s.label}
+      {children}
+    </span>
+  )
+}
+
 /** Marks a quiet schedule run (the agent found nothing to do; shared/quiet.ts). */
 export function QuietPill({ className }: { className?: string }) {
   return (
@@ -63,16 +79,28 @@ export const PR_STYLE: Record<PrState, { icon: LucideIcon; chip: string; link: s
 /**
  * A task's pull request: "PR #23", "Draft #23", "Merged #23" or "Closed #23" in GitHub's colors. `chip` is the
  * bordered pill (task header), `link` the plain inline link (card footers). Renders nothing without a PR.
+ * `activity` folds a running action into the chip ("PR #23 · merging…" with a spinner) instead of a second pill.
  */
-export function PrChip({ task, variant = "chip", className }: { task: PrTask; variant?: "chip" | "link"; className?: string }) {
+export function PrChip({
+  task,
+  variant = "chip",
+  className,
+  activity,
+}: {
+  task: PrTask
+  variant?: "chip" | "link"
+  className?: string
+  activity?: { icon: ReactNode; label: string; title: string } | null
+}) {
   const state = prStateOf(task)
   if (!state || !task.prUrl) return null
   const s = PR_STYLE[state]
   const Icon = s.icon
+  const tooltip = prTooltip(task)
   return (
     <NewTabLink
       href={task.prUrl}
-      title={prTooltip(task) ?? undefined}
+      title={(activity ? `${activity.title}\n${tooltip}` : tooltip) ?? undefined}
       data-pr-state={state}
       className={cx(
         "inline-flex shrink-0 items-center gap-1 whitespace-nowrap",
@@ -80,7 +108,8 @@ export function PrChip({ task, variant = "chip", className }: { task: PrTask; va
         className,
       )}
     >
-      <Icon className={variant === "chip" ? "h-3 w-3" : "h-3.5 w-3.5"} /> {prLabel(task)}
+      {activity ? activity.icon : <Icon className={variant === "chip" ? "h-3 w-3" : "h-3.5 w-3.5"} />} {prLabel(task)}
+      {activity && <span className="font-normal opacity-80">· {activity.label}</span>}
     </NewTabLink>
   )
 }
