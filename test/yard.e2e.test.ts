@@ -66,7 +66,7 @@ async function untilStatus(r: Running, id: string, status: Task["status"]) {
 }
 
 describe("box yard end to end", () => {
-  it("runs a task to done, publishes an artifact and saves a project note", async () => {
+  it("runs a task to done, publishes an artifact and suggests a project note", async () => {
     const r = await start()
     const p = await project(r)
     const t = await task(r, p.id, "Haiku", "write a haiku [artifact] [note]")
@@ -81,8 +81,12 @@ describe("box yard end to end", () => {
     const file = await fetch(r.base + artifacts[0]!.url)
     expect(await file.text()).toContain("write a haiku")
 
+    // The agent's note is a suggestion for the Captain's notes retro, not a note yet.
     const projects = await call<Project[]>(r, "GET", "/api/projects")
-    expect(projects[0]!.notes.map((n) => n.content).join()).toContain("npm test")
+    expect(projects[0]!.notes).toEqual([])
+    expect(projects[0]!.pendingSuggestions).toBe(1)
+    const suggestions = await call<{ content: string; why: string }[]>(r, "GET", `/api/projects/${p.id}/suggestions`)
+    expect(suggestions).toMatchObject([{ content: expect.stringContaining("npm test"), why: expect.stringContaining("test command") }])
 
     // The workspace gets archived so the task can move boxes later.
     await waitFor(async () => (await getTask(r, t.id)).lastArchivedAt, "archive")
