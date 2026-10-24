@@ -7,6 +7,7 @@ import type { Task } from "../../../shared/types"
 import { useRequestMerge } from "../lib/queries"
 import { MERGE_LABEL, mergeBody, mergeButtonState, mergeTitle, sendMergeOnce, useMergesInFlight, type MergeButtonState, type MergeTask } from "../lib/mergePr"
 import { confirmDialog } from "../lib/confirm"
+import { prNumber } from "../lib/prState"
 import { Button, cx } from "./ui"
 import { menuItem, usePopover } from "./TaskHeader"
 
@@ -99,7 +100,9 @@ export function MergePrButton({ task }: { task: MergeableTask }) {
 
 /** Ask with the shared confirm dialog (cards and menus, where an anchored popover doesn't fit). */
 async function confirmAndSend(task: MergeableTask, send: () => Promise<boolean>) {
-  if (await confirmDialog({ title: mergeTitle(task), body: mergeBody(task), confirmLabel: "Send merge request" })) await send()
+  // The dialog's title is one truncated line, so the task's (often long) name goes in the body.
+  const n = prNumber(task.prUrl)
+  if (await confirmDialog({ title: `Merge PR #${n ?? "?"}?`, body: `${mergeTitle(task)} ${mergeBody(task)}`, confirmLabel: "Send merge request" })) await send()
 }
 
 /** The ⋯ menu item. `onPicked` closes the menu before the confirm dialog opens. */
