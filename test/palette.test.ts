@@ -292,8 +292,10 @@ describe("prefixes", () => {
   it("f: p: and @ narrow to files, projects and boxes", () => {
     expect(search(items, "f:arch").map((g) => g.key)).toEqual(["artifact"])
     expect(search(items, "f:").map((g) => g.key)).toEqual(["artifact"])
-    // Same age: by key, so the order never shuffles.
-    expect(titles(search(items, "p:")[0])).toEqual(["Notes app", "box-yard"])
+    // Projects in the owner's saved order (the list's order), not by age or name.
+    expect(titles(search(items, "p:")[0])).toEqual(["box-yard", "Notes app"])
+    const reordered = buildItems({ tasks: [], projects: [projects[1]!, projects[0]!] })
+    expect(titles(search(reordered, "p:")[0])).toEqual(["Notes app", "box-yard"])
     expect(search(items, "p:box").map((g) => g.key)).toEqual(["project"])
     expect(titles(search(items, "@abc")[0])).toEqual(["box_abc123"])
     expect(search(items, "@")[0]!.items[0]!.href).toBe("/boxes#box_abc123")

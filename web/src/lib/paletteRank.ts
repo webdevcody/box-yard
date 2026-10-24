@@ -297,9 +297,11 @@ export function rankPalette(items: PaletteItem[], { scope, query }: ParsedQuery,
 
 const scopeGroup = (scope: PaletteScope): GroupKey => (scope === "file" ? "artifact" : scope)
 
-/** A prefix with nothing after it: the most-used commands, open PRs first, newest files, projects and boxes. */
+/** A prefix with nothing after it: the most-used commands, open PRs first, newest files and boxes, projects in the owner's order. */
 function browseOrder(pool: PaletteItem[], scope: PaletteScope, opts: RankOptions): PaletteItem[] {
   if (scope === "command") return commandsByUse(pool, opts.usage)
+  // Projects arrive in the saved sidebar order (buildItems keeps the list's order).
+  if (scope === "project") return pool
   const open = (i: PaletteItem) => (scope === "pr" && (i.status === "merged" || i.status === "done") ? 1 : 0)
   return [...pool].sort((a, b) => open(a) - open(b) || tieBreak(a, b))
 }
