@@ -37,6 +37,9 @@ import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, Capt
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 const NO_UPDATE = "(no update)"
+/** ask_captain/wait_for_captain never hold the Coordinator's turn longer than this: the reply is pushed anyway. */
+export const CAPTAIN_WAIT_MAX_SECONDS = 60
+export const CAPTAIN_WAIT_DEFAULT_SECONDS = 30
 const MAX_THRESHOLD_SHARE = 0.95
 
 type RunKind = "turn" | "summary" | "compact" | "context"
@@ -82,6 +85,19 @@ function sourceLabel(m: CaptainMessage) {
 /** Up to this much of a Captain's reply is kept on the Coordinator's tool line. */
 const TOOL_REPLY_MAX = 20_000
 
+/** What a Captain tells the Coordinator, and why: an automatic report, or the reply to a Coordinator message. */
+export interface CaptainReport {
+  /** The Coordinator messages (send_to_captain) this reply answers; absent for automatic reports. */
+  replyTo?: string[]
+}
+
+/** An ask_captain/wait_for_captain call waiting for a reply. */
+interface ReplyWaiter {
+  /** The Coordinator messages it waits on; null (wait_for_captain) takes the next reply to any of them. */
+  ids: string[] | null
+  done: () => void
+}
+
 function briefTask(t: Task, ownerName?: string) {
   const by = t.mergeRequest?.requestedBy ?? `${ownerName?.trim() || DEFAULT_OWNER_NAME} with the Merge button`
   const merge = t.mergeRequest ? ` (merge requested by ${by}: pending, don't start another merge of this PR)` : ""
@@ -97,7 +113,7 @@ export class CaptainManager {
   private readonly captains = new Map<string, Captain>()
   /** Each Captain's own MCP bearer token, so the MCP server can scope it to its project. */
   private readonly tokens = new Map<string, string>()
-  onReport: ((projectId: string, content: string) => void) | null = null
+  onReport: ((projectId: string, content: string, report: CaptainReport) => void) | null = null
   /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
   onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** Read when a Captain is created; tests shorten these. */
@@ -124,7 +140,7 @@ export class CaptainManager {
         mcp,
         this.settings,
         project,
-        (text) => this.onReport?.(project.id, text),
+        (text, report = {}) => this.onReport?.(project.id, text, report),
         this.tuning,
         (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
       )
@@ -163,23 +179,42 @@ export class CaptainManager {
     return this.find(projectRef).send(content, opts)
   }
 
-  async ask(projectRef: string, content: string, timeoutSeconds = 120) {
+  /**
+   * Send a question and wait (bounded) for the turn that answers it. If the wait runs out, the Captain keeps
+   * working and its reply reaches the Coordinator as a pushed update instead.
+   */
+  async ask(projectRef: string, content: string, timeoutSeconds = CAPTAIN_WAIT_DEFAULT_SECONDS) {
     const captain = this.find(projectRef)
     const sent = captain.send(content, { source: "coordinator", tool: "ask_captain" })
-    const result = await this.wait(captain.projectId, timeoutSeconds)
+    const answered = await captain.waitForReply([sent.id], waitMs(timeoutSeconds))
+    const messages = this.store.listCaptainMessages(captain.projectId, 60)
     // Only what the Captain said after this question, not an older reply.
-    const after = result.messages.filter((m) => m.createdAt >= sent.createdAt && m.id !== sent.id && (m.role === "assistant" || m.role === "error"))
-    return { ...result, messageId: sent.id, reply: after.length ? after.map((m) => m.content).join("\n\n").slice(0, TOOL_REPLY_MAX) : null }
+    const after = messages.filter((m) => m.createdAt >= sent.createdAt && m.id !== sent.id && (m.role === "assistant" || m.role === "error"))
+    return {
+      ...this.waitResult(captain, messages, answered),
+      messageId: sent.id,
+      reply: after.length ? after.map((m) => m.content).join("\n\n").slice(0, TOOL_REPLY_MAX) : null,
+    }
   }
 
-  async wait(projectRef: string, timeoutSeconds = 120) {
+  /** Wait (bounded) until the Captain's next reply to the Coordinator lands, or it goes idle. */
+  async wait(projectRef: string, timeoutSeconds = CAPTAIN_WAIT_DEFAULT_SECONDS) {
     const captain = this.find(projectRef)
-    const deadline = Date.now() + Math.max(5, Math.min(timeoutSeconds, 240)) * 1000
-    await new Promise((r) => setTimeout(r, 300))
-    while (Date.now() < deadline && captain.active) await new Promise((r) => setTimeout(r, 500))
-    const messages = this.store.listCaptainMessages(captain.projectId, 30)
+    const answered = await captain.waitForReply(null, waitMs(timeoutSeconds))
+    return this.waitResult(captain, this.store.listCaptainMessages(captain.projectId, 30), answered)
+  }
+
+  private waitResult(captain: Captain, messages: CaptainMessage[], answered: boolean) {
     const last = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "error")
-    return { projectId: captain.projectId, allFinished: !captain.active, state: captain.state(), lastReply: last?.content ?? null, messages: messages.slice(-8) }
+    return {
+      projectId: captain.projectId,
+      // A waiter that got its reply runs while that turn wraps up: only queued work means it isn't finished.
+      allFinished: answered ? !captain.queued : !captain.active,
+      state: captain.state(),
+      lastReply: last?.content ?? null,
+      messages: messages.slice(-8),
+      ...(answered ? {} : { note: "Stopped waiting; the Captain is still working. Its reply will reach you as a Box Yard update when it's done, so don't wait again." }),
+    }
   }
 
   requestCompact(projectId: string) {
@@ -251,6 +286,8 @@ export class CaptainManager {
   }
 }
 
+const waitMs = (seconds: number) => Math.max(5, Math.min(seconds, CAPTAIN_WAIT_MAX_SECONDS)) * 1000
+
 class Captain {
   private running = false
   private pending = false
@@ -264,6 +301,7 @@ class Captain {
   private compactWanted: "button" | "auto" | null = null
   private compacting = false
   private lastError: string | null = null
+  private readonly waiters = new Set<ReplyWaiter>()
   private readonly workdir: string
   private readonly mcpConfigPath: string
   private readonly mcpConfig: string
@@ -276,7 +314,7 @@ class Captain {
     mcp: { url: string; token: string },
     private readonly settings: SettingsStore,
     private readonly project: Project,
-    private readonly report: (content: string) => void,
+    private readonly report: (content: string, report?: CaptainReport) => void,
     private readonly tuning: CaptainTuning,
     private readonly noticesHandled: (notices: CaptainNoticeEntry[], ok: boolean) => void = () => {},
   ) {
@@ -296,7 +334,12 @@ class Captain {
   }
 
   get active() {
-    return this.running || this.pending || this.wakeWanted || this.compactWanted !== null
+    return this.running || this.queued
+  }
+
+  /** Work waiting for the next turn: a message, a wake-up or a compaction. */
+  get queued() {
+    return this.pending || this.wakeWanted || this.compactWanted !== null
   }
 
   private writeMcpConfig() {
@@ -317,6 +360,30 @@ class Captain {
     this.publishState()
     void this.drain()
     return msg
+  }
+
+  /**
+   * Resolves true when a turn answering one of `ids` (null: any Coordinator message) ends, or the Captain goes
+   * idle; false after `timeoutMs`. While a waiter holds a reply, it isn't pushed to the Coordinator as well.
+   */
+  waitForReply(ids: string[] | null, timeoutMs: number): Promise<boolean> {
+    if (!this.active) return Promise.resolve(true)
+    return new Promise((resolve) => {
+      const waiter: ReplyWaiter = {
+        ids,
+        done: () => {
+          clearTimeout(timer)
+          this.waiters.delete(waiter)
+          resolve(true)
+        },
+      }
+      const timer = setTimeout(() => {
+        this.waiters.delete(waiter)
+        resolve(false)
+      }, timeoutMs)
+      timer.unref?.()
+      this.waiters.add(waiter)
+    })
   }
 
   nudge() {
@@ -418,6 +485,7 @@ class Captain {
     } finally {
       this.running = false
       this.publishState()
+      for (const w of [...this.waiters]) w.done()
     }
   }
 
@@ -425,17 +493,16 @@ class Captain {
     return this.settings.get().ownerName
   }
 
-  private unansweredUserMessages(): string[] {
+  private unansweredUserMessages(): CaptainMessage[] {
     const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
-    return this.store
-      .listCaptainMessages(this.project.id, 200)
-      .filter((m) => m.role === "user" && m.createdAt >= since)
-      .map((m) => `[${withOwner(sourceLabel(m), this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
-      .filter((text) => text.trim())
+    return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since)
   }
 
   private async turn() {
-    const messages = this.unansweredUserMessages()
+    const answering = this.unansweredUserMessages()
+    const messages = answering
+      .map((m) => `[${withOwner(sourceLabel(m), this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
+      .filter((text) => text.trim())
     if (!messages.length) return
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
@@ -445,6 +512,24 @@ class Captain {
       .join("\n\n")
     const result = await this.runPrompt(prompt)
     this.handled(entries, result.ok)
+    this.replyUpward(answering, result)
+  }
+
+  /**
+   * The Coordinator hears the Captain's reply to its messages as a pushed update, like a task notice, so
+   * send_to_captain needs no blocking wait. An ask/wait_for_captain still waiting gets it in its tool result instead.
+   */
+  private replyUpward(answered: CaptainMessage[], result: { ok: boolean; error: string; text: string }) {
+    const asked = answered.filter((m) => captainSourceOf(m) === "coordinator").map((m) => m.id)
+    if (!asked.length) return
+    const takers = [...this.waiters].filter((w) => !w.ids || w.ids.some((id) => asked.includes(id)))
+    const taken = new Set(takers.flatMap((w) => w.ids ?? asked))
+    for (const w of takers) w.done()
+    const replyTo = asked.filter((id) => !taken.has(id))
+    if (!replyTo.length) return
+    const text = result.ok ? result.text.trim() : `I hit an error: ${result.error.slice(0, 500)}`
+    if (!text || text === NO_UPDATE) return
+    this.report(text.slice(0, TOOL_REPLY_MAX), { replyTo })
   }
 
   /** Tell the manager which notices this turn covered (a notes retro's leftovers are settled then). */
@@ -537,7 +622,7 @@ class Captain {
     return { text: lines.join("\n"), hash }
   }
 
-  private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string }> {
+  private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string; text: string }> {
     let now = this.projectNow()
     const s = this.session()
     let result = await this.run(`${now.text}\n\n${body}`, s.id, s.started)

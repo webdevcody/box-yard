@@ -3,11 +3,12 @@ import { describeCron } from "../../../shared/cron"
 import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
 import { badgeStatus, prNumber, prStateOf, type BadgeStatus } from "./prState"
 import type { PreviewItem } from "./filePreview"
+import { ZEN_SHORTCUT_LABEL } from "./zen"
 
 export type PaletteKind = "action" | "page" | "task" | "pr" | "project" | "schedule" | "artifact" | "box"
 
 /** Dialogs the palette opens itself instead of navigating. */
-export type PaletteCommand = "settings" | "new-project"
+export type PaletteCommand = "settings" | "new-project" | "zen"
 
 export interface PaletteItem {
   /** Unique across kinds: `<kind>:<id>`. */
@@ -65,7 +66,7 @@ export const PAGES: PaletteItem[] = [
   { key: "page:inbox", kind: "page", title: "Inbox", subtitle: "Questions, PRs to review, failures", href: "/inbox" },
   { key: "page:boxes", kind: "page", title: "Boxes", subtitle: "The box pool and what runs where", href: "/boxes" },
   { key: "page:schedules", kind: "page", title: "Schedules", subtitle: "Recurring jobs", href: "/schedules", aliases: ["cron"] },
-  { key: "page:usage", kind: "page", title: "Usage", subtitle: "Spend by agent, project and box", href: "/usage", aliases: ["cost", "spend"] },
+  { key: "page:usage", kind: "page", title: "$ Usage", names: ["Usage"], subtitle: "Spend by agent, project and box", href: "/usage", aliases: ["cost", "spend"] },
   { key: "page:settings", kind: "page", title: "Settings", subtitle: "Models, effort, compaction, pool limits", command: "settings", aliases: ["preferences"] },
 ]
 
@@ -179,6 +180,14 @@ export function buildActions(projects: Project[]): PaletteItem[] {
     { key: "action:new-schedule", kind: "action", title: "New schedule…", href: "/schedules?new=schedule" },
     { key: "action:new-project", kind: "action", title: "New project…", command: "new-project" },
     { key: "action:settings", kind: "action", title: "Open settings", command: "settings" },
+    {
+      key: "action:zen",
+      kind: "action",
+      title: "Zen mode",
+      subtitle: `Just the Coordinator chat, full screen · ${ZEN_SHORTCUT_LABEL} toggles, Esc leaves`,
+      command: "zen",
+      aliases: ["focus", "fullscreen", "coordinator"],
+    },
   ]
 }
 
