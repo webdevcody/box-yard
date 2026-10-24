@@ -76,7 +76,9 @@ describe("usage migration", () => {
     // Stop just before the usage reconcile migration, wherever later migrations put it.
     migrate(db, MIGRATIONS.findIndex((m) => m.includes("claude_usage_new")))
     const store = new Store(db)
-    const p = store.createProject({ name: "demo" })
+    // An old-shaped project row: Store.createProject writes columns later migrations add.
+    db.prepare("INSERT INTO projects (id, name, created_at, updated_at) VALUES ('prj_demo01', 'demo', 1, 1)").run()
+    const p = { id: "prj_demo01" }
     const task = store.createTask({ projectId: p.id, title: "t", prompt: "t" })
     const older = store.createTask({ projectId: p.id, title: "older", prompt: "o" })
     // `older` had a turn before usage was logged, so its first logged turn resumed its session.
