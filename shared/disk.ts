@@ -1,4 +1,5 @@
 // Disk-space helpers shared by the server (placement, cleanup) and the web app (Boxes page, toasts).
+import { MEM_MARK, memCommand, parseMemory, type BoxMemory } from "./memory.js"
 
 /**
  * One step of a box cleanup, run in this order. Each step stops the run once there is enough room, except "tmp":
@@ -80,13 +81,15 @@ export interface DiskSpace {
   totalBytes: number
   /** The root disk (/, holding /tmp and HOME on Upstash) when it's another filesystem than the work disk. */
   root?: { freeBytes: number; totalBytes: number } | null
+  /** The box's memory and load, read by the same script (shared/memory.ts). */
+  memory?: BoxMemory | null
 }
 
 /** Separates the work disk's df line from the root disk's in dfCommand's output. */
 const ROOT_DF_MARK = "@@boxyard-root-df"
 
-/** `df -Pk` for the folder a box keeps its work in, then for /tmp (the root disk on Upstash). */
-export const dfCommand = (dir: string) => `df -Pk '${dir.replace(/'/g, `'\\''`)}' | tail -n 1; echo ${ROOT_DF_MARK}; df -Pk /tmp 2>/dev/null | tail -n 1`
+/** `df -Pk` for the folder a box keeps its work in, then for /tmp (the root disk on Upstash), then memory and load. */
+export const dfCommand = (dir: string) => `df -Pk '${dir.replace(/'/g, `'\\''`)}' | tail -n 1; echo ${ROOT_DF_MARK}; df -Pk /tmp 2>/dev/null | tail -n 1; ${memCommand()}`
 
 /** Free, total and mount point from the last line of a `df -Pk` (POSIX format, 1K blocks). */
 function dfLine(text: string): { freeBytes: number; totalBytes: number; mount: string } | null {
@@ -104,11 +107,19 @@ function dfLine(text: string): { freeBytes: number; totalBytes: number; mount: s
  * when /tmp is on another filesystem.
  */
 export function parseDf(stdout: string): DiskSpace | null {
-  const [workPart, rootPart] = stdout.split(ROOT_DF_MARK)
+  const memAt = stdout.indexOf(MEM_MARK)
+  const [workPart, rootPart] = (memAt < 0 ? stdout : stdout.slice(0, memAt)).split(ROOT_DF_MARK)
   const work = dfLine(workPart ?? "")
   if (!work) return null
   const root = rootPart === undefined ? null : dfLine(rootPart)
-  return { freeBytes: work.freeBytes, totalBytes: work.totalBytes, root: root && root.mount !== work.mount ? { freeBytes: root.freeBytes, totalBytes: root.totalBytes } : null }
+  const memory = parseMemory(stdout)
+  return {
+    freeBytes: work.freeBytes,
+    totalBytes: work.totalBytes,
+    root: root && root.mount !== work.mount ? { freeBytes: root.freeBytes, totalBytes: root.totalBytes } : null,
+    // Left out (not null) without a memory part, so df-only fakes and old outputs read as before.
+    ...(memory ? { memory } : {}),
+  }
 }
 
 /** A root disk with less free than this (or than LOW_DISK_RATIO of it) gets its stale temp folders swept. */

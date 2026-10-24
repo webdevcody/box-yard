@@ -8,6 +8,7 @@ import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
 import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
 import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
+import { memoryMeter, memoryShort } from "../lib/memoryMeter"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
 import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
 import { Modal } from "./Modal"
@@ -259,7 +260,7 @@ function Meter({ used, total, className, tone, label }: { used: number; total: n
 // ---------------------------------------------------------------- the table
 
 // One grid for the header and every row once the list is wide enough; below that a row is two lines.
-const COLS = "@2xl:grid-cols-[minmax(12rem,1.5fr)_3.75rem_6.5rem_minmax(4.5rem,0.7fr)_minmax(7rem,1.6fr)_2rem]"
+const COLS = "@2xl:grid-cols-[minmax(12rem,1.5fr)_3.75rem_6.5rem_5.5rem_minmax(4.5rem,0.7fr)_minmax(7rem,1.6fr)_2rem]"
 
 function BoxTable({
   boxes,
@@ -282,6 +283,7 @@ function BoxTable({
         <span>Box</span>
         <span>Agents</span>
         <span>Disk</span>
+        <span>Memory</span>
         <span>Projects</span>
         <span>Running now</span>
         <span className="sr-only">Actions</span>
@@ -316,6 +318,7 @@ function BoxRow({
   const attention = boxAttention(box)
   const disk = diskMeter(box)
   const tone = diskTone(box)
+  const mem = memoryMeter(box)
   const now = nowRunning(tasks)
   const over = box.runningTurns > box.slots
   const busy = boxBusyReason(box)
@@ -379,6 +382,11 @@ function BoxRow({
           <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[tone])}>{disk ? `${formatBytes(disk.free)} free` : "disk —"}</span>
           {disk && <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="w-8 @2xl:w-full" />}
         </div>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={mem?.title ?? "Memory not measured yet"} data-testid="box-row-memory">
+          <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[mem?.tone ?? "unknown"])}>{mem ? memoryShort(mem) : "mem —"}</span>
+          {/* On the two-line phone row the text alone says it, leaving room for "running now". */}
+          {mem && <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="hidden @2xl:block @2xl:w-full" />}
+        </div>
         <div className="hidden min-w-0 items-center gap-1 @2xl:flex">
           {box.projects.length === 0 ? (
             <span className="text-zinc-600">—</span>
@@ -398,7 +406,7 @@ function BoxRow({
         <RunningNow now={now} />
       </div>
 
-      <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-6">
+      <div className="col-start-2 row-start-1 flex justify-end @2xl:col-start-7">
         <BoxMenu box={box} tasks={tasks} onOpen={() => onOpen(box.id)} onAction={(kind) => onAction(box.id, kind)} />
       </div>
     </div>
@@ -606,6 +614,9 @@ function BoxDetails({
         </Fact>
         <Fact label="Disk">
           <DiskSummary box={box} />
+        </Fact>
+        <Fact label="Memory">
+          <MemorySummary box={box} />
         </Fact>
         <Fact label="Projects">
           {box.projects.length ? (
@@ -844,6 +855,25 @@ function DiskSummary({ box }: { box: BoxInfo }) {
           root disk {formatBytes(root.free)} free
         </div>
       )}
+    </div>
+  )
+}
+
+/** Memory in use (without reclaimable page cache) and the load average, from the same probe as the disk. */
+function MemorySummary({ box }: { box: BoxInfo }) {
+  const mem = memoryMeter(box)
+  if (!mem)
+    return (
+      <span className="text-zinc-500" title="Memory and load are read with the disk check when Box Yard next places a task or checks the box." data-testid="memory-use">
+        not measured yet
+      </span>
+    )
+  return (
+    <div data-testid="memory-use" title={mem.title}>
+      <span className={TONE_TEXT[mem.tone]}>{mem.label}</span>
+      <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="mt-1.5" />
+      {mem.load && <div className="mt-1 text-[11px] text-zinc-500">{mem.load}</div>}
+      {mem.busy && <div className="mt-1 text-[11px] text-amber-300">new agents go elsewhere</div>}
     </div>
   )
 }
