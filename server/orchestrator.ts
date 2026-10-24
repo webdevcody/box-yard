@@ -6,13 +6,13 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
+import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
-import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun, Task, TaskMessage } from "../shared/types.js"
+import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
-import { preview } from "./replies.js"
 import {
   SUMMARY_PROMPT,
   cleanSummary,
@@ -24,6 +24,7 @@ import {
   writeCompaction,
 } from "./compactions.js"
 import { routingInstructions } from "./routing.js"
+import { compactionTaskSnapshots, mentionedTaskIds } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -283,68 +284,11 @@ export class Orchestrator {
     }
   }
 
-  private taskMentionIds(since: number): Set<string> {
-    const ids = new Set<string>()
-    const visit = (value: unknown) => {
-      if (typeof value === "string") {
-        if (/^task_[A-Za-z0-9-]{6,40}$/.test(value)) ids.add(value)
-        for (const m of value.matchAll(/\btask_[A-Za-z0-9-]{6,40}\b/g)) ids.add(m[0])
-      } else if (Array.isArray(value)) {
-        for (const v of value) visit(v)
-      } else if (value && typeof value === "object") {
-        for (const v of Object.values(value)) visit(v)
-      }
-    }
-    for (const m of this.store.listChatSince(since)) {
-      visit(m.content)
-      visit(m.meta)
-    }
-    return ids
-  }
-
-  private taskSnapshotSummary(task: Task, since: number): string {
-    const messages = this.store.listTaskMessages(task.id, 80)
-    const recent = messages
-      .filter((m) => m.createdAt > since && (m.role === "assistant" || m.role === "event" || m.role === "agent"))
-      .slice(-4)
-      .map((m) => `[${m.role}] ${m.content.replace(/\s+/g, " ").trim()}`)
-      .filter(Boolean)
-    const latest = recent.length ? recent.join("\n") : this.latestTaskContext(messages)
-    const parts = [
-      task.summary ? `Outcome: ${task.summary}` : "",
-      latest ? `Recent context: ${latest}` : "",
-      task.question ? `Question: ${task.question}` : "",
-      task.error ? `Error: ${task.error}` : "",
-    ].filter(Boolean)
-    return preview(parts.join("\n"), 1200, "open the task transcript for more")
-  }
-
-  private latestTaskContext(messages: TaskMessage[]): string {
-    const m = [...messages].reverse().find((x) => x.role === "assistant" || x.role === "event" || x.role === "agent")
-    return m ? preview(m.content, 700, "open the task transcript for more") : ""
-  }
-
   /** Tasks active or mentioned since the previous recorded compaction. */
   private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
     const previous = this.store.listOrchestratorCompactions({ limit: 1 })[0]?.at ?? lastCompaction(this.compactionsDir)?.at ?? 0
-    const mentioned = this.taskMentionIds(previous)
-    const activeStatuses = new Set(["queued", "starting", "working", "needs_input", "waiting", "idle", "pr_ready", "failed"])
-    const tasks = this.store
-      .listTasks()
-      .filter((t) => t.updatedAt > previous || mentioned.has(t.id) || activeStatuses.has(t.status))
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-    return tasks.map((t) => ({
-      taskId: t.id,
-      title: t.title,
-      status: t.status,
-      projectId: t.projectId,
-      projectName: this.store.getProject(t.projectId)?.name ?? t.projectId,
-      branch: t.branch,
-      prUrl: t.prUrl,
-      sessionId: t.sessionId,
-      summary: this.taskSnapshotSummary(t, previous),
-      lastActiveAt: t.updatedAt,
-    }))
+    const mentioned = mentionedTaskIds(this.store.listChatSince(previous).flatMap((m) => [m.content, m.meta]))
+    return compactionTaskSnapshots(this.store, this.store.listTasks(), previous, mentioned)
   }
 
   /**
@@ -472,7 +416,7 @@ export class Orchestrator {
     const notices = this.store.takeUnseenNotices()
     const notes = this.runNotes.get(queued.id)
     const prompt = [
-      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      updatesBlock("Box Yard updates since your last turn", notices),
       queued.prompt,
       `(${withOwner("This is a scheduled message from Box Yard, not a new message from Cody.", this.owner())} ${notes ?? ""} ${withOwner("Handle it as if Cody had sent it: do the work, and reply with what Cody should see.", this.owner())})`,
     ]
@@ -508,7 +452,7 @@ export class Orchestrator {
     this.autoTurns++
     await this.runPrompt(
       [
-        `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        updatesBlock("Box Yard updates since your last turn", notices),
         withOwner(
           `(Automatic wake-up: there is no new message from Cody. Tell Cody in a line or two what finished, failed or needs Cody, with links. ` +
           `If an update completes a step of work Cody already asked for and the next step is clear, start it. ` +
@@ -525,7 +469,7 @@ export class Orchestrator {
     this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
     const notices = this.store.takeUnseenNotices()
     const prompt = [
-      notices.length ? `[Box Yard updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "",
+      updatesBlock("Box Yard updates since your last turn", notices),
       messages.join("\n\n"),
     ]
       .filter(Boolean)
