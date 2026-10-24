@@ -162,6 +162,8 @@ process.on("SIGTERM", () => {
 async function runTurn() {
   const turn = readJson(path.join(taskDir, "turn.json"))
   fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
+  // While the machine sleeps the wall clock runs on and the monotonic one doesn't: the gap is time asleep (sleptMs).
+  const clocks = { wall: Date.now(), mono: performance.now() }
   // Answers to message_captain waits that ran out last turn; their replies come as this turn's messages.
   for (const f of fs.readdirSync(taskDir)) if (/^captain-reply-.*\.json$/.test(f)) fs.rmSync(path.join(taskDir, f), { force: true })
   await emit({ t: "turn_start", runner: RUNNER_VERSION })
@@ -224,6 +226,7 @@ async function runTurn() {
     usage,
     resultUsage: attempt.result?.usage ?? null,
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
+    sleptMs: Math.max(0, Math.round(Date.now() - clocks.wall - (performance.now() - clocks.mono))),
   })
   // turn.pid stays behind on purpose: the orchestrator checks it with kill -0,
   // and a fast turn must not finish before the orchestrator sees it started.
