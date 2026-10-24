@@ -11,6 +11,7 @@ import { NewTabLink, StatusBadge, TimeAgo, cx } from "./ui"
 import { useOpenSettings } from "./SettingsDialog"
 import { NewProjectDialog } from "./NewProjectDialog"
 import { Modal } from "./Modal"
+import { toggleZen } from "../lib/zen"
 
 // ------------------------------------------------------------------ open state
 
@@ -97,7 +98,7 @@ export function CommandPalette() {
 
   return (
     <>
-      {isOpen && <Palette onClose={() => setOpen(false)} onCommand={(c) => (c === "settings" ? openSettings() : setDialog(c))} />}
+      {isOpen && <Palette onClose={() => setOpen(false)} onCommand={(c) => (c === "settings" ? openSettings() : c === "zen" ? toggleZen() : setDialog(c))} />}
       {dialog === "new-project" && <NewProjectDialog onClose={() => setDialog(null)} />}
     </>
   )

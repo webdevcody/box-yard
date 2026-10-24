@@ -1,19 +1,20 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
-import { Bot, Settings as SettingsIcon, Square, X } from "lucide-react"
+import { Bot, Expand, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
-import { Button, Markdown, warmMarkdown } from "./ui"
+import { Button, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
-import { Composer } from "./Composer"
+import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { ContextMeter } from "./ContextMeter"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import { ChatLine } from "./ChatLine"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
+import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
 import type { Attachment, ChatMessage } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -24,8 +25,11 @@ const SUGGESTIONS = [
 
 const NO_MESSAGES: ChatMessage[] = []
 
-/** `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). */
-export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => void }) {
+/**
+ * `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). `zen` lays the same
+ * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css).
+ */
+export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onClose?: () => void; zen?: boolean }) {
   const chat = useChat()
   const busy = useChatBusy()
   const send = useSendChat()
@@ -84,12 +88,22 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
 
   return (
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
-      <header className="flex min-h-14 items-center gap-2 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4">
+      <header
+        className={cx(
+          "flex min-h-14 items-center gap-2 pt-[env(safe-area-inset-top)]",
+          zen ? "zen-column overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]" : "border-b border-zinc-900 pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4",
+        )}
+      >
         <Bot className="h-4 w-4 shrink-0 text-yard-400" />
         <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">Coordinator</div>
         {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           <VoiceControl />
+          {!zen && (
+            <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
+              <Expand className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
             <SettingsIcon className="h-3.5 w-3.5" />
           </Button>
@@ -98,7 +112,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
               <Square className="h-3.5 w-3.5" />
             </Button>
           )}
-          {onClose && (
+          {zen && (
+            <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
+              <Shrink className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {onClose && !zen && (
             <button
               type="button"
               onClick={onClose}
@@ -112,7 +131,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
         </div>
       </header>
       <ContextMeter
-        className="border-b border-zinc-900 px-4 py-2"
+        className={cx("border-b border-zinc-900 py-2", zen ? "zen-column overflow-hidden" : "px-4")}
         tokens={orch.data?.usage.tokens ?? null}
         window={orch.data?.usage.window ?? null}
         compacting={orch.data?.compacting ?? false}
@@ -121,7 +140,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
       />
 
       <SelectionToTask source={selectionSource} onPrompt={submit}>
-        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className="px-4 py-4" contentClassName="space-y-3">
+        <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
           {messages.length === 0 && !chat.isLoading && (
             <div className="space-y-3 pt-6 text-center">
               <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
@@ -148,6 +167,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose }: { onClose?: () => 
         placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
         textareaRef={box}
         panelRef={panel}
+        className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
       />
     </section>
   )
