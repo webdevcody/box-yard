@@ -2,7 +2,7 @@
 // tool calls (ToolLine) and notices. Shared by the Coordinator panel and the project Captain tab.
 import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
-import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Wrench } from "lucide-react"
+import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
 import { AppLink, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { toolMentions } from "../lib/linkify"
@@ -182,6 +182,19 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
         <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
           <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-sky-300 uppercase">
             <AlarmClock className="h-3 w-3" /> Scheduled
+          </div>
+          {m.content}
+        </div>
+      </div>
+    )
+  }
+  if (m.role === "user" && m.meta?.source === "hook") {
+    // A hook's message_coordinator action (server/hooks.ts), not typed by Cody.
+    return (
+      <div id={`chat-${m.id}`} className="flex justify-end">
+        <div className="max-w-[85%] min-w-0 rounded-2xl rounded-br-md border border-teal-500/30 bg-teal-500/10 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100">
+          <div className="mb-1 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-teal-300 uppercase">
+            <Webhook className="h-3 w-3" /> Hook: {String(m.meta.hookName ?? "")}
           </div>
           {m.content}
         </div>

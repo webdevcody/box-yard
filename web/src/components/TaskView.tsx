@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { Link } from "wouter"
-import { Bot, HardDrive, MessageCircleQuestion, Users } from "lucide-react"
+import { Bot, HardDrive, MessageCircleQuestion, Users, Webhook } from "lucide-react"
 import {
   newClientId,
   useArtifacts,
@@ -161,10 +161,13 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
     </span>
   )
   switch (m.role) {
-    case "user":
+    case "user": {
+      // A hook's message (server/hooks.ts) is an automation's, not Cody's: its own colour and icon.
+      const hook = m.meta?.source === "hook"
       return (
-        <div className={cx("rounded-lg border-l-2 border-yard-500 bg-yard-500/5 px-3 py-2", m.meta?.pending ? "opacity-60" : "")}>
-          <div className="mb-0.5 text-[11px] font-semibold text-yard-400">
+        <div className={cx("rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
+          <div className={cx("mb-0.5 flex items-center gap-1 text-[11px] font-semibold", hook ? "text-teal-300" : "text-yard-400")}>
+            {hook && <Webhook className="h-3 w-3" />}
             {userMessageLabel(m.meta)}
             {time}
           </div>
@@ -172,6 +175,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           <AttachmentList files={m.meta?.attachments} />
         </div>
       )
+    }
     case "assistant":
       return (
         <div className="flex min-w-0 gap-2">
@@ -205,6 +209,16 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       )
     default: {
       const url = typeof m.meta?.url === "string" ? m.meta.url : null
+      if (m.meta?.kind === "hook")
+        return (
+          <div className={cx("flex items-start gap-1.5 pl-1 text-xs", m.meta.status === "fired" ? "text-teal-300/90" : "text-amber-200/80")} data-testid="hook-event">
+            <Webhook className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <div className="min-w-0 wrap-anywhere [&_p]:inline">
+              <Markdown>{m.content}</Markdown>
+              {time}
+            </div>
+          </div>
+        )
       if (url && m.meta?.kind === "artifact")
         return (
           <div className="pl-6">

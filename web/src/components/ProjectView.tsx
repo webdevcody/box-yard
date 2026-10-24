@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, X } from "lucide-react"
+import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, NotebookPen, Plus, Search, Settings, Trash2, Webhook, X } from "lucide-react"
 import {
   newClientId,
   useAddNote,
@@ -9,6 +9,7 @@ import {
   useCaptainState,
   useCreateTask,
   useDeleteProject,
+  useHooks,
   useProjects,
   useSchedules,
   useTasks,
@@ -31,6 +32,7 @@ import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
+import { HooksPanel } from "./Hooks"
 import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -41,6 +43,7 @@ const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
   { key: "captain", label: "Captain", icon: Bot },
   { key: "schedules", label: "Schedules", icon: AlarmClock },
+  { key: "hooks", label: "Hooks", icon: Webhook },
   { key: "notes", label: "Notes", icon: NotebookPen },
   { key: "files", label: "Files", icon: FileText },
   { key: "settings", label: "Settings", icon: Settings },
@@ -70,6 +73,7 @@ export function ProjectView({ id }: { id: string }) {
   const artifacts = useArtifacts()
   const schedules = useSchedules()
   const captain = useCaptainState(id)
+  const hooks = useHooks(id)
   const [params, setParams] = useSearchParams()
   const [showNew, setShowNew] = useState(false)
   const project = projects.data?.find((p) => p.id === id)
@@ -101,7 +105,7 @@ export function ProjectView({ id }: { id: string }) {
   /** The current URL with a different tab; tasks filters stay so coming back to Tasks keeps them. */
   const tabHref = (key: Tab) =>
     projectHref(id, { tab: key === "tasks" ? null : key, status: params.get("status"), q: params.get("q"), sort: params.get("sort") })
-  const counts: Partial<Record<Tab, number>> = { tasks: openCount, schedules: scheduleCount, notes: project.notes.length, files: files.length }
+  const counts: Partial<Record<Tab, number>> = { tasks: openCount, schedules: scheduleCount, hooks: hooks.data?.length, notes: project.notes.length, files: files.length }
 
   return (
     // The Captain chat fills the rest of the page down to the window bottom (its Composer lines up with the
@@ -128,6 +132,7 @@ export function ProjectView({ id }: { id: string }) {
       {tab === "tasks" && <TasksTab tasks={list} />}
       {tab === "captain" && <CaptainTab project={project} />}
       {tab === "schedules" && <ProjectSchedules projectId={id} />}
+      {tab === "hooks" && <HooksPanel projectId={id} />}
       {tab === "notes" && <Notes project={project} />}
       {tab === "files" && <Files files={files} tasks={list} />}
       {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
