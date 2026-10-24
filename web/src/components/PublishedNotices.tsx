@@ -10,8 +10,9 @@ import { NOTICE_CLASS, NoticeCard } from "./ChatLine"
 import { previewKind } from "../lib/filePreview"
 import { previewGallery, publishedLabel, sameGroup, type PublishedFileRef, type PublishedGroup } from "../lib/publishedNotices"
 
-/** Thumbnails shown before "+N". */
+/** Thumbnails shown before "+N" (fewer on phones, where they're bigger tap targets), so the strip stays one line. */
 export const STRIP_MAX = 6
+const STRIP_MAX_PHONE = 4
 
 const kindOf = (f: PublishedFileRef) => previewKind({ url: f.url, name: f.filename })
 const extOf = (f: PublishedFileRef) => {
@@ -20,7 +21,7 @@ const extOf = (f: PublishedFileRef) => {
 }
 
 /** A small thumbnail for an image, else a file-type chip; same height either way so the strip never shifts. */
-function Thumb({ f, gallery }: { f: PublishedFileRef; gallery: () => ReturnType<typeof previewGallery> }) {
+function Thumb({ f, gallery, className }: { f: PublishedFileRef; gallery: () => ReturnType<typeof previewGallery>; className?: string }) {
   const kind = kindOf(f)
   return (
     <FileLink
@@ -30,10 +31,13 @@ function Thumb({ f, gallery }: { f: PublishedFileRef; gallery: () => ReturnType<
       gallery={gallery}
       title={f.title}
       aria-label={f.title}
-      className="inline-flex h-11 shrink-0 items-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none sm:h-7"
+      className={cx(
+        "inline-flex h-11 shrink-0 items-center overflow-hidden rounded-md border border-zinc-800 bg-zinc-950 text-[10px] font-medium text-zinc-400 hover:border-zinc-600 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none sm:h-7",
+        className,
+      )}
     >
       {kind === "image" ? (
-        <img src={f.url} alt="" loading="lazy" decoding="async" className="h-full w-16 object-cover object-top sm:w-10" />
+        <img src={f.url} alt="" loading="lazy" decoding="async" className="h-full w-14 object-cover object-top sm:w-10" />
       ) : (
         <span className="inline-flex items-center gap-1 px-1.5">
           <KindIcon kind={kind} className="h-3 w-3" />
@@ -50,6 +54,19 @@ function GroupBody({ group, time }: { group: PublishedGroup; time?: number }) {
   const gallery = useMemo(() => previewGallery(files), [files])
   const getGallery = () => gallery
   const more = files.length - STRIP_MAX
+  const morePhone = files.length - STRIP_MAX_PHONE
+  const moreChip = (n: number, className: string) =>
+    n > 0 &&
+    !open && (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title={`Show all ${files.length} files`}
+        className={cx(META_CHIP, "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200", className)}
+      >
+        +{n}
+      </button>
+    )
   const toggle = files.length > 1 && (
     <button
       type="button"
@@ -84,19 +101,11 @@ function GroupBody({ group, time }: { group: PublishedGroup; time?: number }) {
           {toggle}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          {files.slice(0, STRIP_MAX).map((f) => (
-            <Thumb key={f.id} f={f} gallery={getGallery} />
+          {files.slice(0, STRIP_MAX).map((f, i) => (
+            <Thumb key={f.id} f={f} gallery={getGallery} className={i >= STRIP_MAX_PHONE ? "max-sm:hidden" : undefined} />
           ))}
-          {more > 0 && !open && (
-            <button
-              type="button"
-              onClick={() => setOpen(true)}
-              title={`Show all ${files.length} files`}
-              className={cx(META_CHIP, "border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200")}
-            >
-              +{more}
-            </button>
-          )}
+          {moreChip(morePhone, "sm:hidden")}
+          {moreChip(more, "max-sm:hidden")}
         </div>
         {open ? (
           <ul className="mt-1.5 space-y-0.5">
