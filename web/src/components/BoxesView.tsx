@@ -903,19 +903,14 @@ function DiskPanel({ box }: { box: BoxInfo }) {
   )
 }
 
-/** The root disk (/tmp, HOME) when it isn't the work disk: archive and git stages and temp files land there. */
+/** The root disk (/tmp, HOME) when it isn't the work disk: temp files land there. Why it's low is in the attention list above. */
 function RootDisk({ box, root }: { box: BoxInfo; root: NonNullable<ReturnType<typeof rootMeter>> }) {
   const tone = rootTone(box)
   return (
     <div data-testid="root-disk">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <span>
-          <span className="text-zinc-500">Root disk (/tmp, home) · </span>
-          <span className={TONE_TEXT[tone]}>{root.label}</span>
-        </span>
-      </div>
+      <span className="text-zinc-500">Root disk (/tmp, home) · </span>
+      <span className={TONE_TEXT[tone]}>{root.label}</span>
       <Meter used={root.used} total={root.total} tone={tone} label="Root disk used" className="mt-2" />
-      {root.low && <p className="mt-1.5 text-amber-300/90">Low: Box Yard removes temp folders here that haven't changed in 30 minutes, and stages archives on whichever disk has more room.</p>}
     </div>
   )
 }
@@ -963,12 +958,11 @@ function CleanupReport({ box }: { box: BoxInfo }) {
           {cleanup && cleanup.freeBefore !== null && cleanup.freeAfter !== null && (
             <div className="mt-0.5 text-zinc-500">
               {formatBytes(cleanup.freeBefore)} → {formatBytes(cleanup.freeAfter)} free
-              {typeof cleanup.rootFreeBefore === "number" && typeof cleanup.rootFreeAfter === "number" && (
-                <span className="whitespace-nowrap" data-testid="cleanup-root">
-                  {" "}
-                  · root disk {formatBytes(cleanup.rootFreeBefore)} → {formatBytes(cleanup.rootFreeAfter)}
-                </span>
-              )}
+            </div>
+          )}
+          {cleanup && typeof cleanup.rootFreeBefore === "number" && typeof cleanup.rootFreeAfter === "number" && (
+            <div className="text-zinc-500" data-testid="cleanup-root">
+              Root disk: {formatBytes(cleanup.rootFreeBefore)} → {formatBytes(cleanup.rootFreeAfter)} free
             </div>
           )}
         </div>

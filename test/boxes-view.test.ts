@@ -214,7 +214,7 @@ describe("Boxes overview", () => {
     expect(d.querySelector("[data-testid=disk-breakdown]")!.textContent).toContain("Work disk · 3.0 GB free of 5.0 GB")
     const report = d.querySelector("[data-testid=cleanup-report]")!
     expect(report.textContent).toContain("Routine upkeep (stale temp folders): freed 180 MB (tmp 180 MB)")
-    expect(report.querySelector("[data-testid=cleanup-root]")!.textContent).toBe(" · root disk 200 MB → 380 MB")
+    expect(report.querySelector("[data-testid=cleanup-root]")!.textContent).toBe("Root disk: 200 MB → 380 MB free")
     expect(report.textContent).toContain("3 stale temp folders (180 MB)")
   })
 
