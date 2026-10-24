@@ -221,7 +221,7 @@ export function routingInstructions(
   if (settings.agentModel || settings.agentEffort) parts.push(`Settings › Box agents now: model ${settings.agentModel ?? DEFAULT_MODEL}, effort ${coordinatorEffort ? "chosen by you" : (settings.agentEffort ?? DEFAULT_EFFORT)}.`)
   if (loaded.sources.length) parts.push(`Routing sources: ${loaded.sources.join(", ")}`)
   if (loaded.yaml) parts.push(`Current routing config:\n\`\`\`yaml\n${loaded.yaml}\n\`\`\``)
-  else parts.push("No routing.yaml or Settings routing YAML is configured, so there are no rules: omit model and effort unless Cody asks.")
+  else parts.push(owner("No routing.yaml or Settings routing YAML is configured, so there are no rules: omit model and effort unless Cody asks."))
   if (loaded.errors.length) parts.push(`${owner("Routing config warnings (ignore invalid sources and tell Cody if relevant):")}\n${loaded.errors.map((e) => `- ${e}`).join("\n")}`)
   return parts.join("\n\n")
 }
