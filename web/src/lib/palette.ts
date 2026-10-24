@@ -171,6 +171,9 @@ export function buildItems(data: PaletteData): PaletteItem[] {
 
 export function buildActions(projects: Project[]): PaletteItem[] {
   return [
+    ...(projects.length > 1
+      ? [{ key: "action:new-task", kind: "action", title: "New task…", subtitle: "Pick the project as you write it", href: "/?new=task", aliases: ["start task", "add task"] } satisfies PaletteItem]
+      : []),
     ...projects.map<PaletteItem>((p) => ({
       key: `action:new-task:${p.id}`,
       kind: "action",
