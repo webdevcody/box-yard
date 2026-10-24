@@ -253,8 +253,12 @@ describe("placement by project box size", () => {
     const p = await project(r, "proj")
     const t = await settled(r, (await task(r, p.id, "first")).id)
     const small = t.boxId!
+    // Let the turn-end archive finish first, so this one isn't racing it.
+    const archiving = (r.yard.tasks as unknown as { archiving: Set<string> }).archiving
+    await waitFor(() => !archiving.has(t.id), "the turn-end archive")
     fs.writeFileSync(path.join(workDir(r, small, t.id), "notes.md"), "moves with it\n")
     await r.yard.tasks.archive(t.id)
+    expect(r.yard.store.getTaskRow(t.id)!.last_archived_at).toBeGreaterThanOrEqual(r.yard.store.getTaskRow(t.id)!.last_active_at - 1000)
     await call(r, "PATCH", `/api/projects/${p.id}`, { boxSize: "medium" })
 
     await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "carry on" })
