@@ -22,6 +22,7 @@ import {
 } from "../shared/types.js"
 import { BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import { DEFAULT_NOTE_BUDGET, type NoteBudget } from "../shared/notes.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
@@ -72,6 +73,9 @@ export const DEFAULT_SETTINGS: Settings = {
   diskCloneFactor: 2,
   gitPartialClone: true,
   buildCleanupIdleMinutes: 15,
+  notesRetroEnabled: true,
+  notesMaxCount: DEFAULT_NOTE_BUDGET.maxNotes,
+  notesMaxTokens: DEFAULT_NOTE_BUDGET.maxTokens,
 }
 
 /** Env vars that seed box/pool settings; saved settings win over them. */
@@ -139,6 +143,9 @@ export const settingsPatch = z
     diskCloneFactor: z.number().min(1).max(20),
     gitPartialClone: z.boolean(),
     buildCleanupIdleMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    notesRetroEnabled: z.boolean(),
+    notesMaxCount: z.number().int().min(1).max(200),
+    notesMaxTokens: z.number().int().min(200).max(50_000),
   })
   .partial()
   .strict()
@@ -263,6 +270,9 @@ export class SettingsStore {
     return this.info()
   }
 }
+
+/** The notes budget Settings sets. */
+export const noteBudgetOf = (s: Pick<Settings, "notesMaxCount" | "notesMaxTokens">): NoteBudget => ({ maxNotes: s.notesMaxCount, maxTokens: s.notesMaxTokens })
 
 /** Tokens at which an auto-compact should happen, or null when it is off. */
 export function compactThreshold(ac: AutoCompact, window: number | null): number | null {

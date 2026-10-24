@@ -542,6 +542,32 @@ export const MIGRATIONS: string[] = [
   -- Shared git objects: a project's own choice of partial-clone (blob:none) box mirrors. NULL uses Settings.
   ALTER TABLE projects ADD COLUMN partial_clone INTEGER;
   `,
+  `
+  -- Curated project notes (server/notes.ts): who last edited a note and when.
+  ALTER TABLE project_notes ADD COLUMN updated_at INTEGER;
+  ALTER TABLE project_notes ADD COLUMN updated_by TEXT;
+
+  -- Notes agents suggest with suggest_note. They never reach a prompt by themselves: the project's Captain
+  -- (in a notes retro) or the owner accepts one as a note, merges it into one, or rejects it.
+  CREATE TABLE note_suggestions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    task_title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    why TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    note_id TEXT,
+    resolved_by TEXT,
+    reason TEXT,
+    -- When a retro handed it to the Captain (each suggestion goes out once).
+    retro_at INTEGER,
+    created_at INTEGER NOT NULL,
+    resolved_at INTEGER
+  );
+  CREATE INDEX note_suggestions_project ON note_suggestions(project_id, status, created_at);
+  CREATE INDEX note_suggestions_task ON note_suggestions(task_id, status);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

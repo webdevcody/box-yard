@@ -27,7 +27,9 @@ import type {
   OrchestratorState,
   Settings,
   SettingsInfo,
+  NoteSuggestion,
   Project,
+  ProjectNote,
   Schedule,
   ScheduleRun,
   ScheduleTarget,
@@ -70,6 +72,8 @@ export const keys = {
   hooks: (scope: string) => ["hooks", scope] as const,
   hookRuns: (scope: string) => ["hook-runs", scope] as const,
   hookTemplates: ["hook-templates"] as const,
+  /** A project's note suggestions from agents: "pending", or "all" for the resolved ones too. */
+  noteSuggestions: (projectId: string, status: "pending" | "all" = "pending") => ["note-suggestions", projectId, status] as const,
 }
 
 /** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
@@ -256,6 +260,7 @@ export function useCreateProject() {
           baseBranch: input.baseBranch || "main",
           envKeys: Object.keys(input.env ?? {}),
           notes: [],
+          pendingSuggestions: 0,
           boxSize: null,
           partialClone: null,
           createdAt: now,
@@ -319,19 +324,43 @@ export function useDeleteProject() {
   })
 }
 
+/** Optimistically change one project's notes. */
+function editNotes(qc: QueryClient, projectId: string, edit: (notes: ProjectNote[], who: string) => ProjectNote[]) {
+  const undo = snapshot<Project[]>(qc, keys.projects)
+  const who = qc.getQueryData<SettingsInfo>(keys.agentSettings)?.settings.ownerName ?? DEFAULT_OWNER_NAME
+  qc.setQueryData<Project[]>(keys.projects, (list) => list?.map((p) => (p.id === projectId ? { ...p, notes: edit(p.notes, who) } : p)))
+  return undo
+}
+
 export function useAddNote() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ projectId, content }: { projectId: string; content: string }) =>
       api<Project>(`/api/projects/${projectId}/notes`, { body: { content } }),
     onMutate: async ({ projectId, content }) => {
-      const undo = snapshot<Project[]>(qc, keys.projects)
-      qc.setQueryData<Project[]>(keys.projects, (list) =>
-        list?.map((p) =>
-          p.id === projectId
-            ? { ...p, notes: [...p.notes, { id: `tmp-${Date.now()}`, projectId, author: qc.getQueryData<SettingsInfo>(keys.agentSettings)?.settings.ownerName ?? DEFAULT_OWNER_NAME, content, createdAt: Date.now() }] }
-            : p,
-        ),
+      const now = Date.now()
+      const undo = editNotes(qc, projectId, (notes, who) => [
+        ...notes,
+        { id: `tmp-${now}`, projectId, author: who, content, createdAt: now, updatedAt: now, updatedBy: null },
+      ])
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't save the note")(err)
+    },
+    onSuccess: (project) => qc.setQueryData<Project[]>(keys.projects, (list) => upsert(list, project)),
+  })
+}
+
+export function useUpdateNote() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ projectId, noteId, content }: { projectId: string; noteId: string; content: string }) =>
+      api<Project>(`/api/projects/${projectId}/notes/${noteId}`, { method: "PATCH", body: { content } }),
+    onMutate: async ({ projectId, noteId, content }) => {
+      const undo = editNotes(qc, projectId, (notes, who) =>
+        notes.map((n) => (n.id === noteId ? { ...n, content, updatedAt: Date.now(), updatedBy: who } : n)),
       )
       return { undo }
     },
@@ -340,6 +369,54 @@ export function useAddNote() {
       fail("Couldn't save the note")(err)
     },
     onSuccess: (project) => qc.setQueryData<Project[]>(keys.projects, (list) => upsert(list, project)),
+  })
+}
+
+export function useDeleteNote() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ projectId, noteId }: { projectId: string; noteId: string }) =>
+      api<Project>(`/api/projects/${projectId}/notes/${noteId}`, { method: "DELETE" }),
+    onMutate: async ({ projectId, noteId }) => {
+      const undo = editNotes(qc, projectId, (notes) => notes.filter((n) => n.id !== noteId))
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't delete the note")(err)
+    },
+    onSuccess: (project) => qc.setQueryData<Project[]>(keys.projects, (list) => upsert(list, project)),
+  })
+}
+
+export const useNoteSuggestions = (projectId: string, status: "pending" | "all" = "pending") =>
+  useQuery({
+    queryKey: keys.noteSuggestions(projectId, status),
+    queryFn: () => api<NoteSuggestion[]>(`/api/projects/${projectId}/suggestions?status=${status}`),
+  })
+
+export function useResolveSuggestion() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ projectId, id, ...input }: { projectId: string; id: string; action: "accept" | "merge" | "reject"; content?: string; noteId?: string; reason?: string }) =>
+      api<{ project: Project; suggestion: NoteSuggestion }>(`/api/projects/${projectId}/suggestions/${id}/resolve`, { body: input }),
+    onMutate: async ({ projectId, id }) => {
+      const key = keys.noteSuggestions(projectId)
+      await qc.cancelQueries({ queryKey: key })
+      const undoList = snapshot<NoteSuggestion[]>(qc, key)
+      const undoProjects = snapshot<Project[]>(qc, keys.projects)
+      qc.setQueryData<NoteSuggestion[]>(key, (list) => list?.filter((s) => s.id !== id))
+      qc.setQueryData<Project[]>(keys.projects, (list) =>
+        list?.map((p) => (p.id === projectId ? { ...p, pendingSuggestions: Math.max(0, p.pendingSuggestions - 1) } : p)),
+      )
+      return { undo: () => (undoList(), undoProjects()) }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't resolve the suggestion")(err)
+    },
+    onSuccess: ({ project }) => qc.setQueryData<Project[]>(keys.projects, (list) => upsert(list, project)),
+    onSettled: (_r, _e, { projectId }) => void qc.invalidateQueries({ queryKey: ["note-suggestions", projectId] }),
   })
 }
 
