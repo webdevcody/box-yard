@@ -54,14 +54,15 @@ let calls: { url: string; method: string; body: unknown }[]
 /** Answers for the API calls a test makes; anything else never resolves. */
 let routes: Record<string, (body: unknown) => unknown>
 
-function render(path: string, o: { newTab?: boolean; startInZen?: boolean | null; status?: SetupStatus; chat?: ChatMessage[] } = {}) {
+function render(path: string, o: { newTab?: boolean; startInZen?: boolean | null; status?: SetupStatus; chat?: ChatMessage[]; owner?: string } = {}) {
   history.replaceState(null, "", path)
   if (!o.newTab) sessionStorage.setItem("box-yard:landed", "1")
   qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.me, { authed: true, authRequired: false })
   qc.setQueryData(keys.health, { ok: true, provider: "local", mock: false, bus: "file", claude: { available: true, version: "x" }, problems: [], pool: {}, orchestratorBusy: false, scheduler: "local" })
   qc.setQueryData(keys.orchestrator, { busy: false, usage: { tokens: 0, window: 1_000_000, updatedAt: now }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
-  if (o.startInZen !== null) qc.setQueryData(keys.agentSettings, { settings: { startInZen: o.startInZen ?? true, ownerName: "Cody" }, sources: { ownerName: "default" }, defaults: {} })
+  if (o.startInZen !== null)
+    qc.setQueryData(keys.agentSettings, { settings: { startInZen: o.startInZen ?? true, ownerName: o.owner ?? "Cody" }, sources: { ownerName: o.owner ? "ui" : "default" }, defaults: {} })
   qc.setQueryData(keys.setup, o.status ?? setup({ upstashBoxApiKey: saved, claudeOauthToken: saved }))
   qc.setQueryData(keys.chat, o.chat ?? [])
   qc.setQueryData(keys.chatBusy, false)
@@ -75,6 +76,9 @@ function render(path: string, o: { newTab?: boolean; startInZen?: boolean | null
 const inZen = () => Boolean(document.querySelector("[data-zen]"))
 const chat = () => document.querySelector<HTMLElement>("[data-testid=chat-panel]")
 const card = () => document.querySelector<HTMLElement>("[data-testid=setup-card]")
+const tryFirst = () => document.querySelector<HTMLElement>("[data-testid=try-first]")
+const prompts = () => [...tryFirst()!.querySelectorAll<HTMLButtonElement>(".grid > button")]
+const textarea = () => chat()!.querySelector("textarea")!
 const settle = () => act(() => new Promise((r) => setTimeout(r, 20)))
 const byText = (text: string, scope: ParentNode = document) => [...scope.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.trim() === text)
 const type = (input: HTMLInputElement, value: string) =>
@@ -237,27 +241,33 @@ describe("first-run setup", () => {
     expect(byText("Test", field)).toBeDefined()
   })
 
-  it("once the required keys are set the card goes away: a welcome with two ways to start", async () => {
-    routes["POST /api/chat"] = (body) => ({ id: "msg_1", role: "user", content: (body as { content: string }).content, meta: null, createdAt: now })
+  it("once the required keys are set the card switches to what to try first", async () => {
     render(ZEN_PATH, { status: setup() })
     expect(card()).not.toBeNull()
     act(() => qc.setQueryData(keys.setup, setup({ upstashBoxApiKey: saved, claudeOauthToken: saved })))
     await settle()
     expect(card()).toBeNull()
-    const welcome = document.querySelector<HTMLElement>("[data-testid=zen-welcome]")!
-    expect(welcome.textContent).toContain("Welcome to Box Yard")
-    expect(byText("Create your first project from a GitHub repo", welcome)).toBeDefined()
-    // No GitHub token yet: one quiet line points to it.
-    expect(welcome.textContent).toContain("Agents need a GitHub token")
-    act(() => byText("What can you do?", welcome)!.click())
-    await settle()
-    expect(calls.find((c) => c.url === "/api/chat" && c.method === "POST")?.body).toMatchObject({ content: "What can you do?" })
+    const step = tryFirst()!
+    expect(step.querySelector("h2")!.textContent).toBe("You're set. Just tell the Coordinator what you want.")
+    expect(prompts().map((b) => b.textContent)).toEqual([
+      "Add my <owner/repo> repo as a project and list its open GitHub issues",
+      "Pick the easiest open issue in <owner/repo> and fix it in a PR",
+      "Look through <owner/repo> and tell me the 3 riskiest parts of the code",
+      "Every weekday at 9am, summarize what's waiting on me",
+    ])
+    expect(step.textContent).toContain("The Coordinator creates projects, starts agents on their own boxes, and reports back. Ask in plain English.")
+    // No GitHub token yet: one quiet line points to it, and there are no repos to ask for.
+    expect(step.textContent).toContain("Agents need a GitHub token")
+    expect(step.querySelector("[aria-label='Your recent repos']")).toBeNull()
+    expect(calls.some((c) => c.url === "/api/setup/repos")).toBe(false)
   })
 
   it("Skip for now shows the chat with a one-line reminder that brings the card back", () => {
     render(ZEN_PATH, { status: setup() })
     act(() => byText("Skip for now")!.click())
     expect(card()).toBeNull()
+    // The examples still show, but nothing is set yet, so they don't say so.
+    expect(tryFirst()!.querySelector("h2")!.textContent).toBe("Just tell the Coordinator what you want.")
     const reminder = document.querySelector<HTMLElement>("[data-testid=setup-reminder]")!
     expect(reminder.textContent).toContain("Needs Upstash Box API key and Claude sign-in")
     expect(chat()!.querySelector("textarea")!.closest(".hidden")).toBeNull()
@@ -280,5 +290,127 @@ describe("first-run setup", () => {
     render(ZEN_PATH, { status: { ...setup(), ready: true, missing: [], mock: true } })
     expect(card()).toBeNull()
     expect(document.querySelector("[data-testid=setup-reminder]")).toBeNull()
+  })
+})
+
+describe("what to try first", () => {
+  const READY = setup({ upstashBoxApiKey: saved, claudeOauthToken: saved })
+  const WITH_GITHUB = setup({ upstashBoxApiKey: saved, claudeOauthToken: saved, githubToken: saved })
+  const chatPosts = () => calls.filter((c) => c.url === "/api/chat" && c.method === "POST")
+
+  it("picking an example fills the Coordinator box without sending it, with the repo placeholder selected", () => {
+    render(ZEN_PATH, { status: READY })
+    act(() => prompts()[0]!.click())
+    const box = textarea()
+    expect(box.value).toBe("Add my <owner/repo> repo as a project and list its open GitHub issues")
+    expect(document.activeElement).toBe(box)
+    expect(box.value.slice(box.selectionStart, box.selectionEnd)).toBe("<owner/repo>")
+    expect(chatPosts()).toEqual([])
+    // Another one replaces the draft; with nothing to fill in, the caret goes to the end.
+    act(() => prompts()[3]!.click())
+    expect(box.value).toBe("Every weekday at 9am, summarize what's waiting on me")
+    expect([box.selectionStart, box.selectionEnd]).toEqual([box.value.length, box.value.length])
+    expect(chatPosts()).toEqual([])
+    expect(tryFirst()).not.toBeNull()
+  })
+
+  it("with a GitHub token, the most recently pushed repos are chips that fill the prompts in", async () => {
+    routes["GET /api/setup/repos"] = () => ({ repos: ["cody/box-yard", "acme/site", "cody/dotfiles"] })
+    render(ZEN_PATH, { status: WITH_GITHUB })
+    await settle()
+    const chips = [...tryFirst()!.querySelectorAll<HTMLButtonElement>("[aria-label='Your recent repos'] button")]
+    expect(chips.map((c) => c.textContent)).toEqual(["cody/box-yard", "acme/site", "cody/dotfiles"])
+    expect(chips.map((c) => c.getAttribute("aria-pressed"))).toEqual(["true", "false", "false"])
+    expect(prompts()[0]!.textContent).toBe("Add my cody/box-yard repo as a project and list its open GitHub issues")
+    expect(tryFirst()!.textContent).not.toContain("Agents need a GitHub token")
+
+    act(() => chips[1]!.click())
+    expect(chips[1]!.getAttribute("aria-pressed")).toBe("true")
+    expect(prompts().slice(0, 3).every((b) => b.textContent!.includes("acme/site"))).toBe(true)
+    act(() => prompts()[1]!.click())
+    const box = textarea()
+    expect(box.value).toBe("Pick the easiest open issue in acme/site and fix it in a PR")
+    expect([box.selectionStart, box.selectionEnd]).toEqual([box.value.length, box.value.length])
+    expect(chatPosts()).toEqual([])
+  })
+
+  it("no repos back (an error or an empty account) falls back to the placeholder", async () => {
+    routes["GET /api/setup/repos"] = () => ({ repos: [] })
+    render(ZEN_PATH, { status: WITH_GITHUB })
+    await settle()
+    expect(calls.some((c) => c.url === "/api/setup/repos")).toBe(true)
+    expect(tryFirst()!.querySelector("[aria-label='Your recent repos']")).toBeNull()
+    expect(prompts()[0]!.textContent).toContain("<owner/repo>")
+  })
+
+  it("a saved name is in the greeting; the built-in default isn't", () => {
+    render(ZEN_PATH, { status: READY, owner: "Sam" })
+    expect(tryFirst()!.querySelector("h2")!.textContent).toBe("You're set, Sam. Just tell the Coordinator what you want.")
+  })
+
+  it("sending the first message hides it for good", async () => {
+    routes["POST /api/chat"] = (body) => ({ id: "msg_1", role: "user", content: (body as { content: string }).content, meta: null, createdAt: now })
+    render(ZEN_PATH, { status: READY })
+    act(() => prompts()[3]!.click())
+    act(() => chat()!.querySelector<HTMLButtonElement>("button[aria-label=Send]")!.click())
+    await settle()
+    expect(chatPosts().map((c) => (c.body as { content: string }).content)).toEqual(["Every weekday at 9am, summarize what's waiting on me"])
+    expect(tryFirst()).toBeNull()
+    // Back to an empty thread later (a new tab, a cleared chat): still gone.
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(ZEN_PATH, { status: READY })
+    expect(tryFirst()).toBeNull()
+  })
+
+  it("Hide these examples dismisses it in this browser", () => {
+    render(ZEN_PATH, { status: READY })
+    act(() => byText("Hide these examples", tryFirst()!)!.click())
+    expect(tryFirst()).toBeNull()
+    expect(chat()!.querySelector("textarea")).not.toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(ZEN_PATH, { status: READY })
+    expect(tryFirst()).toBeNull()
+  })
+
+  it("never shows over an existing thread, or outside Zen", () => {
+    render(ZEN_PATH, { status: READY, chat: [{ id: "msg_0", role: "user", content: "hi", meta: null, createdAt: now }] as ChatMessage[] })
+    expect(tryFirst()).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    render("/", { status: READY })
+    expect(chat()).not.toBeNull()
+    expect(tryFirst()).toBeNull()
+  })
+})
+
+describe("voice read-back on a fresh install", () => {
+  class FakeUtterance {
+    constructor(public text: string) {}
+  }
+  const fakeSynth = { speaking: false, pending: false, paused: false, speak() {}, cancel() {}, pause() {}, resume() {}, getVoices: () => [], addEventListener() {}, removeEventListener() {} }
+  /** lib/speech caches the settings: a storage event for its key makes it read them again. */
+  const reloadVoice = () => window.dispatchEvent(new StorageEvent("storage", { key: "boxyard:voice" }))
+  const speaker = () => chat()!.querySelector<HTMLButtonElement>("button[aria-pressed][aria-label*='voice']")
+
+  beforeEach(() => {
+    vi.stubGlobal("speechSynthesis", fakeSynth)
+    vi.stubGlobal("SpeechSynthesisUtterance", FakeUtterance)
+  })
+
+  it("with no saved voice setting, the Coordinator's speaker starts on", () => {
+    reloadVoice()
+    render(ZEN_PATH)
+    expect(speaker()!.getAttribute("aria-pressed")).toBe("true")
+    expect(speaker()!.getAttribute("aria-label")).toBe("Turn voice off")
+  })
+
+  it("a saved choice to keep it off is respected", () => {
+    localStorage.setItem("boxyard:voice", JSON.stringify({ enabled: false }))
+    reloadVoice()
+    render(ZEN_PATH)
+    expect(speaker()!.getAttribute("aria-pressed")).toBe("false")
+    expect(speaker()!.getAttribute("aria-label")).toBe("Turn voice on")
   })
 })
