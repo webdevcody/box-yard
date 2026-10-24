@@ -2,6 +2,7 @@
 // notifications into one short spoken line, quiet hours, and the voice picker's default. The live
 // side (speech queue, unlock, wiring to the event stream) is in lib/speech.ts.
 import type { AppNotification } from "../../../shared/types"
+import { parseNextSteps } from "../../../shared/nextSteps"
 
 // ------------------------------------------------------------------ settings (localStorage)
 
@@ -117,7 +118,7 @@ export function cleanForSpeech(md: string): string {
   t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // [text](url) → text
   t = t.replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1") // [text][ref]
   t = t.replace(/`[^`\n]*`/g, " ") // inline code
-  t = t.replace(/\b(?:https?:\/\/|www\.)\S+/gi, " ") // bare URLs
+  t = t.replace(/\b(?:https?:\/\/|www\.)\S+?(?=[.,;:!?)]*(?:\s|$))/gi, " ") // bare URLs (trailing punctuation stays)
   t = t.replace(/(?:^|\s)\/(?:tasks|projects|schedules|boxes|artifacts)\/\S*/g, " ") // app paths
   t = t.replace(/\b(?:task|prj|sch|art|ntf|box|run|chat)_[A-Za-z0-9-]{4,}\b/g, " ") // ids
   t = t.replace(/\b[0-9a-f]{7,40}\b/g, (m) => (/[a-f]/.test(m) && /\d/.test(m) ? " " : m)) // commit shas
@@ -147,31 +148,95 @@ export function capWords(text: string, max = MAX_SPOKEN): string {
   return (space > max * 0.5 ? cut.slice(0, space) : text.slice(0, max)).replace(/[,;:\s-]+$/, "")
 }
 
+/** Longest Coordinator summary: a short opener may pull in the sentences after it. */
+export const MAX_SUMMARY = 300
+/** A first sentence shorter than this ("Partly.", "Yes.") is topped up with the next one. */
+export const MIN_SUMMARY_WORDS = 6
+export const MIN_SUMMARY_CHARS = 40
+const MAX_SUMMARY_SENTENCES = 3
+
+/** Words that end in a dot without ending a sentence. */
+const ABBREVIATIONS = new Set(["e.g", "i.e", "vs", "etc", "approx", "incl", "cf", "mr", "mrs", "ms", "dr", "st", "fig", "a.m", "p.m", "u.s"])
+
+/**
+ * Plain text → sentences. A sentence ends at . ! or ? followed by a space and a capital, digit or
+ * quote, or at the end of the text. Abbreviations ("e.g.", "vs."), initials and dots inside numbers
+ * ("v1.2", "$0.003") don't end one. Run it on cleaned text, so code spans and URLs are already gone.
+ */
+export function splitSentences(text: string): string[] {
+  const out: string[] = []
+  let from = 0
+  for (const m of text.matchAll(/[.!?]+["')\]]*(?=\s+["'(\[]?[A-Z0-9]|\s*$)/g)) {
+    const at = m.index! + m[0].length
+    if (m[0].startsWith(".") && !m[0].includes("!") && !m[0].includes("?")) {
+      const word = text.slice(from, m.index!).match(/(\S+)$/)?.[1]?.toLowerCase() ?? ""
+      if (ABBREVIATIONS.has(word.replace(/^[("']+/, "")) || /^[a-z]$/i.test(word)) continue
+    }
+    const sentence = text.slice(from, at).trim()
+    if (sentence) out.push(sentence)
+    from = at
+  }
+  const rest = text.slice(from).trim()
+  if (rest) out.push(rest)
+  return out
+}
+
 /** The first sentence of plain text (or all of it, if it never ends one). */
 export function firstSentence(text: string): string {
-  const m = text.match(/^.+?[.!?](?=\s+["'(\[]?[A-Z0-9]|$)/)
-  return (m ? m[0] : text).trim()
+  return splitSentences(text)[0] ?? text.trim()
+}
+
+const isHeading = (l: string) => /^\s{0,3}#{1,6}\s/.test(l)
+const isTableRule = (l: string) => /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(l)
+const isListItem = (l: string) => /^\s*(?:[-*+]|\d+[.)])\s+/.test(l)
+const hasWords = (t: string) => /[\p{L}\p{N}]/u.test(t)
+const words = (t: string) => t.split(/\s+/).filter(hasWords).length
+
+/** Grow from the first sentence until it's long enough to mean something, within the caps. */
+function summarize(sentences: string[]): string {
+  let line = ""
+  let count = 0
+  for (const s of sentences) {
+    if (count && (words(line) >= MIN_SUMMARY_WORDS && line.length >= MIN_SUMMARY_CHARS)) break
+    // A long follow-up is cut at a word boundary below rather than dropped: "Partly." alone says nothing.
+    if (count >= MAX_SUMMARY_SENTENCES) break
+    line = count ? `${line} ${s}` : s
+    count++
+  }
+  return capWords(line, MAX_SUMMARY)
 }
 
 /**
- * What to say for an orchestrator reply: its first paragraph's first sentence, cleaned for speech and
- * capped. The orchestrator prompt asks for a plain-language opener, so this is a summary of the reply.
- * Null when there's nothing worth saying (empty, or exactly "(no update)").
+ * What to say for a Coordinator reply: its opening sentence, cleaned for speech. A very short opener
+ * ("Partly.", "Yes.") takes the next sentence or two with it, up to MAX_SUMMARY characters, so the
+ * line still says something. Headings, tables and code are skipped; a reply that opens with a list
+ * uses its first prose line, or the first item when it's all list. The hidden next-steps block is
+ * never read. Null when there's nothing worth saying (empty, or exactly "(no update)").
  */
 export function spokenSummary(reply: string): string | null {
-  const raw = reply.trim()
+  const raw = parseNextSteps(reply).content.trim()
   if (!raw || raw === NO_UPDATE) return null
-  // The first line that still has words once markdown, code and links are gone. Headings and table
-  // rules are skipped, and a line break ends a sentence, so a list isn't run together
-  // ("Here's the yard:" is said, not every item after it).
-  for (const src of raw.replace(/```[\s\S]*?(```|$)/g, "\n").split("\n")) {
-    if (/^\s{0,3}#{1,6}\s/.test(src) || /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(src)) continue
-    const text = cleanForSpeech(src)
-    if (!/[\p{L}\p{N}]/u.test(text)) continue
-    const line = capWords(firstSentence(text))
-    return line === NO_UPDATE ? null : line
+  const lines = raw.replace(/```[\s\S]*?(```|$)/g, "\n").split("\n")
+  const speakable = (l: string) => !isHeading(l) && !isTableRule(l) && hasWords(cleanForSpeech(l))
+  // The first prose line; for a list-first reply, the first prose line after it, else the first item.
+  let at = lines.findIndex((l) => speakable(l) && !isListItem(l))
+  const firstItem = lines.findIndex(speakable)
+  if (at < 0) at = firstItem
+  if (at < 0) return null
+  const sentences: string[] = []
+  for (let i = at; i < lines.length; i++) {
+    const l = lines[i]!
+    if (i > at && (isListItem(l) || isHeading(l) || isTableRule(l) || isListItem(lines[at]!))) break
+    if (!l.trim()) continue
+    const text = cleanForSpeech(l)
+    if (!hasWords(text)) continue
+    // A line break ends a sentence, so lines never run together.
+    sentences.push(...splitSentences(text))
+    // "Here's the yard:" introduces what follows; don't read on into it.
+    if (/:\s*$/.test(l)) break
   }
-  return null
+  const line = summarize(sentences)
+  return line === NO_UPDATE || !line ? null : line
 }
 
 // ------------------------------------------------------------------ task notifications → one line

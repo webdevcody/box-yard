@@ -288,7 +288,8 @@ describe("box cleanup", () => {
     ballast(path.join(r.yard.tasks.taskDir(box, done.id), "work", "node_modules", "dep"), 200 * MB)
     ballast(path.join(r.yard.tasks.taskDir(box, "task_gone"), "work"), 100 * MB)
 
-    const free = 50 * MB
+    // Low, but not so low that the emergency steps go first (that's below).
+    const free = 150 * MB
     r.provider.fill(box, free)
     // Enough once the leftover folder and the done task's dependencies are gone.
     const first = await r.yard.tasks.janitor.run(box, { reason: "low-disk", target: free + 250 * MB, parkBelow: free + 250 * MB })

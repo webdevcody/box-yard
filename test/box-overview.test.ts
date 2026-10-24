@@ -67,6 +67,7 @@ describe("box attention", () => {
 
   it("flags a lost box, a failed cleanup and too many agents", () => {
     expect(boxAttention(box("a", { status: "lost" })).map((r) => r.key)).toEqual(["lost"])
+    expect(boxAttention(box("a", { status: "deleting" })).map((r) => [r.key, r.short])).toEqual([["deleting", "Delete didn't go through yet"]])
     expect(boxAttention(box("a", { cleanup: cleanup({ status: "failed", error: "ssh timeout" }) }))[0]!.detail).toBe("Cleanup failed: ssh timeout")
     expect(boxAttention(box("a", { runningTurns: 3 })).map((r) => r.key)).toEqual(["over"])
   })
