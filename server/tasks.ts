@@ -2148,7 +2148,8 @@ export class TaskManager {
 
   /**
    * Rebuild work/ from git after unpacking an archive (server/gitFirst.ts gitRestoreScript): from git.manifest
-   * (git-first and thin archives), or the working tree of a partial archive. Throws when that fails.
+   * (a git-first archive), or the working tree of a partial archive. A thin archive's git-thin/ is restored before
+   * this, by restoreThinGit. Throws when that fails.
    */
   private async restoreGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null) {
     const refs = [`refs/heads/${project.baseBranch}`, ...(row.branch ? [`refs/heads/${row.branch}`] : [])]

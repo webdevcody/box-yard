@@ -272,8 +272,8 @@ export interface GitRestoreOptions {
 }
 
 /**
- * After the archive is unpacked into the task folder: rebuild work/ from git.manifest (git-first and thin
- * archives), or check out the working tree of a partial archive (only .git was saved). A whole archive is left
+ * After the archive is unpacked into the task folder: rebuild work/ from git.manifest (a git-first archive),
+ * or check out the working tree of a partial archive (only .git was saved). A whole archive is left
  * alone. Prints `RESTORE_MARK git|partial|none|failed <b64 reason>`; on failure the caller removes the task folder.
  */
 export function gitRestoreScript(o: GitRestoreOptions): string {
