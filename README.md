@@ -117,7 +117,7 @@ A project whose box has all its slots busy gets a second box while there's room.
 
 **Local runner.** A project can run its agents on the computer running Box Yard instead of on boxes: project Settings › Runs on › This computer. Use it for work a box can't do, such as a real GPU, a local browser, or long benchmarks.
 - **No sandbox.** Local agents run unsandboxed, as the user running Box Yard, with that user's files, network, logged-in `claude` and `gh`, and keychain. The setting and every local task's header say so.
-- **Where they run.** Each task works in `<BOXYARD_DATA_DIR>/local-workspaces/<task_id>`. A turn is Box Yard's runner as a child process of the server, so it survives a server restart.
+- **Where they run.** Each task works in `~/boxyard-workspaces/<task_id>` (`BOXYARD_LOCAL_DIR` moves it; a leading `~` is the home folder). Keep it out of Box Yard's checkout and any other folder with a `CLAUDE.md`: Claude Code reads every `CLAUDE.md` above the folder it runs in, so Box Yard's own agent rules would reach every local agent. A turn is Box Yard's runner as a child process of the server, so it survives a server restart.
 - **Limits.** `BOXYARD_LOCAL_AGENTS` (Settings › Boxes & limits › Local agents, default 2) caps how many run at once. They have their own queue and never take a box slot or count toward `BOX_MAX_AGENTS`.
 - **Previews.** Previews are on `http://localhost:<port>`.
 - **Sleep.** While a turn runs, `caffeinate` keeps a Mac out of idle sleep (and out of system sleep on AC power), but a closed lid still sleeps. A turn that sleep cut off carries on once the Mac wakes instead of failing.
