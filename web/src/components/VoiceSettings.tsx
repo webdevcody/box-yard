@@ -7,7 +7,7 @@ import { dictationSupported, isMac, setDictationSettings, useDictationSettings }
 import { Panel, Row } from "./SettingsDialog"
 import { TtsSection } from "./TtsSettings"
 import { useTtsSettings } from "../lib/queries"
-import { activeProvider } from "../lib/tts"
+import { activeProvider, useLastFallback } from "../lib/tts"
 import { TTS_PROVIDER_LABEL } from "../../../shared/tts"
 import { Button, Select, cx, inputClass } from "./ui"
 
@@ -63,6 +63,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
   const voices = useVoices()
   const tts = useTtsSettings().data ?? null
   const cloud = activeProvider(tts)
+  const fallback = useLastFallback()
   const supported = voiceSupported()
   const set = (patch: Partial<VoiceSettings>) => setVoiceSettings(patch)
   const off = !supported || !s.enabled
@@ -186,6 +187,11 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
         <Button type="button" variant="subtle" disabled={!supported} onClick={() => speakNow(TEST_LINE)}>
           <Volume2 className="h-4 w-4" /> Test voice
         </Button>
+        {fallback && cloud === fallback.provider && (
+          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-fallback>
+            {TTS_PROVIDER_LABEL[fallback.provider]} failed, so the browser voice spoke instead: {fallback.message}
+          </p>
+        )}
       </Row>
       <p className="mt-2 text-xs text-zinc-500">
         The provider, its voice and keys are saved on the server for every browser; everything else is saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+

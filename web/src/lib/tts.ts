@@ -154,9 +154,24 @@ export function primeAudio() {
 // ------------------------------------------------------------------ fallback toast
 
 const shown = new Set<string>()
+const fallbackListeners = new Set<Listener>()
+let lastFallback: { provider: CloudProvider; message: string; at: number } | null = null
+
+/** The latest fallback, for Settings › Voice (toasts sit under the settings dialog). */
+export const useLastFallback = () =>
+  useSyncExternalStore(
+    (l) => {
+      fallbackListeners.add(l)
+      return () => fallbackListeners.delete(l)
+    },
+    () => lastFallback,
+    () => lastFallback,
+  )
 
 /** Tell Cody once per error (per page load) that the cloud voice failed and the browser voice took over. */
 export function reportFallback(provider: CloudProvider, message: string) {
+  lastFallback = { provider, message, at: Date.now() }
+  fallbackListeners.forEach((l) => l())
   const key = `${provider}:${message}`
   if (shown.has(key)) return
   shown.add(key)
@@ -174,7 +189,10 @@ export function reportFallback(provider: CloudProvider, message: string) {
 }
 
 /** Tests only. */
-export const resetFallbackToasts = () => shown.clear()
+export const resetFallbackToasts = () => {
+  shown.clear()
+  lastFallback = null
+}
 
 // ------------------------------------------------------------------ CloudSynth
 
