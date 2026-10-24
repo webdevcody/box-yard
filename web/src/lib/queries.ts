@@ -185,6 +185,52 @@ export function useQueuedMessageActions(taskId: string) {
   return { edit, remove, restore }
 }
 
+/**
+ * Edit or delete a message queued mid-turn in the Coordinator chat (`projectId` null) or a Captain's thread.
+ * Optimistic; the live stream brings the server's copy. Delete shows an Undo toast. The server refuses once the
+ * turn that reads it has started ("already delivered"), and the change rolls back.
+ */
+export function useQueuedChatActions(projectId: string | null) {
+  const qc = useQueryClient()
+  const key = projectId ? keys.captainMessages(projectId) : keys.chat
+  const base = projectId ? `/api/projects/${projectId}/captain/messages` : "/api/chat/messages"
+  type Msg = ChatMessage | CaptainMessage
+  const patch = (id: string, fn: (m: Msg) => Msg) => {
+    void qc.cancelQueries({ queryKey: key })
+    const undo = snapshot<Msg[]>(qc, key)
+    qc.setQueryData<Msg[]>(key, (list) => list?.map((m) => (m.id === id ? fn(m) : m)))
+    return { undo }
+  }
+  const rollback = (title: string) => (err: Error, _v: unknown, ctx?: { undo: () => void }) => {
+    ctx?.undo()
+    void qc.invalidateQueries({ queryKey: key })
+    fail(title)(err)
+  }
+  const restore = useMutation({
+    mutationFn: (id: string) => api<Msg>(`${base}/${id}/restore`, { method: "POST" }),
+    onMutate: (id) => patch(id, (m) => ({ ...m, meta: { ...withoutKey(m.meta, "cancelled"), queued: true } })),
+    onError: rollback("Couldn't undo"),
+  })
+  const edit = useMutation({
+    mutationFn: (m: { id: string; text: string }) => api<Msg>(`${base}/${m.id}`, { method: "PATCH", body: { text: m.text } }),
+    onMutate: (m) => patch(m.id, (x) => ({ ...x, content: m.text.trim() })),
+    onError: rollback("Couldn't save the edit"),
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api<Msg>(`${base}/${id}`, { method: "DELETE" }),
+    onMutate: (id) => patch(id, (m) => ({ ...m, meta: { ...withoutKey(m.meta, "queued"), cancelled: true } })),
+    onError: rollback("Couldn't delete the message"),
+    onSuccess: (_m, id) =>
+      toast.info("Queued message deleted", undefined, { action: { label: "Undo", onClick: () => restore.mutate(id) }, duration: UNDO_MS }),
+  })
+  return { edit, remove, restore }
+}
+
+function withoutKey(meta: Record<string, unknown> | null, key: string): Record<string, unknown> {
+  const { [key]: _, ...rest } = meta ?? {}
+  return rest
+}
+
 export const useTaskMessages = (id: string) =>
   useQuery({ queryKey: keys.taskMessages(id), queryFn: () => api<TaskMessage[]>(`/api/tasks/${id}/messages`) })
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })

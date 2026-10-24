@@ -1,10 +1,14 @@
-// The task page's Queued rows: messages waiting for the agent's next turn, below the live transcript, in send
-// order. Each can be edited in place or deleted (with Undo) until a turn takes it; the server refuses changes
-// after that ("already delivered"), so an edit or delete never races the delivery.
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
+// Queued messages: sent while an agent, the Coordinator or a Captain is mid-turn, waiting for its next turn.
+// The task page lists them as Queued rows below the live transcript, in send order; the Coordinator chat and
+// the Captain tab show them as their usual bubbles under the live turn (QueuedChatMessage). Each can be edited
+// in place or deleted (with Undo) until a turn takes it; the server refuses changes after that ("already
+// delivered"), so an edit or delete never races the delivery.
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
+import { useQueryClient } from "@tanstack/react-query"
 import { Clock, Loader2, Pencil, Trash2 } from "lucide-react"
-import type { QueuedMessage } from "../../../shared/types"
-import { useOwnerName, useQueuedMessageActions, useTaskQueue } from "../lib/queries"
+import type { CaptainMessage, ChatMessage, QueuedMessage } from "../../../shared/types"
+import { keys, useOwnerName, useQueuedChatActions, useQueuedMessageActions, useTaskQueue } from "../lib/queries"
+import { isQueued } from "../lib/queued"
 import { UNDO_MS } from "../lib/inbox"
 import { navigate } from "wouter/use-browser-location"
 import { QUEUE_HASH, REVEAL_QUEUE_EVENT, revealTaskQueue } from "../lib/reveal"
@@ -137,7 +141,7 @@ const QueuedRow = memo(function QueuedRow({
         )}
       </div>
       {editing ? (
-        <QueuedEditor m={m} locked={delivering} onSave={onSave} onCancel={() => onEdit(null)} />
+        <QueuedEditor initial={m.text} canBeEmpty={m.attachments.length > 0} locked={delivering} onSave={(text) => onSave(m, text)} onCancel={() => onEdit(null)} />
       ) : (
         m.text && <div className="mt-0.5 line-clamp-6 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-300">{m.text}</div>
       )}
@@ -146,9 +150,26 @@ const QueuedRow = memo(function QueuedRow({
   )
 })
 
-/** `locked`: a turn is taking the message right now, so the edit can't be saved any more. */
-function QueuedEditor({ m, locked, onSave, onCancel }: { m: QueuedMessage; locked: boolean; onSave: (m: QueuedMessage, text: string) => void; onCancel: () => void }) {
-  const [text, setText] = useState(m.text)
+/**
+ * Edit a queued message in place. `locked`: a turn is taking it right now, so the edit can't be saved any more.
+ * `canBeEmpty`: it has attachments, so the text may go.
+ */
+function QueuedEditor({
+  initial,
+  canBeEmpty = false,
+  locked = false,
+  onSave,
+  onCancel,
+  className = "mt-1",
+}: {
+  initial: string
+  canBeEmpty?: boolean
+  locked?: boolean
+  onSave: (text: string) => void
+  onCancel: () => void
+  className?: string
+}) {
+  const [text, setText] = useState(initial)
   const area = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
     const el = area.current
@@ -163,7 +184,7 @@ function QueuedEditor({ m, locked, onSave, onCancel }: { m: QueuedMessage; locke
     el.style.height = "auto"
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`
   }, [text])
-  const empty = !text.trim() && !m.attachments.length
+  const empty = !text.trim() && !canBeEmpty
   const canSave = !empty && !locked
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Escape") {
@@ -171,15 +192,15 @@ function QueuedEditor({ m, locked, onSave, onCancel }: { m: QueuedMessage; locke
       onCancel()
     } else if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canSave) {
       e.preventDefault()
-      onSave(m, text)
+      onSave(text)
     }
   }
   return (
     <form
-      className="mt-1"
+      className={className}
       onSubmit={(e) => {
         e.preventDefault()
-        if (canSave) onSave(m, text)
+        if (canSave) onSave(text)
       }}
     >
       <textarea
@@ -243,5 +264,69 @@ export function QueuedLink({ taskId, count, className }: { taskId: string; count
     >
       {count} queued
     </button>
+  )
+}
+
+/** Under a message sent mid-turn: it reaches `who` when the current turn ends. */
+export function QueuedLabel({ who, className }: { who: string; className?: string }) {
+  return (
+    <div data-testid="queued-label" title={`Sent while ${who} was busy. It goes in with the next turn.`} className={cx("flex items-center gap-1 text-[11px] text-zinc-500", className)}>
+      <Clock className="h-3 w-3" /> Queued · delivered when this turn ends
+    </div>
+  )
+}
+
+/**
+ * A Coordinator or Captain message queued mid-turn (`projectId` null: the Coordinator chat): its bubble
+ * (`children`), then the Queued label with Edit and Delete. Edit swaps the bubble for an editor in place. The
+ * parent lays them out (a flex column, aligned like the bubble).
+ */
+export function QueuedChatMessage({ m, projectId, who, children }: { m: ChatMessage | CaptainMessage; projectId: string | null; who: string; children: ReactNode }) {
+  const [editing, setEditing] = useState(false)
+  const { edit, remove } = useQueuedChatActions(projectId)
+  const qc = useQueryClient()
+  // The turn took it while it was being edited: this line moves into the thread (unmounting here), so say so.
+  const editingNow = useRef(false)
+  editingNow.current = editing
+  useEffect(
+    () => () => {
+      if (!editingNow.current) return
+      const now = qc.getQueryData<(ChatMessage | CaptainMessage)[]>(projectId ? keys.captainMessages(projectId) : keys.chat)?.find((x) => x.id === m.id)
+      if (now && !isQueued(now) && now.meta?.cancelled !== true) toast.error("Already delivered", `${who[0]!.toUpperCase()}${who.slice(1)} got the message as it was, so your edit wasn't saved.`)
+    },
+    [qc, projectId, m.id, who],
+  )
+  const settled = !m.meta?.pending
+  const files = m.meta?.attachments as unknown[] | undefined
+  return (
+    <>
+      {editing ? (
+        <QueuedEditor
+          initial={m.content}
+          canBeEmpty={Boolean(files?.length)}
+          className="w-full max-w-[85%]"
+          onCancel={() => setEditing(false)}
+          onSave={(text) => {
+            setEditing(false)
+            if (text.trim() !== m.content) edit.mutate({ id: m.id, text })
+          }}
+        />
+      ) : (
+        children
+      )}
+      <div className="flex min-h-6 items-center gap-1">
+        <QueuedLabel who={who} />
+        {settled && !editing && (
+          <span className="-my-2.5 flex shrink-0 sm:-my-0.5">
+            <button type="button" className={ICON_BUTTON} title="Edit" aria-label="Edit queued message" onClick={() => setEditing(true)}>
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" className={cx(ICON_BUTTON, "hover:text-red-300")} title="Delete" aria-label="Delete queued message" onClick={() => remove.mutate(m.id)}>
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        )}
+      </div>
+    </>
   )
 }
