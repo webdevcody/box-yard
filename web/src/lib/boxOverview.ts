@@ -17,7 +17,7 @@ export interface AttentionReason {
 }
 
 type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "rootFreeBytes" | "rootTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots"> &
-  Partial<Pick<BoxInfo, "memUsedBytes" | "memTotalBytes" | "loadAvg" | "cpuCount" | "memoryPressure">>
+  Partial<Pick<BoxInfo, "memUsedBytes" | "memTotalBytes" | "loadAvg" | "cpuCount" | "memoryPressure" | "limitLoweredFrom">>
 
 /** Why a box needs Cody's eye, worst first; empty when it's fine. */
 export function boxAttention(box: AttentionBox): AttentionReason[] {
@@ -59,8 +59,10 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
       detail: `Busy: ${mem.busy}. New agents go to other boxes (or wait) until it calms down; running agents keep going.`,
     })
   if (box.cleanup?.status === "failed") out.push({ key: "cleanup", level: "warn", short: "Last cleanup failed", detail: cleanupLine(box.cleanup) })
-  if (box.runningTurns > box.slots)
-    out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} agents: over its limit`, detail: `${box.runningTurns} agents are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
+  if (box.runningTurns > box.slots) {
+    const lowered = box.limitLoweredFrom ? `The limit was lowered from ${box.limitLoweredFrom} to ${box.slots} while ${box.runningTurns} agents were running. ` : ""
+    out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} agents: over its limit`, detail: `${lowered}${box.runningTurns} agents are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
+  }
   return out
 }
 
