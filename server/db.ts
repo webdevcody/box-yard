@@ -588,6 +588,10 @@ export const MIGRATIONS: string[] = [
     WHERE p.created_at < projects.created_at OR (p.created_at = projects.created_at AND p.rowid < projects.rowid)
   );
   `,
+  `
+  -- Size-aware placement: the box size a queued task waits for (its project's box size), shown with wait_reason.
+  ALTER TABLE tasks ADD COLUMN wait_box_size TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

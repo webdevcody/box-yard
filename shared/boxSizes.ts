@@ -89,7 +89,12 @@ export function scaleDownFit(input: { usedBytes: number | null; to: Size; headro
 /** Resize in place (the provider changes the box's size) or by moving everything to a new box. */
 export type ResizeMode = "in-place" | "migration"
 
-export type ResizeInitiator = { kind: "cody" } | { kind: "coordinator" } | { kind: "captain"; projectId: string }
+export type ResizeInitiator =
+  | { kind: "cody" }
+  | { kind: "coordinator" }
+  | { kind: "captain"; projectId: string }
+  /** Placement grew an idle box for a task whose project needs a bigger box (the pool was full). */
+  | { kind: "placement"; projectId: string; taskId: string }
 
 export interface ResizeStep {
   key: "stop" | "resize" | "create" | "archive" | "move" | "delete"
@@ -159,5 +164,11 @@ export function resizeSummary(r: BoxResize): string {
 }
 
 export function initiatorLabel(by: ResizeInitiator, projectName?: string): string {
-  return by.kind === "cody" ? "Cody" : by.kind === "coordinator" ? "The Coordinator" : `The ${projectName ?? by.projectId} Captain`
+  return by.kind === "cody"
+    ? "Cody"
+    : by.kind === "coordinator"
+    ? "The Coordinator"
+    : by.kind === "placement"
+    ? "Box Yard"
+    : `The ${projectName ?? by.projectId} Captain`
 }

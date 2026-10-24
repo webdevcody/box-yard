@@ -125,6 +125,8 @@ export interface Task {
   error: string | null
   /** Why a queued task is held back beyond a free slot, e.g. "Waiting for disk cleanup on box-1". */
   waitReason: string | null
+  /** Set when that wait is for a box of at least this size (the project's box size): no such box has room yet. */
+  waitBoxSize: BoxSize | null
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
