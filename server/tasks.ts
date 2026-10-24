@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
-import type { Store, TaskRow, TurnFlags } from "./store.js"
+import type { BoxRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
 import { q } from "./providers/types.js"
@@ -22,10 +22,11 @@ import {
   recapPrompt,
   recapWorkspaceNote,
   workerSystemPrompt,
+  type BoxPromptInfo,
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type PushState, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
@@ -39,6 +40,7 @@ import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
+import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/memory.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
@@ -180,6 +182,10 @@ const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
 /** The running or last resize of a box (old and new box both point at it). */
 const resizeKey = (boxId: string) => `box_resize:${boxId}`
+/** A box row's last memory and load reading, or null before the first. */
+const boxMemory = (b: BoxRow): BoxMemory | null =>
+  b.mem_used_bytes != null && b.mem_total_bytes != null ? { usedBytes: b.mem_used_bytes, totalBytes: b.mem_total_bytes, load1: b.load_avg ?? 0, cpus: b.cpu_count ?? 1 } : null
+
 /** The work disk's df total a box of this size last reported, for the scale-down check. */
 const diskTotalKey = (size: BoxSize) => `disk_total:${size}`
 /** kv key for a repo's last measured clone size in bytes (by mirror name). */
@@ -774,6 +780,7 @@ export class TaskManager {
     this.meterBoxes()
     const rates = this.settings.get().costRates
     const floor = this.diskNeed(null)
+    const memoryPolicy = this.memoryPolicy()
     const now = Date.now()
     // Boxes still being deleted show too: they exist (and bill) until the provider confirms.
     return [...this.store.listBoxes(), ...this.store.listDeletingBoxes()].map((b) => {
@@ -798,6 +805,11 @@ export class TaskManager {
         diskCheckedAt: b.disk_checked_at ?? null,
         rootFreeBytes: b.root_free_bytes ?? null,
         rootTotalBytes: b.root_total_bytes ?? null,
+        memUsedBytes: b.mem_used_bytes ?? null,
+        memTotalBytes: b.mem_total_bytes ?? null,
+        loadAvg: b.load_avg ?? null,
+        cpuCount: b.cpu_count ?? null,
+        memoryPressure: memoryPressure(boxMemory(b), memoryPolicy),
         diskLow: this.lowBoxes.has(b.id) || (b.disk_free_bytes !== null && b.disk_free_bytes !== undefined && b.disk_free_bytes < floor),
         cleanup: this.janitor.current(b.id),
         operation: this.boxOperation(b.id),
@@ -1438,9 +1450,14 @@ export class TaskManager {
       if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
     }
     for (const [projectId, n] of perProject) {
-      const need = Math.ceil(n / this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
+      const need = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
       for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
+  }
+
+  /** Agents of a project one new box takes: its slots, or one when the project runs heavy tasks. */
+  private growthSlots(projectId: string): number {
+    return this.store.projectHeavyTasks(projectId) === "off" ? this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox : 1
   }
 
   /** Pick a box for a task's next turn, or null to wait. */
@@ -1461,10 +1478,16 @@ export class TaskManager {
           this.setWaitReason(row.id, `Waiting for disk cleanup on ${box.id}`)
           return null
         }
-        if (this.runningOn(box.id) < this.slotsFor(box.id)) return box.id
+        // Busy: no free slot, or a free one its project's heavy-tasks setting or the box's memory rules out.
+        const full = this.runningOn(box.id) >= this.slotsFor(box.id)
+        const busy = full ? null : (this.heavyBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
+        if (!full && !busy) return box.id
         // Its box is busy. Move to a free box if the archive is fresh enough.
-        if (!this.hasFreshArchive(row)) return null
-        const other = await this.pickBox(row.id, box.id)
+        if (!this.hasFreshArchive(row)) {
+          if (busy) this.setWaitReason(row.id, `Waiting: ${busy}`)
+          return null
+        }
+        const other = await this.pickBox(row.id, box.id, busy)
         if (!other) return null
         const oldBox = box.id
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
@@ -1491,7 +1514,7 @@ export class TaskManager {
    * (or new one) can take it.
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
-  private async pickBox(taskId: string, exclude?: string): Promise<string | null> {
+  private async pickBox(taskId: string, exclude?: string, busyHere: string | null = null): Promise<string | null> {
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -1512,14 +1535,21 @@ export class TaskManager {
       .filter((b) => b.running < b.slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     const low: { boxId: string; state: "running" | "exhausted" }[] = []
+    // Boxes with a free slot that heavy tasks or memory rule out, why (the first one is the wait reason).
+    const busy: string[] = busyHere ? [busyHere] : []
     for (const b of candidates) {
       if (b.rank === 2 && this.poolHasRoom()) {
         // Rather than crowd another project's box, make one for this project.
         this.wantsBox.add(taskId)
-        this.holdForDisk(taskId, low)
+        this.holdForDisk(taskId, low, busy[0])
         return null
       }
       if (b.residents >= b.maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
+      const why = row ? (this.heavyBlock(row, b.id) ?? (await this.memoryBlock(b.id, taskId))) : null
+      if (why) {
+        busy.push(why)
+        continue
+      }
       const room = row ? await this.diskRoom(b.id, row) : "ok"
       if (room !== "ok") {
         low.push({ boxId: b.id, state: room })
@@ -1541,7 +1571,7 @@ export class TaskManager {
         return cleaned.boxId
       }
     }
-    this.holdForDisk(taskId, low)
+    this.holdForDisk(taskId, low, busy[0])
     return null
   }
 
@@ -1568,10 +1598,11 @@ export class TaskManager {
     return this.janitor.ensure(boxId, need + pending)
   }
 
-  /** Say on a queued task why it's waiting when that's about disk space, or clear it. */
-  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[]) {
+  /** Say on a queued task why it's waiting when that's about disk space (or else `busy`: heavy tasks, memory), or clear it. */
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: string | null) {
     const first = low[0]
     let reason: string | null = null
+    if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy}` : `Waiting: ${busy}`
     if (first) {
       if (this.wantsBox.has(taskId)) reason = `Waiting for a new box: ${first.boxId} is low on disk`
       else if (first.state === "running" || low.some((l) => this.janitor.isRunning(l.boxId))) {
@@ -1589,6 +1620,47 @@ export class TaskManager {
     this.emitTask(taskId)
   }
 
+  /** The box facts a worker's system prompt states (stable from turn to turn, so the prompt cache holds). */
+  private boxPromptInfo(boxId: string, project: Project): BoxPromptInfo {
+    return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots: this.slotsFor(boxId), heavyTasks: project.heavyTasks }
+  }
+
+  /** Settings → Boxes & limits → Memory and load: when placement skips a box. */
+  private memoryPolicy(): MemoryPolicy {
+    const s = this.settings.get()
+    return { maxUsedPercent: s.memoryMaxUsedPercent, minFreeMb: s.memoryMinFreeMb, maxLoadPerCpu: s.loadMaxPerCpu }
+  }
+
+  /**
+   * Why a box is too loaded for another agent right now ("box … is busy: 3.4 GB of 4 GB memory in use (85%), over
+   * 80%"), or null. It reads the df probe's memory and load, so it costs nothing extra. It only counts while other
+   * agents run there: memory that no turn holds won't free up by waiting, and an idle box should still take work.
+   */
+  private async memoryBlock(boxId: string, taskId: string): Promise<string | null> {
+    const policy = this.memoryPolicy()
+    if (!policy.maxUsedPercent && !policy.minFreeMb && !policy.maxLoadPerCpu) return null
+    if (!this.store.listTaskRows({ boxId }).some((r) => r.current_turn_id && r.id !== taskId)) return null
+    const space = await this.probeDisk(boxId, DISK_CACHE_MS)
+    const why = memoryPressure(space?.memory, policy)
+    return why ? `box ${boxId} is busy: ${why}` : null
+  }
+
+  /**
+   * Why the projects' "heavy tasks" settings keep this task off a box right now, or null. "one-per-box": no second
+   * running agent of its project there. "whole-box": no other running agent at all, and nothing joins a box where
+   * one of those runs.
+   */
+  private heavyBlock(row: TaskRow, boxId: string): string | null {
+    const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id && r.id !== row.id)
+    if (!running.length) return null
+    const name = (projectId: string) => this.store.getProjectName(projectId) ?? projectId
+    const mine = this.store.projectHeavyTasks(row.project_id)
+    if (mine === "whole-box") return `${name(row.project_id)} runs heavy tasks on a whole box, and box ${boxId} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
+    if (mine === "one-per-box" && running.some((r) => r.project_id === row.project_id)) return `${name(row.project_id)} runs heavy tasks one per box, and another of its agents runs on box ${boxId}`
+    const hog = running.find((r) => this.store.projectHeavyTasks(r.project_id) === "whole-box")
+    return hog ? `box ${boxId} is running a heavy ${name(hog.project_id)} task alone` : null
+  }
+
   /** df on a box's work disk, cached for `maxAgeMs`. Saves the numbers on the box row for the Boxes page. */
   async probeDisk(boxId: string, maxAgeMs = DISK_CACHE_MS): Promise<DiskSpace | null> {
     const hit = this.diskCache.get(boxId)
@@ -1603,13 +1675,23 @@ export class TaskManager {
       const size = normalizeBoxSize(before?.size)
       if (space.totalBytes > 0 && this.store.getKv(diskTotalKey(size)) !== String(space.totalBytes)) this.store.setKv(diskTotalKey(size), String(space.totalBytes))
       const root = space.root ?? null
-      this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now, rootFreeBytes: root?.freeBytes ?? null, rootTotalBytes: root?.totalBytes ?? null })
+      const mem = space.memory
+      this.store.meterBox(boxId, {
+        diskFreeBytes: space.freeBytes,
+        diskTotalBytes: space.totalBytes,
+        diskCheckedAt: now,
+        rootFreeBytes: root?.freeBytes ?? null,
+        rootTotalBytes: root?.totalBytes ?? null,
+        // A probe without the memory part (an old or fake df) keeps the last reading.
+        ...(mem ? { memUsedBytes: mem.usedBytes, memTotalBytes: mem.totalBytes, loadAvg: mem.load1, cpuCount: mem.cpus } : {}),
+      })
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
       const changed =
         Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 ||
         before?.disk_total_bytes !== space.totalBytes ||
-        Math.abs((before?.root_free_bytes ?? 0) - (root?.freeBytes ?? 0)) > 16 * 1024 * 1024
+        Math.abs((before?.root_free_bytes ?? 0) - (root?.freeBytes ?? 0)) > 16 * 1024 * 1024 ||
+        (mem && (Math.abs((before?.mem_used_bytes ?? 0) - mem.usedBytes) > 64 * 1024 * 1024 || Math.abs((before?.load_avg ?? 0) - mem.load1) >= 0.5))
       if (changed || now - (before?.disk_checked_at ?? 0) > 60_000) this.emitBoxes()
     }
     return space
@@ -1956,7 +2038,7 @@ export class TaskManager {
           resume: !firstTurn && !recapped,
           compact,
           ...agent,
-          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName, pushAtTurnEnd: this.pushAtTurnEnd(project) }),
+          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName, pushAtTurnEnd: this.pushAtTurnEnd(project), box: this.boxPromptInfo(boxId, project) }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
           recap: recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60)),
