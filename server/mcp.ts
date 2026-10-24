@@ -22,6 +22,7 @@ import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
+import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 
 export interface McpDeps {
   store: Store
@@ -1383,10 +1384,51 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         inputSchema: { box: z.string().describe("Box id, from pool_status") },
       },
       safe(async (a: { box: string }) => {
-        const report = await tasks.cleanBox(a.box)
+        const report = await tasks.cleanBox(a.box, { kind: "coordinator" })
         return ok({ started: true, box: report.boxId, next: "Call pool_status in a minute to see what it freed." })
       }),
     ),
+  )
+
+  server.registerTool(
+    "box_history",
+    {
+      description:
+        "The box history log, newest first: every box created, resized (from → to, with the migration target), deleted, lost (the provider reports it gone), cleaned up or cleared (with freed bytes), size changes and orphan sweeps, " +
+        "with who did it (Cody, the Coordinator or a Captain with their reason, the resize migration, the failed-resize cleanup, the janitor, the orphan sweep, the provider) and the projects and tasks on the box. " +
+        "Deleted boxes stay in it (90 days). Use it to answer \"where did my box go\"." +
+        (scopeId ? " As a Captain you see only events about your project's boxes." : ""),
+      inputSchema: {
+        box: z.string().optional().describe("Box id; includes the other box of its resizes"),
+        type: z.enum(BOX_EVENT_TYPES.map((t) => t.key) as [BoxEventType, ...BoxEventType[]]).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
+      },
+    },
+    safe(async (a: { box?: string; type?: BoxEventType; limit?: number }) => {
+      const filter = { boxId: a.box?.trim() || undefined, type: a.type, limit: a.limit ?? 20 }
+      const events = tasks.history.list({ ...filter, projectId: scopeId ?? undefined })
+      if (scopeId && filter.boxId && !events.length && tasks.history.list({ ...filter, limit: 1 }).length) {
+        throw outOfScope(`box ${filter.boxId} never hosted project "${ownProject().name}"`)
+      }
+      const projectName = (id: string) => store.getProject(id)?.name
+      return ok(
+        events.map((e) => ({
+          at: new Date(e.at).toISOString(),
+          ago: ago(e.at),
+          box: e.boxId,
+          ...(e.boxName && e.boxName !== e.boxId ? { name: e.boxName } : {}),
+          event: e.type,
+          by: owner(boxActorLabel(e, projectName)),
+          reason: e.reason ?? undefined,
+          size: e.fromSize && e.toSize ? `${e.fromSize} → ${e.toSize}` : (e.size ?? undefined),
+          other_box: e.relatedBoxId ?? undefined,
+          projects: e.projects.length ? e.projects.map((p) => projectName(p.id) ?? p.name) : undefined,
+          tasks: e.taskIds.length ? e.taskIds : undefined,
+          freed_mb: e.freedBytes !== null ? mb(e.freedBytes) : undefined,
+          detail: e.detail ?? undefined,
+        })),
+      )
+    }),
   )
 
   server.registerTool(
