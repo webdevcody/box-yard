@@ -5,6 +5,7 @@
 //   node box-runner.mjs turn  <taskDir>  run one headless Claude turn for a task
 //   node box-runner.mjs mcp   <taskDir>  stdio MCP server Claude uses to talk back
 //   node box-runner.mjs clean <taskDir>  delete regenerable dirs from a resting work/
+//   node box-runner.mjs deps  <taskDir> restore|save   the dependency cache step of a turn, on its own
 //
 // Every event goes into <taskDir>/events.jsonl, and also into an Upstash Redis
 // stream when task.json has Redis credentials. Each event has a `seq` number so
@@ -21,18 +22,18 @@
 import { spawn, execFile } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 
 const RUNNER_VERSION = "1"
 const [, , mode, taskDirArg] = process.argv
 
 if (!mode || !taskDirArg) {
-  console.error("usage: box-runner.mjs <turn|mcp|clean> <taskDir>")
+  console.error("usage: box-runner.mjs <turn|mcp|clean|deps> <taskDir>")
   process.exit(2)
 }
 
 const taskDir = path.resolve(taskDirArg)
-const task = mode === "clean" ? {} : readJson(path.join(taskDir, "task.json"))
+const task = mode === "clean" || mode === "deps" ? {} : readJson(path.join(taskDir, "task.json"))
 
 /** Box Yard's built-in text says "Cody"; swap in the configured owner name (same rule as shared/owner.ts). */
 function owner(text) {
@@ -175,19 +176,32 @@ async function runTurn() {
     }),
   )
 
+  // Dependencies back from the box's cache, and a word on what changed in work/ while the task rested.
+  const workDir = path.join(taskDir, "work")
+  let prompt = turn.prompt
+  if (!turn.compact) {
+    const restored = depsStep(depsRestore, turn.deps, workDir)
+    if (restored && restored.action !== "miss") await emit({ t: "deps", ...restored })
+    const note = workspaceNote(restored?.action === "restored")
+    if (note) prompt = `${note}\n\n${prompt}`
+  }
+
   let sessionId = turn.sessionId
-  let attempt = await runClaude({ turn, sessionId, resume: turn.resume, prompt: turn.prompt, mcpConfigFile })
+  let attempt = await runClaude({ turn, sessionId, resume: turn.resume, prompt, mcpConfigFile })
 
   // The session file can go missing (fresh box, lost archive). Start a new
   // session that carries a recap instead of failing the task.
   if (!stopping && attempt.exitCode !== 0 && turn.resume && /no conversation found|session.*not found/i.test(attempt.errorText)) {
     sessionId = randomUUID()
     await emit({ t: "session_reset", sessionId, reason: "Previous Claude session was not found on this box." })
-    const prompt = `${turn.recap ?? ""}\n\n---\n\n${turn.prompt}`.trim()
-    attempt = await runClaude({ turn, sessionId, resume: false, prompt, mcpConfigFile })
+    attempt = await runClaude({ turn, sessionId, resume: false, prompt: `${turn.recap ?? ""}\n\n---\n\n${prompt}`.trim(), mcpConfigFile })
   }
 
   const ok = stopping || (attempt.exitCode === 0 && !attempt.result?.is_error)
+  if (!turn.compact && !stopping) {
+    const saved = depsStep(depsSave, turn.deps, workDir)
+    if (saved) await emit({ t: "deps", ...saved })
+  }
   let usage = attempt.usage
   if (turn.compact && ok && !stopping) {
     // /compact prints no usage of its own; ask the session what it holds now.
@@ -855,6 +869,222 @@ async function cleanWorkspace() {
   const removed = []
   await cleanDir(work, 0, removed)
   for (const p of removed) console.log(path.relative(work, p))
+  if (removed.length) {
+    // The next turn's prompt says what went (workspaceNote), so the agent reinstalls before it runs anything.
+    const file = path.join(taskDir, "cleaned.json")
+    const dirs = new Set(readJson(file, { dirs: [] }).dirs)
+    for (const p of removed) dirs.add(path.relative(work, p))
+    fs.writeFileSync(file, JSON.stringify({ dirs: [...dirs] }))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dependency cache (opt-in: turn.json `deps`, from Settings › Dependency cache or
+// the project's override). One store per box, next to the task folders so hard
+// links work (/tmp is another filesystem there, and reflinks cost full quota):
+//
+//   <deps.dir>/npm/<key>/node_modules   read-only files, hard-linked into tasks
+//   <deps.dir>/npm/<key>/meta.json      size, last use, a sentinel file
+//
+// The key is the lockfile plus what makes an install differ (Node ABI, platform,
+// libc). Before a turn, a task with a package-lock.json and no node_modules gets
+// the tree for its key in well under a second. After a turn, a node_modules that
+// matches its lockfile (npm's own node_modules/.package-lock.json) is saved.
+// Files are chmod a-w, so a task writing into one fails loudly instead of
+// changing every task's copy; npm itself replaces files, it never writes in place.
+
+const DEPS_VERSION = 1
+/** Top-level node_modules entries tools write per task (vite, vitest, prisma's generated client); never shared. */
+const DEPS_NPM_SKIP = new Set([".cache", ".vite", ".vitest", ".prisma", ".tmp", ".boxyard-deps.json"])
+
+function depsKeyNpm(lockText) {
+  const glibc = process.report?.getReport?.().header?.glibcVersionRuntime ? "glibc" : "musl"
+  const parts = [`v${DEPS_VERSION}`, lockText, process.versions.modules, process.platform, process.arch, process.platform === "linux" ? glibc : ""]
+  return createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)
+}
+
+/** Why a work/ dir's npm tree can't use the cache, or null. A root lockfile whose packages all live under ./node_modules. */
+function npmUnsupported(lock) {
+  const pkgs = lock?.packages
+  if (!pkgs || typeof pkgs !== "object") return "lockfile has no packages map (lockfileVersion < 2)"
+  for (const k of Object.keys(pkgs)) if (k.includes("node_modules/") && !k.startsWith("node_modules/")) return `nested node_modules (${k})`
+  return null
+}
+
+/** Whether node_modules holds exactly what package-lock.json asks for, going by npm's hidden lockfile. */
+function npmTreeMatches(lock, hidden) {
+  const want = lock.packages
+  const have = hidden?.packages
+  if (!have) return false
+  for (const [k, v] of Object.entries(want)) {
+    if (k === "") continue
+    const h = have[k]
+    if (!h) {
+      if (v.optional) continue // not installed on this platform
+      return false
+    }
+    if ((h.version ?? h.resolved) !== (v.version ?? v.resolved)) return false
+  }
+  return Object.keys(have).every((k) => k in want)
+}
+
+/** Node ABIs node-gyp built addons for (build/config.gypi), so a tree built by another Node isn't keyed as ours. */
+function gypAbis(nm) {
+  const abis = new Set()
+  const look = (dir) => {
+    const gypi = path.join(dir, "build", "config.gypi")
+    if (!fs.existsSync(gypi)) return
+    const m = fs.readFileSync(gypi, "utf8").match(/"node_module_version":\s*(\d+)/)
+    abis.add(m ? m[1] : "?")
+  }
+  for (const e of fs.readdirSync(nm, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue
+    const abs = path.join(nm, e.name)
+    if (e.name.startsWith("@")) for (const s of fs.readdirSync(abs, { withFileTypes: true })) s.isDirectory() && look(path.join(abs, s.name))
+    else look(abs)
+  }
+  return abis
+}
+
+/** Copy a tree as hard links (dirs are new, files shared). `readOnly` chmods each file a-w. Returns files and bytes. */
+function linkTree(src, dst, { skip = new Set(), readOnly = false } = {}) {
+  const stats = { files: 0, bytes: 0, sentinel: null }
+  const walk = (from, to, top) => {
+    fs.mkdirSync(to)
+    for (const e of fs.readdirSync(from, { withFileTypes: true })) {
+      if (top && skip.has(e.name)) continue
+      const a = path.join(from, e.name)
+      const b = path.join(to, e.name)
+      if (e.isDirectory()) walk(a, b, false)
+      else if (e.isSymbolicLink()) fs.symlinkSync(fs.readlinkSync(a), b)
+      else if (e.isFile()) {
+        const st = fs.statSync(a)
+        if (readOnly && st.mode & 0o222) fs.chmodSync(a, st.mode & ~0o222)
+        fs.linkSync(a, b)
+        stats.files++
+        stats.bytes += st.size
+        stats.sentinel ??= path.relative(dst, b)
+      }
+    }
+  }
+  walk(src, dst, true)
+  return stats
+}
+
+function readLock(work) {
+  const text = fs.readFileSync(path.join(work, "package-lock.json"), "utf8")
+  return { text, lock: JSON.parse(text) }
+}
+
+function touchMeta(entry, patch = {}) {
+  const file = path.join(entry, "meta.json")
+  const meta = { ...readJson(file, {}), ...patch, lastUsed: Date.now() }
+  fs.writeFileSync(file, JSON.stringify(meta))
+  return meta
+}
+
+/** Before a turn: hard-link the cached node_modules into work/ when it's missing. */
+function depsRestore(deps, work) {
+  if (!deps?.npm || !deps.dir) return null
+  if (!fs.existsSync(path.join(work, "package-lock.json")) || fs.lstatSync(path.join(work, "node_modules"), { throwIfNoEntry: false })) return null
+  const started = Date.now()
+  const { text, lock } = readLock(work)
+  if (npmUnsupported(lock)) return null
+  const key = depsKeyNpm(text)
+  const entry = path.join(deps.dir, "npm", key)
+  if (!fs.existsSync(path.join(entry, "node_modules"))) return { ecosystem: "npm", action: "miss", key }
+  const dst = path.join(work, "node_modules")
+  try {
+    const { files } = linkTree(path.join(entry, "node_modules"), dst)
+    fs.writeFileSync(path.join(dst, ".boxyard-deps.json"), JSON.stringify({ ecosystem: "npm", key }))
+    touchMeta(entry)
+    return { ecosystem: "npm", action: "restored", key, files, ms: Date.now() - started }
+  } catch (err) {
+    fs.rmSync(dst, { recursive: true, force: true })
+    return { ecosystem: "npm", action: "failed", key, error: clip(String(err?.message ?? err), 300) }
+  }
+}
+
+/** After a turn: save a node_modules that matches its lockfile, then keep the store under deps.maxMb. */
+function depsSave(deps, work) {
+  if (!deps?.npm || !deps.dir) return null
+  const nm = path.join(work, "node_modules")
+  if (!fs.existsSync(path.join(work, "package-lock.json")) || !fs.lstatSync(nm, { throwIfNoEntry: false })?.isDirectory()) return null
+  const { text, lock } = readLock(work)
+  const skipped = (reason) => ({ ecosystem: "npm", action: "skipped", reason })
+  const unsupported = npmUnsupported(lock)
+  if (unsupported) return skipped(unsupported)
+  if (!npmTreeMatches(lock, readJson(path.join(nm, ".package-lock.json"), null))) return skipped("node_modules doesn't match package-lock.json")
+  const abis = [...gypAbis(nm)].filter((a) => a !== process.versions.modules)
+  if (abis.length) return skipped(`native addons built for another Node (ABI ${abis.join(", ")})`)
+  const key = depsKeyNpm(text)
+  const store = path.join(deps.dir, "npm")
+  const entry = path.join(store, key)
+  if (fs.existsSync(path.join(entry, "node_modules"))) {
+    touchMeta(entry)
+    return { ecosystem: "npm", action: "present", key }
+  }
+  const started = Date.now()
+  fs.mkdirSync(store, { recursive: true })
+  const tmp = path.join(store, `.${key}.${process.pid}.tmp`)
+  try {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    fs.mkdirSync(tmp)
+    const stats = linkTree(nm, path.join(tmp, "node_modules"), { skip: DEPS_NPM_SKIP, readOnly: true })
+    fs.writeFileSync(path.join(tmp, "meta.json"), JSON.stringify({ ecosystem: "npm", key, node: process.version, createdAt: Date.now(), lastUsed: Date.now(), files: stats.files, bytes: stats.bytes, sentinel: stats.sentinel }))
+    fs.renameSync(tmp, entry) // another task saving the same key first: keep theirs
+  } catch (err) {
+    fs.rmSync(tmp, { recursive: true, force: true })
+    if (!fs.existsSync(path.join(entry, "node_modules"))) return { ecosystem: "npm", action: "failed", key, error: clip(String(err?.message ?? err), 300) }
+  }
+  fs.writeFileSync(path.join(nm, ".boxyard-deps.json"), JSON.stringify({ ecosystem: "npm", key }))
+  const evicted = depsPrune(deps, key)
+  return { ecosystem: "npm", action: "saved", key, ms: Date.now() - started, ...(evicted.length ? { evicted } : {}) }
+}
+
+/**
+ * Evict least recently used entries until the store fits deps.maxMb. An entry a task still links (its sentinel file
+ * has more than one link) frees nothing, so it stays.
+ */
+function depsPrune(deps, keep) {
+  const store = path.join(deps.dir, "npm")
+  const entries = fs
+    .readdirSync(store, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+    .map((e) => ({ dir: path.join(store, e.name), meta: readJson(path.join(store, e.name, "meta.json"), {}) }))
+  let total = entries.reduce((n, e) => n + (e.meta.bytes ?? 0), 0)
+  const budget = (deps.maxMb ?? 2048) * 1024 * 1024
+  const evicted = []
+  for (const e of entries.sort((a, b) => (a.meta.lastUsed ?? 0) - (b.meta.lastUsed ?? 0))) {
+    if (total <= budget) break
+    if (e.meta.key === keep) continue
+    const sentinel = e.meta.sentinel && fs.statSync(path.join(e.dir, "node_modules", e.meta.sentinel), { throwIfNoEntry: false })
+    if (sentinel && sentinel.nlink > 1) continue
+    fs.rmSync(e.dir, { recursive: true, force: true })
+    total -= e.meta.bytes ?? 0
+    evicted.push(path.basename(e.dir))
+  }
+  return evicted
+}
+
+/** What Box Yard did to work/ while the task rested, for the start of the next prompt. */
+function workspaceNote(restored) {
+  const file = path.join(taskDir, "cleaned.json")
+  const cleaned = readJson(file, { dirs: [] }).dirs.filter((d) => !(restored && d === "node_modules"))
+  fs.rmSync(file, { force: true })
+  const lines = []
+  if (restored) lines.push(`Box Yard restored node_modules from this box's dependency cache (it matches package-lock.json), so there's no need to run npm ci or npm install unless you change dependencies.`)
+  if (cleaned.length) lines.push(`While this task was idle, Box Yard removed build output to free disk: ${cleaned.map((d) => `work/${d}`).join(", ")}. Reinstall or rebuild before you run tests or the app.`)
+  return lines.length ? `[Box Yard] ${lines.join(" ")}` : ""
+}
+
+/** A cache step never fails a turn: errors come back as a "failed" result. */
+function depsStep(fn, deps, work) {
+  try {
+    return fn(deps, work)
+  } catch (err) {
+    return { ecosystem: "npm", action: "failed", error: clip(String(err?.message ?? err), 300) }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +1101,10 @@ if (mode === "turn") {
   )
 } else if (mode === "mcp") {
   serveMcp()
+} else if (mode === "deps") {
+  const deps = readJson(path.join(taskDir, "turn.json"), {}).deps
+  const fn = process.argv[4] === "save" ? depsSave : depsRestore
+  console.log(JSON.stringify(depsStep(fn, deps, path.join(taskDir, "work"))))
 } else if (mode === "clean") {
   cleanWorkspace().then(
     () => process.exit(0),

@@ -54,6 +54,8 @@ export interface Project {
   partialClone: boolean | null
   /** Push each task's branch and uncommitted work at the end of every turn; null uses Settings → Push at turn end. */
   pushAtTurnEnd: boolean | null
+  /** Restore and save node_modules through the box's dependency cache; null uses Settings → Dependency cache. */
+  depCache: boolean | null
   /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
   heavyTasks: HeavyTasks
   createdAt: number
@@ -611,6 +613,13 @@ export interface Settings {
   gitPushAtTurnEnd: boolean
   /** Remove a resting task's git-ignored build output (node_modules, dist, caches…) after this many idle minutes. 0 = off. */
   buildCleanupIdleMinutes: number
+  /**
+   * Dependency cache: each box keeps installed node_modules per lockfile and hard-links them into tasks that lack one
+   * (box-runner.mjs depsRestore/depsSave), so a fresh or cleaned task needs no npm ci. A project can override it.
+   */
+  depCacheEnabled: boolean
+  /** Most space (MB) one box's dependency cache may take on its work disk; least recently used entries go first. */
+  depCacheMaxMb: number
   /** Notes retro: when a task's PR merges, or a task without a PR ends done, its Captain curates the agent's note suggestions. */
   notesRetroEnabled: boolean
   /** Max notes: at most this many notes go into each agent's prompt (a project can set its own)... */

@@ -231,6 +231,7 @@ interface ProjectRow {
   box_size: string | null
   partial_clone: number | null
   push_at_turn_end: number | null
+  dep_cache?: number | null
   heavy_tasks: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
@@ -603,6 +604,7 @@ export class Store {
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
+      depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -652,6 +654,7 @@ export class Store {
     boxSize?: BoxSize | null
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
+    depCache?: boolean | null
     heavyTasks?: HeavyTasks
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
@@ -676,6 +679,7 @@ export class Store {
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
+    if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
     this.setHeavyTasks(id, input.heavyTasks)
     this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
@@ -696,6 +700,8 @@ export class Store {
       partialClone?: boolean | null
       /** null clears it (Settings → Push at turn end applies). */
       pushAtTurnEnd?: boolean | null
+      /** null clears it (Settings → Dependency cache applies). */
+      depCache?: boolean | null
       /** How its running agents share boxes (shared/memory.ts HEAVY_TASKS). */
       heavyTasks?: HeavyTasks
       /** null clears it (Settings › Max notes applies). */
@@ -711,7 +717,7 @@ export class Store {
     for (const k of patch.removeEnv ?? []) delete env[k]
     this.db
       .prepare(
-        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, partial_clone = ?, push_at_turn_end = ?, updated_at = ? WHERE id = ?`,
+        `UPDATE projects SET name = ?, description = ?, repo = ?, base_branch = ?, env_json = ?, box_size = ?, partial_clone = ?, push_at_turn_end = ?, dep_cache = ?, updated_at = ? WHERE id = ?`,
       )
       .run(
         patch.name?.trim() || current.name,
@@ -722,6 +728,7 @@ export class Store {
         patch.boxSize === undefined ? current.box_size : patch.boxSize,
         patch.partialClone === undefined ? current.partial_clone : patch.partialClone === null ? null : patch.partialClone ? 1 : 0,
         patch.pushAtTurnEnd === undefined ? current.push_at_turn_end : patch.pushAtTurnEnd === null ? null : patch.pushAtTurnEnd ? 1 : 0,
+        patch.depCache === undefined ? (current.dep_cache ?? null) : patch.depCache === null ? null : patch.depCache ? 1 : 0,
         Date.now(),
         id,
       )

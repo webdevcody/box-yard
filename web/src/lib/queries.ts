@@ -416,6 +416,7 @@ export function useCreateProject() {
           boxSize: null,
           partialClone: null,
           pushAtTurnEnd: null,
+          depCache: null,
           heavyTasks: "off",
           createdAt: now,
           updatedAt: now,
@@ -450,6 +451,7 @@ export function useUpdateProject() {
       notesMaxCount?: number | null
       notesMaxTokens?: number | null
       pushAtTurnEnd?: boolean | null
+      depCache?: boolean | null
       heavyTasks?: HeavyTasks
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
