@@ -268,9 +268,13 @@ export function createBoxYard(
     const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
     if (ids.length) retro.settle(projectId, ids, ok)
   }
-  captains.onReport = (projectId, content) => {
+  // A Captain's automatic report, or its reply to a send_to_captain: a notice that wakes the Coordinator, like a task's.
+  captains.onReport = (projectId, content, report) => {
     const project = store.getProject(projectId)
-    const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
+    const who = `Captain${project ? ` for ${project.name}` : ""}`
+    const msg = report.replyTo
+      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo })
+      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true })
     hub.broadcast({ type: "chat.message", message: msg })
     orchestrator.nudge()
   }

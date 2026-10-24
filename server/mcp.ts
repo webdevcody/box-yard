@@ -9,7 +9,7 @@ import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
-import type { CaptainManager } from "./captains.js"
+import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
@@ -296,7 +296,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "send_to_captain",
       {
         description:
-          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project.",
+          "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project. " +
+          'When it finishes the turn that handles your message, its reply reaches you as a Box Yard update ("Captain for <project> replied: …") that wakes you, so you don\'t need wait_for_captain.',
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1).describe("The project-scoped request for the Captain."),
@@ -315,16 +316,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "ask_captain",
       {
         description:
-          "Coordinator tool: send a project-scoped request to a Captain and wait briefly for its reply. Use this for quick project work or project-specific planning.",
+          "Coordinator tool: send a project-scoped request to a Captain and wait briefly (at most 60 s) for its reply; it returns as soon as the reply lands. Use it only for quick questions. If the wait runs out, the Captain keeps working and its reply reaches you as a Box Yard update. Prefer send_to_captain for anything that may take a while.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; message: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.ask(a.project, a.message, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )
@@ -334,15 +335,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "wait_for_captain",
       {
         description:
-          "Coordinator tool: wait for a Captain's current turn to finish and return its latest reply. If it times out, the Captain keeps working and will report when project events wake it.",
+          "Coordinator tool: wait briefly (at most 60 s) for a Captain's next reply to you; it returns as soon as that lands or the Captain goes idle, with its latest reply. Rarely needed: replies to send_to_captain are pushed to you as Box Yard updates. If it times out, the Captain keeps working and its reply still reaches you.",
         inputSchema: {
           project: z.string().describe("Project id or name"),
-          timeout_seconds: z.number().int().min(5).max(240).optional().describe("Default 120"),
+          timeout_seconds: z.number().int().min(5).max(CAPTAIN_WAIT_MAX_SECONDS).optional().describe(`Default ${CAPTAIN_WAIT_DEFAULT_SECONDS}, at most ${CAPTAIN_WAIT_MAX_SECONDS}`),
         },
       },
       safe(async (a: { project: string; timeout_seconds?: number }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? 120))
+        return ok(await deps.captains.wait(a.project, a.timeout_seconds ?? CAPTAIN_WAIT_DEFAULT_SECONDS))
       }),
     ),
   )
