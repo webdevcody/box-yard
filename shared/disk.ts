@@ -8,7 +8,7 @@ import { MEM_MARK, memCommand, parseMemory, type BoxMemory } from "./memory.js"
 export const CLEANUP_STEPS = [
   { key: "tmp", label: "Stale temp folders on the root disk (/tmp)" },
   { key: "partials", label: "Partial clones and failed task folders" },
-  { key: "caches", label: "npm, pip and tmp caches" },
+  { key: "caches", label: "npm, pip and tmp caches, and unused dependency cache entries" },
   { key: "builds", label: "node_modules and build output in resting tasks" },
   { key: "git", label: "git gc and unused repo mirrors" },
   { key: "archive", label: "Done workspaces parked in the archive" },
@@ -33,7 +33,7 @@ export const CLEAR_STEPS: readonly { key: CleanupStepKey; label: string }[] = [
   { key: "archive", label: "Archive every workspace, then remove it from the box" },
   { key: "partials", label: "Leftover task folders and temp files" },
   { key: "tmp", label: "Stale temp folders on the root disk (/tmp)" },
-  { key: "caches", label: "npm, pip and tmp caches" },
+  { key: "caches", label: "npm, pip and tmp caches, and unused dependency cache entries" },
   { key: "git", label: "Repo mirrors" },
 ]
 

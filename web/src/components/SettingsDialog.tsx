@@ -773,6 +773,25 @@ function LimitsPanel({
         <input id={fid("bci")} type="number" min={0} max={43_200} className={inputClass} value={s.buildCleanupIdleMinutes} onChange={int("buildCleanupIdleMinutes")} />
       </Row>
       <Row
+        id={fid("dce")}
+        label="Dependency cache (npm)"
+        help="Each box keeps the node_modules its agents installed, one per package-lock.json, next to the task folders. A task with that lockfile and no node_modules (a fresh clone, or one the build output cleanup emptied) gets it hard-linked in before its turn, in under a second, and its prompt says it needn't run npm ci. The shared files are read-only, so a task can't change another's. A project can override it."
+        hint={hint("depCacheEnabled")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("dce")} type="checkbox" checked={s.depCacheEnabled} onChange={(e) => set("depCacheEnabled", e.target.checked)} data-testid="dep-cache" />
+          {s.depCacheEnabled ? "On: node_modules restored from the box cache" : "Off: agents install dependencies"}
+        </label>
+      </Row>
+      <Row
+        id={fid("dcm")}
+        label="Dependency cache size (MB)"
+        help="Most work-disk space one box's cache may hold. Over it, the least recently used lockfiles no task links go first. Low-disk cleanup also removes entries no task links."
+        hint={hint("depCacheMaxMb")}
+      >
+        <input id={fid("dcm")} type="number" min={100} max={1_000_000} step={256} className={inputClass} value={s.depCacheMaxMb} disabled={!s.depCacheEnabled} onChange={(e) => set("depCacheMaxMb", Number(e.target.value))} data-testid="dep-cache-max" />
+      </Row>
+      <Row
         id={fid("gpc")}
         label="Partial clone mirrors"
         help="Each box keeps one mirror per repo, and task checkouts borrow its objects instead of copying them. With this on, mirrors skip old file versions (git clone --filter=blob:none); git fetches one from GitHub when log -p, blame or a checkout needs it. A project can override it."

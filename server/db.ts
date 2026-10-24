@@ -642,6 +642,10 @@ export const MIGRATIONS: string[] = [
   -- Size-aware placement: the box size a queued task waits for (its project's box size), shown with wait_reason.
   ALTER TABLE tasks ADD COLUMN wait_box_size TEXT;
   `,
+  `
+  -- A project's own choice of the box dependency cache (NULL uses Settings › Dependency cache).
+  ALTER TABLE projects ADD COLUMN dep_cache INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

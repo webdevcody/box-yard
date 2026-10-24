@@ -43,7 +43,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/memory.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
-import { BoxJanitor, pushedCheck, pushedVerdict } from "./janitor.js"
+import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
@@ -2284,6 +2284,7 @@ export class TaskManager {
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
           recap: recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60)),
+          ...(this.depCache(project) ? { deps: { npm: true, dir: `${this.provider.root(boxId)}/${DEPS_DIR}`, maxMb: this.settings.get().depCacheMaxMb } } : {}),
         }),
       )
 
@@ -2805,6 +2806,13 @@ export class TaskManager {
         return say("tool", `${ev.name} ${ev.input ?? ""}`.trim(), { name: ev.name })
       case "tool_error":
         return say("tool", String(ev.text ?? "tool error"), { error: true })
+      case "deps": {
+        // Only what changes the agent's start is shown; saves, misses and skips are in events.jsonl.
+        const seconds = typeof ev.ms === "number" ? ` in ${(ev.ms / 1000).toFixed(1)} s` : ""
+        if (ev.action === "restored") return say("event", `Restored node_modules from the box's dependency cache${seconds}.`, { kind: "deps" })
+        if (ev.action === "failed") return say("event", `Dependency cache step failed: ${String(ev.error ?? "unknown error")}`, { kind: "deps" })
+        return
+      }
       case "session_reset":
         this.store.updateTask(taskId, { sessionId: String(ev.sessionId) })
         return say("event", "Claude session was missing on this box, so the agent started a new one with a recap.")
@@ -3411,6 +3419,11 @@ export class TaskManager {
     // Mock mode never pushes to GitHub: its agent's commits are made up.
     if (this.c.mock && githubSlug(project.repo)) return false
     return project.pushAtTurnEnd ?? this.settings.get().gitPushAtTurnEnd
+  }
+
+  /** Whether a project's tasks use the box dependency cache (box-runner.mjs depsRestore/depsSave): its own choice, else Settings. */
+  depCache(project: { depCache?: boolean | null }): boolean {
+    return project.depCache ?? this.settings.get().depCacheEnabled
   }
 
   /** Snapshot a task's git work on its box and push it to origin (server/gitFirst.ts). */
