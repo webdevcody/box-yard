@@ -94,9 +94,16 @@ export function pruneAdvice(r: NoteBudgetReport<unknown>): string {
   )
 }
 
+/** Box Yard itself as a suggestion's resolver: it closes what a retro left pending. */
+export const BOXYARD_EDITOR = "boxyard"
+
+/** Longest reason the Captain gives for a decision on a suggestion: one line. */
+export const MAX_REASON_CHARS = 300
+
 /** Who a note's author or editor is, as the Notes tab names them. */
 export function noteAuthorLabel(author: string): string {
   if (author === "orchestrator") return "Coordinator"
   if (author === "captain") return "Captain"
+  if (author === BOXYARD_EDITOR) return "Box Yard"
   return author
 }

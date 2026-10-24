@@ -14,8 +14,8 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
-// A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion) and replies
-// "(no update)"; FAKE_RETRO=reject rejects them instead.
+// A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
+// replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
 //   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
 // [note] suggests a project note (suggest_note) for the Captain's notes retro.
@@ -181,9 +181,10 @@ function sh(cmd) {
 /** A Captain's notes retro: settle every suggestion it names. */
 async function notesRetro(mcp, prompt) {
   const ids = [...new Set([...prompt.matchAll(/`(sug_[A-Za-z0-9_-]+)`/g)].map((m) => m[1]))]
-  const action = process.env.FAKE_RETRO === "reject" ? "reject" : "accept"
+  const mode = process.env.FAKE_RETRO
+  const action = mode === "reject" ? "reject" : "accept"
   await useTool(mcp, "list_notes", {})
-  for (const id of ids) await useTool(mcp, "resolve_suggestion", { suggestion: id, action, ...(action === "reject" ? { reason: "mock retro" } : {}) })
+  if (mode !== "skip") for (const id of ids) await useTool(mcp, "resolve_suggestion", { suggestion: id, action, reason: `mock retro ${action}` })
   await say("(no update)")
   return "(no update)"
 }

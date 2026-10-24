@@ -16,7 +16,7 @@ import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore } from "./settings.js"
 import { TtsError, TtsService } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
-import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS } from "./notes.js"
+import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro } from "./retro.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
@@ -32,6 +32,7 @@ import { HookStore } from "./hookStore.js"
 import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
+import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, type Health } from "../shared/types.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
 
@@ -42,6 +43,12 @@ const idSchema = z
 const envSchema = z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "Env var names must be like MY_VAR"), z.string())
 
 const attachmentIds = z.array(z.string()).max(20).optional()
+
+/** A project's own notes budget; null goes back to the one in Settings. */
+const projectNotesBudget = {
+  notesMaxCount: z.number().int().min(NOTE_BUDGET_LIMITS.maxNotes.min).max(NOTE_BUDGET_LIMITS.maxNotes.max).nullable().optional(),
+  notesMaxTokens: z.number().int().min(NOTE_BUDGET_LIMITS.maxTokens.min).max(NOTE_BUDGET_LIMITS.maxTokens.max).nullable().optional(),
+}
 
 const labelList = z.array(z.string().trim().min(1).max(100)).max(30).optional()
 const hookFilters = z.object({
@@ -78,6 +85,7 @@ const schemas = {
     env: envSchema.optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
+    ...projectNotesBudget,
   }),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
@@ -88,14 +96,9 @@ const schemas = {
     removeEnv: z.array(z.string()).optional(),
     boxSize: z.enum(BOX_SIZES).nullable().optional(),
     partialClone: z.boolean().nullable().optional(),
+    ...projectNotesBudget,
   }),
   note: z.object({ content: z.string().trim().min(1).max(MAX_NOTE_CHARS) }),
-  resolveSuggestion: z.object({
-    action: z.enum(SUGGESTION_ACTIONS),
-    content: z.string().trim().min(1).max(MAX_NOTE_CHARS).optional(),
-    noteId: z.string().optional(),
-    reason: z.string().trim().max(500).optional(),
-  }),
   task: z.object({
     id: idSchema,
     projectId: z.string().min(1),
@@ -255,8 +258,14 @@ export function createBoxYard(
     deliver: (projectId, content, meta) => captains.projectNotice(projectId, content, meta),
     budget: (projectId) => notes.budgetStatus(projectId),
     ownerName: () => settings.get().ownerName,
+    changed: (projectId) => notes.suggestionsChanged(projectId),
   })
   retro.start()
+  // The Captain's turn that read a retro is over: whatever it left pending is rejected, so nothing waits.
+  captains.onNoticesHandled = (projectId, notices, ok) => {
+    const ids = notices.flatMap((n) => (n.meta?.kind === "retro" && Array.isArray(n.meta.suggestionIds) ? n.meta.suggestionIds.filter((id): id is string => typeof id === "string") : []))
+    if (ids.length) retro.settle(projectId, ids, ok)
+  }
   captains.onReport = (projectId, content) => {
     const project = store.getProject(projectId)
     const msg = store.addChat("notice", `Captain${project ? ` for ${project.name}` : ""}: ${content}`, { projectId, captain: true })
@@ -357,6 +366,8 @@ export function createBoxYard(
   api.patch("/projects/:id", (req, res) => {
     const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))
     hub.broadcast({ type: "project", project })
+    // A smaller notes budget for this project can put it over: its Captain hears about it.
+    notes.checkBudget(project.id)
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
@@ -396,14 +407,6 @@ export function createBoxYard(
     if (!store.getProject(id)) throw new BadRequestError("No such project")
     const all = req.query.status === "all"
     res.json(store.listNoteSuggestions({ projectId: id, status: all ? undefined : ["pending"], limit: all ? 200 : 500 }))
-  })
-  api.post("/projects/:id/suggestions/:suggestionId/resolve", (req, res) => {
-    const id = req.params.id!
-    const s = ofProject(notes.requireSuggestion(req.params.suggestionId!), id)
-    const input = parse(schemas.resolveSuggestion, req.body)
-    if (input.noteId) ofProject(notes.require(input.noteId), id)
-    const { suggestion } = notes.resolve(s.id, input, ownerEditor())
-    res.json({ project: store.getProject(id)!, suggestion })
   })
   api.get("/projects/:id/captain", (req, res) => {
     const id = req.params.id!
@@ -705,6 +708,8 @@ export function createBoxYard(
     applyPoolChange()
     // A smaller notes budget can put projects over it: their Captains hear about it.
     notes.checkAllBudgets()
+    // Turning the notes retro on picks up what finished while it was off.
+    retro.catchUp()
     res.json(info)
   })
   api.delete("/agent-settings", (_req, res) => {
@@ -712,6 +717,7 @@ export function createBoxYard(
     hub.broadcast({ type: "settings", info })
     applyPoolChange()
     notes.checkAllBudgets()
+    retro.catchUp()
     res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {

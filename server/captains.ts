@@ -4,7 +4,7 @@ import fs from "node:fs"
 import path from "node:path"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
-import type { Store } from "./store.js"
+import type { CaptainNoticeEntry, Store } from "./store.js"
 import { BadRequestError } from "./store.js"
 import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
@@ -95,6 +95,8 @@ export class CaptainManager {
   /** Each Captain's own MCP bearer token, so the MCP server can scope it to its project. */
   private readonly tokens = new Map<string, string>()
   onReport: ((projectId: string, content: string) => void) | null = null
+  /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
+  onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -112,7 +114,17 @@ export class CaptainManager {
     let captain = this.captains.get(project.id)
     if (!captain) {
       const mcp = { url: this.mcp.url, token: this.tokenFor(project.id) }
-      captain = new Captain(this.c, this.store, this.hub, mcp, this.settings, project, (text) => this.onReport?.(project.id, text), this.tuning)
+      captain = new Captain(
+        this.c,
+        this.store,
+        this.hub,
+        mcp,
+        this.settings,
+        project,
+        (text) => this.onReport?.(project.id, text),
+        this.tuning,
+        (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
+      )
       this.captains.set(project.id, captain)
     }
     return captain
@@ -254,6 +266,7 @@ class Captain {
     private readonly project: Project,
     private readonly report: (content: string) => void,
     private readonly tuning: CaptainTuning,
+    private readonly noticesHandled: (notices: CaptainNoticeEntry[], ok: boolean) => void = () => {},
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
@@ -413,11 +426,23 @@ class Captain {
     const messages = this.unansweredUserMessages()
     if (!messages.length) return
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
-    const notices = this.store.takeUnseenCaptainNotices(this.project.id)
+    const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
+    const notices = entries.map((n) => n.content)
     const prompt = [notices.length ? `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "", messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
-    await this.runPrompt(prompt)
+    const result = await this.runPrompt(prompt)
+    this.handled(entries, result.ok)
+  }
+
+  /** Tell the manager which notices this turn covered (a notes retro's leftovers are settled then). */
+  private handled(entries: CaptainNoticeEntry[], ok: boolean) {
+    if (!entries.length) return
+    try {
+      this.noticesHandled(entries, ok)
+    } catch (err) {
+      console.error(`[captain ${this.project.id}] after-turn notice handling failed:`, err)
+    }
   }
 
   private async autoTurn() {
@@ -453,6 +478,7 @@ class Captain {
       ].join("\n\n"),
       true,
     )
+    this.handled(entries, result.ok)
     if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
   }
 
@@ -496,8 +522,6 @@ class Captain {
     else if (this.store.getKv(notesSeenKey(this.project.id)) === hash) lines.push(`Notes: unchanged since you last saw them (${budgetLine(r)}). list_notes shows them with ids.`)
     else lines.push(`Notes, as agents get them (${budgetLine(r)}; list_notes shows ids):`, ...listed)
     if (r.over) lines.push(withOwner(pruneAdvice(r), this.owner()))
-    const pending = this.store.pendingSuggestionCount(this.project.id)
-    if (pending) lines.push(`${pending} note suggestion${pending === 1 ? " is" : "s are"} waiting for you (list_note_suggestions).`)
     return { text: lines.join("\n"), hash }
   }
 

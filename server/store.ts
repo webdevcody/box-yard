@@ -210,6 +210,13 @@ const SCHEDULE_COLUMNS: Record<keyof SchedulePatch, string> = {
   qstashId: "qstash_id",
 }
 
+/** An unseen Captain notice, with what its WakeLoopGuard counts it by and its meta (a notes retro's suggestion ids). */
+export interface CaptainNoticeEntry {
+  content: string
+  loopKey: string
+  meta: Record<string, unknown> | null
+}
+
 interface ProjectRow {
   id: string
   name: string
@@ -1364,7 +1371,7 @@ export class Store {
    * Unseen notices with the key the Captain's WakeLoopGuard counts them by: meta.loopKey when the notice has one
    * (a notes retro is keyed by its tasks, since its text changes every time), else the text itself.
    */
-  takeUnseenCaptainNoticeEntries(projectId: string): { content: string; loopKey: string }[] {
+  takeUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
     return this.db.transaction(() => {
       const entries = this.peekUnseenCaptainNoticeEntries(projectId)
       this.db.prepare("UPDATE captain_messages SET seen_by_captain = 1 WHERE project_id = ? AND seen_by_captain = 0").run(projectId)
@@ -1372,13 +1379,15 @@ export class Store {
     })()
   }
 
-  peekUnseenCaptainNoticeEntries(projectId: string): { content: string; loopKey: string }[] {
+  peekUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
     const rows = this.db
-      .prepare(
-        "SELECT content, json_extract(meta_json, '$.loopKey') AS loop_key FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC",
-      )
-      .all(projectId) as { content: string; loop_key: string | null }[]
-    return rows.map((r) => ({ content: r.content, loopKey: typeof r.loop_key === "string" && r.loop_key ? r.loop_key : r.content }))
+      .prepare("SELECT content, meta_json FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
+      .all(projectId) as { content: string; meta_json: string | null }[]
+    return rows.map((r) => {
+      const meta = json<Record<string, unknown> | null>(r.meta_json, null)
+      const loopKey = typeof meta?.loopKey === "string" && meta.loopKey ? meta.loopKey : r.content
+      return { content: r.content, loopKey, meta }
+    })
   }
 
   unseenCaptainNoticeTasks(projectId: string): (string | null)[] {

@@ -2186,8 +2186,6 @@ export class TaskManager {
           why: String(ev.why ?? "").trim().slice(0, 1000),
         })
         say("event", `Suggested a project note: ${suggestion.content}`, { kind: "note_suggestion", suggestionId: suggestion.id })
-        const project = this.store.getProject(row.project_id)
-        if (project) this.hub.broadcast({ type: "project", project })
         this.hub.broadcast({ type: "note_suggestions", projectId: row.project_id })
         return
       }

@@ -70,7 +70,8 @@ export type NoteSuggestionStatus = (typeof NOTE_SUGGESTION_STATUSES)[number]
 
 /**
  * A note an agent proposed with suggest_note. It never reaches a prompt by itself: the project's Captain
- * (or the owner, on the Notes tab) accepts it as a note, merges it into one, or rejects it.
+ * accepts it as a note, merges it into one, or rejects it in the notes retro after the task. Nobody else
+ * approves it; the Notes tab only shows the history.
  */
 export interface NoteSuggestion {
   id: string
@@ -85,7 +86,7 @@ export interface NoteSuggestion {
   /** The note it became (accepted) or was merged into. */
   noteId: string | null
   resolvedBy: string | null
-  /** Why it was rejected, or a remark on how it was used. */
+  /** The Captain's one-line reason for its decision. */
   reason: string | null
   createdAt: number
   resolvedAt: number | null

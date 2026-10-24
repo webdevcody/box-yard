@@ -803,7 +803,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   server.registerTool(
     "list_note_suggestions",
     {
-      description: "Notes agents suggested (suggest_note) with their reasons, oldest first. Pending ones wait for resolve_suggestion.",
+      description: "Notes agents suggested (suggest_note) with their reasons, oldest first. Pending ones wait for your notes retro and resolve_suggestion.",
       inputSchema: {
         project: notesProjectParam,
         task: z.string().optional().describe("Only this task's suggestions."),
@@ -823,16 +823,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "resolve_suggestion",
     {
       description:
-        "Settle an agent's note suggestion. accept: add it as a note (pass content to reword it as one short rule). merge: fold it into an existing note (pass note and that note's whole new content). reject: drop it, with a short reason (e.g. it's a run log, already covered, or a code convention for AGENTS.md).",
+        "Decide on an agent's note suggestion: keep it if it will help future agents in this project. accept: add it as a note (pass content to reword it as one short rule). merge: fold it into an existing note (pass note and that note's whole new content). reject: drop it (e.g. it's a run log, already covered, or a code convention for AGENTS.md). Every decision needs a one-line reason; the Notes tab shows it.",
       inputSchema: {
         suggestion: z.string().describe("Suggestion id (sug_…)."),
         action: z.enum(SUGGESTION_ACTIONS),
         content: noteContent.optional().describe("accept: the note's text if you reword it. merge: the merged note's whole new text."),
         note: z.string().optional().describe("merge: the id of the note to merge into."),
-        reason: z.string().max(500).optional().describe("Why, in a few words (shown on the Notes tab)."),
+        reason: z.string().trim().min(1).max(MAX_REASON_CHARS).describe("Why, in one line (shown on the Notes tab)."),
       },
     },
-    safe(async (a: { suggestion: string; action: SuggestionAction; content?: string; note?: string; reason?: string }) => {
+    safe(async (a: { suggestion: string; action: SuggestionAction; content?: string; note?: string; reason: string }) => {
       const s = suggestion(a.suggestion)
       const target = a.note ? note(a.note) : undefined
       const r = notes.resolve(s.id, { action: a.action, content: a.content, noteId: target?.id, reason: a.reason }, editor)

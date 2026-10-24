@@ -1,7 +1,7 @@
 import type { Hub } from "./hub.js"
 import { BadRequestError, ConflictError, NotFoundError, type Store } from "./store.js"
 import { noteBudgetOf } from "./settings.js"
-import { MAX_NOTE_CHARS, budgetLine, budgetNotes, pruneAdvice, type NoteBudgetReport } from "../shared/notes.js"
+import { MAX_NOTE_CHARS, MAX_REASON_CHARS, budgetLine, budgetNotes, pruneAdvice, type NoteBudgetReport } from "../shared/notes.js"
 import { withOwner } from "../shared/owner.js"
 import type { NoteSuggestion, ProjectNote, Settings } from "../shared/types.js"
 
@@ -33,8 +33,8 @@ const overKey = (projectId: string) => `notes_over_budget:${projectId}`
 
 /**
  * Project notes are a small, curated set of lasting rules the Captain chooses. Every change to them goes
- * through here, from the Captain's and the Coordinator's MCP tools and from the Notes tab, so the workers'
- * copy, the UI and the budget signal stay in step.
+ * through here, from the Captain's and the Coordinator's MCP tools and from the Notes tab (where Cody can
+ * add, edit or delete a note by hand), so the workers' copy, the UI and the budget signal stay in step.
  */
 export class ProjectNotes {
   constructor(private readonly deps: NotesDeps) {}
@@ -88,19 +88,22 @@ export class ProjectNotes {
   }
 
   /**
-   * Settle a suggestion: accept it as a new note (optionally reworded), merge it into an existing note of the
-   * same project (`content` is that note's new text), or reject it.
+   * Settle a suggestion (the Captain's call, in its notes retro): accept it as a new note (optionally reworded),
+   * merge it into an existing note of the same project (`content` is that note's new text), or reject it.
+   * Every decision carries a one-line reason, which the Notes tab's history shows.
    */
   resolve(
     suggestionId: string,
-    input: { action: SuggestionAction; content?: string; noteId?: string; reason?: string },
+    input: { action: SuggestionAction; content?: string; noteId?: string; reason: string },
     who: NoteEditor,
   ): { suggestion: NoteSuggestion; note: ProjectNote | null } {
     const s = this.requireSuggestion(suggestionId)
     if (s.status !== "pending") throw new ConflictError(`Suggestion ${s.id} was already ${s.status}${s.resolvedBy ? ` by ${s.resolvedBy}` : ""}.`)
+    const reason = oneLine(input.reason)
+    if (!reason) throw new BadRequestError("Pass reason: one line on why (the Notes tab shows it).")
     const result = this.store.db.transaction(() => {
       if (input.action === "reject") {
-        return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "rejected", by: who.by, reason: input.reason }), note: null }
+        return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "rejected", by: who.by, reason }), note: null }
       }
       if (input.action === "merge") {
         if (!input.noteId) throw new BadRequestError("Pass note: the id of the note to merge this suggestion into.")
@@ -108,10 +111,10 @@ export class ProjectNotes {
         const target = this.require(input.noteId)
         if (target.projectId !== s.projectId) throw new BadRequestError(`Note ${target.id} belongs to another project.`)
         const note = this.store.updateNote(target.id, noteText(input.content), who.by)
-        return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "merged", noteId: note.id, by: who.by, reason: input.reason }), note }
+        return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "merged", noteId: note.id, by: who.by, reason }), note }
       }
       const note = this.store.addNote(s.projectId, who.by, noteText(input.content?.trim() ? input.content : s.content))
-      return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "accepted", noteId: note.id, by: who.by, reason: input.reason }), note }
+      return { suggestion: this.store.resolveNoteSuggestion(s.id, { status: "accepted", noteId: note.id, by: who.by, reason }), note }
     })()
     if (result.note) this.changed(s.projectId, who)
     else this.suggestionsChanged(s.projectId)
@@ -143,19 +146,25 @@ export class ProjectNotes {
   private changed(projectId: string, who: NoteEditor) {
     this.deps.publish(projectId)
     this.checkBudget(projectId, who)
+    const project = this.store.getProject(projectId)
+    if (project) this.deps.hub.broadcast({ type: "project", project })
     this.suggestionsChanged(projectId)
   }
 
-  /** The project (its notes and pending count) and its suggestion list changed. */
+  /** The project's suggestion history changed. */
   suggestionsChanged(projectId: string) {
-    const project = this.store.getProject(projectId)
-    if (project) this.deps.hub.broadcast({ type: "project", project })
     this.deps.hub.broadcast({ type: "note_suggestions", projectId })
   }
 
   private owner(text: string) {
     return withOwner(text, this.deps.settings.get().ownerName)
   }
+}
+
+/** A reason as the history shows it: one line, kept short. */
+function oneLine(text: string | undefined): string {
+  const line = (text ?? "").replace(/\s+/g, " ").trim()
+  return line.length > MAX_REASON_CHARS ? `${line.slice(0, MAX_REASON_CHARS - 1)}…` : line
 }
 
 function noteText(content: string): string {
