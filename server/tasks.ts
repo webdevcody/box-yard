@@ -156,6 +156,9 @@ interface PreparedWorkspace {
   fallback?: { reason: string; wip: boolean }
 }
 
+/** "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. */
+const onBox = (boxId: string) => (isLocalRunnerBox(boxId) ? "on this computer" : `on box ${boxId}`)
+
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
 
@@ -2843,7 +2846,7 @@ export class TaskManager {
     const cursor = parseCursor(row.event_cursor)
     const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
     this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
-    this.addEvent(row.id, from === "git" ? `Workspace restored on box ${boxId}: its session from the archive, its code from git.` : `Workspace restored on box ${boxId}.`)
+    this.addEvent(row.id, from === "git" ? `Workspace restored ${onBox(boxId)}: its session from the archive, its code from git.` : `Workspace restored ${onBox(boxId)}.`)
     return { restored: true }
   }
 
@@ -2874,8 +2877,8 @@ export class TaskManager {
     const checkout = !row.branch ? "a fresh workspace" : prepared.branch === "base" ? `branch ${row.branch} recreated from ${project.baseBranch}` : `a fresh checkout of branch ${row.branch}`
     const work = wip ? ", with the uncommitted work its last turn pushed" : ""
     const where = kept ? ` The archive is kept on the server as ${kept} (removed after ${this.settings.get().archiveRetentionDays || "no"} days).` : ""
-    this.addEvent(row.id, `Couldn't restore the workspace archive on box ${boxId} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
-    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored on box ${boxId} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
+    this.addEvent(row.id, `Couldn't restore the workspace archive ${onBox(boxId)} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
+    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored ${onBox(boxId)} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
     return { ...prepared, fallback: { reason, wip } }
   }
 
@@ -2965,7 +2968,7 @@ export class TaskManager {
     if (res.stdout.includes(`${MIRROR_MARK}recreate`)) {
       this.addEvent(row.id, `Re-created the box's mirror of ${project.repo} as a ${mirror!.spec.partial ? "partial (blob:none)" : "full"} clone to match the project's partial clone setting.`)
     }
-    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
+    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} ${onBox(boxId)}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready ${onBox(boxId)}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
   }
