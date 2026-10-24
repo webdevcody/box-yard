@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest"
 import type { Server } from "node:http"
 import { execFileSync } from "node:child_process"
+import fs from "node:fs"
+import path from "node:path"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import { LocalProvider } from "../server/providers/local.js"
@@ -88,6 +90,23 @@ const status = (r: Running, id: string, want: (t: Task) => boolean, what: string
 const working = (r: Running, id: string) => status(r, id, (t) => t.status === "working", `task ${id} to work`)
 const settled = (r: Running, id: string) => status(r, id, (t) => t.status === "done" && Boolean(t.lastArchivedAt) && t.pendingCount === 0, `task ${id} to finish and archive`)
 const inUse = (r: Running, boxId: string) => r.yard.store.slotsInUse(boxId)
+
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", ...args], { cwd, stdio: "pipe" }).toString().trim()
+
+/** A bare origin with one commit on main, served over file:// like GitHub. */
+function origin() {
+  const root = tmpDir("box-yard-origin-")
+  const bare = path.join(root, "origin.git")
+  const seed = path.join(root, "seed")
+  git(root, "init", "-q", "--bare", "-b", "main", bare)
+  git(root, "init", "-q", "-b", "main", seed)
+  fs.writeFileSync(path.join(seed, "README.md"), "hello\n")
+  git(seed, "add", ".")
+  git(seed, "commit", "-qm", "init")
+  git(seed, "push", "-q", bare, "main")
+  return `file://${bare}`
+}
 
 /** Fail the test if any box ever runs more turns than its slots (checked on every broadcast). */
 function watchSlots(r: Running) {
@@ -244,6 +263,50 @@ describe("slot limit", () => {
     expect(getTask(r, stuck.id)).toMatchObject({ status: "queued", boxId })
     expect(over).toEqual([])
   }, 60_000)
+
+  it("keeps a task whose archive is too big to upload on its full box, with the reason", async () => {
+    const r = await start({ maxBoxes: 2 })
+    const over = watchSlots(r)
+    const p = r.yard.store.createProject({ name: "alpha" })
+    const big = await settled(r, newTask(r, p.id, "big").id)
+    const hangs = [newTask(r, p.id, "runner 1", HANG), newTask(r, p.id, "runner 2", HANG)]
+    const boxId = (await working(r, hangs[0]!.id)).boxId!
+    await working(r, hangs[1]!.id)
+    expect(big.boxId).toBe(boxId)
+    // Archived after its last turn, but over what a restore uploads in one file (Upstash: 100 MB).
+    fs.truncateSync(r.yard.store.getTaskRow(big.id)!.archive_path!, 91 * 1024 * 1024)
+    r.yard.tasks.sendInput(big.id, "continue", "cody")
+    await status(r, big.id, (t) => t.waitReason === `Waiting for a free slot on ${boxId}`, "the big task's reason")
+    await new Promise((res) => setTimeout(res, 1500))
+    expect(getTask(r, big.id)).toMatchObject({ status: "queued", boxId, waitReason: `Waiting for a free slot on ${boxId}` })
+    expect(r.yard.store.listBoxes()).toHaveLength(1)
+    expect(over).toEqual([])
+  }, 60_000)
+
+  it("moves a repo task off its full box only when its last turn's work is on origin", async () => {
+    const r = await start({ maxBoxes: 2 })
+    const over = watchSlots(r)
+    const p = r.yard.store.createProject({ name: "alpha" })
+    r.yard.store.db.prepare("UPDATE projects SET repo = ? WHERE id = ?").run(origin(), p.id)
+    const pushed = await settled(r, newTask(r, p.id, "pushed").id)
+    const unpushed = await settled(r, newTask(r, p.id, "unpushed").id)
+    expect(pushed.pushState?.status).toBe("pushed")
+    const hangs = [newTask(r, p.id, "runner 1", HANG), newTask(r, p.id, "runner 2", HANG)]
+    const boxId = (await working(r, hangs[0]!.id)).boxId!
+    await working(r, hangs[1]!.id)
+    expect([pushed.boxId, unpushed.boxId]).toEqual([boxId, boxId])
+    // Its turn-end push didn't happen: the archive alone would carry its code, so it stays with its workspace.
+    r.yard.store.updateTask(unpushed.id, { pushState: { ...unpushed.pushState!, status: "failed", reason: "no access" } }, { touch: false })
+    r.yard.tasks.sendInput(unpushed.id, "continue", "cody")
+    await status(r, unpushed.id, (t) => t.waitReason === `Waiting for a free slot on ${boxId}`, "the unpushed task's reason")
+    // Origin has its branch and WIP: it restores on a new box from git plus its small archive.
+    r.yard.tasks.sendInput(pushed.id, "continue", "cody")
+    const moved = await status(r, pushed.id, (t) => t.status === "done" && t.pendingCount === 0 && t.boxId !== boxId, "the pushed task to run elsewhere")
+    expect(moved.boxId).toBeTruthy()
+    expect(r.yard.store.listTaskMessages(pushed.id, 100).some((m) => m.content.startsWith(`Moved from busy box ${boxId}`))).toBe(true)
+    expect(getTask(r, unpushed.id)).toMatchObject({ status: "queued", boxId })
+    expect(over).toEqual([])
+  }, 90_000)
 
   it("puts a new task on a box with a free slot (or a new one) instead of a full one", async () => {
     const r = await start({ maxBoxes: 2 })

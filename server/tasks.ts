@@ -93,6 +93,8 @@ const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
 const RESTING: TaskStatus[] = [...RESTING_STATUSES]
 /** A task that takes one of its box's agent slots: a turn id, or starting/working (the same rule as Store.slotsInUse). */
 const holdsSlot = (r: TaskRow) => Boolean(r.current_turn_id) || r.status === "starting" || r.status === "working"
+/** The biggest archive a task moves to another box with: a restore uploads it as one file (Upstash takes up to 100 MB). */
+const MOVE_MAX_ARCHIVE_BYTES = 90 * 1024 * 1024
 const PORT_BASE = 4000
 const MAX_INTERRUPTS = 2
 const STALL_MS = 45_000
@@ -1667,12 +1669,31 @@ export class TaskManager {
 
   /**
    * A task whose box is busy may restore on another box (of its project's size, through `pickBox`) only when
-   * nothing would be lost: its turn-end archive is fresh (git-first: the branch and WIP ref are on origin and
-   * the archive holds the rest), or it never ran. One being archived right now waits for that to finish.
+   * nothing would be lost and the restore can't fail: it never ran, or `moveBlock` finds nothing in the way.
+   * One being archived right now waits for that to finish.
    */
   private canMove(row: TaskRow): boolean {
     if (this.archiving.has(row.id)) return false
-    return !row.session_started || this.archiveHoldsWorkspace(row)
+    return !row.session_started || this.moveBlock(row) === null
+  }
+
+  /**
+   * Why a task that ran can't move to another box right now, or null when it can: its turn-end archive must hold
+   * the workspace, be small enough to upload in one restore (the provider's file limit, 100 MB on Upstash), and
+   * in a repo project its code must be on origin from a turn-end push (git-first: the branch and WIP ref) after
+   * its last turn, so the new box checks the branch out rather than unpacking it.
+   */
+  private moveBlock(row: TaskRow): string | null {
+    if (!this.archiveHoldsWorkspace(row)) return "its workspace has no archive from after its last turn"
+    const bytes = fs.statSync(row.archive_path!, { throwIfNoEntry: false })?.size
+    if (bytes === undefined) return "its workspace has no archive from after its last turn"
+    if (bytes > MOVE_MAX_ARCHIVE_BYTES) return `its archive is ${formatBytes(bytes)}, over the ${formatBytes(MOVE_MAX_ARCHIVE_BYTES)} a restore uploads safely`
+    if (this.store.getProject(row.project_id)?.repo) {
+      const push = this.store.getTask(row.id)?.pushState
+      const ended = this.store.lastTurnFinishedAt(row.id) ?? 0
+      if (push?.status !== "pushed" || push.at < ended) return "origin doesn't have its branch and uncommitted work from its last turn"
+    }
+    return null
   }
 
   /**
@@ -1696,8 +1717,9 @@ export class TaskManager {
   private async leaveSmallBox(row: TaskRow, boxId: string, min: BoxSize): Promise<string | null | "stay"> {
     // Its turn-end archive is being written right now; it's fresh in a moment.
     if (this.archiving.has(row.id)) return null
-    if (row.session_started && !this.archiveHoldsWorkspace(row)) {
-      const note = `Running on ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) though its project needs ${min} boxes: its workspace has no fresh archive to move.`
+    const block = row.session_started ? this.moveBlock(row) : null
+    if (block) {
+      const note = `Running on ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) though its project needs ${min} boxes: it can't move safely (${block}).`
       if (!this.smallBoxNoted.has(`${row.id}:${boxId}`)) {
         this.smallBoxNoted.add(`${row.id}:${boxId}`)
         this.addEvent(row.id, note)
