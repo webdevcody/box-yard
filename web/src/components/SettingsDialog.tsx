@@ -20,7 +20,7 @@ import { VoicePanel } from "./VoiceSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
-import { BOX_SIZE_SPECS, sizePriceLine, sizeSpecLine } from "../../../shared/boxSizes"
+import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -520,7 +520,7 @@ function LimitsPanel({
         >
           {BOX_SIZES.map((size) => (
             <option key={size} value={size}>
-              {BOX_SIZE_SPECS[size].label} ({sizeSpecLine(size)}, {sizePriceLine(size)})
+              {BOX_SIZE_SPECS[size].label} · {BOX_SIZE_SPECS[size].cpu} vCPU · {BOX_SIZE_SPECS[size].ramGb} GB RAM
             </option>
           ))}
         </Select>
@@ -658,7 +658,7 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
       <p className="border-t border-zinc-900 px-3 py-2 leading-relaxed text-zinc-500">
         {overridden
           ? "Your saved or env values below replace the size defaults for every size."
-          : `Values come from the worker size: small boxes run ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keep ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders. Set the fields below to override.`}{" "}
+          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
         Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} agents and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
       </p>
     </div>
