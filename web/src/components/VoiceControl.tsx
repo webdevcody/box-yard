@@ -33,12 +33,13 @@ export function VoiceControl() {
         <button
           type="button"
           data-voice-unlock
-          // Normally the window-level gesture listener in lib/speech.ts has already unlocked by now.
+          // Normally the window-level gesture listener in lib/speech.ts has already unlocked by now. Phones don't
+          // show it: there's no room in the header, and the first tap anywhere (into the message box) unlocks.
           onClick={() => {
             unlockVoice()
             speakNow("Voice on.")
           }}
-          className="rounded-full border border-yard-500/40 bg-yard-500/10 px-2 py-0.5 text-[11px] font-medium text-yard-300 hover:bg-yard-500/20"
+          className="rounded-full border border-yard-500/40 bg-yard-500/10 px-2 py-0.5 text-[11px] font-medium text-yard-300 hover:bg-yard-500/20 max-sm:hidden"
         >
           🔊 Click to enable voice
         </button>

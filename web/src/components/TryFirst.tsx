@@ -118,7 +118,7 @@ function PromptText({ template, repo }: { template: string; repo: string | null 
   return (
     <>
       {before}
-      {repo ? <span className="font-medium text-zinc-50">{repo}</span> : <span className="font-mono text-[0.8125rem] text-yard-400">{REPO_PLACEHOLDER}</span>}
+      {repo ? <span className="inline-block max-w-full font-medium text-zinc-50">{repo}</span> : <span className="font-mono text-[0.8125rem] text-yard-400">{REPO_PLACEHOLDER}</span>}
       {after}
     </>
   )
