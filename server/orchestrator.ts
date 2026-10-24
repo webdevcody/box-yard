@@ -104,6 +104,8 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
+  private stopped = false
   /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
   private readonly runNotes = new Map<string, string>()
   private child: ChildProcess | null = null
@@ -204,6 +206,7 @@ export class Orchestrator {
   }
 
   stop() {
+    this.stopped = true
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
     this.cancel()
@@ -424,11 +427,11 @@ export class Orchestrator {
   }
 
   private async drain() {
-    if (this.running) return
+    if (this.running || this.stopped) return
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun()) {
+      while (!this.stopped && (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun())) {
         if (this.compactWanted) {
           await this.doCompact()
         } else if (this.pending) {
@@ -442,6 +445,9 @@ export class Orchestrator {
           await this.autoTurn()
         }
       }
+    } catch (err) {
+      // stop() killed the turn and closed the database under it: nothing left to record.
+      if (!this.stopped) throw err
     } finally {
       this.running = false
       this.hub.broadcast({ type: "chat.busy", busy: false })

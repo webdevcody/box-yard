@@ -2590,6 +2590,8 @@ export class TaskManager {
     this.publishDirectory()
     void this.archive(row.id)
       .then(() => {
+        // stop() may have closed the database while the archive ran.
+        if (this.stopped) return
         const fresh = this.store.getTaskRow(row.id)
         if (!fresh?.archive_path) return
         const available = fs.existsSync(fresh.archive_path)

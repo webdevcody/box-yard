@@ -247,6 +247,8 @@ class Captain {
   private throttleTimer: NodeJS.Timeout | null = null
   /** Unattended wake-ups since Cody or the Coordinator last wrote. */
   private autoTurns = 0
+  /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
+  private stopped = false
   private readonly loopGuard: WakeLoopGuard
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
@@ -321,6 +323,7 @@ class Captain {
   }
 
   stop() {
+    this.stopped = true
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
     this.clearThrottleTimer()
@@ -388,11 +391,11 @@ class Captain {
   }
 
   private async drain() {
-    if (this.running) return
+    if (this.running || this.stopped) return
     this.running = true
     this.publishState()
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted) {
+      while (!this.stopped && (this.pending || this.wakeWanted || this.compactWanted)) {
         if (this.compactWanted) await this.doCompact()
         else if (this.pending) {
           this.pending = false
@@ -403,6 +406,9 @@ class Captain {
           await this.autoTurn()
         }
       }
+    } catch (err) {
+      // stop() killed the turn and closed the database under it: nothing left to record.
+      if (!this.stopped) throw err
     } finally {
       this.running = false
       this.publishState()
