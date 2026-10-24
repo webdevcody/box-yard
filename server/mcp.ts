@@ -11,6 +11,7 @@ import type { Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import type { CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
+import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
@@ -852,6 +853,247 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       }),
     ),
   )
+
+  // ---------------------------------------------------------------- hooks
+  // Coordinator: global hooks and any project's. A Captain: only its own project's hooks and their runs,
+  // never another project's or the global ones (#58 scoping, enforced here, not in the prompt).
+  const hookEngine = deps.hooks
+  if (hookEngine) {
+    const createdBy = () => (scopeId ? `the ${ownProject().name} Captain` : "the Coordinator")
+    const hookRef = (ref: string): Hook => {
+      const h = hookEngine.find(ref, scopeId ?? undefined)
+      if (!h) throw new Error(`No hook "${ref}"${scopeId ? " in this project" : ""}. Use list_hooks.`)
+      if (scopeId && h.projectId !== scopeId) {
+        throw outOfScope(h.projectId ? `hook "${h.name}" belongs to another project` : `hook "${h.name}" is a global (Coordinator) hook`)
+      }
+      return h
+    }
+    /** Where a new hook lives: a Captain's own project; for the Coordinator, the given project or global. */
+    const hookScope = (ref?: string | null): string | null => (scopeId ? (ref ? project(ref).id : scopeId) : ref ? project(ref).id : null)
+    const hookView = (h: Hook & { lastRun?: HookRun | null }) => ({
+      id: h.id,
+      name: h.name,
+      scope: h.projectId ? (store.getProject(h.projectId)?.name ?? h.projectId) : "global",
+      enabled: h.enabled,
+      on: `${h.trigger} (${TRIGGER_INFO[h.trigger].label})`,
+      action: h.action,
+      taskTitle: h.taskTitle ?? undefined,
+      filters: Object.keys(h.filters).length ? h.filters : undefined,
+      prompt: h.prompt,
+      allowSelfTrigger: h.allowSelfTrigger || undefined,
+      maxFiresPerTask: h.maxFiresPerTask,
+      template: h.template ?? undefined,
+      createdBy: h.createdBy,
+      lastRun: h.lastRun ? `${h.lastRun.status} ${ago(h.lastRun.createdAt)} on ${h.lastRun.taskId ?? "?"}: ${h.lastRun.result}` : undefined,
+    })
+    const runView = (r: HookRun) => ({
+      at: new Date(r.createdAt).toISOString(),
+      hook: r.hookName,
+      event: r.event,
+      task: r.taskId ? `${r.taskId} "${r.taskTitle ?? ""}"` : undefined,
+      headSha: r.headSha ?? undefined,
+      action: r.action,
+      status: r.status,
+      result: r.result,
+      target: r.targetTaskId && r.targetTaskId !== r.taskId ? r.targetTaskId : undefined,
+      prompt: preview(r.prompt, 400, "see the hook's runs in the app"),
+    })
+    const filtersSchema = z
+      .object({
+        project: z.string().optional().describe("Global hooks only: just this project's tasks"),
+        title_regex: z.string().max(300).optional().describe("Case-insensitive regex the task title must match"),
+        prompt_regex: z.string().max(300).optional().describe("Case-insensitive regex the task prompt must match"),
+        sources: z.array(z.enum(HOOK_SOURCES)).optional().describe("Only tasks started by these: cody, captain, coordinator, schedule"),
+        labels: z.array(z.string()).optional().describe("The PR must carry at least one of these labels"),
+        exclude_labels: z.array(z.string()).optional().describe('Skip PRs with any of these labels, e.g. ["no-automerge"]'),
+        include_drafts: z.boolean().optional().describe("Also fire for draft PRs (off by default)"),
+        include_quiet: z.boolean().optional().describe("schedule.run_finished: also fire for quiet no-op runs (off by default)"),
+      })
+      .optional()
+    type FiltersArg = z.infer<typeof filtersSchema>
+    const toFilters = (f: FiltersArg) =>
+      f === undefined
+        ? undefined
+        : {
+            projectId: f.project ? project(f.project).id : null,
+            titleRegex: f.title_regex ?? null,
+            promptRegex: f.prompt_regex ?? null,
+            sources: f.sources,
+            labels: f.labels,
+            excludeLabels: f.exclude_labels,
+            includeDrafts: f.include_drafts,
+            includeQuiet: f.include_quiet,
+          }
+    const triggers = HOOK_TRIGGERS.map((t) => `${t} (${TRIGGER_INFO[t].description})`).join("; ")
+    const actions = HOOK_ACTIONS.map((a) => `${a} (${ACTION_INFO[a].description})`).join("; ")
+
+    server.registerTool(
+      "create_hook",
+      {
+        description:
+          "Create a hook: an automation that runs when a task event happens, so routine follow-ups happen without anyone watching. " +
+          `Triggers: ${triggers}. Actions: ${actions}. ` +
+          `The prompt is a template; ${HOOK_VARIABLES.map((v) => `{${v}}`).join(", ")} are filled in when it fires. ` +
+          (scopeId
+            ? "Your hooks always belong to your project. "
+            : "Leave project out for a global hook (every project's tasks, optionally filtered with filters.project), or give project for a project hook its Captain manages. ") +
+          'template: "pr_merge" starts from the built-in "On PR ready → merge" hook (the Merge PR button\'s standard merge request; PRs labelled no-automerge skipped); other fields override it. ' +
+          "New hooks are OFF unless enabled: true. Turn one on only when Cody asked for the automation. Each fire fires once per event (per PR head commit for task.pr_ready), never on work it started itself, and shows on the task's transcript and as a notice to the Captain and the Coordinator.",
+        inputSchema: {
+          name: z.string().min(1).max(120).optional().describe("Required unless template is given"),
+          project: z.string().optional().describe(scopeId ? "Your project (the default)" : "Project id or name for a project hook; omit for a global hook"),
+          template: z.enum(HOOK_TEMPLATES).optional(),
+          trigger: z.enum(HOOK_TRIGGERS).optional().describe("Required unless template is given"),
+          action: z.enum(HOOK_ACTIONS).optional().describe("Required unless template is given"),
+          prompt: z.string().min(1).max(20_000).optional().describe("Required unless template is given"),
+          task_title: z.string().max(120).optional().describe("create_task only: the new task's title (a template)"),
+          filters: filtersSchema,
+          enabled: z.boolean().optional().describe("Default false"),
+          allow_self_trigger: z.boolean().optional().describe("Let it fire on turns its own prompt started. Default false: leave it off unless the loop is intended."),
+          max_fires_per_task: z.number().int().min(1).max(50).optional().describe("Most fires per task (default 3)"),
+        },
+      },
+      safe(
+        async (a: {
+          name?: string
+          project?: string
+          template?: (typeof HOOK_TEMPLATES)[number]
+          trigger?: (typeof HOOK_TRIGGERS)[number]
+          action?: (typeof HOOK_ACTIONS)[number]
+          prompt?: string
+          task_title?: string
+          filters?: FiltersArg
+          enabled?: boolean
+          allow_self_trigger?: boolean
+          max_fires_per_task?: number
+        }) => {
+          const projectId = hookScope(a.project)
+          const filters = toFilters(a.filters)
+          if (scopeId && filters?.projectId && filters.projectId !== scopeId) throw outOfScope("hooks can only watch your own project")
+          if (a.template) {
+            let hook = hookEngine.fromTemplate(a.template, { projectId, createdBy: createdBy(), enabled: a.enabled, name: a.name, prompt: a.prompt })
+            const rest = { trigger: a.trigger, action: a.action, taskTitle: a.task_title, filters, allowSelfTrigger: a.allow_self_trigger, maxFiresPerTask: a.max_fires_per_task }
+            if (Object.values(rest).some((v) => v !== undefined)) hook = hookEngine.update(hook.id, rest)
+            return ok(hookView(hook))
+          }
+          if (!a.name || !a.trigger || !a.action || !a.prompt) throw new Error("Give name, trigger, action and prompt (or a template).")
+          return ok(
+            hookView(
+              hookEngine.create({
+                name: a.name,
+                projectId,
+                trigger: a.trigger,
+                action: a.action,
+                prompt: a.prompt,
+                taskTitle: a.task_title ?? null,
+                filters: filters ?? {},
+                enabled: a.enabled ?? false,
+                allowSelfTrigger: a.allow_self_trigger,
+                maxFiresPerTask: a.max_fires_per_task,
+                createdBy: createdBy(),
+              }),
+            ),
+          )
+        },
+      ),
+    )
+
+    server.registerTool(
+      "list_hooks",
+      {
+        description: scopeId
+          ? "List your project's hooks (automations on task events), with each one's last run."
+          : 'List hooks with each one\'s last run: all of them, one project\'s (project), or only the global ones (project: "global").',
+        inputSchema: { project: z.string().optional() },
+      },
+      safe(async (a: { project?: string }) => {
+        if (scopeId) {
+          if (a.project && a.project.toLowerCase() === "global") throw outOfScope("global hooks belong to the Coordinator")
+          return ok(hookEngine.list({ projectId: a.project ? project(a.project).id : scopeId }).map(hookView))
+        }
+        const filter = a.project ? { projectId: a.project.toLowerCase() === "global" ? null : project(a.project).id } : {}
+        return ok(hookEngine.list(filter).map(hookView))
+      }),
+    )
+
+    server.registerTool(
+      "update_hook",
+      {
+        description: "Change a hook: rename it, turn it on or off (enabled), or change its trigger, filters, action, prompt or limits. Passing filters replaces all of them. A hook's scope (global vs project) can't change.",
+        inputSchema: {
+          hook: z.string().describe("Hook id or name"),
+          name: z.string().min(1).max(120).optional(),
+          enabled: z.boolean().optional(),
+          trigger: z.enum(HOOK_TRIGGERS).optional(),
+          action: z.enum(HOOK_ACTIONS).optional(),
+          prompt: z.string().min(1).max(20_000).optional(),
+          task_title: z.string().max(120).optional(),
+          filters: filtersSchema,
+          allow_self_trigger: z.boolean().optional(),
+          max_fires_per_task: z.number().int().min(1).max(50).optional(),
+        },
+      },
+      safe(
+        async (a: {
+          hook: string
+          name?: string
+          enabled?: boolean
+          trigger?: (typeof HOOK_TRIGGERS)[number]
+          action?: (typeof HOOK_ACTIONS)[number]
+          prompt?: string
+          task_title?: string
+          filters?: FiltersArg
+          allow_self_trigger?: boolean
+          max_fires_per_task?: number
+        }) => {
+          const h = hookRef(a.hook)
+          const filters = toFilters(a.filters)
+          if (scopeId && filters?.projectId && filters.projectId !== scopeId) throw outOfScope("hooks can only watch your own project")
+          return ok(
+            hookView(
+              hookEngine.update(h.id, {
+                name: a.name,
+                enabled: a.enabled,
+                trigger: a.trigger,
+                action: a.action,
+                prompt: a.prompt,
+                taskTitle: a.task_title,
+                filters,
+                allowSelfTrigger: a.allow_self_trigger,
+                maxFiresPerTask: a.max_fires_per_task,
+              }),
+            ),
+          )
+        },
+      ),
+    )
+
+    server.registerTool(
+      "delete_hook",
+      { description: "Delete a hook. Its past runs stay in the log.", inputSchema: { hook: z.string().describe("Hook id or name") } },
+      safe(async (a: { hook: string }) => {
+        const h = hookRef(a.hook)
+        hookEngine.remove(h.id)
+        return ok(`Deleted hook "${h.name}".`)
+      }),
+    )
+
+    server.registerTool(
+      "list_hook_runs",
+      {
+        description:
+          "The hook audit log, newest first: when each hook matched an event, what it sent (the rendered prompt) and what happened (fired, skipped by a guard, or failed). Filter by hook, task or project.",
+        inputSchema: { hook: z.string().optional(), task: z.string().optional(), project: z.string().optional(), limit: z.number().int().min(1).max(100).optional() },
+      },
+      safe(async (a: { hook?: string; task?: string; project?: string; limit?: number }) => {
+        const hookId = a.hook ? hookRef(a.hook).id : undefined
+        const taskId = a.task ? task(a.task).id : undefined
+        const projectId = scopeId ?? (a.project ? project(a.project).id : undefined)
+        // A Captain reads only its own hooks' runs, not the global hooks' (even on its own tasks).
+        return ok(hookEngine.runs({ hookId, taskId, projectId, hookScope: scopeId ?? undefined, limit: a.limit ?? 20 }).map(runView))
+      }),
+    )
+  }
 
   // Boxes are shared across projects, so cleaning one up is the Coordinator's call.
   coordinatorOnly(

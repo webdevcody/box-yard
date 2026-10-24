@@ -37,6 +37,7 @@ interface HookRunRow {
   id: string
   hook_id: string | null
   hook_name: string
+  hook_project_id: string | null
   project_id: string | null
   task_id: string | null
   task_title: string | null
@@ -104,6 +105,7 @@ function runFromRow(r: HookRunRow): HookRun {
     id: r.id,
     hookId: r.hook_id,
     hookName: r.hook_name,
+    hookProjectId: r.hook_project_id,
     projectId: r.project_id,
     taskId: r.task_id,
     taskTitle: r.task_title,
@@ -226,13 +228,14 @@ export class HookStore {
     const id = newId("hrun")
     this.db
       .prepare(
-        `INSERT INTO hook_runs (id, hook_id, hook_name, project_id, task_id, task_title, event, fire_key, head_sha, action, prompt, status, result, target_task_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO hook_runs (id, hook_id, hook_name, hook_project_id, project_id, task_id, task_title, event, fire_key, head_sha, action, prompt, status, result, target_task_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         input.hookId,
         input.hookName,
+        input.hookProjectId,
         input.projectId,
         input.taskId,
         input.taskTitle,
@@ -263,8 +266,11 @@ export class HookStore {
     return row ? runFromRow(row) : null
   }
 
-  /** Newest first. `global`: only runs of global (Coordinator) hooks. `taskId` also finds runs that sent to or created it. */
-  listRuns(filter: { hookId?: string; projectId?: string; taskId?: string; global?: boolean; limit?: number } = {}): HookRun[] {
+  /**
+   * Newest first. `projectId`: runs on that project's tasks. `hookScope`: only runs of hooks owned by that project,
+   * or of global (Coordinator) hooks for null. `taskId` also finds runs that sent to or created it.
+   */
+  listRuns(filter: { hookId?: string; projectId?: string; taskId?: string; hookScope?: string | null; limit?: number } = {}): HookRun[] {
     const where: string[] = []
     const args: unknown[] = []
     if (filter.hookId) {
@@ -279,7 +285,11 @@ export class HookStore {
       where.push("(r.task_id = ? OR r.target_task_id = ?)")
       args.push(filter.taskId, filter.taskId)
     }
-    if (filter.global) where.push("r.hook_id IN (SELECT id FROM hooks WHERE project_id IS NULL)")
+    if (filter.hookScope === null) where.push("r.hook_project_id IS NULL")
+    else if (filter.hookScope !== undefined) {
+      where.push("r.hook_project_id = ?")
+      args.push(filter.hookScope)
+    }
     const rows = this.db
       .prepare(`SELECT r.* FROM hook_runs r ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY r.created_at DESC, r.rowid DESC LIMIT ?`)
       .all(...args, Math.max(1, Math.min(filter.limit ?? 50, 500))) as HookRunRow[]

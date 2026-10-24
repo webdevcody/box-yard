@@ -441,7 +441,7 @@ export function createBoxYard(
     res.json(
       hooks.runs({
         projectId: scope ?? undefined,
-        global: scope === null,
+        hookScope: scope === null ? null : undefined,
         hookId: typeof req.query.hookId === "string" ? req.query.hookId : undefined,
         taskId: typeof req.query.taskId === "string" ? req.query.taskId : undefined,
         limit,

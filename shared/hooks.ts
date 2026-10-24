@@ -86,6 +86,9 @@ export interface HookRun {
   id: string
   hookId: string | null
   hookName: string
+  /** The hook's scope when it ran: null for a global hook, else the project that owns it. */
+  hookProjectId: string | null
+  /** The task's project. */
   projectId: string | null
   taskId: string | null
   taskTitle: string | null

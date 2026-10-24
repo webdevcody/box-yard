@@ -482,6 +482,8 @@ export const MIGRATIONS: string[] = [
     id TEXT PRIMARY KEY,
     hook_id TEXT REFERENCES hooks(id) ON DELETE SET NULL,
     hook_name TEXT NOT NULL,
+    -- The hook's own scope when it ran (NULL: a global hook), so a Captain only reads its own hooks' runs.
+    hook_project_id TEXT,
     project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
     task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
     task_title TEXT,

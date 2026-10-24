@@ -156,6 +156,11 @@ export class HookEngine {
     return list.map((h) => ({ ...h, lastRun: last.get(h.id) ?? null }))
   }
 
+  /** By id, or by name among global hooks (null), one project's, or all (undefined). */
+  find(ref: string, scope?: string | null): Hook | null {
+    return this.deps.hooks.find(ref, scope)
+  }
+
   get(id: string): Hook {
     const hook = this.deps.hooks.get(id)
     if (!hook) throw new NotFoundError(`Hook ${id} not found`)
@@ -283,6 +288,7 @@ export class HookEngine {
     return {
       hookId: hook.id,
       hookName: hook.name,
+      hookProjectId: hook.projectId,
       projectId: task.projectId,
       taskId: task.id,
       taskTitle: task.title,
