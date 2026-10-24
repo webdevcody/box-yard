@@ -87,13 +87,15 @@ describe("prompts with an owner name", () => {
     expect(text).toContain("Message from the site Captain (on Ana's behalf)")
     const first = firstTurnPrompt({
       task: { title: "T", prompt: "p" },
-      notes: [{ id: "n", projectId: "prj_1", author: "Cody", content: "Cody likes tabs", createdAt: 0 }],
+      notes: [{ author: "Cody", content: "Cody likes tabs" }],
+      hiddenNotes: 2,
       directory: [],
       extraInputs: [],
       ownerName: "Ana",
     })
-    expect(first).toContain("shared memory from Ana and other agents")
+    expect(first).toContain("lasting rules from Ana and the project's Captain")
     expect(first).toContain("(Cody) Cody likes tabs")
+    expect(first).toContain("2 older notes don't fit the notes budget")
   })
 
   it("Coordinator, Captain and routing prompts have no Cody left", () => {

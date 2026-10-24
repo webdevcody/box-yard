@@ -14,8 +14,11 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
+// A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion) and replies
+// "(no update)"; FAKE_RETRO=reject rejects them instead.
 // Worker prompts understand these markers anywhere in the text:
 //   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
+// [note] suggests a project note (suggest_note) for the Captain's notes retro.
 // [hang] keeps the turn running for two minutes (until it's stopped).
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
@@ -175,7 +178,18 @@ function sh(cmd) {
 
 // ---------------------------------------------------------------- behaviors
 
+/** A Captain's notes retro: settle every suggestion it names. */
+async function notesRetro(mcp, prompt) {
+  const ids = [...new Set([...prompt.matchAll(/`(sug_[A-Za-z0-9_-]+)`/g)].map((m) => m[1]))]
+  const action = process.env.FAKE_RETRO === "reject" ? "reject" : "accept"
+  await useTool(mcp, "list_notes", {})
+  for (const id of ids) await useTool(mcp, "resolve_suggestion", { suggestion: id, action, ...(action === "reject" ? { reason: "mock retro" } : {}) })
+  await say("(no update)")
+  return "(no update)"
+}
+
 async function orchestrator(mcp, prompt) {
+  if (prompt.includes("📝 **Notes retro**")) return notesRetro(mcp, prompt)
   const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
   const lines = []
   let m
@@ -261,7 +275,8 @@ async function worker(mcp, prompt) {
   if (agent) {
     await useTool(mcp, "message_agent", { to: agent[1], message: "Hi from another agent! What are you working on?", expect_reply: false })
   }
-  if (/\[note\]/i.test(prompt)) await useTool(mcp, "save_note", { content: "The mock agent says: tests run with npm test." })
+  if (/\[note\]/i.test(prompt))
+    await useTool(mcp, "suggest_note", { content: "The mock agent says: tests run with npm test.", why: "A future agent would guess the wrong test command." })
   if (/\[preview\]/i.test(prompt)) {
     const port = Number(process.env.PORT || 4000)
     await sh(
