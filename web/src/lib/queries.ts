@@ -7,6 +7,7 @@ import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
+import type { HeavyTasks } from "../../../shared/memory"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import type {
@@ -268,6 +269,7 @@ export function useCreateProject() {
           boxSize: null,
           partialClone: null,
           pushAtTurnEnd: null,
+          heavyTasks: "off",
           createdAt: now,
           updatedAt: now,
         }),
@@ -301,6 +303,7 @@ export function useUpdateProject() {
       notesMaxCount?: number | null
       notesMaxTokens?: number | null
       pushAtTurnEnd?: boolean | null
+      heavyTasks?: HeavyTasks
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {

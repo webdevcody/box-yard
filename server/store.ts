@@ -3,6 +3,7 @@ import type { DB } from "./db.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
+import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -229,6 +230,7 @@ interface ProjectRow {
   box_size: string | null
   partial_clone: number | null
   push_at_turn_end: number | null
+  heavy_tasks: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   sort_order: number
@@ -254,6 +256,10 @@ export interface BoxRow {
   disk_checked_at: number | null
   root_free_bytes: number | null
   root_total_bytes: number | null
+  mem_used_bytes: number | null
+  mem_total_bytes: number | null
+  load_avg: number | null
+  cpu_count: number | null
 }
 
 /** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
@@ -522,6 +528,7 @@ export class Store {
       boxSize: row.box_size ? normalizeBoxSize(row.box_size) : null,
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
+      heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -536,6 +543,16 @@ export class Store {
   getProject(id: string): Project | null {
     const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
     return row ? this.projectFromRow(row) : null
+  }
+
+  /** Just the name, without loading the notes (placement asks often). */
+  getProjectName(id: string): string | null {
+    return (this.db.prepare("SELECT name FROM projects WHERE id = ?").get(id) as { name: string } | undefined)?.name ?? null
+  }
+
+  /** The project's "heavy tasks" setting, without loading the rest (placement asks per box and running task). */
+  projectHeavyTasks(id: string): HeavyTasks {
+    return normalizeHeavyTasks((this.db.prepare("SELECT heavy_tasks FROM projects WHERE id = ?").get(id) as { heavy_tasks: string | null } | undefined)?.heavy_tasks)
   }
 
   findProject(idOrName: string): Project | null {
@@ -560,6 +577,7 @@ export class Store {
     boxSize?: BoxSize | null
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
+    heavyTasks?: HeavyTasks
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -583,6 +601,7 @@ export class Store {
     if (input.boxSize) this.db.prepare("UPDATE projects SET box_size = ? WHERE id = ?").run(input.boxSize, id)
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
+    this.setHeavyTasks(id, input.heavyTasks)
     this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
   }
@@ -602,6 +621,8 @@ export class Store {
       partialClone?: boolean | null
       /** null clears it (Settings → Push at turn end applies). */
       pushAtTurnEnd?: boolean | null
+      /** How its running agents share boxes (shared/memory.ts HEAVY_TASKS). */
+      heavyTasks?: HeavyTasks
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -629,8 +650,15 @@ export class Store {
         Date.now(),
         id,
       )
+    this.setHeavyTasks(id, patch.heavyTasks)
     this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** undefined leaves it as it is; "off" is stored as NULL. */
+  private setHeavyTasks(id: string, v: HeavyTasks | undefined) {
+    if (v === undefined) return
+    this.db.prepare("UPDATE projects SET heavy_tasks = ? WHERE id = ?").run(v === "off" ? null : normalizeHeavyTasks(v), id)
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
@@ -1920,6 +1948,10 @@ export class Store {
       diskCheckedAt: number | null
       rootFreeBytes: number | null
       rootTotalBytes: number | null
+      memUsedBytes: number | null
+      memTotalBytes: number | null
+      loadAvg: number | null
+      cpuCount: number | null
     }>,
   ) {
     const sets: string[] = []
@@ -1937,6 +1969,10 @@ export class Store {
       diskCheckedAt: "disk_checked_at",
       rootFreeBytes: "root_free_bytes",
       rootTotalBytes: "root_total_bytes",
+      memUsedBytes: "mem_used_bytes",
+      memTotalBytes: "mem_total_bytes",
+      loadAvg: "load_avg",
+      cpuCount: "cpu_count",
     } as const
     for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
       if (v === undefined) continue

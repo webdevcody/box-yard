@@ -4,6 +4,7 @@ import type { BoxCleanup } from "./disk.js"
 import type { Hook, HookRun } from "./hooks.js"
 import type { BoxResize } from "./boxSizes.js"
 import type { TtsInfo } from "./tts.js"
+import type { HeavyTasks } from "./memory.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -50,6 +51,8 @@ export interface Project {
   partialClone: boolean | null
   /** Push each task's branch and uncommitted work at the end of every turn; null uses Settings → Push at turn end. */
   pushAtTurnEnd: boolean | null
+  /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
+  heavyTasks: HeavyTasks
   createdAt: number
   updatedAt: number
 }
@@ -328,6 +331,14 @@ export interface BoxInfo {
   /** Free and total space on the box's root disk (/tmp, HOME) when that isn't the work disk; null otherwise or until checked. */
   rootFreeBytes?: number | null
   rootTotalBytes?: number | null
+  /** Memory in use (without reclaimable page cache) and the box's memory, from the same probe; null until checked. */
+  memUsedBytes?: number | null
+  memTotalBytes?: number | null
+  /** 1-minute load average and the CPUs it's over (nproc). */
+  loadAvg?: number | null
+  cpuCount?: number | null
+  /** Why placement skips the box for new agents (Settings → Boxes & limits → Memory), or null. */
+  memoryPressure?: string | null
   /** Too little free space for a new workspace (Settings → Boxes & limits → Disk). */
   diskLow: boolean
   /** The running cleanup, or the last one. */
@@ -543,6 +554,12 @@ export interface Settings {
   diskMinFreeMb: number
   /** ...and at least this many times the repo's last clone size. */
   diskCloneFactor: number
+  /** Placement skips a box with more than this % of its memory in use while agents run on it. 0 = off. */
+  memoryMaxUsedPercent: number
+  /** ...or with less than this much memory free (MB). 0 = off. */
+  memoryMinFreeMb: number
+  /** ...or with a 1-minute load average above this many times its CPUs. 0 = off. */
+  loadMaxPerCpu: number
   /** Box repo mirrors are partial clones (blob:none): old blobs are fetched when something reads them. A project can override it. */
   gitPartialClone: boolean
   /**

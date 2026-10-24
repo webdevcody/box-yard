@@ -588,6 +588,15 @@ export const MIGRATIONS: string[] = [
     WHERE p.created_at < projects.created_at OR (p.created_at = projects.created_at AND p.rowid < projects.rowid)
   );
   `,
+  `
+  -- Memory-aware placement: each box's memory in use and load from its last probe (the df script), and a project's
+  -- "heavy tasks" choice: NULL or 'off', 'one-per-box', 'whole-box'.
+  ALTER TABLE boxes ADD COLUMN mem_used_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN mem_total_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN load_avg REAL;
+  ALTER TABLE boxes ADD COLUMN cpu_count INTEGER;
+  ALTER TABLE projects ADD COLUMN heavy_tasks TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
