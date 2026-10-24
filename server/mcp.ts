@@ -71,11 +71,11 @@ const effortSchema = z
   .enum(EFFORTS)
   .optional()
   .describe(
-    "How hard the agent should think (reasoning effort). Pick the lowest level that fits: " +
+    "How hard the agent should think (reasoning effort). Omit it to use the project route, Settings or routing defaults; pass one for a matching routing rule, an escalation, or when Settings leaves effort to the Coordinator, and then pick the lowest level that fits: " +
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Default if omitted: high.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
   )
 
 const modelSchema = z
@@ -85,7 +85,7 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, chosen from the routing rules. Omit to use project/global defaults.")
+  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
