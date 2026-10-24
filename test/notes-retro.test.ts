@@ -259,6 +259,22 @@ describe("NotesRetro", () => {
     expect(sent).toHaveLength(1)
   })
 
+  it("doesn't send a retro again that is still queued for its Captain (Box Yard restarted before it woke)", () => {
+    const { sent, task, suggest, store, project } = setup()
+    const t = task("Queued")
+    const s = suggest(t, "queued rule")
+    store.markSuggestionsInRetro([s.id])
+    store.addCaptainMessage(project.id, "notice", "📝 **Notes retro**: 1 finished task left 1 note suggestion to curate.", { kind: "retro", taskIds: [t.id], suggestionIds: [s.id], loopKey: `retro:${t.id}` })
+    // A fresh NotesRetro, as after a restart.
+    const retro = new NotesRetro({ store, subscribe: () => () => {}, enabled: () => true, deliver: (projectId, content, meta) => sent.push({ projectId, content, meta }), budget: () => ({ line: "", over: false }), ownerName: () => "Ana" })
+    retro.tuning.debounceMs = 1000
+    retro.start()
+    vi.advanceTimersByTime(5000)
+    expect(sent).toHaveLength(0)
+    // Its Captain's turn ends: settled as usual.
+    expect(retro.settle(project.id, [s.id], true)).toBe(1)
+  })
+
   it("sends a project's orphaned suggestions on their own", () => {
     const { retro, sent, task, suggest, store, project } = setup()
     const gone = task("Gone")

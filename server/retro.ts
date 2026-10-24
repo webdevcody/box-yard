@@ -111,6 +111,12 @@ export function retroNotice(items: RetroItem[], opts: { budget: { line: string; 
   return lines.join("\n")
 }
 
+/** The suggestion ids a retro notice's meta holds (none for any other notice). */
+export function retroSuggestionIds(meta: Record<string, unknown> | null | undefined): string[] {
+  if (meta?.kind !== "retro" || !Array.isArray(meta.suggestionIds)) return []
+  return meta.suggestionIds.filter((id): id is string => typeof id === "string")
+}
+
 interface Batch {
   tasks: Map<string, RetroTrigger>
   timer: NodeJS.Timeout | null
@@ -150,8 +156,13 @@ export class NotesRetro {
    */
   catchUp() {
     if (!this.deps.enabled()) return
+    const pending = this.deps.store.listNoteSuggestions({ status: ["pending"], limit: 2000 })
+    // A retro still queued for its Captain (Box Yard restarted before it woke) is in flight: don't send it twice.
+    for (const projectId of new Set(pending.map((s) => s.projectId))) {
+      for (const n of this.deps.store.peekUnseenCaptainNoticeEntries(projectId)) for (const id of retroSuggestionIds(n.meta)) this.inFlight.add(id)
+    }
     const projects = new Set<string>()
-    for (const s of this.deps.store.listNoteSuggestions({ status: ["pending"], limit: 2000 })) {
+    for (const s of pending) {
       if (this.inFlight.has(s.id)) continue
       const task = s.taskId ? this.deps.store.getTask(s.taskId) : null
       if (task && s.retroAt === null) {

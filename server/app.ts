@@ -17,7 +17,7 @@ import { SettingsStore, TtsSettingsStore } from "./settings.js"
 import { TtsError, TtsService } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
-import { NotesRetro } from "./retro.js"
+import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
 import { LocalProvider } from "./providers/local.js"
@@ -263,7 +263,7 @@ export function createBoxYard(
   retro.start()
   // The Captain's turn that read a retro is over: whatever it left pending is rejected, so nothing waits.
   captains.onNoticesHandled = (projectId, notices, ok) => {
-    const ids = notices.flatMap((n) => (n.meta?.kind === "retro" && Array.isArray(n.meta.suggestionIds) ? n.meta.suggestionIds.filter((id): id is string => typeof id === "string") : []))
+    const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
     if (ids.length) retro.settle(projectId, ids, ok)
   }
   captains.onReport = (projectId, content) => {
