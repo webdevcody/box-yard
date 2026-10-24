@@ -270,7 +270,7 @@ async function worker(mcp, prompt) {
   const markNoop = () => useTool(mcp, "mark_done", { summary: "Nothing to do this run.", outcome: "noop" })
   if (/\[fail\]/i.test(prompt)) {
     if (noop) await markNoop()
-    console.error("fake failure requested by [fail]")
+    console.error("fake failure requested by the fail marker")
     process.exit(3)
   }
   await say("Looking at the task. (mock Claude)")
