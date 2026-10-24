@@ -232,10 +232,12 @@ describe("shared git objects", () => {
     expect(git(work, "cat-file", "-t", doomed)).toBe("commit")
   })
 
+  // These three test the full archive (push at turn end off), the fallback for tasks git can't carry;
+  // test/git-first.e2e.test.ts covers the small archives of pushed tasks.
   it("archives restore onto a box with a fresh mirror, keeping the task's commits and objects GitHub dropped", async () => {
     const o = origin()
     const r = await start()
-    const p = await repoProject(r, "alpha", o.url)
+    const p = await repoProject(r, "alpha", o.url, { pushAtTurnEnd: false })
     const feature = o.pushBranch("feature")
     const t = await startTask(r, p.id, "round trip")
     const boxId = t.boxId!
@@ -285,7 +287,7 @@ describe("shared git objects", () => {
   it("keeps the borrowed objects in a too-big archive too (git history only, uncommitted work on refs/boxyard/wip)", async () => {
     const o = origin()
     const r = await start({ archiveMaxMb: 1 })
-    const p = await repoProject(r, "alpha", o.url)
+    const p = await repoProject(r, "alpha", o.url, { pushAtTurnEnd: false })
     const feature = o.pushBranch("feature")
     const t = await startTask(r, p.id, "too big")
     const work = workOf(r, t)
@@ -314,12 +316,16 @@ describe("shared git objects", () => {
     expect(git(restored, "cat-file", "-t", feature)).toBe("commit")
     expect(git(restored, "show", "refs/boxyard/wip:notes.md")).toBe("uncommitted")
     expect(git(restored, "rev-parse", "--abbrev-ref", "HEAD")).toBe(t.branch)
+    // The partial archive had no working files: they're checked out from the snapshot, with the archived index.
+    expect(fs.readFileSync(path.join(restored, "notes.md"), "utf8")).toBe("uncommitted\n")
+    expect(fs.readFileSync(path.join(restored, "README.md"), "utf8")).toBe("hello\n")
+    expect(git(restored, "status", "--porcelain").split("\n")).toEqual(expect.arrayContaining(["?? notes.md", "?? box-yard-demo.md"]))
   })
 
   it("refuses a restore whose shared objects can't be rebuilt, and restores once the repo is reachable again", async () => {
     const o = origin()
     const r = await start()
-    const p = await repoProject(r, "alpha", o.url)
+    const p = await repoProject(r, "alpha", o.url, { pushAtTurnEnd: false })
     const t = await startTask(r, p.id, "offline restore")
     const dir = path.dirname(workOf(r, t))
     const mirror = mirrorOf(r, t.boxId!)
