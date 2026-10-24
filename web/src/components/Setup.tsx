@@ -128,7 +128,7 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
             ••••••••••••
           </span>
           <span className="ml-auto">
-            <SourceHint source={fromEnv ? "env" : "ui"} env={fromEnv ? info.env : undefined} changed={false} />
+            <SourceHint source={fromEnv ? "env" : "ui"} changed={false} />
           </span>
         </div>
       )}
@@ -186,7 +186,7 @@ function ResultLine({ ok, text }: { ok: boolean; text: string }) {
   )
 }
 
-/** `claude setup-token`, with a copy button. */
+/** `claude setup-token` on its own line, with a copy button. */
 export function SetupTokenCommand() {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
@@ -195,22 +195,25 @@ export function SetupTokenCommand() {
     return () => clearTimeout(t)
   }, [copied])
   return (
-    <span className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 py-0.5 pr-0.5 pl-2 align-middle">
-      <code className="font-mono text-xs text-zinc-200">{SETUP_TOKEN_COMMAND}</code>
+    <div className="mt-2 flex max-w-sm items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 pl-3">
+      <code className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">
+        <span className="text-zinc-600 select-none">$ </span>
+        {SETUP_TOKEN_COMMAND}
+      </code>
       <button
         type="button"
-        className="grid h-11 w-11 place-items-center rounded text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 sm:h-6 sm:w-6"
+        className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 sm:h-8 sm:w-8"
         aria-label={copied ? "Copied" : `Copy ${SETUP_TOKEN_COMMAND}`}
         title={copied ? "Copied" : "Copy"}
         onClick={() => void navigator.clipboard?.writeText(SETUP_TOKEN_COMMAND).then(() => setCopied(true), () => {})}
       >
         {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
       </button>
-    </span>
+    </div>
   )
 }
 
-const linkClass = "text-yard-300 hover:underline"
+const linkClass = "text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400"
 
 /** Where to get each credential, in a sentence or two with its link. */
 function CredentialHelp({ k }: { k: CredentialKey }) {
@@ -223,7 +226,8 @@ function CredentialHelp({ k }: { k: CredentialKey }) {
   if (k === "claudeOauthToken")
     return (
       <>
-        {info.help} Run <SetupTokenCommand /> where Claude Code is installed, sign in, and paste the token it prints. {link}.
+        {info.help} Run this where Claude Code is installed, sign in, and paste the token it prints. {link}.
+        <SetupTokenCommand />
       </>
     )
   if (k === "githubToken")
@@ -273,9 +277,9 @@ function ClaudeChoice({ status, id }: { status: SetupStatus; id: string }) {
           )
         })}
       </div>
-      <p className="text-xs leading-relaxed text-zinc-400">
+      <div className="text-xs leading-relaxed text-zinc-400">
         <CredentialHelp k={choice} />
-      </p>
+      </div>
       <CredentialField key={choice} k={choice} status={status.credentials[choice]} id={`${id}-${choice}`} />
       {both && <p className="text-xs text-zinc-500">Both are set, so Claude Code uses the API key.</p>}
     </div>
@@ -303,7 +307,7 @@ function Step({ n, done, title, tag, help, children }: { n: number; done: boolea
             {tag && <span className="rounded bg-zinc-800 px-1.5 py-px text-[11px] text-zinc-400">{tag}</span>}
             {done && <span className="sr-only">(done)</span>}
           </div>
-          {help && <p className="text-xs leading-relaxed text-zinc-400">{help}</p>}
+          {help && <div className="text-xs leading-relaxed text-zinc-400">{help}</div>}
           {children}
         </div>
       </div>
@@ -323,7 +327,7 @@ function OwnerNameField({ id }: { id: string }) {
     return <p className="text-xs text-zinc-500">{name}: set on the server by BOXYARD_OWNER_NAME.</p>
   const submit = () => changed && save.mutate({ ownerName: draft.trim() }, { onSuccess: () => setValue(null) })
   return (
-    <div className="flex flex-col gap-2 sm:flex-row">
+    <div className="space-y-2">
       <input
         id={id}
         className={inputClass}
@@ -338,7 +342,7 @@ function OwnerNameField({ id }: { id: string }) {
         }}
         aria-label="Your name"
       />
-      <Button type="button" size="sm" variant={changed ? "primary" : "subtle"} disabled={!changed || !draft.trim()} loading={save.isPending} onClick={submit} className="shrink-0">
+      <Button type="button" size="sm" variant={changed ? "primary" : "subtle"} disabled={!changed || !draft.trim()} loading={save.isPending} onClick={submit}>
         Save
       </Button>
     </div>

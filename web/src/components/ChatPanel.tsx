@@ -224,7 +224,7 @@ function ZenWelcome({ onPick, needsGithub, onGithub }: { onPick: (text: string) 
       {needsGithub && (
         <p className="mt-6 text-xs text-zinc-500">
           Agents need a GitHub token to push branches and open PRs.{" "}
-          <button type="button" onClick={onGithub} className="text-yard-300 hover:underline">
+          <button type="button" onClick={onGithub} className="text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400">
             Add one
           </button>
         </p>
