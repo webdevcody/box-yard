@@ -546,6 +546,17 @@ export interface QueuedInputRow {
 /** A compare-and-set on a queued input: ok, or the input as it is now (null: gone, i.e. delivered or cleared). */
 export type InputChange = { ok: true; row: QueuedInputRow } | { ok: false; row: QueuedInputRow | null }
 
+/** A queued Coordinator chat or Captain message (meta.queued: sent mid-turn, waiting for the next one). */
+export type QueuedChatTable = "chat_messages" | "captain_messages"
+export interface QueuedChatRow {
+  id: string
+  content: string
+  meta: Record<string, unknown>
+  createdAt: number
+}
+/** Why a queued chat message couldn't change: a turn took it already, it was deleted, or there is no such message. */
+export type QueuedChatChange = { ok: true; row: QueuedChatRow } | { ok: false; reason: "delivered" | "deleted" | "missing" }
+
 const inputAttachments = (r: InputRow) => (r.attachments ? (JSON.parse(r.attachments) as string[]) : [])
 const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r) })
 const queuedInputRow = (r: InputRow): QueuedInputRow => ({
@@ -1451,6 +1462,62 @@ export class Store {
   /** Ids of Coordinator chat messages still waiting for a turn (after a restart, say). */
   queuedChatIds(): string[] {
     return (this.db.prepare("SELECT id FROM chat_messages WHERE json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC").all() as { id: string }[]).map((r) => r.id)
+  }
+
+  // Cody can edit or delete a queued Coordinator/Captain message until the turn that reads it takes it. Each change
+  // is a compare-and-set on meta.queued, which deliverQueued clears in the same tick the turn reads the messages,
+  // so a change lands either before the read (the turn sees it) or not at all ("delivered"). Deleting is soft
+  // (meta.cancelled, queued cleared) so Undo can bring it back; turns skip cancelled messages.
+
+  /** `thread`: the Captain's project, for captain_messages. */
+  editQueuedChat(table: QueuedChatTable, id: string, thread: string | null, content: string): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row?.meta.queued) return this.queuedChatRefusal(row)
+      if (!content.trim() && !(row.meta.attachments as unknown[] | undefined)?.length) throw new BadRequestError("message is empty")
+      this.db.prepare(`UPDATE ${table} SET content = ? WHERE id = ?`).run(content, id)
+      return { ok: true, row: { ...row, content } }
+    })()
+  }
+
+  cancelQueuedChat(table: QueuedChatTable, id: string, thread: string | null): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row?.meta.queued) return this.queuedChatRefusal(row)
+      const { queued: _, ...rest } = row.meta
+      const meta = { ...rest, cancelled: true }
+      this.db.prepare(`UPDATE ${table} SET meta_json = ? WHERE id = ?`).run(JSON.stringify(meta), id)
+      return { ok: true, row: { ...row, meta } }
+    })()
+  }
+
+  /**
+   * Undo a delete: the message waits again (`queued` while a turn runs) and moves to `at`, so the next turn's
+   * "since the last turn" picks it up even if a turn ran meanwhile.
+   */
+  restoreQueuedChat(table: QueuedChatTable, id: string, thread: string | null, { queued, at }: { queued: boolean; at: number }): QueuedChatChange {
+    return this.db.transaction((): QueuedChatChange => {
+      const row = this.queuedChatRow(table, id, thread)
+      if (!row) return { ok: false, reason: "missing" }
+      if (!row.meta.cancelled) return { ok: false, reason: row.meta.queued ? "deleted" : "delivered" }
+      const { cancelled: _, ...rest } = row.meta
+      const meta = { ...rest, ...(queued ? { queued: true } : {}) }
+      this.db.prepare(`UPDATE ${table} SET meta_json = ?, created_at = ? WHERE id = ?`).run(JSON.stringify(meta), at, id)
+      return { ok: true, row: { ...row, meta, createdAt: at } }
+    })()
+  }
+
+  private queuedChatRow(table: QueuedChatTable, id: string, thread: string | null): QueuedChatRow | null {
+    const r = (
+      table === "captain_messages"
+        ? this.db.prepare("SELECT id, content, meta_json, created_at FROM captain_messages WHERE id = ? AND project_id = ? AND role = 'user'").get(id, thread)
+        : this.db.prepare("SELECT id, content, meta_json, created_at FROM chat_messages WHERE id = ? AND role = 'user'").get(id)
+    ) as { id: string; content: string; meta_json: string | null; created_at: number } | undefined
+    return r ? { id: r.id, content: r.content, meta: json<Record<string, unknown>>(r.meta_json, {}) ?? {}, createdAt: r.created_at } : null
+  }
+
+  private queuedChatRefusal(row: QueuedChatRow | null): QueuedChatChange {
+    return { ok: false, reason: !row ? "missing" : row.meta.cancelled ? "deleted" : "delivered" }
   }
 
   // ---------- task transcript ----------
@@ -2513,6 +2580,13 @@ export class BadRequestError extends Error {
 /** The request is fine but the thing is busy or in the way right now (e.g. agents running on a box). */
 export class ConflictError extends Error {
   status = 409
+}
+
+/** The error for a refused change to a queued chat message (see Store.editQueuedChat). */
+export function queuedChatError(reason: "delivered" | "deleted" | "missing", who: string): Error {
+  if (reason === "missing") return new NotFoundError("No such message.")
+  if (reason === "deleted") return new ConflictError("That message was deleted.")
+  return new ConflictError(`That message was already delivered to ${who}, so it can't be changed.`)
 }
 
 /** Accept `owner/name`, `github.com/owner/name`, or a full URL. Returns null for empty. */
