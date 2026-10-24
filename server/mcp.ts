@@ -866,7 +866,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "pool_status",
-    { description: "Show worker boxes (which projects live on each, busy slots) and queued tasks. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room." },
+    {
+      description:
+        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+    },
     safe(async () =>
       ok({
         boxes: tasks.boxes().map((b) => ({
