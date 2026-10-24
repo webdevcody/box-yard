@@ -183,6 +183,17 @@ export class CaptainManager {
 
   /** Route a task notice to its project's Captain. Returns true when handled. `wake: false` waits for the Captain's next turn. */
   notice(content: string, meta: Record<string, unknown> | null = null, { wake = true }: { wake?: boolean } = {}): boolean {
+    // A box notice (e.g. a resize) goes to the Captain of every project on the box, and the Coordinator still
+    // reads it: only the Captain that started it is woken; the others see it with their next update.
+    if (Array.isArray(meta?.projectIds) && !meta.taskId) {
+      for (const projectId of meta.projectIds as unknown[]) {
+        if (typeof projectId !== "string" || !this.store.getProject(projectId)) continue
+        const msg = this.store.addCaptainMessage(projectId, "notice", content, meta)
+        this.hub.broadcast({ type: "captain.message", message: msg })
+        if (wake && meta.captainProjectId === projectId) this.get(projectId).nudge()
+      }
+      return false
+    }
     const taskId = typeof meta?.taskId === "string" ? meta.taskId : null
     const task = taskId ? this.store.getTask(taskId) : null
     if (!task) return false

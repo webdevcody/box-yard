@@ -15,10 +15,11 @@ import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS,
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import type { SettingsStore } from "./settings.js"
-import { EFFORTS, TASK_STATUSES, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine } from "../shared/disk.js"
+import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 
 export interface McpDeps {
   store: Store
@@ -156,6 +157,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
     return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : s < 129600 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`
   }
+  const mb = (bytes: number) => Math.round(bytes / 1024 / 1024)
+  /** What Cody's Settings let MCP callers do with resize_box. */
+  const resizeGuard = () => {
+    const st = deps.settings?.get()
+    return { allowed: st?.autoResizeEnabled ?? true, max_size: (st?.autoResizeMaxSize ?? "large") as BoxSize, how: tasks.resizeMode() }
+  }
   const brief = (t: Task) => ({
     id: t.id,
     title: t.title,
@@ -231,6 +238,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     repo: p.repo,
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
+    ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
     notes: p.notes.map((n) => `(${n.author}) ${n.content}`),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
@@ -864,13 +872,22 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         boxes: tasks.boxes().map((b) => ({
           id: b.id,
           status: b.status,
+          size: `${b.size} (${sizeSpecLine(b.size)})`,
           projects: b.projects,
           running: `${b.runningTurns}/${b.slots}`,
           tasks: b.residentTasks.length,
           disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
+          disk_mb:
+            b.diskFreeBytes !== null && b.diskTotalBytes !== null
+              ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
+              : null,
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
+          ...(b.resize && (b.resize.status === "running" || Date.now() - (b.resize.finishedAt ?? 0) < 24 * 3600_000)
+            ? { resize: `${resizeTitle(b.resize)}: ${resizeSummary(b.resize)}${b.resize.finishedAt ? ` ${ago(b.resize.finishedAt)}` : ""}` }
+            : {}),
         })),
         pool: tasks.poolLimits(),
+        resize_box: resizeGuard(),
         queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason})` : ""}`),
       }),
     ),
@@ -1143,6 +1160,49 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         return ok({ started: true, box: report.boxId, next: "Call pool_status in a minute to see what it freed." })
       }),
     ),
+  )
+
+  server.registerTool(
+    "resize_box",
+    {
+      description:
+        "Resize a worker box up or down (small 2 vCPU/4 GB RAM/10 GB disk, medium 4/8/20, large 8/16/30; pool_status shows each box's size and disk). " +
+        (tasks?.resizeMode() === "in-place"
+          ? "The provider resizes the box in place, keeping its disk. "
+          : "Upstash can't change a box's size in place, so Box Yard makes a new box of that size, archives every workspace, moves the tasks and projects to it and deletes the old box; workspaces restore from their archive on each task's next turn. ") +
+        "Refused while agents are running on the box (wait until it's idle; never stop agents for this), for a scale-down whose disk in use wouldn't fit, and when Cody's Settings don't allow it or the size is above the maximum set there. " +
+        "Runs in the background; Cody, the Coordinator and the box's Captains get a notice with your reason when it finishes." +
+        (scopeId ? " As a Captain you can only resize a box your project's tasks live on." : ""),
+      inputSchema: {
+        box: z.string().describe("Box id, from pool_status"),
+        size: z.enum(BOX_SIZES),
+        reason: z.string().trim().min(3).max(500).describe("Why, in one sentence for Cody (e.g. \"Low on disk three times today and cleanup frees under 200 MB\")."),
+      },
+    },
+    safe(async (a: { box: string; size: BoxSize; reason: string }) => {
+      const guard = resizeGuard()
+      if (!guard.allowed) {
+        return fail(owner("Cody has turned off automatic box resizing (Settings → Boxes & limits → Resizing). Tell Cody why a resize would help; Cody can resize it from the Boxes page."))
+      }
+      if (compareSizes(a.size, guard.max_size) > 0) {
+        return fail(owner(`Cody's Settings let you resize boxes up to ${guard.max_size}; ${a.size} is above that. Ask Cody to resize it from the Boxes page, or pick ${guard.max_size}.`))
+      }
+      const box = store.getBox(a.box)
+      if (!box) return fail(`No box "${a.box}". Use pool_status.`)
+      if (scopeId && !tasks.projectsOnBox(box.id).includes(scopeId)) {
+        throw outOfScope(`box ${box.id} doesn't host project "${ownProject().name}"`)
+      }
+      const by = scopeId ? ({ kind: "captain", projectId: scopeId } as const) : ({ kind: "coordinator" } as const)
+      const r = await tasks.resizeBox(box.id, a.size, { by, reason: a.reason })
+      return ok({
+        started: true,
+        box: r.boxId,
+        from: r.from,
+        to: r.to,
+        how: r.mode === "in-place" ? "in place" : "migration to a new box",
+        next: "You'll get a notice when it's done; pool_status shows progress.",
+      })
+    }),
   )
 
   return server

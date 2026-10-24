@@ -4,6 +4,7 @@ import { AlarmClock, Bot, Box, FileText, FolderGit2, GitBranch, ListTodo, Notebo
 import {
   newClientId,
   useAddNote,
+  useAgentSettings,
   useArtifacts,
   useBoxes,
   useCaptainState,
@@ -26,14 +27,15 @@ import {
   type TaskFilter,
 } from "../lib/projectTasks"
 import { Modal } from "./Modal"
-import { Button, Empty, Field, NewTabLink, STATUS, TimeAgo, cx, inputClass, parseEnv } from "./ui"
+import { Button, Empty, Field, NewTabLink, STATUS, Select, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
 import { ProjectSchedules } from "./Schedules"
 import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
-import type { Artifact, BoxInfo, Project, Task, TaskStatus } from "../../../shared/types"
+import { BOX_SIZES, type Artifact, type BoxInfo, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
+import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -497,13 +499,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [baseBranch, setBaseBranch] = useState(project.baseBranch)
   const [env, setEnv] = useState("")
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
+  const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
+  const settings = useAgentSettings()
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={(e) => {
         e.preventDefault()
-        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys })
+        update.mutate({ id: project.id, name, description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), removeEnv: removeKeys, boxSize: boxSize || null })
         onDone()
       }}
     >
@@ -524,6 +528,16 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       </div>
       <Field label="Description">
         <textarea className={inputClass} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+      </Field>
+      <Field label="Preferred box size" hint="New boxes made for this project use it. Boxes it already has keep their size; resize them from the Boxes page.">
+        <Select className="w-full sm:w-80" value={boxSize} onChange={(e) => setBoxSize(e.target.value as BoxSize | "")} data-testid="project-box-size">
+          <option value="">Default ({settings.data?.settings.workerSize ?? "Settings"}: Settings → Worker size)</option>
+          {BOX_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {BOX_SIZE_SPECS[size].label}: {sizeSpecLine(size)}
+            </option>
+          ))}
+        </Select>
       </Field>
       <Field label="Env vars" hint="Values are write-only. Add KEY=value lines to set or replace.">
         <div className="mb-2 flex flex-wrap gap-1.5">

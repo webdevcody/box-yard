@@ -4,10 +4,14 @@ import { api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
+import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type {
   BoxCleanup,
   BoxContents,
+  BoxResize,
+  BoxSize,
+  ResizePlan,
   AppNotification,
   Artifact,
   Attachment,
@@ -220,6 +224,7 @@ export function useCreateProject() {
           baseBranch: input.baseBranch || "main",
           envKeys: Object.keys(input.env ?? {}),
           notes: [],
+          boxSize: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -237,7 +242,7 @@ export function useCreateProject() {
 export function useUpdateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, ...patch }: { id: string; name?: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; removeEnv?: string[] }) =>
+    mutationFn: ({ id, ...patch }: { id: string; name?: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; removeEnv?: string[]; boxSize?: BoxSize | null }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -565,6 +570,28 @@ export function useClearBox() {
     onSuccess: (cleanup) => qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, cleanup)),
     // Not awaited: the dialog closes as soon as the server answers.
     onSettled: () => void qc.invalidateQueries({ queryKey: keys.boxes }),
+  })
+}
+
+/** What resizing a box to `size` would do (mode, running agents, a scale-down's disk fit). */
+export const useResizePlan = (boxId: string, size: BoxSize) =>
+  useQuery({
+    queryKey: ["box-resize-plan", boxId, size],
+    queryFn: () => api<ResizePlan>(`/api/boxes/${encodeURIComponent(boxId)}/resize?size=${size}`),
+    staleTime: 0,
+    gcTime: 0,
+  })
+
+/** Start a resize; it answers with the running report and SSE box.resize toasts its progress. */
+export function useResizeBox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { boxId: string; size: BoxSize; stopAgents: boolean }) =>
+      api<BoxResize>(`/api/boxes/${encodeURIComponent(input.boxId)}/resize`, { body: { size: input.size, stopAgents: input.stopAgents } }),
+    onSuccess: (r) => {
+      qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withResize(list, r))
+      announceResize(r)
+    },
   })
 }
 

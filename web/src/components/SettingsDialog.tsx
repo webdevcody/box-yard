@@ -21,6 +21,7 @@ import { HooksPanel } from "./Hooks"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
+import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -494,19 +495,45 @@ function LimitsPanel({
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
   const upstash = health.data?.provider === "upstash"
-  const sizeDefault = SIZE_DEFAULTS[s.workerSize]
   return (
     <Panel section="limits">
       <Row
         id={fid("ws")}
         label="Worker size"
-        help="Upstash Box size for newly created boxes. Existing boxes keep the size they were created with."
+        help="Upstash Box size for newly created boxes, unless a project sets its own preferred size. Existing boxes keep their size until resized from the Boxes page."
         hint={hint("workerSize")}
       >
         <Select id={fid("ws")} className="w-full" value={s.workerSize} onChange={(e) => set("workerSize", e.target.value as WorkerSize)}>
           {WORKER_SIZES.map((size) => (
             <option key={size} value={size}>
               {size} ({SIZE_DEFAULTS[size].slotsPerBox} slots, {SIZE_DEFAULTS[size].maxResidentPerBox} resident tasks by default)
+            </option>
+          ))}
+        </Select>
+      </Row>
+      <Row
+        id={fid("are")}
+        label="Allow the Coordinator to resize boxes automatically"
+        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running agents for it, and every resize they make sends you a notice with their reason."
+        hint={hint("autoResizeEnabled")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("are")} type="checkbox" checked={s.autoResizeEnabled} onChange={(e) => set("autoResizeEnabled", e.target.checked)} data-testid="auto-resize" />
+          {s.autoResizeEnabled ? "Allowed" : "Off: only you resize boxes"}
+        </label>
+      </Row>
+      <Row id={fid("arm")} label="Max size it may choose" help="resize_box refuses anything bigger. You can still pick any size yourself on the Boxes page." hint={hint("autoResizeMaxSize")}>
+        <Select
+          id={fid("arm")}
+          className="w-full disabled:opacity-50"
+          value={s.autoResizeMaxSize}
+          disabled={!s.autoResizeEnabled}
+          onChange={(e) => set("autoResizeMaxSize", e.target.value as BoxSize)}
+          data-testid="auto-resize-max"
+        >
+          {BOX_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {BOX_SIZE_SPECS[size].label} · {BOX_SIZE_SPECS[size].cpu} vCPU · {BOX_SIZE_SPECS[size].ramGb} GB RAM
             </option>
           ))}
         </Select>
@@ -518,7 +545,7 @@ function LimitsPanel({
       <Row
         id={fid("spb")}
         label="Agents per box"
-        help={`Claude turns that may run at the same time inside one box. Default for ${s.workerSize}: ${sizeDefault.slotsPerBox}.`}
+        help={`Claude turns that may run at the same time inside one box. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
         hint={hint("slotsPerBox")}
       >
         <input id={fid("spb")} type="number" min={1} max={20} className={inputClass} value={s.slotsPerBox} onChange={int("slotsPerBox")} />
@@ -529,7 +556,7 @@ function LimitsPanel({
       <Row
         id={fid("mr")}
         label="Resident tasks per box"
-        help={`Task folders kept on one box before older archived workspaces are parked. Default for ${s.workerSize}: ${sizeDefault.maxResidentPerBox}.`}
+        help={`Task folders kept on one box before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
         hint={hint("maxResidentPerBox")}
       >
         <input id={fid("mr")} type="number" min={1} max={200} className={inputClass} value={s.maxResidentPerBox} onChange={int("maxResidentPerBox")} />
@@ -644,7 +671,7 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
       <p className="border-t border-zinc-900 px-3 py-2 leading-relaxed text-zinc-500">
         {overridden
           ? "Your saved or env values below replace the size defaults for every size."
-          : `Values come from the worker size: small boxes run ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keep ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders. Set the fields below to override.`}{" "}
+          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
         Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} agents and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
       </p>
     </div>

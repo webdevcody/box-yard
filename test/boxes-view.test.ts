@@ -6,7 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { BoxesView } from "../web/src/components/BoxesView.js"
 import { keys } from "../web/src/lib/queries.js"
 import { CLEANUP_STEPS } from "../shared/disk"
-import type { BoxContents, BoxInfo, Health, Task } from "../shared/types"
+import type { BoxContents, BoxInfo, BoxSize, Health, ResizePlan, Task } from "../shared/types"
+import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -33,6 +34,7 @@ const box = (id: string, over: Partial<BoxInfo> = {}): BoxInfo => ({
   diskLow: false,
   cleanup: null,
   operation: null,
+  resize: null,
   estimatedCostUsd: 0.25,
   usageSource: "estimated",
   createdAt: now - 86_400_000,
@@ -85,6 +87,17 @@ const contentsFor = (boxId: string, running: number): BoxContents => ({
 })
 const CONTENTS: Record<string, BoxContents> = { "low-box": contentsFor("low-box", 1), "idle-box": contentsFor("idle-box", 0), "busy-box": contentsFor("busy-box", 2) }
 let REPLY: Record<string, unknown> = { ok: true }
+/** What GET /api/boxes/:id/resize answers. */
+let PLAN = (boxId: string, to: BoxSize): ResizePlan => ({
+  boxId,
+  from: "small",
+  to,
+  mode: "migration",
+  running: TASKS.filter((t) => t.boxId === boxId && t.status === "working").map((t) => ({ id: t.id, title: t.title })),
+  tasks: TASKS.filter((t) => t.boxId === boxId).length,
+  fit: null,
+  refusal: null,
+})
 const requests: { url: string; method: string }[] = []
 
 let root: Root
@@ -107,6 +120,9 @@ beforeEach(() => {
     const contents = /\/api\/boxes\/([^/]+)\/contents$/.exec(url)
     if (contents) return new Response(JSON.stringify(CONTENTS[decodeURIComponent(contents[1]!)]), { status: 200 })
     if (url.endsWith("/clear") || init?.method === "DELETE") return new Response(JSON.stringify(REPLY), { status: REPLY.error ? 409 : 200 })
+    const plan = /\/api\/boxes\/([^/]+)\/resize\?size=(\w+)$/.exec(url)
+    if (plan) return new Response(JSON.stringify(PLAN(decodeURIComponent(plan[1]!), plan[2] as BoxSize)), { status: 200 })
+    if (/\/resize$/.test(url) && init?.method === "POST") return new Response(JSON.stringify(REPLY), { status: REPLY.error ? 409 : 202 })
     return new Promise(() => {})
   })
   host = document.createElement("div")
@@ -187,7 +203,7 @@ describe("Boxes overview", () => {
     render()
     click(host.querySelector("button[aria-label='Actions for busy-box']")!)
     const menu = host.querySelector("[role=menu]")!
-    expect([...menu.querySelectorAll("[role=menuitem]")].map((m) => m.textContent?.trim())).toEqual(["Details", "Clean up now", "Clear box…", "Delete box…", "Boxes redesign", "Royale count"])
+    expect([...menu.querySelectorAll("[role=menuitem]")].map((m) => m.textContent?.trim())).toEqual(["Details", "Clean up now", "Clear box…", "Resize…", "Delete box…", "Boxes redesign", "Royale count"])
     expect(dialog()).toBeNull()
   })
 })
@@ -269,13 +285,82 @@ describe("Clear box and Delete box", () => {
       render()
       click(host.querySelector("button[aria-label='Actions for idle-box']")!)
       const items = [...host.querySelectorAll<HTMLButtonElement>("[role=menuitem]")]
-      for (const label of ["Clean up now", "Clear box…", "Delete box…"]) {
+      for (const label of ["Clean up now", "Clear box…", "Resize…", "Delete box…"]) {
         const item = items.find((m) => m.textContent?.trim() === label)!
         expect(item.disabled).toBe(true)
         expect(item.title).toBe("This box is being cleared")
       }
     } finally {
       BOXES[1]!.operation = null
+    }
+  })
+})
+
+describe("Resize box", () => {
+  const resizeButton = () => document.querySelector<HTMLButtonElement>("[data-testid=resize-confirm]")!
+  const submitResize = async () => {
+    await act(async () => void resizeButton().closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    await flush()
+  }
+  afterEach(() => {
+    for (const t of currentToasts()) dismiss(t.id)
+  })
+
+  it("compares the sizes, says it's a migration, and resizes an idle box in one confirm with a progress toast", async () => {
+    render()
+    await menuItem("idle-box", "Resize…")
+    const d = dialog()!
+    expect(d.textContent).toContain("Resize boxidle-box")
+    expect(d.querySelector("[role=radio][aria-checked=true]")!.textContent).toContain("Medium")
+    expect(d.querySelector("[data-testid=size-small]")!.textContent).toContain("Current")
+    expect(d.querySelector("[data-testid=size-large]")!.textContent).toBe("LargeCPU8 vCPURAM16 GBDisk30 GBPrice$0.40/hAgents4")
+    expect(d.querySelector("[data-testid=resize-mode]")!.textContent).toBe("migration to a new box")
+    expect(d.querySelector("[data-testid=resize-steps]")!.textContent).toContain("Creates a new medium box")
+    expect(d.querySelector("[data-testid=agents-running]")).toBeNull()
+    expect(resizeButton().textContent).toBe("Resize to medium")
+    click(d.querySelector("[data-testid=size-large]")!)
+    await flush()
+    expect(resizeButton().textContent).toBe("Resize to large")
+    REPLY = { id: "rsz_1", boxId: "idle-box", newBoxId: null, from: "small", to: "large", mode: "migration", status: "running", steps: [{ key: "create", label: "Create a large box", status: "running", detail: null }], movedTasks: [], by: { kind: "cody" }, reason: null, error: null, startedAt: now, finishedAt: null }
+    await submitResize()
+    expect(requests).toContainEqual({ url: "/api/boxes/idle-box/resize", method: "POST" })
+    expect(dialog()).toBeNull()
+    expect(currentToasts().map((t) => [t.title, t.body, t.progress])).toEqual([["Resizing idle-box: small → large", "Create a large box… (1 of 1)", true]])
+  })
+
+  it("lists running agents and asks a second time before stopping them", async () => {
+    render()
+    await menuItem("busy-box", "Resize…")
+    const d = dialog()!
+    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("2 agents are running. Box Yard never interrupts them")
+    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("Boxes redesign")
+    expect(resizeButton().textContent).toBe("Stop agents and resize…")
+    await submitResize()
+    expect(requests.some((r) => r.method === "POST")).toBe(false)
+    expect(d.querySelector("[data-testid=stop-confirm]")!.textContent).toContain("Stop 2 running agents first?")
+    expect(resizeButton().textContent).toBe("Stop 2 agents and resize")
+  })
+
+  it("shows a scale-down that wouldn't fit and keeps the button off", async () => {
+    const before = PLAN
+    PLAN = (boxId, to) => ({
+      ...before(boxId, to),
+      from: "medium",
+      fit: { ok: false, usedBytes: 4.6 * GB, capacityBytes: 5 * GB, headroomBytes: GB, reason: "4.6 GB is in use, and a small box has about 5.0 GB; it wouldn't fit." },
+      refusal: "Can't scale idle-box down to small: it wouldn't fit.",
+    })
+    BOXES[1]!.size = "medium"
+    try {
+      render()
+      await menuItem("idle-box", "Resize…")
+      click(dialog()!.querySelector("[data-testid=size-small]")!)
+      await flush()
+      expect(dialog()!.querySelector("[data-testid=resize-fit]")!.textContent).toContain("it wouldn't fit")
+      expect(resizeButton().disabled).toBe(true)
+      expect(resizeButton().title).toBe("Can't scale idle-box down to small: it wouldn't fit.")
+    } finally {
+      PLAN = before
+      BOXES[1]!.size = "small"
     }
   })
 })

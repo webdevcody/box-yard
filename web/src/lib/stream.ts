@@ -4,6 +4,7 @@ import { keys, upsert } from "./queries"
 import { applyRead, receiveNotification } from "./notifications"
 import { withActivity } from "./taskSummary"
 import { announceCleanup, withCleanup } from "./diskCleanup"
+import { announceResize, withResize } from "./boxResize"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 
@@ -162,6 +163,10 @@ export function useServerEvents(enabled: boolean): Connection {
         case "box.cleanup":
           qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withCleanup(list, ev.cleanup))
           announceCleanup(ev.cleanup)
+          break
+        case "box.resize":
+          qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withResize(list, ev.resize))
+          announceResize(ev.resize)
           break
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))

@@ -47,6 +47,11 @@ export interface BoxProvider {
   uploadFile(boxId: string, localPath: string, destination: string): Promise<void>
   publicUrl(boxId: string, port: number): Promise<string>
   destroy(boxId: string): Promise<void>
+  /**
+   * Change a box's size in place, keeping its disk. Optional: Upstash Box (0.7.10) sets the size only at
+   * creation, so without this Box Yard resizes by moving the box's work to a new box of the target size.
+   */
+  resize?(boxId: string, size: WorkerSize): Promise<void>
   /** Ids of boxes carrying a label, to clean up boxes a crash left behind. */
   listIds?(label: string): Promise<string[]>
   /** Best-effort provider/disk usage metadata. Missing fields are estimated by Box Yard. */

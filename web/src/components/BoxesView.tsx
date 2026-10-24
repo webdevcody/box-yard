@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, HardDrive, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
@@ -12,12 +12,16 @@ import { formatBytes, measuredAgo } from "../../../shared/disk"
 import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
-import { BoxActionDialog, type BoxAction } from "./BoxActionDialog"
+import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
+import { BoxResizeDialog } from "./BoxResizeDialog"
+import { resizeLine } from "../lib/boxResize"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
+
+type BoxAction = ConfirmAction | "resize"
 
 const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string; dot: string }> = {
   creating: { label: "Starting", chip: "bg-sky-500/10 text-sky-300", dot: "bg-sky-400 animate-pulse" },
@@ -120,7 +124,8 @@ export function BoxesView() {
       </section>
 
       {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} onAction={onAction} />}
-      {action && actionBox && (
+      {action?.kind === "resize" && actionBox && <BoxResizeDialog key={`${action.boxId}-resize`} box={actionBox} onClose={() => setAction(null)} />}
+      {action && action.kind !== "resize" && actionBox && (
         <BoxActionDialog
           key={`${action.boxId}-${action.kind}`}
           box={actionBox}
@@ -470,6 +475,9 @@ function BoxMenu({ box, tasks, onOpen, onAction }: { box: BoxInfo; tasks: Task[]
               <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it; keep the box"} onClick={() => act("clear")}>
                 <Eraser className="h-4 w-4 text-zinc-500" /> Clear box…
               </button>
+              <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? `Move this ${box.size} box to another size, up or down`} onClick={() => act("resize")}>
+                <Maximize2 className="h-4 w-4 text-zinc-500" /> Resize…
+              </button>
             </>
           )}
           <button
@@ -552,9 +560,14 @@ function BoxDetails({
         <>
           {busy && <span className="mr-auto text-xs text-amber-300">{busy}…</span>}
           {box.status === "ready" && (
-            <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it from the box; the box stays"} onClick={() => onAction(box.id, "clear")}>
-              <Eraser className="h-4 w-4" /> Clear box…
-            </Button>
+            <>
+              <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? `Move this ${box.size} box to another size, up or down`} onClick={() => onAction(box.id, "resize")}>
+                <Maximize2 className="h-4 w-4" /> Resize…
+              </Button>
+              <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it from the box; the box stays"} onClick={() => onAction(box.id, "clear")}>
+                <Eraser className="h-4 w-4" /> Clear box…
+              </Button>
+            </>
           )}
           <Button type="button" variant="danger" disabled={Boolean(busy)} title={busy ?? "Archive every workspace, then destroy the box"} onClick={() => onAction(box.id, "delete")}>
             <Trash2 className="h-4 w-4" /> Delete box…
@@ -572,6 +585,8 @@ function BoxDetails({
           ))}
         </ul>
       )}
+
+      {box.resize && <ResizeStatus box={box} />}
 
       <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
         <Fact label="Agents busy">
@@ -652,6 +667,34 @@ function BoxDetails({
         </div>
       </div>
     </Modal>
+  )
+}
+
+/** The running resize (with its steps) or the last one, at the top of the details. */
+function ResizeStatus({ box }: { box: BoxInfo }) {
+  const r = box.resize!
+  const tone = r.status === "failed" ? "border-red-500/30 bg-red-500/10 text-red-200" : r.status === "running" ? "border-sky-500/30 bg-sky-500/10 text-sky-100" : "border-zinc-800/70 bg-zinc-900/40 text-zinc-300"
+  return (
+    <div className={cx("rounded-lg border px-3 py-2 text-xs", tone)} data-testid="resize-status">
+      <div className="flex items-center gap-2">
+        {r.status === "running" ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Maximize2 className="h-3.5 w-3.5 shrink-0 opacity-70" />}
+        <span className="min-w-0 flex-1">
+          {resizeLine(r, box.id)}
+          <span className="opacity-60"> · {timeAgo(r.finishedAt ?? r.startedAt)}</span>
+        </span>
+      </div>
+      {r.reason && <div className="mt-0.5 pl-5.5 opacity-80">Reason: {r.reason}</div>}
+      {r.status === "running" && (
+        <ol className="mt-1.5 space-y-0.5 pl-5.5">
+          {r.steps.map((s) => (
+            <li key={s.key} className={cx(s.status === "done" ? "text-emerald-300" : s.status === "running" ? "text-sky-200" : "opacity-60")}>
+              {s.status === "done" ? "✓" : s.status === "running" ? "…" : "·"} {s.label}
+              {s.detail && <span className="opacity-70"> · {s.detail}</span>}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
   )
 }
 
