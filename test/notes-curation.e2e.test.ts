@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
+import fs from "node:fs"
+import path from "node:path"
 import type { Server } from "node:http"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
@@ -6,10 +8,11 @@ import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer, type McpCaller } from "../server/mcp.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import type { CaptainMessage, ChatMessage, NoteSuggestion, Project, Task } from "../shared/types.js"
-import { freePort, testConfig, waitFor } from "./helpers.js"
+import { UNRESOLVED_REASON } from "../server/retro.js"
+import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
-// Project notes, curated: agents suggest, the Captain (or Cody on the Notes tab) decides. Real HTTP and MCP,
-// fake-claude for the worker and Captain turns.
+// Project notes, curated: agents suggest, the Captain alone decides (Cody only edits notes by hand). Real HTTP
+// and MCP, fake-claude for the worker and Captain turns.
 
 interface Running {
   yard: BoxYard
@@ -38,6 +41,8 @@ async function start({ captainTurns = false } = {}): Promise<Running> {
 }
 
 afterEach(async () => {
+  delete process.env.FAKE_RETRO
+  delete process.env.FAKE_CLAUDE_LOG
   for (const c of clients.splice(0)) await c.close().catch(() => {})
   for (const r of running.splice(0)) {
     // Let any Captain turn finish before the database closes under it.
@@ -115,10 +120,10 @@ describe("Captain note tools", () => {
       ["delete_note", { note: betaNote.id }],
       ["list_note_suggestions", { project: "beta" }],
       ["list_note_suggestions", { task: tb.id }],
-      ["resolve_suggestion", { suggestion: betaSug.id, action: "accept" }],
-      ["resolve_suggestion", { suggestion: betaSug.id, action: "reject" }],
+      ["resolve_suggestion", { suggestion: betaSug.id, action: "accept", reason: "useful" }],
+      ["resolve_suggestion", { suggestion: betaSug.id, action: "reject", reason: "not useful" }],
       // Its own suggestion, merged into another project's note.
-      ["resolve_suggestion", { suggestion: alphaSug.id, action: "merge", note: betaNote.id, content: "merged" }],
+      ["resolve_suggestion", { suggestion: alphaSug.id, action: "merge", note: betaNote.id, content: "merged", reason: "overlaps" }],
     ]
     for (const [name, args] of denied) {
       const res = await tool(name, args)
@@ -154,20 +159,30 @@ describe("Captain note tools", () => {
     expect(pending.suggestions.map((s: { id: string }) => s.id)).toEqual([s1.id, s2.id, s3.id])
     expect(pending.suggestions[0]).toMatchObject({ content: "use pnpm", why: "npm breaks the lockfile", task: `${ta.id} Alpha work`, status: "pending" })
 
-    const accepted = await ok("resolve_suggestion", { suggestion: s1.id, action: "accept", content: "Use pnpm, never npm: npm rewrites the lockfile." })
+    // Every decision needs its one-line reason: the Notes tab shows it.
+    const noReason = await tool("resolve_suggestion", { suggestion: s1.id, action: "accept" })
+    expect(noReason.isError).toBe(true)
+    expect(r.yard.store.getNoteSuggestion(s1.id)!.status).toBe("pending")
+    const accepted = await ok("resolve_suggestion", {
+      suggestion: s1.id,
+      action: "accept",
+      content: "Use pnpm, never npm: npm rewrites the lockfile.",
+      reason: "A lasting\n  rule agents would   get wrong.",
+    })
     expect(accepted).toMatchObject({ accepted: s1.id, note: expect.stringMatching(/^note_/), pendingSuggestions: 2 })
     expect(r.yard.store.getNote(accepted.note)).toMatchObject({ author: "captain", content: "Use pnpm, never npm: npm rewrites the lockfile." })
+    expect(r.yard.store.getNoteSuggestion(s1.id)).toMatchObject({ status: "accepted", resolvedBy: "captain", reason: "A lasting rule agents would get wrong." })
 
-    const merged = await ok("resolve_suggestion", { suggestion: s2.id, action: "merge", note: added.added, content: "Run tests with npm test; rerun retention.e2e alone if it flakes" })
+    const merged = await ok("resolve_suggestion", { suggestion: s2.id, action: "merge", note: added.added, content: "Run tests with npm test; rerun retention.e2e alone if it flakes", reason: "Same topic as the test note." })
     expect(merged).toMatchObject({ merged: s2.id, note: added.added })
     expect(r.yard.store.getNote(added.added)!.content).toBe("Run tests with npm test; rerun retention.e2e alone if it flakes")
 
     await ok("resolve_suggestion", { suggestion: s3.id, action: "reject", reason: "a run log, not a rule" })
     expect(r.yard.store.getNoteSuggestion(s3.id)).toMatchObject({ status: "rejected", resolvedBy: "captain", reason: "a run log, not a rule" })
-    const again = await tool("resolve_suggestion", { suggestion: s3.id, action: "accept" })
+    const again = await tool("resolve_suggestion", { suggestion: s3.id, action: "accept", reason: "changed my mind" })
     expect(again.isError).toBe(true)
     expect(again.content[0]!.text).toMatch(/already rejected by captain/)
-    const bad = await tool("resolve_suggestion", { suggestion: s3.id, action: "merge" })
+    const bad = await tool("resolve_suggestion", { suggestion: s3.id, action: "merge", reason: "overlaps" })
     expect(bad.isError).toBe(true)
 
     expect((await ok("list_note_suggestions")).suggestions).toEqual([])
@@ -187,7 +202,7 @@ describe("Captain note tools", () => {
     const saved = await ok("save_note", { project: "beta", content: "Beta deploys on Fridays only" })
     expect(r.yard.store.getNote(saved.saved)).toMatchObject({ author: "orchestrator", projectId: b.id })
     const s = suggest(r, tb, "Beta uses yarn")
-    await ok("resolve_suggestion", { suggestion: s.id, action: "accept" })
+    await ok("resolve_suggestion", { suggestion: s.id, action: "accept", reason: "Beta's package manager." })
     expect((await ok("list_notes", { project: "beta" })).notes.map((n: { author: string }) => n.author)).toEqual(["orchestrator", "orchestrator"])
     expect((await ok("list_projects")).find((p: { name: string }) => p.name === "beta").notes).toHaveLength(2)
   })
@@ -236,10 +251,46 @@ describe("notes budget", () => {
     expect(captainNotices(r, b.id, "notes_budget")).toHaveLength(0)
     await expect(call(r, "PUT", "/api/agent-settings", { notesMaxCount: 0 })).rejects.toThrow(/400/)
   })
+
+  it("a project's own budget wins over Settings in the Captain's budget, the prune notice and its prompt", async () => {
+    const r = await start()
+    const { a, b } = await twoProjects(r)
+    for (const p of [a, b]) for (const c of ["one", "two", "three"]) await call(r, "POST", `/api/projects/${p.id}/notes`, { content: c })
+    expect(captainNotices(r, a.id, "notes_budget")).toHaveLength(0)
+
+    const patched = await call<Project>(r, "PATCH", `/api/projects/${a.id}`, { notesMaxCount: 2, notesMaxTokens: 1000 })
+    expect(patched).toMatchObject({ notesMaxCount: 2, notesMaxTokens: 1000 })
+    const notices = captainNotices(r, a.id, "notes_budget")
+    expect(notices).toHaveLength(1)
+    expect(notices[0]!.content).toMatch(/^📝 Project notes are over budget \(3 of 2 notes, ~\d+ of 1k tokens\)/)
+    expect(captainNotices(r, b.id, "notes_budget")).toHaveLength(0)
+    expect(r.yard.notes.budgetStatus(b.id).line).toMatch(/^3 of 25 notes/)
+    const { ok } = await mcpAs(r, { kind: "captain", projectId: a.id })
+    expect(await ok("list_notes")).toMatchObject({ budget: expect.stringMatching(/^3 of 2 notes, ~\d+ of 1k tokens$/) })
+
+    // Its Captain is told the project's own budget.
+    const log = path.join(tmpDir(), "fake-claude.log")
+    process.env.FAKE_CLAUDE_LOG = log
+    r.yard.captains.tuning.wakeDebounceMs = 50
+    await call(r, "POST", `/api/projects/${a.id}/captain/messages`, { content: "status" })
+    await waitFor(() => (fs.existsSync(log) && fs.readFileSync(log, "utf8").includes("You are the Box Yard Captain") && !r.yard.captains.anyBusy()) || null, "the Captain's turn", 30_000)
+    expect(fs.readFileSync(log, "utf8")).toContain("Their budget is 2 notes or about 1k tokens (Max notes in Cody's Settings, or this project's own)")
+
+    // Cleared, it's Settings' budget again; out of range is refused.
+    expect(await call<Project>(r, "PATCH", `/api/projects/${a.id}`, { notesMaxCount: null, notesMaxTokens: null })).toMatchObject({ notesMaxCount: null, notesMaxTokens: null })
+    expect(r.yard.notes.budgetStatus(a.id).line).toMatch(/^3 of 25 notes/)
+    await expect(call(r, "PATCH", `/api/projects/${a.id}`, { notesMaxCount: 0 })).rejects.toThrow(/400/)
+    await expect(call(r, "PATCH", `/api/projects/${a.id}`, { notesMaxTokens: 10 })).rejects.toThrow(/400/)
+    // The Coordinator can set it too.
+    const coordinator = await mcpAs(r, { kind: "coordinator" })
+    await coordinator.ok("update_project", { project: "beta", notes_max: 2 })
+    expect(r.yard.store.getProject(b.id)).toMatchObject({ notesMaxCount: 2, notesMaxTokens: null })
+    expect(captainNotices(r, b.id, "notes_budget")).toHaveLength(1)
+  })
 })
 
 describe("Notes tab API", () => {
-  it("edits and deletes notes, and accepts, merges or rejects suggestions, within the project", async () => {
+  it("edits and deletes notes by hand and shows the suggestion history, with no way to approve suggestions", async () => {
     const r = await start()
     await call(r, "PUT", "/api/agent-settings", { ownerName: "Ana" })
     const { a, b, ta, tb } = await twoProjects(r)
@@ -250,31 +301,26 @@ describe("Notes tab API", () => {
     expect(edited.notes[0]).toMatchObject({ content: "Use tabs, width 2", updatedBy: "Ana" })
 
     const s1 = suggest(r, ta, "Run the linter before pushing")
-    const s2 = suggest(r, ta, "Tabs are 2 wide")
-    const s3 = suggest(r, ta, "Merged #4")
-    const sb = suggest(r, tb, "Beta rule")
-    expect((await call<Project[]>(r, "GET", "/api/projects")).find((x) => x.id === a.id)!.pendingSuggestions).toBe(3)
-    expect((await call<NoteSuggestion[]>(r, "GET", `/api/projects/${a.id}/suggestions`)).map((s) => s.id)).toEqual([s1.id, s2.id, s3.id])
-
-    const accepted = await call<{ project: Project; suggestion: NoteSuggestion }>(r, "POST", `/api/projects/${a.id}/suggestions/${s1.id}/resolve`, { action: "accept" })
-    expect(accepted.suggestion).toMatchObject({ status: "accepted", resolvedBy: "Ana" })
-    expect(accepted.project.notes.map((n) => [n.author, n.content])).toEqual([["Ana", "Use tabs, width 2"], ["Ana", "Run the linter before pushing"]])
-    await call(r, "POST", `/api/projects/${a.id}/suggestions/${s2.id}/resolve`, { action: "merge", noteId, content: "Use tabs, 2 wide" })
-    const rejected = await call<{ project: Project }>(r, "POST", `/api/projects/${a.id}/suggestions/${s3.id}/resolve`, { action: "reject" })
-    expect(rejected.project.pendingSuggestions).toBe(0)
-    expect(r.yard.store.getNote(noteId)!.content).toBe("Use tabs, 2 wide")
-    expect((await call<NoteSuggestion[]>(r, "GET", `/api/projects/${a.id}/suggestions?status=all`)).map((s) => s.status)).toEqual(["accepted", "merged", "rejected"])
+    const s2 = suggest(r, ta, "Merged #4")
+    suggest(r, tb, "Beta rule")
+    r.yard.store.resolveNoteSuggestion(s2.id, { status: "rejected", by: "captain", reason: "A run log, not a rule." })
+    const history = await call<NoteSuggestion[]>(r, "GET", `/api/projects/${a.id}/suggestions?status=all`)
+    expect(history.map((s) => [s.id, s.status, s.reason])).toEqual([
+      [s1.id, "pending", null],
+      [s2.id, "rejected", "A run log, not a rule."],
+    ])
+    expect((await call<NoteSuggestion[]>(r, "GET", `/api/projects/${a.id}/suggestions`)).map((s) => s.id)).toEqual([s1.id])
+    // Nobody approves suggestions from the Notes tab: the Captain decides.
+    await expect(call(r, "POST", `/api/projects/${a.id}/suggestions/${s1.id}/resolve`, { action: "accept", reason: "x" })).rejects.toThrow(/404/)
+    expect(r.yard.store.getNoteSuggestion(s1.id)!.status).toBe("pending")
 
     // Only through the project it belongs to.
-    await expect(call(r, "POST", `/api/projects/${a.id}/suggestions/${sb.id}/resolve`, { action: "accept" })).rejects.toThrow(/400/)
-    await expect(call(r, "POST", `/api/projects/${b.id}/suggestions/${s1.id}/resolve`, { action: "reject" })).rejects.toThrow(/409|400/)
     const betaNote = r.yard.store.addNote(b.id, "Ana", "Beta note")
     await expect(call(r, "PATCH", `/api/projects/${a.id}/notes/${betaNote.id}`, { content: "x" })).rejects.toThrow(/400/)
     await expect(call(r, "DELETE", `/api/projects/${a.id}/notes/${betaNote.id}`)).rejects.toThrow(/400/)
     await expect(call(r, "PATCH", `/api/projects/${a.id}/notes/${noteId}`, { content: "x".repeat(4001) })).rejects.toThrow(/400/)
-    await expect(call(r, "POST", `/api/projects/${a.id}/suggestions/${s1.id}/resolve`, { action: "accept" })).rejects.toThrow(/409/)
     await call(r, "DELETE", `/api/projects/${a.id}/notes/${noteId}`)
-    expect(r.yard.store.listNotes(a.id).map((n) => n.content)).toEqual(["Run the linter before pushing"])
+    expect(r.yard.store.listNotes(a.id)).toEqual([])
   })
 })
 
@@ -303,6 +349,7 @@ describe("notes retro, end to end", () => {
     expect(retro[0]!.content).toContain(`**[Write docs](/tasks/${task.id})** (${task.id}) · done, no PR`)
     expect(retro[0]!.meta).toMatchObject({ taskIds: [task.id], suggestionIds: [s!.id] })
     expect(r.yard.store.listNotes(project.id)).toMatchObject([{ author: "captain", content: s!.content }])
+    expect(r.yard.store.getNoteSuggestion(s!.id)).toMatchObject({ resolvedBy: "captain", reason: "mock retro accept" })
     await waitFor(() => !r.yard.captains.anyBusy() || null, "the Captain to finish")
     // "(no update)" stays out of the Coordinator's chat.
     const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
@@ -346,7 +393,24 @@ describe("notes retro, end to end", () => {
     expect((retro[0]!.meta!.taskIds as string[]).sort()).toEqual([one.id, two.id].sort())
   })
 
-  it("is off when Settings turns it off: suggestions wait on the Notes tab", async () => {
+  it("rejects what the Captain left pending when its retro turn ends, so nothing waits", async () => {
+    process.env.FAKE_RETRO = "skip"
+    const r = await start({ captainTurns: true })
+    const project = await call<Project>(r, "POST", "/api/projects", { name: "site" })
+    const task = await call<Task>(r, "POST", "/api/tasks", { projectId: project.id, title: "Write docs", prompt: "Write the docs [note]" })
+    await resting(r, task.id, ["done"])
+    const [s] = r.yard.store.listNoteSuggestions({ taskId: task.id })
+    await waitFor(() => r.yard.store.getNoteSuggestion(s!.id)!.status !== "pending" || null, "the leftover to be settled", 30_000)
+    expect(r.yard.store.getNoteSuggestion(s!.id)).toMatchObject({ status: "rejected", resolvedBy: "boxyard", reason: UNRESOLVED_REASON })
+    expect(captainNotices(r, project.id, "retro")).toHaveLength(1)
+    expect(r.yard.store.listNotes(project.id)).toEqual([])
+    // Nothing asks Cody about it.
+    await waitFor(() => !r.yard.captains.anyBusy() || null, "the Captain to finish")
+    const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
+    expect(chat.some((m) => /suggestion/i.test(m.content))).toBe(false)
+  })
+
+  it("is off when Settings turns it off: suggestions stay pending, and go to the Captain once it's back on", async () => {
     const r = await start()
     await call(r, "PUT", "/api/agent-settings", { notesRetroEnabled: false })
     const project = await call<Project>(r, "POST", "/api/projects", { name: "site" })
@@ -355,7 +419,11 @@ describe("notes retro, end to end", () => {
     await waitFor(() => r.yard.store.listNoteSuggestions({ taskId: task.id }).length || null, "the suggestion")
     expect(r.yard.retro.queued(project.id)).toEqual([])
     expect(captainNotices(r, project.id, "retro")).toHaveLength(0)
-    expect((await call<NoteSuggestion[]>(r, "GET", `/api/projects/${project.id}/suggestions`))).toHaveLength(1)
+    expect(await call<NoteSuggestion[]>(r, "GET", `/api/projects/${project.id}/suggestions`)).toHaveLength(1)
+
+    await call(r, "PUT", "/api/agent-settings", { notesRetroEnabled: true })
+    await waitFor(() => captainNotices(r, project.id, "retro").length || null, "the catch-up retro")
+    expect(captainNotices(r, project.id, "retro")[0]!.meta).toMatchObject({ taskIds: [task.id] })
   })
 })
 

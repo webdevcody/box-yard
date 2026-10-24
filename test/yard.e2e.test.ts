@@ -84,7 +84,6 @@ describe("box yard end to end", () => {
     // The agent's note is a suggestion for the Captain's notes retro, not a note yet.
     const projects = await call<Project[]>(r, "GET", "/api/projects")
     expect(projects[0]!.notes).toEqual([])
-    expect(projects[0]!.pendingSuggestions).toBe(1)
     const suggestions = await call<{ content: string; why: string }[]>(r, "GET", `/api/projects/${p.id}/suggestions`)
     expect(suggestions).toMatchObject([{ content: expect.stringContaining("npm test"), why: expect.stringContaining("test command") }])
 

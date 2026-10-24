@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest"
-import { budgetLine, budgetNotes, estimateTokens, noteAuthorLabel, noteTokens, pruneAdvice, shortTokens } from "../shared/notes.js"
+import { afterEach, describe, expect, it } from "vitest"
+import { budgetLine, budgetNotes, estimateTokens, noteAuthorLabel, noteTokens, projectNoteBudget, pruneAdvice, shortTokens } from "../shared/notes.js"
 import { captainPrompt, firstTurnPrompt, workerSystemPrompt } from "../server/prompts.js"
+import { openDb } from "../server/db.js"
+import { Store } from "../server/store.js"
+import { SettingsStore, noteBudgetOf } from "../server/settings.js"
 import type { Project } from "../shared/types.js"
+import { tmpDir } from "./helpers.js"
 
 const note = (i: number, content = `rule ${i}`) => ({ id: `note_${i}`, author: "captain", content })
 
@@ -53,6 +57,42 @@ describe("notes budget", () => {
   })
 })
 
+describe("the configured budget", () => {
+  afterEach(() => {
+    delete process.env.BOXYARD_NOTES_MAX
+  })
+
+  it("is Settings' Max notes and token cap, unless the project has its own", () => {
+    const settings = { notesMaxCount: 10, notesMaxTokens: 2000 }
+    expect(projectNoteBudget(undefined)).toEqual({ maxNotes: 25, maxTokens: 4000 })
+    expect(projectNoteBudget(settings)).toEqual({ maxNotes: 10, maxTokens: 2000 })
+    expect(projectNoteBudget(settings, { notesMaxCount: null, notesMaxTokens: null })).toEqual({ maxNotes: 10, maxTokens: 2000 })
+    // Each half overrides on its own.
+    expect(projectNoteBudget(settings, { notesMaxCount: 4, notesMaxTokens: null })).toEqual({ maxNotes: 4, maxTokens: 2000 })
+    expect(projectNoteBudget(settings, { notesMaxCount: 4, notesMaxTokens: 900 })).toEqual({ maxNotes: 4, maxTokens: 900 })
+  })
+
+  it("defaults to 25 notes and 4k tokens; env vars are only a fallback that Settings overrides", () => {
+    const store = new Store(openDb(tmpDir(), ":memory:"))
+    expect(new SettingsStore(store, {}).get()).toMatchObject({ notesMaxCount: 25, notesMaxTokens: 4000 })
+
+    process.env.BOXYARD_NOTES_MAX = "12"
+    const settings = new SettingsStore(store, { notesMaxCount: 12, notesMaxTokens: 3000 })
+    let info = settings.info()
+    expect(info.settings).toMatchObject({ notesMaxCount: 12, notesMaxTokens: 3000 })
+    expect(info.sources.notesMaxCount).toBe("env")
+    info = settings.update({ notesMaxCount: 30 })
+    expect(info.settings.notesMaxCount).toBe(30)
+    expect(info.sources.notesMaxCount).toBe("ui")
+    expect(noteBudgetOf(info.settings, { notesMaxCount: null, notesMaxTokens: 1500 })).toEqual({ maxNotes: 30, maxTokens: 1500 })
+    expect(settings.reset(["notesMaxCount"]).settings.notesMaxCount).toBe(12)
+    expect(() => settings.update({ notesMaxCount: 0 })).toThrow()
+    expect(() => settings.update({ notesMaxTokens: 100_000 })).toThrow()
+    // An env value out of range is brought into it.
+    expect(new SettingsStore(store, { notesMaxCount: 9999, notesMaxTokens: 5 }).get()).toMatchObject({ notesMaxCount: 200, notesMaxTokens: 200 })
+  })
+})
+
 describe("notes in prompts", () => {
   const project = { id: "prj_1", name: "site", description: "", repo: "acme/site", baseBranch: "main", envKeys: [], notes: [], pendingSuggestions: 0, boxSize: null, partialClone: null, createdAt: 0, updatedAt: 0 } satisfies Project
 
@@ -82,6 +122,10 @@ describe("notes in prompts", () => {
     expect(text).toContain("AGENTS.md")
     expect(text).toContain("(no update)")
     expect(text).toContain("Ana's decisions and preferences")
+    // The Captain decides alone and settles every suggestion in its retro.
+    expect(text).toContain("The decision is yours alone: Ana doesn't review or approve suggestions, so never ask Ana to.")
+    expect(text).toContain("each with a one-line reason")
+    expect(text).toContain("Any you leave pending are rejected when your turn ends.")
     expect(text).not.toMatch(/save_note/)
   })
 })

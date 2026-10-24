@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { NotesRetro, retroNotice, retroTrigger } from "../server/retro.js"
+import { NotesRetro, UNRESOLVED_REASON, retroNotice, retroTrigger } from "../server/retro.js"
 import { WakeLoopGuard } from "../server/loopGuard.js"
 import type { TaskEvent, TaskEventListener } from "../server/tasks.js"
 import type { Task } from "../shared/types.js"
@@ -20,6 +20,7 @@ function setup() {
   const store = new Store(openDb(tmpDir(), ":memory:"))
   const listeners = new Set<TaskEventListener>()
   const sent: Sent[] = []
+  const changed: string[] = []
   let enabled = true
   const retro = new NotesRetro({
     store,
@@ -28,6 +29,7 @@ function setup() {
     deliver: (projectId, content, meta) => sent.push({ projectId, content, meta }),
     budget: () => ({ line: "2 of 25 notes, ~40 of 4k tokens", over: false }),
     ownerName: () => "Ana",
+    changed: (projectId) => changed.push(projectId),
   })
   retro.tuning.debounceMs = 1000
   retro.tuning.maxWaitMs = 5000
@@ -42,7 +44,7 @@ function setup() {
   }
   const suggest = (t: Task, content: string, why = "so the next agent knows") =>
     store.addNoteSuggestion({ projectId: t.projectId, taskId: t.id, taskTitle: t.title, content, why })
-  return { store, retro, sent, project, emit, task, suggest, disable: () => void (enabled = false), listeners }
+  return { store, retro, sent, changed, project, emit, task, suggest, disable: () => void (enabled = false), enable: () => void (enabled = true), listeners }
 }
 
 beforeEach(() => vi.useFakeTimers())
@@ -82,7 +84,7 @@ describe("NotesRetro", () => {
     expect(content).toContain("Summary: Fixed the login redirect.")
     expect(content).not.toContain("boxyard-next-steps")
     expect(content).toContain(`- \`${s.id}\`: Login tests need REDIS_URL set\n  Why: they hang without it`)
-    expect(content).toContain("unless Ana needs to hear about it")
+    expect(content).toContain("It's your call: don't ask Ana to review them. Any still pending when this turn ends are rejected automatically.")
     expect(content).not.toMatch(/\bCody\b/)
     expect(meta).toEqual({ kind: "retro", taskIds: [t.id], suggestionIds: [s.id], loopKey: `retro:${t.id}` })
     expect(store.getNoteSuggestion(s.id)!.retroAt).not.toBeNull()
@@ -185,17 +187,89 @@ describe("NotesRetro", () => {
     expect(sent[0]!.meta.taskIds).toEqual([busy.id])
   })
 
-  it("mentions older suggestions still pending from earlier retros", () => {
-    const { sent, emit, task, suggest } = setup()
+  it("settles every suggestion when the Captain's retro turn ends: what it left pending is rejected for it", () => {
+    const { retro, sent, changed, emit, task, suggest, store, project } = setup()
+    const t = task("Fix login")
+    const kept = suggest(t, "kept rule")
+    const left = suggest(t, "left pending")
+    emit("task.finished", t.id)
+    vi.advanceTimersByTime(1000)
+    expect(sent[0]!.meta.suggestionIds).toEqual([kept.id, left.id])
+    store.resolveNoteSuggestion(kept.id, { status: "accepted", by: "captain", reason: "a lasting rule" })
+
+    expect(retro.settle(project.id, [kept.id, left.id], true)).toBe(1)
+    expect(store.getNoteSuggestion(kept.id)).toMatchObject({ status: "accepted", resolvedBy: "captain", reason: "a lasting rule" })
+    expect(store.getNoteSuggestion(left.id)).toMatchObject({ status: "rejected", resolvedBy: "boxyard", reason: UNRESOLVED_REASON })
+    expect(store.pendingSuggestionCount(project.id)).toBe(0)
+    expect(changed).toEqual([project.id])
+    // Settling again (a second turn read the same notice) changes nothing.
+    expect(retro.settle(project.id, [kept.id, left.id], true)).toBe(0)
+    expect(changed).toEqual([project.id])
+  })
+
+  it("a retro whose turn failed rides along in the project's next retro instead of being rejected", () => {
+    const { retro, sent, emit, task, suggest, store, project } = setup()
     const first = task("First")
-    suggest(first, "first rule")
+    const early = suggest(first, "first rule")
     emit("task.finished", first.id)
     vi.advanceTimersByTime(1000)
+    // While that retro is with the Captain, the next one doesn't send its suggestions again.
     const second = task("Second")
-    suggest(second, "second rule")
+    const s2 = suggest(second, "second rule")
     emit("task.finished", second.id)
     vi.advanceTimersByTime(1000)
-    expect(sent[1]!.content).toContain("1 older suggestion from earlier retros is still pending (list_note_suggestions).")
+    expect(sent[1]!.meta.suggestionIds).toEqual([s2.id])
+
+    expect(retro.settle(project.id, [early.id], false)).toBe(0)
+    expect(store.getNoteSuggestion(early.id)!.status).toBe("pending")
+    const third = task("Third")
+    const s3 = suggest(third, "third rule")
+    emit("task.finished", third.id)
+    vi.advanceTimersByTime(1000)
+    const { content, meta } = sent[2]!
+    expect(content.split("\n")[0]).toBe("📝 **Notes retro**: 1 finished task left 1 note suggestion to curate, plus 1 earlier one.")
+    expect(content).toContain("**Earlier suggestions** (an earlier retro didn't finish, or their task was deleted)")
+    expect(content).toContain(`- \`${early.id}\`: first rule\n  Why: so the next agent knows (from "First")`)
+    expect(meta).toEqual({ kind: "retro", taskIds: [third.id], suggestionIds: [s3.id, early.id], loopKey: `retro:${[third.id, early.id].sort().join(",")}` })
+  })
+
+  it("catches up on start and when turned back on: tasks that finished meanwhile, and suggestions whose task was deleted", () => {
+    const { retro, sent, emit, task, suggest, store, project, disable, enable } = setup()
+    disable()
+    const missed = task("Missed")
+    const s1 = suggest(missed, "missed rule")
+    emit("task.finished", missed.id)
+    const gone = task("Gone")
+    const s2 = suggest(gone, "orphan rule")
+    store.deleteTask(gone.id)
+    vi.advanceTimersByTime(5000)
+    expect(sent).toHaveLength(0)
+
+    enable()
+    retro.catchUp()
+    expect(retro.queued(project.id)).toEqual([missed.id])
+    vi.advanceTimersByTime(1000)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.content.split("\n")[0]).toBe("📝 **Notes retro**: 1 finished task left 1 note suggestion to curate, plus 1 earlier one.")
+    expect(sent[0]!.meta.suggestionIds).toEqual([s1.id, s2.id])
+
+    // Nothing left to catch up: everything is in flight.
+    retro.catchUp()
+    vi.advanceTimersByTime(5000)
+    expect(sent).toHaveLength(1)
+  })
+
+  it("sends a project's orphaned suggestions on their own", () => {
+    const { retro, sent, task, suggest, store, project } = setup()
+    const gone = task("Gone")
+    const s = suggest(gone, "orphan rule")
+    store.deleteTask(gone.id)
+    retro.catchUp()
+    vi.advanceTimersByTime(1000)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.content.split("\n")[0]).toBe("📝 **Notes retro**: 1 earlier note suggestion to curate.")
+    expect(sent[0]!.meta).toEqual({ kind: "retro", taskIds: [], suggestionIds: [s.id], loopKey: `retro:${s.id}` })
+    expect(retro.settle(project.id, [s.id], true)).toBe(1)
   })
 
   it("does nothing while Settings › Notes retro is off, and stops listening on stop()", () => {
@@ -229,7 +303,7 @@ describe("retro loop safety", () => {
 
   it("the notice reads the same shape the Captain tab parses", () => {
     const t = { id: "task_1", title: "T", summary: null, prUrl: null, prState: null } as unknown as Task
-    const text = retroNotice([{ task: t, trigger: "done", suggestions: [] }], { budget: { line: "0 of 25 notes, ~0 of 4k tokens", over: true, prune: "Prune them." }, olderPending: 0 })
+    const text = retroNotice([{ task: t, trigger: "done", suggestions: [] }], { budget: { line: "0 of 25 notes, ~0 of 4k tokens", over: true, prune: "Prune them." } })
     expect(text).toMatch(/^📝 \*\*Notes retro\*\*: /)
     expect(text).toContain("Notes now: 0 of 25 notes, ~0 of 4k tokens. Prune them.")
   })
