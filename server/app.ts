@@ -857,6 +857,8 @@ export function createBoxYard(
     res.json(store.listArtifacts({ projectId: q.projectId, taskId: q.taskId }))
   })
   api.get("/boxes", (_req, res) => {
+    // Boxes deleted outside Box Yard drop out in the background (throttled); the SSE "boxes" update follows.
+    void tasks.reconcileBoxes()
     res.json(tasks.boxes())
   })
   /** The box history log, newest first: filter by box (deleted ones too), event type and actor; page with ?before=<id>. */

@@ -369,6 +369,8 @@ export interface BoxInfo {
   diskFreeBytes: number | null
   diskTotalBytes: number | null
   diskCheckedAt: number | null
+  /** Since when Box Yard's probes can't reach the box (its disk and memory numbers are stale), or null. */
+  unreachableSince?: number | null
   /** Free and total space on the box's root disk (/tmp, HOME) when that isn't the work disk; null otherwise or until checked. */
   rootFreeBytes?: number | null
   rootTotalBytes?: number | null

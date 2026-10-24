@@ -6,7 +6,7 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
-import type { BoxProvider, BoxUsageProbe } from "./providers/types.js"
+import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
 import { providerOf, q } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { deleteWipScript, gitPrepScript, gitRestoreScript, gitStages, parseGitPrep, parseGitRestore, wipRef, type GitPrepResult } from "./gitFirst.js"
@@ -112,6 +112,10 @@ const MIRROR_GC_MS = 6 * 60 * 60_000
 const ROOT_SWEEP_MS = 10 * 60_000
 /** A df reading this fresh is good enough for placement. */
 const DISK_CACHE_MS = 20_000
+/** How often maintain() asks the provider which boxes it still has (reconcileBoxes). */
+const RECONCILE_MS = 5 * 60_000
+/** The same check when the Boxes page or pool_status loads, throttled so page loads don't hammer the provider's API. */
+export const RECONCILE_LOOK_MS = 60_000
 /** Tries at restoring an archive before the task restarts from a recap instead (prepareWorkspace). */
 const RESTORE_ATTEMPTS = 2
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
@@ -296,6 +300,11 @@ export class TaskManager {
   /** Last delete attempt of a box stuck in "deleting". */
   private lastReclaimAt = new Map<string, number>()
   private lastOrphanSweepAt = Date.now()
+  /** When reconcileBoxes last asked the provider which boxes it still has, and the check in flight. */
+  private lastReconcileAt = 0
+  private reconciling: Promise<void> | null = null
+  /** Boxes the last probe couldn't reach, since when (the next probe that reaches one clears it). */
+  private unreachable = new Map<string, number>()
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
@@ -954,6 +963,7 @@ export class TaskManager {
         diskFreeBytes: b.disk_free_bytes ?? null,
         diskTotalBytes: b.disk_total_bytes ?? null,
         diskCheckedAt: b.disk_checked_at ?? null,
+        unreachableSince: this.unreachable.get(b.id) ?? null,
         rootFreeBytes: b.root_free_bytes ?? null,
         rootTotalBytes: b.root_total_bytes ?? null,
         memUsedBytes: b.mem_used_bytes ?? null,
@@ -1025,7 +1035,12 @@ export class TaskManager {
    */
   async clearBox(boxId: string, opts: { stopAgents?: boolean } = {}): Promise<BoxCleanup> {
     const box = this.store.getBox(boxId)
+    if (!box && this.history.boxIds().includes(boxId)) return goneCleanup(boxId, "clear")
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status === "ready" && !this.boxOperation(boxId) && (await this.goneAtProvider(boxId))) {
+      await this.loseGoneBox(boxId, "Clear box")
+      return goneCleanup(boxId, "clear")
+    }
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleared.`)
     this.claimBox(boxId, "clear", Boolean(opts.stopAgents))
     try {
@@ -1051,7 +1066,13 @@ export class TaskManager {
    */
   async destroyBox(boxId: string, opts: { stopAgents?: boolean } = {}) {
     const box = this.store.getBox(boxId)
-    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (!box) {
+      // Already deleted or lost: deleting it again is a no-op.
+      if (this.history.boxIds().includes(boxId)) return
+      throw new NotFoundError(`Box ${boxId} not found`)
+    }
+    // Deleted outside Box Yard: there's nothing to archive or destroy, only records to drop.
+    if (box.status === "ready" && !this.boxOps.has(boxId) && (await this.goneAtProvider(boxId))) return this.loseGoneBox(boxId, "Delete box")
     if (box.status === "ready") {
       this.claimBox(boxId, "delete", Boolean(opts.stopAgents))
       try {
@@ -1996,8 +2017,15 @@ export class TaskManager {
   async probeDisk(boxId: string, maxAgeMs = DISK_CACHE_MS): Promise<DiskSpace | null> {
     const hit = this.diskCache.get(boxId)
     if (hit && maxAgeMs > 0 && Date.now() - hit.at < maxAgeMs) return hit.space
-    const res = await this.provider.exec(boxId, dfCommand(this.provider.root(boxId))).catch(() => null)
-    const space = res && res.exitCode === 0 ? parseDf(res.stdout) : null
+    let res: ExecResult
+    try {
+      res = await this.provider.exec(boxId, dfCommand(this.provider.root(boxId)))
+    } catch {
+      this.markUnreachable(boxId)
+      return null
+    }
+    this.markReachable(boxId)
+    const space = res.exitCode === 0 ? parseDf(res.stdout) : null
     if (!space) return null
     const now = Date.now()
     this.diskCache.set(boxId, { at: now, space })
@@ -2063,7 +2091,12 @@ export class TaskManager {
    */
   async cleanBox(boxId: string, by: BoxActor = { kind: "owner" }): Promise<BoxCleanup> {
     const box = this.store.getBox(boxId)
+    if (!box && this.history.boxIds().includes(boxId)) return goneCleanup(boxId, "manual")
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status === "ready" && !this.boxOps.has(boxId) && !this.janitor.isRunning(boxId) && (await this.goneAtProvider(boxId))) {
+      await this.loseGoneBox(boxId, "Clean up now", by)
+      return goneCleanup(boxId, "manual")
+    }
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be cleaned up.`)
     const op = this.boxOps.get(boxId)
     if (op && !this.janitor.isRunning(boxId)) throw new ConflictError(busyMessage(boxId, op))
@@ -3860,6 +3893,7 @@ export class TaskManager {
     try {
       probe = await provider.usage(boxId)
     } catch {
+      this.markUnreachable(boxId)
       return
     }
     const patch: Parameters<Store["meterBox"]>[1] = {
@@ -3966,6 +4000,8 @@ export class TaskManager {
     const now = Date.now()
     this.meterBoxes(now)
     for (const box of this.store.listBoxes()) void this.refreshBoxUsage(box.id)
+    // Idle boxes too: one deleted in the provider's console has no turn to notice it.
+    await this.reconcileBoxes(RECONCILE_MS)
     const active = this.store.listTaskRows({ status: ["working", "starting"] })
     const checkedBoxes = new Map<string, Awaited<ReturnType<BoxProvider["health"]>>>()
     const health = async (boxId: string) => {
@@ -4124,6 +4160,84 @@ export class TaskManager {
   }
 
   /**
+   * Drop boxes the provider no longer has (deleted in its console, or gone some other way): each is lost, with a box
+   * history row, and its tasks restore from their archives (or a recap) on their next turn. A box missing from a
+   * successful list is then asked about on its own, and only a definite "gone" drops it; an API error (network, 5xx,
+   * timeout, auth) keeps every box. Runs at most every `maxAgeMs`; callers during a run share it.
+   */
+  reconcileBoxes(maxAgeMs = RECONCILE_LOOK_MS): Promise<void> {
+    if (this.reconciling) return this.reconciling
+    // The heavy mock dataset's boxes exist only in the database.
+    if (this.stopped || this.c.mockHeavy || Date.now() - this.lastReconcileAt < maxAgeMs) return Promise.resolve()
+    this.lastReconcileAt = Date.now()
+    this.reconciling = this.reconcileNow().finally(() => (this.reconciling = null))
+    return this.reconciling
+  }
+
+  private async reconcileNow() {
+    const groups = new Map<BoxProvider, string[]>()
+    for (const box of this.store.listBoxes()) {
+      // Being created, deleted or resized: those paths own the box (it may not be in the list yet).
+      if (box.status !== "ready" || this.boxOps.has(box.id)) continue
+      const p = providerOf(this.provider, box.id)
+      groups.set(p, [...(groups.get(p) ?? []), box.id])
+    }
+    for (const [p, ids] of groups) {
+      let live: Set<string> | null = null
+      if (p.liveIds) {
+        try {
+          live = new Set(await p.liveIds())
+        } catch (err) {
+          console.warn(`[box-yard] box reconcile skipped (${p.name}): ${errorMessage(err)}`)
+          continue
+        }
+      }
+      for (const id of ids) {
+        if (live?.has(id)) continue
+        // A list can lag or be cut short, so ask about the box itself before dropping it.
+        if (!(await this.goneAtProvider(id))) continue
+        const box = this.store.getBox(id)
+        if (this.stopped || box?.status !== "ready" || this.boxOps.has(id)) continue
+        console.log(`[box-yard] box ${id} no longer exists at the provider; dropping it`)
+        await this.loseBox(id, `Box ${id} no longer exists at the provider.`, false, {
+          type: "lost",
+          actor: { kind: "provider" },
+          reason: live
+            ? "Missing from the provider's box list, and the provider says it's gone (deleted outside Box Yard, e.g. in the provider's console)."
+            : "The provider says the box is gone (deleted outside Box Yard, e.g. in the provider's console).",
+        })
+      }
+    }
+  }
+
+  /** The provider says the box doesn't exist. Errors and every other answer count as "still there". */
+  private async goneAtProvider(boxId: string): Promise<boolean> {
+    return (await providerOf(this.provider, boxId).health(boxId).catch(() => "unknown" as const)) === "gone"
+  }
+
+  /** Delete, Clear or Clean up on a box the provider no longer has: drop it from Box Yard's records instead of failing. */
+  private async loseGoneBox(boxId: string, action: string, by: BoxActor = { kind: "owner" }) {
+    const who = by.kind === "owner" ? this.owner() : by.kind === "coordinator" ? "the Coordinator" : by.kind === "captain" ? "a Captain" : "Box Yard"
+    await this.loseBox(boxId, `Box ${boxId} no longer exists at the provider.`, false, {
+      type: "lost",
+      actor: { kind: "provider" },
+      reason: `The provider no longer has the box (deleted outside Box Yard, e.g. in the provider's console); found when ${who} pressed ${action}.`,
+    })
+  }
+
+  /** A probe couldn't reach the box: its numbers go stale on the Boxes page, and the provider is asked whether it still has it. */
+  private markUnreachable(boxId: string) {
+    if (!this.store.getBox(boxId) || this.unreachable.has(boxId)) return
+    this.unreachable.set(boxId, Date.now())
+    this.emitBoxes()
+    void this.reconcileBoxes()
+  }
+
+  private markReachable(boxId: string) {
+    if (this.unreachable.delete(boxId)) this.emitBoxes()
+  }
+
+  /**
    * A box is gone. Its tasks lose their folder and come back from archives elsewhere. `event` is its history row
    * (deleted by whom, or lost), written while the box's projects and tasks are still known.
    */
@@ -4135,6 +4249,7 @@ export class TaskManager {
     this.store.setKv(boxOwnerKey(boxId), null)
     this.janitor.forget(boxId)
     this.diskCache.delete(boxId)
+    this.unreachable.delete(boxId)
     this.reserved.delete(boxId)
     this.lowBoxes.delete(boxId)
     for (const [taskId, held] of this.diskHold) if (held === boxId) this.diskHold.delete(taskId)
@@ -4283,6 +4398,12 @@ export class TaskManager {
     const notes = this.store.listNotes(projectId).map((n) => ({ author: n.author, content: n.content }))
     void this.redis.cmd("SET", `boxyard:notes:${projectId}`, JSON.stringify(notes)).catch(() => {})
   }
+}
+
+/** What Clean up / Clear answer for a box the provider no longer has: nothing to do, and Box Yard dropped it. */
+function goneCleanup(boxId: string, reason: BoxCleanup["reason"]): BoxCleanup {
+  const now = Date.now()
+  return { boxId, reason, status: "done", startedAt: now, finishedAt: now, targetFreeBytes: null, freeBefore: null, freeAfter: null, totalBytes: null, freedBytes: 0, steps: [], enough: true, error: null }
 }
 
 /** The turn this launch was for is no longer the task's (its start timed out, or it was reset): leave the task alone. */

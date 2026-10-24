@@ -63,6 +63,11 @@ export interface BoxProvider {
   resize?(boxId: string, size: WorkerSize): Promise<void>
   /** Ids of boxes carrying a label, to clean up boxes a crash left behind. */
   listIds?(label: string): Promise<string[]>
+  /**
+   * Ids of every box the provider has right now (any label, deleted ones left out), so Box Yard notices boxes
+   * removed outside it (e.g. in the provider's console). Throws when the provider can't say (network, 5xx, auth).
+   */
+  liveIds?(): Promise<string[]>
   /** Best-effort provider/disk usage metadata. Missing fields are estimated by Box Yard. */
   usage?(boxId: string): Promise<BoxUsageProbe>
   /** The provider that runs this box, when one provider fronts several (AutoProvider). */
