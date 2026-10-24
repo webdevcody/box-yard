@@ -2390,7 +2390,7 @@ export class TaskManager {
           })
           this.hub.broadcast({ type: "artifact", artifact })
           say("event", `Published artifact: ${artifact.title}`, { kind: "artifact", url: artifact.url, artifactId: artifact.id })
-          this.notice(`📎 **${row.title}** published ${artifact.title}: ${this.absoluteUrl(artifact.url)}`, { taskId })
+          this.notice(`📎 **${row.title}** published ${artifact.title}: ${this.absoluteUrl(artifact.url)}`, { taskId, artifactId: artifact.id })
         } catch (err) {
           say("event", `Couldn't fetch artifact ${ev.path}: ${errorMessage(err)}`)
         }

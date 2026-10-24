@@ -66,7 +66,7 @@ export const PAGES: PaletteItem[] = [
   { key: "page:inbox", kind: "page", title: "Inbox", subtitle: "Questions, PRs to review, failures", href: "/inbox" },
   { key: "page:boxes", kind: "page", title: "Boxes", subtitle: "The box pool and what runs where", href: "/boxes" },
   { key: "page:schedules", kind: "page", title: "Schedules", subtitle: "Recurring jobs", href: "/schedules", aliases: ["cron"] },
-  { key: "page:usage", kind: "page", title: "$ Usage", names: ["Usage"], subtitle: "Spend by agent, project and box", href: "/usage", aliases: ["cost", "spend"] },
+  { key: "page:usage", kind: "page", title: "Usage", subtitle: "Spend by agent, project and box", href: "/usage", aliases: ["cost", "spend"] },
   { key: "page:settings", kind: "page", title: "Settings", subtitle: "Models, effort, compaction, pool limits", command: "settings", aliases: ["preferences"] },
 ]
 

@@ -9,6 +9,7 @@ import { BadRequestError } from "./store.js"
 import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
+import { updatesBlock } from "./noticeBatch.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
@@ -22,15 +23,18 @@ import {
   captainCompactionsDir,
   cleanSummary,
   compactionsPrompt,
+  findCompactionRecord,
   finishCompaction,
   lastCompaction,
   listCompactions,
   readCompactionFile,
   readCompactionInfo,
+  readCompactionRecords,
   summaryLooksValid,
   writeCompaction,
 } from "./compactions.js"
-import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, ContextUsage, Project, Task } from "../shared/types.js"
+import { compactionTaskSnapshots, mentionedTaskIds } from "./compactionTasks.js"
+import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 const NO_UPDATE = "(no update)"
@@ -229,6 +233,15 @@ export class CaptainManager {
       const info = readCompactionInfo(file)
       return info ? [{ ...info, content: readCompactionFile(file) }] : []
     })
+  }
+
+  /** This project's compactions as records, newest first; `taskId` keeps those linked to that task. */
+  compactionRecords(projectId: string, filter: { taskId?: string; limit?: number } = {}): CompactionRecord[] {
+    return readCompactionRecords(captainCompactionsDir(this.c.dataDir, projectId), filter)
+  }
+
+  compactionRecord(projectId: string, id: string): CompactionRecord | null {
+    return findCompactionRecord(captainCompactionsDir(this.c.dataDir, projectId), id)
   }
 
   /** Route a task notice to its project's Captain. Returns true when handled. `wake: false` waits for the Captain's next turn. */
@@ -495,7 +508,7 @@ class Captain {
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
-    const prompt = [notices.length ? `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}` : "", messages.join("\n\n")]
+    const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
     const result = await this.runPrompt(prompt)
@@ -555,7 +568,7 @@ class Captain {
     const notices = entries.map((n) => n.content)
     const result = await this.runPrompt(
       [
-        `[Project updates since your last turn]\n${notices.map((n) => `- ${n}`).join("\n")}`,
+        updatesBlock("Project updates since your last turn", notices),
         withOwner(
           `(Automatic wake-up: there is no new message from Cody or the Coordinator. Decide whether a project-local next step is needed. If Cody or the Coordinator should hear about it, say so in a line or two. If nothing needs reporting, reply with exactly ${NO_UPDATE} and nothing else.)`,
           this.owner(),
@@ -650,6 +663,14 @@ class Captain {
     }
   }
 
+  /** This project's tasks active or mentioned since the previous compaction, so the tools can find it by task. */
+  private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
+    const previous = lastCompaction(this.compactionsDir)?.at ?? 0
+    const messages = this.store.listCaptainMessages(this.project.id, 1000).filter((m) => m.createdAt > previous)
+    const mentioned = mentionedTaskIds(messages.flatMap((m) => [m.content, m.meta]))
+    return compactionTaskSnapshots(this.store, this.store.listTasks({ projectId: this.project.id }), previous, mentioned)
+  }
+
   private async doCompact() {
     const trigger = this.compactWanted ?? "button"
     this.compactWanted = null
@@ -665,7 +686,8 @@ class Captain {
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
       }
-      const { markdownFile: file } = writeCompaction(this.compactionsDir, { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before, heading: `Captain compaction summary: ${this.project.name}` }, text)
+      const meta = { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before, heading: `Captain compaction summary: ${this.project.name}` }
+      const { markdownFile: file } = writeCompaction(this.compactionsDir, meta, text, this.compactionTaskSnapshots())
       const compact = await this.run("/compact", s.id, true, "compact")
       if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
       let id = s.id
