@@ -17,7 +17,8 @@ interface Running {
   yard: BoxYard
   server: Server
   base: string
-  gh: { requests: number; state: string }
+  /** What the fake GitHub answers: the PR's head commit, and a state that overrides the merge file (e.g. CLOSED). */
+  gh: { requests: number; state: string; head: string; force: string | null }
 }
 const running: Running[] = []
 
@@ -27,15 +28,16 @@ const HEAD = "c0ffee".padEnd(40, "0")
 async function start(stateFile: string): Promise<Running> {
   const port = await freePort()
   const config = testConfig({ port })
-  const gh = { requests: 0, state: "OPEN" }
+  const gh = { requests: 0, state: "OPEN", head: HEAD, force: null as string | null }
   // GitHub's GraphQL API as the PR tracker sees it: PR #7 is open until the mock gh merges it.
   const fetch = (async () => {
     gh.requests++
     const merged = fs.existsSync(stateFile) && JSON.parse(fs.readFileSync(stateFile, "utf8")).state === "MERGED"
-    gh.state = merged ? "MERGED" : "OPEN"
-    const pr = merged
-      ? { state: "MERGED", isDraft: false, mergedAt: new Date().toISOString(), mergedBy: { login: "fake-claude" }, headRefOid: HEAD, labels: { nodes: [] } }
-      : { state: "OPEN", isDraft: false, mergedAt: null, mergedBy: null, headRefOid: HEAD, labels: { nodes: [{ name: "enhancement" }] } }
+    gh.state = gh.force ?? (merged ? "MERGED" : "OPEN")
+    const pr =
+      gh.state === "MERGED"
+        ? { state: "MERGED", isDraft: false, mergedAt: new Date().toISOString(), mergedBy: { login: "fake-claude" }, headRefOid: gh.head, labels: { nodes: [] } }
+        : { state: gh.state, isDraft: false, mergedAt: null, mergedBy: null, headRefOid: gh.head, labels: { nodes: [{ name: "enhancement" }] } }
     const data = { rateLimit: { remaining: 4000, resetAt: new Date(Date.now() + 3600_000).toISOString() }, p0: { pullRequest: pr } }
     return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } })
   }) as unknown as typeof globalThis.fetch
@@ -146,5 +148,77 @@ describe("On PR ready → merge, end to end", () => {
     expect(r.yard.store.getTaskRow(t.id)!.pr_labels_json).toBe('["enhancement"]')
     expect(t.turnCount).toBe(1)
     expect(await call<HookRun[]>(r, "GET", `/api/hooks/runs?projectId=${project.id}`)).toEqual([])
+  }, 60_000)
+
+  it("fires for a PR whose agent ended its turn with mark_done (done, not pr_ready), once", async () => {
+    const stateFile = path.join(tmpDir(), "gh-state.json")
+    const r = await start(stateFile)
+    const events: TaskEvent[] = []
+    r.yard.tasks.subscribe((e) => events.push(e))
+    const project = await call<Project>(r, "POST", "/api/projects", { name: "site", env: { FAKE_GH_STATE: stateFile } })
+    const hook = await call<Hook>(r, "POST", "/api/hooks/from-template", { projectId: project.id, template: "pr_merge", enabled: true })
+
+    // No [pr] marker: the agent opens the PR and calls mark_done, so the turn ends "done" with the PR open.
+    const task = await call<Task>(r, "POST", "/api/tasks", { projectId: project.id, title: "Add a header", prompt: "Add a header [slow]" })
+    await waitFor(() => r.yard.store.getTaskRow(task.id)?.status === "working", "the first turn to start")
+    await r.yard.tasks.apply(task.id, { seq: 0, ts: Date.now(), turnId: null, t: "pr", url: PR_URL, number: 7, branch: "boxyard/add-a-header", headSha: HEAD })
+
+    // The hook's merge turn runs, the PR merges, and that merge turn doesn't raise pr_ready again.
+    const done = await waitFor(async () => {
+      const t = await call<Task>(r, "GET", `/api/tasks/${task.id}`)
+      return t.prState === "merged" && t.turnCount === 2 && !r.yard.store.getTaskRow(task.id)?.current_turn_id ? t : null
+    }, "the hook's merge turn to merge the PR", 30_000)
+    expect(done.status).toBe("done")
+    expect(events.filter((e) => e.taskId === task.id).map((e) => e.type)).toEqual(["task.finished", "task.pr_ready", "pr.merged", "task.finished"])
+    const runs = await call<HookRun[]>(r, "GET", `/api/hooks/runs?projectId=${project.id}`)
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).toMatchObject({ hookId: hook.id, status: "fired", event: "task.pr_ready", headSha: HEAD, prompt: mergeRequestPrompt(7) })
+  }, 60_000)
+
+  it("fires once per head commit across later turns, and never for a closed PR", async () => {
+    const stateFile = path.join(tmpDir(), "gh-state.json")
+    const r = await start(stateFile)
+    const project = await call<Project>(r, "POST", "/api/projects", { name: "site", env: { FAKE_GH_STATE: stateFile } })
+    // A hook that doesn't start turns of its own (the Captain's wake is held off in start()).
+    const hook = await call<Hook>(r, "POST", "/api/hooks", {
+      projectId: project.id,
+      name: "Review ready PRs",
+      trigger: "task.pr_ready",
+      action: "message_captain",
+      prompt: "Review {pr_url} at {head_sha}",
+      enabled: true,
+      maxFiresPerTask: 10,
+    })
+    const fired = async () => (await call<HookRun[]>(r, "GET", `/api/hooks/runs?projectId=${project.id}`)).filter((x) => x.hookId === hook.id)
+    const turn = async (n: number) => {
+      await call(r, "POST", `/api/tasks/${task.id}/messages`, { content: "One more thing, please." })
+      await waitFor(async () => {
+        const t = await call<Task>(r, "GET", `/api/tasks/${task.id}`)
+        return t.turnCount === n && t.status === "done" && !r.yard.store.getTaskRow(task.id)?.current_turn_id ? t : null
+      }, `turn ${n} to end`, 30_000)
+    }
+
+    const task = await call<Task>(r, "POST", "/api/tasks", { projectId: project.id, title: "Add a sidebar", prompt: "Add a sidebar [slow]" })
+    await waitFor(() => r.yard.store.getTaskRow(task.id)?.status === "working", "the first turn to start")
+    await r.yard.tasks.apply(task.id, { seq: 0, ts: Date.now(), turnId: null, t: "pr", url: PR_URL, number: 7, branch: "boxyard/add-a-sidebar", headSha: HEAD })
+    await resting(r, task.id, ["done"])
+    expect((await fired()).map((x) => [x.status, x.headSha])).toEqual([["fired", HEAD]])
+
+    // A later turn on a finished task, same head commit: nothing new.
+    await turn(2)
+    expect(await fired()).toHaveLength(1)
+
+    // A new push (GitHub reports a new head at turn end): fires again, for the new commit.
+    const HEAD2 = "beef".padEnd(40, "1")
+    r.gh.head = HEAD2
+    await turn(3)
+    expect((await fired()).map((x) => x.headSha).sort()).toEqual([HEAD, HEAD2].sort())
+
+    // The PR was closed (and pushed to again): a closed PR is never ready.
+    r.gh.force = "CLOSED"
+    r.gh.head = "dead".padEnd(40, "2")
+    await turn(4)
+    expect(r.yard.store.getTaskRow(task.id)!.pr_state).toBe("closed")
+    expect(await fired()).toHaveLength(2)
   }, 60_000)
 })

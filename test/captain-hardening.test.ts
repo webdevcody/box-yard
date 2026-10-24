@@ -76,7 +76,7 @@ function parkedTask(r: Running, projectId: string, title: string): Task {
   return r.yard.store.getTask(t.id)!
 }
 
-const COORDINATOR_ONLY = ["create_project", "update_project", "delete_project", "send_to_captain", "ask_captain", "wait_for_captain", "list_compactions", "read_compaction", "clean_up_box", "save_note"]
+const COORDINATOR_ONLY = ["create_project", "update_project", "delete_project", "send_to_captain", "ask_captain", "wait_for_captain", "clean_up_box", "save_note"]
 
 describe("Captain MCP scoping (#43)", () => {
   async function twoProjects() {

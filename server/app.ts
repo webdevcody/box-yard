@@ -92,6 +92,7 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     ...projectNotesBudget,
   }),
+  projectOrder: z.object({ ids: z.array(z.string().max(64)).max(1000) }).strict(),
   projectPatch: z.object({
     name: z.string().trim().min(1).max(80).optional(),
     description: z.string().max(4000).optional(),
@@ -384,6 +385,13 @@ export function createBoxYard(
     const project = store.createProject(body)
     hub.broadcast({ type: "project", project })
     res.status(201).json(project)
+  })
+  // The owner's project order (sidebar drag-to-reorder): every project id, first to last.
+  api.put("/projects/order", (req, res) => {
+    const projects = store.reorderProjects(parse(schemas.projectOrder, req.body).ids)
+    const ids = projects.map((p) => p.id)
+    hub.broadcast({ type: "projects.order", ids })
+    res.json({ ids })
   })
   api.patch("/projects/:id", (req, res) => {
     const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))

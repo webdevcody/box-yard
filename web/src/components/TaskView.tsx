@@ -19,6 +19,8 @@ import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
 import { PublishedFile } from "./TaskFiles"
+import { PREVIEW_GROUP } from "./FileLink"
+import { runsOf } from "../lib/publishedNotices"
 import { AttachmentList } from "./Attachments"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
@@ -123,6 +125,7 @@ const TaskThread = memo(function TaskThread({
   const messages = useTaskMessages(id)
   const shown = useMemo(() => (messages.data ?? []).filter((m) => showTools || m.role !== "tool"), [messages.data, showTools])
   const tail = useTail(shown, id)
+  const runs = useMemo(() => runsOf(tail.visible, isPublishedEvent), [tail.visible])
 
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
@@ -142,9 +145,7 @@ const TaskThread = memo(function TaskThread({
         contentClassName="space-y-2.5"
       >
         {messages.isLoading && <div className="text-sm text-zinc-500">Loading transcript…</div>}
-        {tail.visible.map((m) => (
-          <Line key={m.id} m={m} onFollowUp={onFollowUp} />
-        ))}
+        {runs.map((r) => (Array.isArray(r) ? <PublishedRun key={r[0]!.id} messages={r} /> : <Line key={r.id} m={r} onFollowUp={onFollowUp} />))}
         {working && (
           <div className="flex items-center gap-2 pt-1 text-xs text-sky-400">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {working}
@@ -154,6 +155,26 @@ const TaskThread = memo(function TaskThread({
     </SelectionToTask>
   )
 })
+
+/** A transcript "Published artifact" event; TaskThread shows back-to-back ones together in one PublishedRun. */
+const isPublishedEvent = (m: TaskMessage) => m.role === "event" && m.meta?.kind === "artifact" && typeof m.meta.url === "string"
+
+/** Back-to-back published files as one wrapping row of file chips (one ←/→ gallery), with the newest one's time. */
+const PublishedRun = memo(
+  function PublishedRun({ messages }: { messages: TaskMessage[] }) {
+    return (
+      <div className="flex flex-wrap items-center gap-1.5 pl-6" {...PREVIEW_GROUP}>
+        {messages.map((m) => (
+          <PublishedFile key={m.id} artifactId={typeof m.meta?.artifactId === "string" ? m.meta.artifactId : undefined} url={String(m.meta!.url)} text={m.content} />
+        ))}
+        <span className="text-[10px] text-zinc-600">
+          <TimeAgo ts={messages.at(-1)!.createdAt} />
+        </span>
+      </div>
+    )
+  },
+  (a, b) => a.messages.length === b.messages.length && a.messages.every((m, i) => m === b.messages[i]),
+)
 
 const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
   const ownerName = useOwnerName()
@@ -222,13 +243,6 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
               <Markdown>{m.content}</Markdown>
               {time}
             </div>
-          </div>
-        )
-      if (url && m.meta?.kind === "artifact")
-        return (
-          <div className="pl-6">
-            <PublishedFile artifactId={typeof m.meta.artifactId === "string" ? m.meta.artifactId : undefined} url={url} text={m.content} />
-            {time}
           </div>
         )
       return (

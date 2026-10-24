@@ -350,7 +350,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_projects",
-    { description: "List all projects with their repo, env var names, notes and tasks." },
+    { description: owner("List all projects, in the order Cody keeps them in the sidebar, with their repo, env var names, notes and tasks.") },
     safe(async () => ok(scopeId ? [projectView(ownProject())] : store.listProjects().map(projectView))),
   )
 
@@ -481,53 +481,78 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     }),
   )
 
-  coordinatorOnly(
-    server.registerTool(
-      "list_compactions",
-      {
-        description:
-          "List orchestrator compaction records, newest first. Use this to recover prior context after the orchestrator was compacted; pass task to filter to compactions that mentioned or snapshotted that task.",
-        inputSchema: {
-          task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
-          limit: z.number().int().min(1).max(100).optional(),
-        },
+  /** A project's Captain compactions live in files under the Captain's data dir; null when no Captains run here. */
+  const captainCompactions = (projectId: string, filter: { taskId?: string; limit?: number }) =>
+    deps.captains ? deps.captains.compactionRecords(projectId, filter).map((c) => ({ ...compactionView(c), captain: projectId })) : null
+  const noCaptains = "Captains are not available in this Box Yard process."
+
+  server.registerTool(
+    "list_compactions",
+    {
+      description: scopeId
+        ? "List your own Captain compaction records, newest first. Use this to recover prior context after you were compacted; pass task to filter to compactions that mentioned or snapshotted that task."
+        : "List compaction records, newest first: the Coordinator's own, or a project Captain's when you pass project. Use this to recover prior context after a compaction; pass task to filter to compactions that mentioned or snapshotted that task.",
+      inputSchema: {
+        task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
+        project: z
+          .string()
+          .optional()
+          .describe(scopeId ? "Leave out: your own project." : "Project id or name: list that project's Captain compactions instead of the Coordinator's."),
+        limit: z.number().int().min(1).max(100).optional(),
       },
-      safe(async (a: { task?: string; limit?: number }) => {
-        const taskId = a.task ? task(a.task).id : undefined
-        return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
-      }),
-    ),
+    },
+    safe(async (a: { task?: string; project?: string; limit?: number }) => {
+      const taskId = a.task ? task(a.task).id : undefined
+      const projectId = projectFilter(a.project)
+      if (!projectId) return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
+      const list = captainCompactions(projectId, { taskId, limit: a.limit ?? 20 })
+      return list ? ok(list) : fail(noCaptains)
+    }),
   )
 
-  coordinatorOnly(
-    server.registerTool(
-      "read_compaction",
-      {
-        description: "Read one orchestrator compaction's markdown summary and linked task snapshots.",
-        inputSchema: { compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z") },
+  server.registerTool(
+    "read_compaction",
+    {
+      description: scopeId
+        ? "Read one of your Captain compactions: its markdown summary and linked task snapshots."
+        : "Read one compaction's markdown summary and linked task snapshots: the Coordinator's, or a project Captain's when you pass project.",
+      inputSchema: {
+        compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z"),
+        project: z.string().optional().describe(scopeId ? "Leave out: your own project." : "Project id or name, for one of that project's Captain compactions."),
       },
-      safe(async (a: { compaction: string }) => {
+    },
+    safe(async (a: { compaction: string; project?: string }) => {
+      const projectId = projectFilter(a.project)
+      if (!projectId) {
         const c = store.getOrchestratorCompaction(a.compaction, true)
-        if (!c) throw new Error(`No compaction "${a.compaction}". Use list_compactions.`)
+        if (!c) throw new Error(`No Coordinator compaction "${a.compaction}". Use list_compactions, and pass project for a Captain compaction.`)
         return ok(compactionView(c, true))
-      }),
-    ),
+      }
+      if (!deps.captains) return fail(noCaptains)
+      const c = deps.captains.compactionRecord(projectId, a.compaction)
+      if (!c) throw new Error(`No Captain compaction "${a.compaction}" in this project. Use list_compactions.`)
+      return ok({ ...compactionView(c, true), captain: projectId })
+    }),
   )
 
   server.registerTool(
     "find_compactions_by_task",
     {
-      description:
-        "Find orchestrator compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
+      description: scopeId
+        ? "Find your Captain compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context."
+        : "Find Coordinator compactions and the task's project Captain compactions linked to a task, and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
       inputSchema: { task: z.string(), limit: z.number().int().min(1).max(100).optional() },
     },
     safe(async (a: { task: string; limit?: number }) => {
       const t = task(a.task)
+      const limit = a.limit ?? 20
       return ok({
         task: brief(t),
-        // Coordinator compactions span every project, so Captains only get the task's own.
-        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit: a.limit ?? 20 }).map((c) => compactionView(c)),
-        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit: a.limit ?? 20 }),
+        // Coordinator compactions span every project, so Captains only get their own and the task's.
+        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit }).map((c) => compactionView(c)),
+        // task() keeps a Captain inside its own project, so this is never another project's Captain.
+        captainCompactions: captainCompactions(t.projectId, { taskId: t.id, limit }) ?? undefined,
+        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit }),
       })
     }),
   )
