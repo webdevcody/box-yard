@@ -231,12 +231,12 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
         <MoreHorizontal className="h-3.5 w-3.5 text-zinc-500" />
       </button>
       {open && (
-        <div role="menu" className="absolute top-full right-0 z-30 mt-1 w-64 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl sm:hidden">
+        <div role="menu" className="absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl sm:hidden">
           <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">Context {contextLabel(tokens, window)}</div>
           <button
             type="button"
             role="menuitem"
-            className={cx(menuItem, warn && "text-amber-300")}
+            className={menuItem}
             disabled={waiting}
             onClick={() => {
               onCompact()
