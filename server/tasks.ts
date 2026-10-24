@@ -1,6 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
@@ -273,7 +273,11 @@ export class TaskManager {
       taskDir: (boxId, taskId) => this.taskDir(boxId, taskId),
       installRunner: async (boxId) => {
         const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
-        await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
+        const source = this.runnerSource()
+        // Only when it changed: a full disk can't take the write, and cleanup has to work then.
+        const sum = createHash("sha256").update(source).digest("hex")
+        const current = await this.provider.exec(boxId, `sha256sum ${q(runnerPath)} 2>/dev/null | cut -c1-64`).catch(() => null)
+        if (current?.stdout.trim() !== sum) await this.provider.writeFile(boxId, runnerPath, source)
         return runnerPath
       },
       hasFreshArchive: (row) => this.hasFreshArchive(row),
@@ -1084,7 +1088,9 @@ export class TaskManager {
       if (box.status === "deleting") {
         if (now - (this.lastReclaimAt.get(box.id) ?? 0) < 5 * 60_000) continue
         this.lastReclaimAt.set(box.id, now)
-        await this.dropBox(box.id)
+        const made = this.resizeReport(box.id)
+        const note = await this.dropBox(box.id)
+        if (made?.newBoxId === box.id && made.boxId !== box.id) this.noteResizeCleanup(made, note)
         continue
       }
       const r = this.resizeReport(box.id)
