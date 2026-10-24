@@ -30,7 +30,7 @@ const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
 const WAKE_DEBOUNCE_MS = 4000
 /** Automatic turns in a row (no message from Cody in between) before it stops waking itself. */
-const MAX_AUTO_TURNS = 8
+export const MAX_AUTO_TURNS = 8
 /** What the orchestrator says on an automatic turn when there's nothing to tell Cody; not shown. */
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
@@ -104,6 +104,8 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Read on every nudge; tests shorten it. */
+  readonly tuning = { wakeDebounceMs: WAKE_DEBOUNCE_MS }
   /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
   private stopped = false
   /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
@@ -201,7 +203,7 @@ export class Orchestrator {
       if (!ready) return
       this.wakeWanted = true
       void this.drain()
-    }, WAKE_DEBOUNCE_MS)
+    }, this.tuning.wakeDebounceMs)
     this.wakeTimer.unref?.()
   }
 
