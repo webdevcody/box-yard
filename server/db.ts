@@ -571,6 +571,14 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX note_suggestions_project ON note_suggestions(project_id, status, created_at);
   CREATE INDEX note_suggestions_task ON note_suggestions(task_id, status);
   `,
+  `
+  -- Git-first archives: a project's own choice of pushing at turn end (NULL uses Settings), each task's last push,
+  -- and free space on a box's root disk (/tmp, HOME) when it isn't the workspace disk.
+  ALTER TABLE projects ADD COLUMN push_at_turn_end INTEGER;
+  ALTER TABLE tasks ADD COLUMN push_state_json TEXT;
+  ALTER TABLE boxes ADD COLUMN root_free_bytes INTEGER;
+  ALTER TABLE boxes ADD COLUMN root_total_bytes INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

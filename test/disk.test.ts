@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest"
-import { CLEANUP_STEPS, cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, measuredAgo, parseDf, requiredFreeBytes } from "../shared/disk.js"
-import { buildCleanupOrder, parkOrder, staleTaskDir } from "../server/janitor.js"
+import fs from "node:fs"
+import path from "node:path"
+import { execFileSync } from "node:child_process"
+import { CLEANUP_STEPS, cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, measuredAgo, parseDf, requiredFreeBytes, rootDiskLine, rootLow } from "../shared/disk.js"
+import { buildCleanupOrder, parkOrder, staleTaskDir, staleTmpScript, STALE_TMP_PATTERNS } from "../server/janitor.js"
+import { tmpDir } from "./helpers.js"
 import type { TaskRow } from "../server/store.js"
 
 const MB = 1024 * 1024
@@ -9,11 +13,25 @@ const GB = 1024 * MB
 describe("parseDf", () => {
   it("reads free and total bytes from df -Pk", () => {
     const out = "Filesystem     1024-blocks    Used Available Capacity Mounted on\n/dev/nvme0n1       5242880 4998276    244604      96% /workspace\n"
-    expect(parseDf(out)).toEqual({ totalBytes: 5242880 * 1024, freeBytes: 244604 * 1024 })
+    expect(parseDf(out)).toEqual({ totalBytes: 5242880 * 1024, freeBytes: 244604 * 1024, root: null })
   })
 
   it("copes with spaces in the filesystem name and a bare last line", () => {
-    expect(parseDf("map auto_home  100 40 60 40% /System/Volumes/Data/home")).toEqual({ totalBytes: 100 * 1024, freeBytes: 60 * 1024 })
+    expect(parseDf("map auto_home  100 40 60 40% /System/Volumes/Data/home")).toEqual({ totalBytes: 100 * 1024, freeBytes: 60 * 1024, root: null })
+  })
+
+  it("reads the root disk after the mark when /tmp is another filesystem", () => {
+    const out = [
+      "/dev/nvme1n1       5242880 4998276    244604      96% /workspace",
+      "@@boxyard-root-df",
+      "overlay            8388608 7864320    524288      94% /",
+    ].join("\n")
+    expect(parseDf(out)).toEqual({ totalBytes: 5242880 * 1024, freeBytes: 244604 * 1024, root: { totalBytes: 8388608 * 1024, freeBytes: 524288 * 1024 } })
+  })
+
+  it("leaves the root disk out when /tmp is on the work disk, or its df failed", () => {
+    expect(parseDf("/dev/sda1 100 40 60 40% /\n@@boxyard-root-df\n/dev/sda1 100 40 60 40% /\n")).toEqual({ totalBytes: 100 * 1024, freeBytes: 60 * 1024, root: null })
+    expect(parseDf("/dev/sda1 100 40 60 40% /work\n@@boxyard-root-df\n")).toEqual({ totalBytes: 100 * 1024, freeBytes: 60 * 1024, root: null })
   })
 
   it("returns null for output it can't read", () => {
@@ -22,7 +40,7 @@ describe("parseDf", () => {
   })
 
   it("quotes the path", () => {
-    expect(dfCommand("/workspace/home")).toBe("df -Pk '/workspace/home' | tail -n 1")
+    expect(dfCommand("/workspace/home")).toBe("df -Pk '/workspace/home' | tail -n 1; echo @@boxyard-root-df; df -Pk /tmp 2>/dev/null | tail -n 1")
     expect(dfCommand("/a'b")).toContain(`'/a'\\''b'`)
   })
 })
@@ -79,8 +97,8 @@ describe("requiredFreeBytes", () => {
 describe("cleanup summaries", () => {
   it("names each step that freed something", () => {
     const steps = CLEANUP_STEPS.map((s) => ({ key: s.key, label: s.label, freedBytes: 0, removed: [], skipped: null }))
-    steps[1]!.freedBytes = 800 * MB
-    steps[2]!.freedBytes = 400 * MB
+    steps[2]!.freedBytes = 800 * MB
+    steps[3]!.freedBytes = 400 * MB
     expect(cleanupSummary({ freedBytes: 1200 * MB, steps })).toBe("freed 1.2 GB (caches 800 MB, builds 400 MB)")
     expect(cleanupSummary({ freedBytes: 0, steps })).toBe("freed nothing")
   })
@@ -92,7 +110,77 @@ describe("cleanup summaries", () => {
   })
 
   it("runs the steps in the safe order", () => {
-    expect(CLEANUP_STEPS.map((s) => s.key)).toEqual(["partials", "caches", "builds", "git", "archive"])
+    expect(CLEANUP_STEPS.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
+  })
+})
+
+describe("root disk", () => {
+  it("is low under 512 MB free, or under a tenth of a big disk", () => {
+    expect(rootLow({ freeBytes: 380 * MB, totalBytes: 5 * GB })).toBe(true)
+    expect(rootLow({ freeBytes: 600 * MB, totalBytes: 5 * GB })).toBe(false)
+    expect(rootLow({ freeBytes: 1.5 * GB, totalBytes: 20 * GB })).toBe(true)
+    expect(rootLow({ freeBytes: 3 * GB, totalBytes: 20 * GB })).toBe(false)
+  })
+
+  it("is never low when it isn't measured or is the work disk", () => {
+    expect(rootLow(null)).toBe(false)
+    expect(rootLow({ freeBytes: null, totalBytes: null })).toBe(false)
+    expect(rootDiskLine({ rootFreeBytes: null, rootTotalBytes: null })).toBeNull()
+    expect(rootDiskLine({})).toBeNull()
+  })
+
+  it("says where it is", () => {
+    expect(rootDiskLine({ rootFreeBytes: 380 * MB, rootTotalBytes: 5 * GB })).toBe("380 MB free of 5.0 GB on the root disk (/tmp, home)")
+  })
+})
+
+describe("stale temp folders", () => {
+  const old = (Date.now() - 40 * 60_000) / 1000
+  /** A folder with one file; `stale` dates both 40 minutes back. */
+  const folder = (dir: string, stale: boolean) => {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, "f"), "x".repeat(4096))
+    if (stale) for (const f of [path.join(dir, "f"), dir]) fs.utimesSync(f, old, old)
+  }
+
+  it("removes Box Yard's and test runs' folders nothing touched in 30 minutes, and nothing else", () => {
+    const base = tmpDir()
+    try {
+      // The script's /tmp, moved into a scratch folder so this test never sweeps the machine's own.
+      const tmp = path.join(base, "tmp")
+      const root = path.join(base, "box")
+      for (const name of ["box-yard-test-old", "box-yard-origin-old", "thin-old", "archive-old", "boxes-old", "boxyard-git-task_old"]) folder(path.join(tmp, name), true)
+      folder(path.join(tmp, "box-yard-test-fresh"), false)
+      folder(path.join(tmp, "someone-elses-old"), true)
+      // An old folder with a file written a moment ago is still in use.
+      folder(path.join(tmp, "archive-busy"), true)
+      fs.writeFileSync(path.join(tmp, "archive-busy", "now"), "writing")
+      folder(path.join(root, ".boxyard", "tmp", "boxyard-archive-keep-task_old"), true)
+      folder(path.join(root, ".boxyard", "tmp", "boxyard-git-task_now"), false)
+
+      // Only the bare /tmp globs: the box's quoted root lives under /tmp here too.
+      const script = staleTmpScript(root, false).replaceAll(" /tmp/", ` ${tmp}/`)
+      const out = execFileSync("bash", ["-c", script]).toString()
+      const removed = out
+        .trim()
+        .split("\n")
+        .map((l) => l.replace(/^\d+ /, ""))
+        .sort()
+      expect(removed).toEqual(
+        [...["archive-old", "box-yard-origin-old", "box-yard-test-old", "boxes-old", "boxyard-git-task_old", "thin-old"].map((n) => path.join(tmp, n)), path.join(root, ".boxyard", "tmp", "boxyard-archive-keep-task_old")].sort(),
+      )
+      expect(out).toMatch(/^\d+ /)
+      expect(fs.readdirSync(tmp).sort()).toEqual(["archive-busy", "box-yard-test-fresh", "someone-elses-old"])
+      expect(fs.readdirSync(path.join(root, ".boxyard", "tmp"))).toEqual(["boxyard-git-task_now"])
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it("leaves /tmp alone on a local box, whose /tmp is this machine's", () => {
+    expect(staleTmpScript("/r", true)).not.toContain("/tmp/")
+    expect(staleTmpScript("/r", true)).toContain("'/r/.boxyard/tmp'/*")
+    for (const p of STALE_TMP_PATTERNS) expect(staleTmpScript("/r", false)).toContain(`/tmp/${p}`)
   })
 })
 

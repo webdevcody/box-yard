@@ -48,6 +48,8 @@ export interface Project {
   boxSize: BoxSize | null
   /** Box mirrors of its repo are partial clones (blob:none); null uses Settings → Partial clone mirrors. */
   partialClone: boolean | null
+  /** Push each task's branch and uncommitted work at the end of every turn; null uses Settings → Push at turn end. */
+  pushAtTurnEnd: boolean | null
   createdAt: number
   updatedAt: number
 }
@@ -152,8 +154,27 @@ export interface Task {
   routingReason: string | null
   /** Cody pressed "Merge PR" and the agent hasn't finished that turn yet (null otherwise). */
   mergeRequest?: MergeRequest | null
+  /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
+  pushState?: PushState | null
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * What the last turn-end push did. "pushed": origin has the branch's commits and, when there is uncommitted work,
+ * the hidden ref refs/boxyard/wip/<task>, so the archive only needs the session and log. "skipped" (push off, no
+ * write access, a repo git can't snapshot) and "failed" keep the full archive.
+ */
+export interface PushState {
+  status: "pushed" | "skipped" | "failed"
+  at: number
+  branch: string | null
+  /** The commit the workspace was on. */
+  head: string | null
+  /** Commit on origin at refs/boxyard/wip/<task> holding uncommitted work; null when the work was clean. */
+  wip: string | null
+  /** Why it was skipped or failed. */
+  reason: string | null
 }
 
 /**
@@ -304,6 +325,9 @@ export interface BoxInfo {
   diskFreeBytes: number | null
   diskTotalBytes: number | null
   diskCheckedAt: number | null
+  /** Free and total space on the box's root disk (/tmp, HOME) when that isn't the work disk; null otherwise or until checked. */
+  rootFreeBytes?: number | null
+  rootTotalBytes?: number | null
   /** Too little free space for a new workspace (Settings → Boxes & limits → Disk). */
   diskLow: boolean
   /** The running cleanup, or the last one. */
@@ -519,6 +543,11 @@ export interface Settings {
   diskCloneFactor: number
   /** Box repo mirrors are partial clones (blob:none): old blobs are fetched when something reads them. A project can override it. */
   gitPartialClone: boolean
+  /**
+   * After every turn, push the task's branch and its uncommitted work (to the hidden ref refs/boxyard/wip/<task>),
+   * so archives only carry what git can't. A project can override it.
+   */
+  gitPushAtTurnEnd: boolean
   /** Remove a resting task's git-ignored build output (node_modules, dist, caches…) after this many idle minutes. 0 = off. */
   buildCleanupIdleMinutes: number
   /** Notes retro: when a task's PR merges, or a task without a PR ends done, its Captain curates the agent's note suggestions. */

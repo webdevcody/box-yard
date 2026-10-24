@@ -27,6 +27,7 @@ import { Button, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "
 import { FilesChip } from "./TaskFiles"
 import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
+import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
@@ -317,6 +318,7 @@ function TaskMenu({
                   <span>{task.lastArchivedAt ? "archived" : "no box yet"}</span>
                 )}
               </Detail>
+              {task.pushState && <PushDetail push={task.pushState} />}
               {(task.model || task.effort) && (
                 <Detail label="Model">
                   <span className="min-w-0 truncate text-zinc-300">{[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}</span>
@@ -414,6 +416,18 @@ function TaskMenu({
 }
 
 /** One label/value pair in the details grid; the value cell holds text plus an optional copy button. */
+/** The last turn-end push: whether the task's code is on origin, so its box can go without losing it. */
+function PushDetail({ push }: { push: NonNullable<Task["pushState"]> }) {
+  const line = pushStateLine(push)
+  return (
+    <Detail label="Git" top>
+      <span className="min-w-0 py-0.5 leading-snug wrap-anywhere" data-testid="push-state">
+        <span className={line.tone === "ok" ? "text-zinc-300" : line.tone === "warn" ? "text-amber-300" : undefined}>{line.text}</span> · <TimeAgo ts={push.at} />
+      </span>
+    </Detail>
+  )
+}
+
 function Detail({ label, top, children }: { label: string; top?: boolean; children: ReactNode }) {
   return (
     <>

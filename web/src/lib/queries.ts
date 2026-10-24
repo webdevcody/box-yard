@@ -264,6 +264,7 @@ export function useCreateProject() {
           notesMaxTokens: null,
           boxSize: null,
           partialClone: null,
+          pushAtTurnEnd: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -296,6 +297,7 @@ export function useUpdateProject() {
       partialClone?: boolean | null
       notesMaxCount?: number | null
       notesMaxTokens?: number | null
+      pushAtTurnEnd?: boolean | null
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {

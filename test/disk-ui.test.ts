@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { announceCleanup, cleanupLine, cleanupToast, diskMeter, withCleanup } from "../web/src/lib/diskCleanup"
+import { announceCleanup, cleanupLine, cleanupToast, diskMeter, rootMeter, withCleanup } from "../web/src/lib/diskCleanup"
 import { currentToasts, dismiss } from "../web/src/lib/toast"
 import { CLEANUP_STEPS } from "../shared/disk"
 import type { BoxCleanup, BoxInfo } from "../shared/types"
@@ -47,6 +47,13 @@ describe("disk meter", () => {
   it("is null before the first df", () => {
     expect(diskMeter({ diskFreeBytes: null, diskTotalBytes: null, diskLow: false })).toBeNull()
   })
+
+  it("shows the root disk when it's another one, low by the server's rule", () => {
+    expect(rootMeter({ rootFreeBytes: 380 * MB, rootTotalBytes: 5 * GB })).toMatchObject({ label: "380 MB free of 5.0 GB", low: true })
+    expect(rootMeter({ rootFreeBytes: 2 * GB, rootTotalBytes: 5 * GB })!.low).toBe(false)
+    expect(rootMeter({ rootFreeBytes: null, rootTotalBytes: null })).toBeNull()
+    expect(rootMeter({})).toBeNull()
+  })
 })
 
 describe("cleanup line", () => {
@@ -59,9 +66,16 @@ describe("cleanup line", () => {
     expect(cleanupLine(cleanup({ enough: false, freedBytes: 0, steps: [] }))).toBe("Cleaned up because it was low on disk: freed nothing; still short of the 1.0 GB new workspaces need")
   })
 
+  it("names what routine upkeep did", () => {
+    const step = (key: "tmp" | "caches" | "builds" | "git", freedBytes = 0) => ({ key, label: key, freedBytes, removed: [], skipped: null })
+    const routine = (steps: BoxCleanup["steps"]) => cleanup({ reason: "routine", targetFreeBytes: null, freedBytes: steps.reduce((n, s) => n + s.freedBytes, 0), steps })
+    expect(cleanupLine(routine([step("tmp", 1.6 * GB), step("caches")]))).toBe("Routine upkeep (stale temp folders, caches): freed 1.6 GB (tmp 1.6 GB)")
+    expect(cleanupLine(routine([step("builds", 10 * MB), step("git")]))).toBe("Routine upkeep (idle build output, mirror gc): freed 10 MB (builds 10 MB)")
+  })
+
   it("shows progress while running, and the error when it failed", () => {
     expect(cleanupLine(cleanup({ status: "running", freedBytes: 0, steps: [] }))).toBe("Cleaning up…")
-    expect(cleanupLine(cleanup({ status: "running", freedBytes: 171 * MB, steps: cleanup().steps.slice(0, 1) }))).toBe("Cleaning up: freed 171 MB so far (1 of 5 steps)")
+    expect(cleanupLine(cleanup({ status: "running", freedBytes: 171 * MB, steps: cleanup().steps.slice(0, 1) }))).toBe("Cleaning up: freed 171 MB so far (1 of 6 steps)")
     expect(cleanupLine(cleanup({ status: "failed", error: "box not responding" }))).toBe("Cleanup failed: box not responding")
   })
 })

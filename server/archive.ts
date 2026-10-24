@@ -1,5 +1,6 @@
 import { q } from "./providers/types.js"
 import { KEEP_PACK } from "./gitShare.js"
+import { GIT_MANIFEST, GIT_PACK, stageBaseScript } from "./gitFirst.js"
 
 /**
  * Workspace archives stream off the box: tar writes to stdout, base64 makes it text the exec stream can carry, and
@@ -31,10 +32,16 @@ export interface ArchiveScript {
    */
   partial: boolean
   /**
-   * Where archive() staged the task's git-keep.pack (server/gitShare.ts keepPackStage), on /tmp. When
+   * Where archive() staged the task's git-keep.pack (server/gitShare.ts keepPackScript), on /tmp or the work disk. When
    * `<keepStage>/<taskId>/git-keep.pack` exists, it goes into the archive as `<taskId>/git-keep.pack`.
    */
   keepStage?: string
+  /**
+   * Git-first (or thin) archive: git carries the repo, so only the task folder's other entries go in (the Claude
+   * session, the log, runner state), with `<stage>/<taskId>/git.manifest` and `git.pack` from gitPrepScript
+   * (server/gitFirst.ts) and, with `ignored`, the files git ignores in work/ outside the excluded build dirs.
+   */
+  git?: { stage: string; ignored: boolean }
 }
 
 /** The bash script that streams a task's archive to stdout. */
@@ -49,12 +56,28 @@ export function archiveScript(o: ArchiveScript): string {
     `if cd ${q(o.root)} 2>>"$err"; then`,
     o.keepStage ? `  [ -f ${q(`${o.keepStage}/${o.taskId}/${KEEP_PACK}`)} ] && k=(-C ${q(o.keepStage)} ${q(`${o.taskId}/${KEEP_PACK}`)}) || k=()` : `  k=()`,
   ]
-  if (o.partial) {
+  if (o.git) {
+    const stage = q(o.git.stage)
     lines.push(
-      `  m=(); for f in claude events.jsonl events.seq work/.git; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
+      `  m=(); while IFS= read -r -d '' f; do m+=("$f"); done < <(find ${id} -mindepth 1 -maxdepth 1 ! -name work -print0 2>>"$err")`,
+      `  g=(-C ${stage} ${q(`${o.taskId}/${GIT_MANIFEST}`)}); [ -f ${q(`${o.git.stage}/${o.taskId}/${GIT_PACK}`)} ] && g+=(${q(`${o.taskId}/${GIT_PACK}`)})`,
+      `  i=(); il=${q(`${o.git.stage}/ignored.list`)}`,
+      o.git.ignored
+        ? `  if (cd ${id}/work 2>/dev/null && git ls-files -z -o -i --exclude-standard --directory 2>/dev/null) | while IFS= read -r -d '' f; do printf '%s\\0' ${id}/work/"$f"; done > "$il" 2>>"$err" && [ -s "$il" ]; then i=(--null -T "$il"); fi`
+        : `  :`,
+      // The excludes come first: they apply to the listed ignored folders too (node_modules/, dist/…).
+      `  tar czf - ${excludes} "\${m[@]}" "\${i[@]}" "\${g[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
+    )
+  } else if (o.partial) {
+    lines.push(
+      // Everything but the working files: the session, the log, runner state and work/.git.
+      `  m=(); while IFS= read -r -d '' f; do m+=("$f"); done < <(find ${id} -mindepth 1 -maxdepth 1 ! -name work -print0 2>>"$err"); [ -e ${id}/work/.git ] && m+=(${id}/work/.git)`,
       `  if [ -e ${id}/work/.git ]; then`,
-      `    stage=$(mktemp -d /tmp/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${wipSnapshot(o.taskId)}) || wip=failed`,
-      `  fi`,
+      // The index copy and the snapshot's objects go to whichever of /tmp and the work disk has more room.
+      `    ${stageBaseScript(o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
+      `    stage=$(mktemp -d "$bybase"/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${wipSnapshot(o.taskId)}) || wip=failed`,
+      // No repo: without its files there would be nothing of the work left.
+      `  else wip=nogit; fi`,
       `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
       `  tar czf - ${excludes} "\${m[@]}" "\${x[@]}" "\${k[@]}" 2>>"$err" | head -c ${o.maxBytes + 1} | base64 | fold -w 76`,
     )
@@ -102,7 +125,7 @@ export interface ArchiveTrailer {
   head: number
   base64: number
   fold: number
-  /** "-" (not tried), "clean", "failed" or the WIP commit. */
+  /** "-" (not tried), "clean", "failed", "nogit" (no repo to keep) or the WIP commit. */
   wip: string
   /** The end of stderr. */
   stderr: string
@@ -180,6 +203,7 @@ export function archiveOutcome(d: ArchiveDecoder, o: { maxBytes: number; partial
   // tar exits 1 when a file changed while it was read; the archive is still whole.
   if (t.tar > 1) return { ok: false, tooBig: false, error: detail || `tar exited with ${t.tar}` }
   if (t.head || t.base64 || t.fold) return { ok: false, tooBig: false, error: detail || `streaming the archive failed (exit ${t.head || t.base64 || t.fold})` }
+  if (o.partial && t.wip === "nogit") return { ok: false, tooBig: false, error: "work/ has no git repo, so it can't be archived without its files" }
   if (o.partial && t.wip === "failed") return { ok: false, tooBig: false, error: `couldn't save uncommitted work on refs/boxyard/wip${detail ? `: ${detail}` : ""}` }
   if (!d.bytes) return { ok: false, tooBig: false, error: detail || "tar wrote nothing" }
   return { ok: true, bytes: d.bytes, wip: t.wip }

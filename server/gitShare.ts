@@ -13,6 +13,7 @@
 // - Removing a task folder only drops that task's own objects: nothing in the mirror points at a task.
 
 import { q } from "./providers/types.js"
+import { stageBaseScript } from "./gitFirst.js"
 
 /** In an archive, next to work/: borrowed objects only the mirror still had. */
 export const KEEP_PACK = "git-keep.pack"
@@ -20,7 +21,11 @@ export const KEEP_PACK = "git-keep.pack"
  * Where archive() stages a task's keep pack: on /tmp, the box's other disk, so archiving writes nothing to a
  * full /workspace. tar adds it as `<taskId>/git-keep.pack` with `-C <stage>`.
  */
-export const keepPackStage = (taskId: string) => `/tmp/boxyard-archive-keep-${taskId}`
+const keepStageName = (taskId: string) => `boxyard-archive-keep-${taskId}`
+/** Both places keepPackScript may stage a task's keep pack (/tmp or the work disk), for cleanup. */
+export const keepPackStages = (root: string, taskId: string) => [`/tmp/${keepStageName(taskId)}`, `${root}/.boxyard/tmp/${keepStageName(taskId)}`]
+/** Echoed by keepPackScript, followed by the stage folder, when it made a keep pack. */
+export const KEEP_STAGE_MARK = "boxyard-keep-stage="
 /** Echoed by the mirror sync when it re-created a mirror (its mode changed and no task used it). */
 export const MIRROR_MARK = "boxyard-mirror="
 /** Echoed after a restore: `ok`, or `broken` when HEAD's commit can't be read even with the mirror. */
@@ -100,15 +105,16 @@ export function hydrateMirrorScript(s: MirrorSpec, refs: string[]): string {
  * Clone a task's work/ against the mirror (run inside the task folder). It borrows the mirror's objects; it is
  * a partial clone itself when the mirror is (or, with no mirror, when the setting says so), so blobs nobody has
  * yet are fetched from GitHub on demand. The alternates file is rewritten with the mirror's path as Box Yard
- * spells it, so in-use checks can match it exactly.
+ * spells it, so in-use checks can match it exactly. `target` is the folder to clone into (work/, or a temp folder
+ * whose .git a restore moves into work/).
  */
-export function cloneTaskScript(s: MirrorSpec): string {
+export function cloneTaskScript(s: MirrorSpec, target = "work"): string {
   const fallback = s.partial ? "--filter=blob:none" : ""
   return [
     `bym=${q(s.mirror)}`,
     `byf=${fallback ? q(fallback) : '""'}`,
     `if [ -d "$bym" ]; then byf=""; ${isPartial("$bym")} && byf=--filter=blob:none; fi`,
-    `${s.git} clone -q --no-checkout $byf --reference-if-able "$bym" ${q(s.url)} work && { [ ! -f work/.git/objects/info/alternates ] || echo "$bym/objects" > work/.git/objects/info/alternates; }`,
+    `${s.git} clone -q --no-checkout $byf --reference-if-able "$bym" ${q(s.url)} ${q(target)} && { [ ! -f ${q(`${target}/.git/objects/info/alternates`)} ] || echo "$bym/objects" > ${q(`${target}/.git/objects/info/alternates`)}; }`,
   ].join("\n")
 }
 
@@ -124,23 +130,25 @@ export function withMirrorLock(mirror: string, body: string): string {
  * force-push or a deleted branch. The task's own objects are already in its .git, and everything else comes
  * from a fresh mirror on restore. Leaves no stage when there is nothing to keep.
  */
-export function keepPackScript(taskDir: string, taskId: string): string {
+export function keepPackScript(taskDir: string, taskId: string, root: string): string {
   const w = q(`${taskDir}/work`)
-  const stage = q(keepPackStage(taskId))
-  const out = q(`${keepPackStage(taskId)}/${taskId}/${KEEP_PACK}`)
+  const out = `"$bystage"/${q(`${taskId}/${KEEP_PACK}`)}`
   return [
-    `rm -rf ${stage}`,
+    `rm -rf ${keepPackStages(root, taskId).map(q).join(" ")}`,
+    // On whichever of /tmp and the work disk has more room: a nearly full root disk doesn't stop the archive.
+    stageBaseScript(root),
+    `bystage="$bybase"/${q(keepStageName(taskId))}`,
     `bya=${w}/.git/objects/info/alternates`,
     `if [ -f "$bya" ]; then`,
     `  byo=$(head -n 1 "$bya")`,
     `  byv=$(mktemp -d)`,
     // A plain repo that sees only the mirror's objects: asking it about a missing object never fetches.
-    `  if [ -d "$byo" ] && git init -q --bare "$byv" && echo "$byo" > "$byv/objects/info/alternates" && mkdir -p ${q(`${keepPackStage(taskId)}/${taskId}`)}; then`,
+    `  if [ -d "$byo" ] && git init -q --bare "$byv" && echo "$byo" > "$byv/objects/info/alternates" && mkdir -p "$bystage"/${q(taskId)}; then`,
     `    bytips=$(cd ${w} && { git rev-parse -q --verify HEAD; git for-each-ref --format='%(objectname)' refs/heads refs/boxyard refs/stash; } 2>/dev/null | sort -u)`,
     `    [ -n "$bytips" ] && git -C ${w} -c core.alternateRefsPrefixes=${q(ORIGIN_REF_PREFIXES)} rev-list --objects --missing=allow-any $bytips --not --alternate-refs 2>/dev/null \\`,
     `      | cut -d' ' -f1 | git -C "$byv" cat-file --batch-check='%(objectname) %(objecttype)' | awk '$2 != "missing" { print $1 }' \\`,
     `      | git -C "$byv" pack-objects -q --stdout > ${out}`,
-    `    [ "$(wc -c < ${out} 2>/dev/null || echo 0)" -gt ${EMPTY_PACK_BYTES} ] || rm -rf ${stage}`,
+    `    if [ "$(wc -c < ${out} 2>/dev/null || echo 0)" -gt ${EMPTY_PACK_BYTES} ]; then echo "${KEEP_STAGE_MARK}$bystage"; else rm -rf "$bystage"; fi`,
     `  fi`,
     `  rm -rf "$byv"`,
     `fi`,
@@ -160,7 +168,7 @@ export function relinkTaskScript(taskDir: string, mirror: string): string {
     `if [ -f "$bya" ] && [ -d ${q(mirrorObjects(mirror))} ]; then echo ${q(mirrorObjects(mirror))} > "$bya"; fi`,
     `if [ -f ${pack} ]; then git -C ${w} index-pack --stdin < ${pack} >/dev/null 2>&1; rm -f ${pack}; fi`,
     // An unborn HEAD (no commits yet) is fine; a HEAD whose commit or tree can't be read is not.
-    `byh=$(git -C ${w} rev-parse -q --verify HEAD 2>/dev/null)`,
+    `byh=$([ -e ${w}/.git ] && git -C ${w} rev-parse -q --verify HEAD 2>/dev/null)`,
     `if [ -n "$byh" ]; then git -C ${w} cat-file -e "$byh^{tree}" 2>/dev/null && echo ${GIT_MARK}ok || echo ${GIT_MARK}broken; fi`,
     `true`,
   ].join("\n")

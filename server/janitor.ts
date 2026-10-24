@@ -5,7 +5,7 @@ import { q } from "./providers/types.js"
 import { errorMessage } from "./util/retry.js"
 import { RESTING_STATUSES } from "../shared/types.js"
 import { mirrorGcScript } from "./gitShare.js"
-import { CLEANUP_STEPS, CLEAR_STEPS, EMERGENCY_FREE_BYTES, EMERGENCY_STEPS, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
+import { CLEANUP_STEPS, CLEAR_STEPS, EMERGENCY_FREE_BYTES, EMERGENCY_STEPS, formatBytes, type BoxCleanup, type CleanupReason, type CleanupStepKey, type CleanupStepReport, type DiskSpace } from "../shared/disk.js"
 
 /** After a low-disk cleanup that couldn't reach its target, don't run another for this long (unless a launch hit ENOSPC). */
 const COOLDOWN_MS = 10 * 60_000
@@ -15,6 +15,44 @@ const kvKey = (boxId: string) => `box_cleanup:${boxId}`
  * file-history caches, config backups. A resume needs none of them; the transcripts in projects/ are never touched.
  */
 export const SESSION_TEMP_DIRS = ["shell-snapshots", "session-env", "debug", "statsig", "paste-cache", "file-history", "backups"]
+/**
+ * Temp folders on a box's /tmp that are safe to remove once nothing in them changed for STALE_TMP_MINUTES:
+ * Box Yard's own archive, snapshot and restore stages, and what test runs of Box Yard itself leave behind.
+ */
+export const STALE_TMP_PATTERNS = [
+  "boxyard-archive-*",
+  "boxyard-wip.*",
+  "boxyard-git-*",
+  "boxyard-restore.*",
+  "box-yard-test-*",
+  "box-yard-repo-*",
+  "box-yard-origin-*",
+  "thin-*",
+  "archive-*",
+  "boxes-*",
+  "unpacked-*",
+  "pushed-*",
+  "full-disk-shims-*",
+]
+export const STALE_TMP_MINUTES = 30
+
+/**
+ * Remove stale temp folders: in /tmp (unless `sharedTmp`: a local box's /tmp is this machine's) by
+ * STALE_TMP_PATTERNS, and anything in the box's own <root>/.boxyard/tmp. A folder goes only when neither it nor
+ * anything inside it changed in the last STALE_TMP_MINUTES. Prints each removed path with its size in KB.
+ */
+export function staleTmpScript(root: string, sharedTmp: boolean): string {
+  const globs = [...(sharedTmp ? [] : STALE_TMP_PATTERNS.map((p) => `/tmp/${p}`)), `${q(`${root}/.boxyard/tmp`)}/*`]
+  const m = STALE_TMP_MINUTES
+  return [
+    `for d in ${globs.join(" ")}; do`,
+    `  [ -e "$d" ] || continue`,
+    `  [ -n "$(find "$d" -maxdepth 0 -mmin +${m} 2>/dev/null)" ] && [ -z "$(find "$d" -mmin -${m} -print -quit 2>/dev/null)" ] || continue`,
+    `  k=$(du -sk "$d" 2>/dev/null | cut -f1); rm -rf "$d" 2>/dev/null && echo "\${k:-0} $d"`,
+    `done; true`,
+  ].join("\n")
+}
+
 /** What the pushed check prints first; "yes" or "no <why>" follows. */
 const PUSHED_MARK = "boxyard-pushed="
 
@@ -247,9 +285,13 @@ export class BoxJanitor {
     const start = await this.host.probe(boxId)
     report.freeBefore = start?.freeBytes ?? null
     report.totalBytes = start?.totalBytes ?? null
+    report.rootFreeBefore = start?.root?.freeBytes ?? null
+    report.rootFreeAfter = report.rootFreeBefore
+    report.rootTotalBytes = start?.root?.totalBytes ?? null
     let free = start?.freeBytes ?? null
+    let rootFree = start?.root?.freeBytes ?? null
     const enough = () => opts.target !== null && free !== null && free >= opts.target
-    /** Re-measure; returns bytes freed since the last measurement. */
+    /** Re-measure; returns bytes freed since the last measurement (on the root disk too, when it's another one). */
     const measure = async () => {
       const now = await this.host.probe(boxId)
       if (!now) return 0
@@ -257,7 +299,14 @@ export class BoxJanitor {
       const freed = free === null ? 0 : Math.max(0, now.freeBytes - free)
       free = now.freeBytes
       report.freeAfter = free
-      return freed
+      let rootFreed = 0
+      if (now.root) {
+        rootFreed = rootFree === null ? 0 : Math.max(0, now.root.freeBytes - rootFree)
+        rootFree = now.root.freeBytes
+        report.rootFreeAfter = rootFree
+        report.rootTotalBytes = now.root.totalBytes
+      }
+      return freed + rootFreed
     }
     report.freeAfter = free
     report.enough = enough()
@@ -269,7 +318,8 @@ export class BoxJanitor {
     for (const step of plan) {
       const entry: CleanupStepReport = { key: step.key, label: step.label, freedBytes: 0, removed: [], skipped: null }
       report.steps.push(entry)
-      if (enough()) {
+      // The root disk's sweep isn't about the work disk's room.
+      if (enough() && step.key !== "tmp") {
         entry.skipped = "enough room already"
         continue
       }
@@ -308,6 +358,18 @@ export class BoxJanitor {
     const cloning = () => onBox().some((r) => r.status === "starting")
 
     switch (key) {
+      case "tmp": {
+        const out = await exec(staleTmpScript(root, provider.name === "local"))
+        const gone = out
+          .split("\n")
+          .map((l) => l.match(/^(\d+) (.+)$/))
+          .filter((m): m is RegExpMatchArray => Boolean(m))
+        if (!gone.length) return provider.name === "local" ? "no stale temp folders (a local box's /tmp is this machine's, so it's left alone)" : "no stale temp folders"
+        const kb = gone.reduce((n, m) => n + Number(m[1]), 0)
+        entry.removed.push(`${gone.length} stale temp ${gone.length === 1 ? "folder" : "folders"} (${formatBytes(kb * 1024)})`)
+        return null
+      }
+
       case "temp": {
         // Marked busy so no turn starts in these folders meanwhile; re-checked under the mark.
         const resting = onBox().filter((r) => !r.current_turn_id && RESTING_STATUSES.includes(r.status) && !this.busy.has(r.id))
@@ -322,8 +384,7 @@ export class BoxJanitor {
           const parts = dirs.length ? [`for d in ${dirs.join(" ")}; do [ -e "$d" ] && rm -rf "$d" && echo "$d"; done`] : []
           // A restore in progress belongs to a starting task.
           if (!cloning()) parts.push(`find ${q(root + "/.boxyard")} -maxdepth 1 -name 'restore-*.tgz' -print -delete 2>/dev/null`)
-          // Archive leftovers in the box's /tmp (local boxes share this machine's /tmp, so not there). Archives in flight are newer.
-          if (provider.name !== "local") parts.push(`find /tmp -maxdepth 1 \\( -name 'boxyard-archive-*' -o -name 'boxyard-wip.*' \\) -mmin +30 -print -exec rm -rf {} + 2>/dev/null`)
+          // (Archive leftovers in /tmp are the "tmp" step's.)
           out = await exec(`${parts.join("; ")}; true`)
         } finally {
           for (const r of resting) this.busy.delete(r.id)

@@ -178,8 +178,11 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
   return data as T
 }
 
-/** A project cloning a local bare repo (the API only takes GitHub repos, so it's set in the database). */
-async function repoProject(r: Running, name: string) {
+/**
+ * A project cloning a local bare repo (the API only takes GitHub repos, so it's set in the database). Push at turn
+ * end is off unless `push`: most of these tests are about the full archive, which pushed tasks don't need.
+ */
+async function repoProject(r: Running, name: string, push = false) {
   const root = tmpDir("box-yard-repo-")
   const bare = path.join(root, "origin.git")
   const seed = path.join(root, "seed")
@@ -189,7 +192,7 @@ async function repoProject(r: Running, name: string) {
   git(seed, "add", ".")
   git(seed, "commit", "-qm", "init")
   git(seed, "push", "-q", bare, "main")
-  const p = await call<Project>(r, "POST", "/api/projects", { name })
+  const p = await call<Project>(r, "POST", "/api/projects", { name, pushAtTurnEnd: push })
   r.yard.store.db.prepare("UPDATE projects SET repo = ? WHERE id = ?").run(bare, p.id)
   return p
 }
@@ -269,6 +272,53 @@ describe("archiving on a full disk", () => {
     expect(rep.status).toBe("done")
     expect(rep.movedTasks).toEqual([t.id])
     expect((await getTask(r, t.id)).boxId).toBe(rep.newBoxId)
+  })
+
+  it("pushes at turn end, so a full box's archive is only the session and the resize moves the work through git", async () => {
+    const r = await start({ archiveMaxMb: 1 })
+    const p = await repoProject(r, "alpha", true)
+    const bare = r.yard.store.getProject(p.id)!.repo!
+    const t = await doneTask(r, p.id, "game assets")
+    const box = t.boxId!
+    const work = workDir(r, box, t.id)
+    // The same ignored asset cache over the cap, and uncommitted work.
+    fs.writeFileSync(path.join(work, ".gitignore"), "cache/\n")
+    fs.mkdirSync(path.join(work, "cache"))
+    fs.writeFileSync(path.join(work, "cache", "atlas.bin"), Buffer.from(Array.from({ length: 2 * MB }, () => Math.floor(Math.random() * 256))))
+    fs.writeFileSync(path.join(work, "README.md"), "edited on a full disk\n")
+    r.provider.fill(box, 0)
+    r.provider.full.add(box)
+    stale(r, t.id)
+    const before = repoState(work)
+
+    await r.yard.tasks.archive(t.id)
+    const row = r.yard.store.getTaskRow(t.id)!
+    expect(row.last_archived_at).toBeGreaterThan(1)
+    expect(repoState(work)).toEqual(before)
+    // Origin has the branch and, on the task's hidden ref, the uncommitted work.
+    expect(git(bare, "show", `refs/boxyard/wip/${t.id}:README.md`)).toBe("edited on a full disk\n")
+    expect(git(bare, "show", `refs/boxyard/wip/${t.id}:.gitignore`)).toBe("cache/\n")
+    expect((await getTask(r, t.id)).pushState).toMatchObject({ status: "pushed", branch: t.branch, wip: expect.stringMatching(/^[0-9a-f]{40}$/) })
+    // So the archive has no repo and no working files, just the session, the log and a manifest.
+    const unpacked = unpack(r, t.id)
+    expect(fs.existsSync(path.join(unpacked, "work"))).toBe(false)
+    expect(fs.readFileSync(path.join(unpacked, "git.manifest"), "utf8")).toContain(`wipref refs/boxyard/wip/${t.id}`)
+    expect(fs.statSync(row.archive_path!).size).toBeLessThan(64 * 1024)
+    expect(events(r, t.id)).toContain("Archived without the files git ignores in work/ (over 1 MB compressed); git has the rest.")
+
+    stale(r, t.id)
+    await call(r, "POST", `/api/boxes/${box}/resize`, { size: "medium" })
+    const rep = await finished(r, box)
+    expect(rep.error).toBeNull()
+    expect(rep.status).toBe("done")
+    expect(rep.movedTasks).toEqual([t.id])
+    // The next turn clones the branch on the new box and puts the uncommitted work back.
+    await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "carry on" })
+    await waitFor(async () => ((await getTask(r, t.id)).status === "done" ? true : null), "the turn on the new box")
+    const moved = workDir(r, rep.newBoxId!, t.id)
+    expect(fs.readFileSync(path.join(moved, "README.md"), "utf8")).toBe("edited on a full disk\n")
+    expect(git(moved, "status", "--porcelain")).toContain(" M README.md")
+    expect(events(r, t.id)).toContain(`Workspace restored on box ${rep.newBoxId}: its session from the archive, its code from git.`)
   })
 
   it("names the failed step and each task's error, and deletes the box it made (retrying a failed delete)", async () => {
@@ -421,7 +471,7 @@ describe("emergency cleanup at 0 bytes free", () => {
 
     const report = await r.yard.tasks.janitor.run(box, { reason: "out-of-space", target: 100 * MB, parkBelow: 100 * MB })
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
-    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["temp", "merged", "tmp", "partials", "caches", "builds", "git", "archive"])
     expect(step(report, "temp").removed).toEqual(["session temp files of 1 task"])
     expect(fs.existsSync(path.join(dir(idle), "claude", "shell-snapshots"))).toBe(false)
     expect(fs.existsSync(path.join(dir(idle), "claude", "projects", "p", "s.jsonl"))).toBe(true)
@@ -464,7 +514,7 @@ describe("emergency cleanup at 0 bytes free", () => {
     r.yard.store.updateTask(t.id, { prUrl: "https://github.com/o/r/pull/1", prState: "merged" })
     r.provider.fill(t.boxId!, 300 * MB)
     const report = await r.yard.tasks.janitor.run(t.boxId!, { reason: "low-disk", target: 400 * MB, parkBelow: 400 * MB })
-    expect(report.steps.map((s) => s.key)).toEqual(["partials", "caches", "builds", "git", "archive"])
+    expect(report.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
     // Parked with its archive (the session stays), not dropped.
     expect(r.yard.store.getTaskRow(t.id)!.archive_path).toBeTruthy()
   })

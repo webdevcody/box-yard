@@ -409,6 +409,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
+  const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -429,6 +430,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           removeEnv: removeKeys,
           boxSize: boxSize || null,
           partialClone: partialClone ? partialClone === "on" : null,
+          pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -471,6 +473,16 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="">Default ({settings.data?.settings.gitPartialClone === false ? "off" : "on"}: Settings → Partial clone mirrors)</option>
           <option value="on">On: blob:none mirror</option>
           <option value="off">Off: full mirror</option>
+        </Select>
+      </Field>
+      <Field
+        label="Push at turn end"
+        hint="On: after every turn Box Yard pushes the task's branch and keeps uncommitted work on a hidden ref (refs/boxyard/wip/<task>), so archives stay small and any box can go without losing code. Off: Box Yard pushes nothing itself, and archives hold the whole workspace. Needs write access to the repo; without it Box Yard falls back to full archives by itself."
+      >
+        <Select className="w-full sm:w-80" value={pushAtTurnEnd} onChange={(e) => setPushAtTurnEnd(e.target.value as "" | "on" | "off")} data-testid="project-push-at-turn-end">
+          <option value="">Default ({settings.data?.settings.gitPushAtTurnEnd === false ? "off" : "on"}: Settings → Push at turn end)</option>
+          <option value="on">On: push branch and WIP, small archives</option>
+          <option value="off">Off: full archives</option>
         </Select>
       </Field>
       <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">

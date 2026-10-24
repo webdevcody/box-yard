@@ -97,6 +97,8 @@ export const config = {
   diskCloneFactor: num("BOXYARD_DISK_CLONE_FACTOR", 2),
   /** Box repo mirrors are partial clones (blob:none) unless a project says otherwise. */
   gitPartialClone: (env.BOXYARD_GIT_PARTIAL_CLONE ?? "1") !== "0",
+  /** Push each repo task's branch, and its uncommitted work to a hidden ref, at the end of every turn. */
+  gitPushAtTurnEnd: (env.BOXYARD_GIT_PUSH_AT_TURN_END ?? "1") !== "0",
   /** Remove a resting task's git-ignored build output once it has been idle this many minutes. 0 = off. */
   buildCleanupIdleMinutes: int("BOXYARD_BUILD_CLEANUP_IDLE_MINUTES", 15),
 

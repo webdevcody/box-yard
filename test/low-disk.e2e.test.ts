@@ -9,8 +9,9 @@ import type { ExecResult } from "../server/providers/types.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { BoxCleanup, BoxInfo, Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
-import { diskLine } from "../shared/disk.js"
+import { diskLine, rootLow } from "../shared/disk.js"
 import { diskMeter } from "../web/src/lib/diskCleanup.js"
+import { boxAttention } from "../web/src/lib/boxOverview.js"
 
 // Low disk: a box without room for a new workspace is skipped (and cleaned up in
 // the background), a setup that runs out of space is cleaned up and retried once,
@@ -43,9 +44,21 @@ class DiskBoxes extends LocalProvider {
   /** Holds the runner's clean mode until released, to watch a task wait for cleanup. */
   gate: Promise<void> | null = null
 
+  /** Boxes whose root disk (/tmp, HOME) is another filesystem: its capacity; what's in <root>/.boxyard/tmp uses it. */
+  rootCapacity = new Map<string, number>()
+
   /** Make a box's disk show `free` bytes free right now. */
   fill(boxId: string, free: number) {
     this.capacity.set(boxId, used(this.root(boxId)) + free)
+  }
+
+  /** Give a box a separate root disk with `free` bytes free right now. */
+  fillRoot(boxId: string, free: number) {
+    this.rootCapacity.set(boxId, used(this.stageDir(boxId)) + free)
+  }
+
+  stageDir(boxId: string) {
+    return path.join(this.root(boxId), ".boxyard", "tmp")
   }
 
   override async exec(boxId: string, command: string): Promise<ExecResult> {
@@ -53,7 +66,10 @@ class DiskBoxes extends LocalProvider {
       const u = used(this.root(boxId))
       const total = this.capacity.get(boxId) ?? u + 50 * GB
       const kb = (n: number) => Math.floor(Math.max(0, n) / 1024)
-      return { exitCode: 0, stdout: `fakefs ${kb(total)} ${kb(u)} ${kb(total - u)} 50% ${this.root(boxId)}\n`, stderr: "" }
+      const rootTotal = this.rootCapacity.get(boxId)
+      const ru = rootTotal === undefined ? 0 : used(this.stageDir(boxId))
+      const rootLine = rootTotal === undefined ? "" : `@@boxyard-root-df\nfakeroot ${kb(rootTotal)} ${kb(ru)} ${kb(rootTotal - ru)} 90% /\n`
+      return { exitCode: 0, stdout: `fakefs ${kb(total)} ${kb(u)} ${kb(total - u)} 50% ${this.root(boxId)}\n${rootLine}`, stderr: "" }
     }
     if (this.gate && command.includes(" clean ")) await this.gate
     if (this.failSetups > 0 && command.startsWith("mkdir -p") && /rm -rf '[^']*\/work'/.test(command)) {
@@ -293,8 +309,9 @@ describe("box cleanup", () => {
     r.provider.fill(box, free)
     // Enough once the leftover folder and the done task's dependencies are gone.
     const first = await r.yard.tasks.janitor.run(box, { reason: "low-disk", target: free + 250 * MB, parkBelow: free + 250 * MB })
-    expect(first.steps.map((s) => s.key)).toEqual(["partials", "caches", "builds", "git", "archive"])
+    expect(first.steps.map((s) => s.key)).toEqual(["tmp", "partials", "caches", "builds", "git", "archive"])
     const step = (c: BoxCleanup, key: string) => c.steps.find((s) => s.key === key)!
+    expect(step(first, "tmp").skipped).toBe("no stale temp folders (a local box's /tmp is this machine's, so it's left alone)")
     expect(step(first, "partials").removed).toContain("task_gone (unknown task)")
     expect(step(first, "partials").freedBytes).toBeGreaterThanOrEqual(100 * MB)
     expect(step(first, "caches").skipped).toBe("local boxes share this machine's caches")
@@ -349,5 +366,71 @@ describe("box cleanup", () => {
     expect(report.steps.find((s) => s.key === "archive")!.skipped).toBe("enough room without parking workspaces")
     expect((await boxes(r))[0]!.cleanup?.freedBytes).toBe(report.freedBytes)
     await expect(call(r, "POST", "/api/boxes/nope/cleanup")).rejects.toThrow(/404/)
+  })
+})
+
+describe("root disk", () => {
+  it("sweeps stale temp folders off a low root disk by itself, once per cooldown, and reports both disks", async () => {
+    const r = await start({ maxBoxes: 1 })
+    const p = await project(r, "alpha")
+    const t = await settled(r, (await task(r, p.id, "first")).id)
+    const box = t.boxId!
+    // A snapshot stage nothing touched in 45 minutes, and one an archive is writing now.
+    const stale = path.join(r.provider.stageDir(box), "boxyard-git-task_old")
+    ballast(stale, 300 * MB)
+    const old = (Date.now() - 45 * 60_000) / 1000
+    for (const f of [path.join(stale, "big.ballast"), stale]) fs.utimesSync(f, old, old)
+    const live = path.join(r.provider.stageDir(box), "boxyard-archive-keep-task_now")
+    ballast(live, 100 * MB)
+    r.provider.fillRoot(box, 200 * MB)
+
+    await r.yard.tasks.probeDisk(box, 0)
+    const low = (await boxes(r)).find((b) => b.id === box)!
+    expect(low.rootFreeBytes).toBe(200 * MB)
+    expect(rootLow({ freeBytes: low.rootFreeBytes ?? null, totalBytes: low.rootTotalBytes ?? null })).toBe(true)
+    expect(boxAttention(low).map((a) => a.key)).toEqual(["root"])
+    expect(low.diskLow).toBe(false)
+
+    const sweep = (r.yard.tasks as unknown as { sweepRootDisks(now: number): Promise<void> }).sweepRootDisks.bind(r.yard.tasks)
+    await sweep(Date.now())
+    const c = await cleanupDone(r, box)
+    expect(c).toMatchObject({ reason: "routine", status: "done", rootFreeBefore: 200 * MB, rootFreeAfter: 500 * MB })
+    expect(c.steps.map((s) => s.key)).toEqual(["tmp", "caches"])
+    expect(c.steps[0]!.removed).toEqual([expect.stringMatching(/^1 stale temp folder \(/)])
+    expect(c.steps[0]!.freedBytes).toBe(300 * MB)
+    expect(fs.existsSync(stale)).toBe(false)
+    expect(fs.existsSync(live)).toBe(true)
+
+    // Still under 512 MB free, but swept a moment ago: not again until the cooldown passes.
+    await r.yard.tasks.probeDisk(box, 0)
+    await sweep(Date.now())
+    expect(r.yard.tasks.janitor.current(box)!.startedAt).toBe(c.startedAt)
+    ballast(path.join(r.provider.stageDir(box), "boxyard-git-task_older"), MB)
+    fs.utimesSync(path.join(r.provider.stageDir(box), "boxyard-git-task_older", "big.ballast"), old, old)
+    fs.utimesSync(path.join(r.provider.stageDir(box), "boxyard-git-task_older"), old, old)
+    await sweep(Date.now() + 11 * 60_000)
+    const again = await cleanupDone(r, box)
+    expect(again.startedAt).toBeGreaterThan(c.startedAt)
+    expect(fs.existsSync(path.join(r.provider.stageDir(box), "boxyard-git-task_older"))).toBe(false)
+  })
+
+  it("leaves a box alone when its root disk has room or is the work disk", async () => {
+    const r = await start({ maxBoxes: 1 })
+    const p = await project(r, "alpha")
+    const t = await settled(r, (await task(r, p.id, "first")).id)
+    const box = t.boxId!
+    const sweep = (r.yard.tasks as unknown as { sweepRootDisks(now: number): Promise<void> }).sweepRootDisks.bind(r.yard.tasks)
+    const janitor = r.yard.tasks.janitor
+    const runs: unknown[] = []
+    const run = janitor.run.bind(janitor)
+    janitor.run = (boxId, opts) => (runs.push(opts.steps), run(boxId, opts))
+    await r.yard.tasks.probeDisk(box, 0)
+    expect((await boxes(r)).find((b) => b.id === box)!.rootFreeBytes).toBeNull()
+    await sweep(Date.now())
+    r.provider.fillRoot(box, 3 * GB)
+    await r.yard.tasks.probeDisk(box, 0)
+    expect((await boxes(r)).find((b) => b.id === box)!.rootFreeBytes).toBe(3 * GB)
+    await sweep(Date.now())
+    expect(runs).toEqual([])
   })
 })

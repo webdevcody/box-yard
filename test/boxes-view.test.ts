@@ -103,10 +103,10 @@ const requests: { url: string; method: string }[] = []
 let root: Root
 let host: HTMLElement
 
-function render(url = "/boxes") {
+function render(url = "/boxes", boxes = BOXES) {
   history.replaceState(null, "", url)
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
-  qc.setQueryData(keys.boxes, BOXES)
+  qc.setQueryData(keys.boxes, boxes)
   qc.setQueryData(keys.tasks, TASKS)
   qc.setQueryData(keys.projects, [{ id: "prj_a", name: "survive-the-night" }])
   qc.setQueryData(keys.health, { provider: "upstash", pool: { maxBoxes: 5, slotsPerBox: 2, maxAgents: 10, maxResidentPerBox: 3, boxIdleDeleteMinutes: 30 } } as Partial<Health>)
@@ -175,11 +175,56 @@ describe("Boxes overview", () => {
     expect(d.querySelector("[role=tab][aria-selected=true]")!.textContent).toBe("Disk & cleanup")
     const report = d.querySelector("[data-testid=cleanup-report]")!
     expect(report.textContent).toContain("Clean up now")
-    expect(report.querySelectorAll("li")).toHaveLength(5)
+    expect(report.querySelectorAll("li")).toHaveLength(CLEANUP_STEPS.length)
     expect(report.textContent).toContain("freed 1 MB")
 
     click([...d.querySelectorAll("[role=tab]")].find((t) => t.textContent?.startsWith("Finished"))!)
     expect(d.querySelector("[role=tabpanel]")!.textContent).toContain("Zombie waves")
+  })
+
+  it("shows a low root disk (/tmp, home) and what the last sweep freed there", () => {
+    const tmpBox = box("tmp-box", {
+      rootFreeBytes: 380 * MB,
+      rootTotalBytes: 5 * GB,
+      cleanup: {
+        boxId: "tmp-box",
+        reason: "routine",
+        status: "done",
+        startedAt: now - 120_000,
+        finishedAt: now - 100_000,
+        targetFreeBytes: null,
+        freeBefore: 3 * GB,
+        freeAfter: 3 * GB,
+        totalBytes: 5 * GB,
+        rootFreeBefore: 200 * MB,
+        rootFreeAfter: 380 * MB,
+        rootTotalBytes: 5 * GB,
+        freedBytes: 180 * MB,
+        steps: [{ key: "tmp", label: "Stale temp folders on the root disk (/tmp)", freedBytes: 180 * MB, removed: ["3 stale temp folders (180 MB)"], skipped: null }],
+        enough: true,
+        error: null,
+      },
+    })
+    render("/boxes#tmp-box", [...BOXES, tmpBox])
+    expect(row("tmp-box").querySelector("[data-testid=box-attention]")!.getAttribute("aria-label")).toBe("Needs attention: Root disk low: 380 MB free")
+    const d = dialog()!
+    expect(d.querySelector("[role=tab][aria-selected=true]")!.textContent).toBe("Disk & cleanup")
+    expect(d.querySelector("[data-testid=root-disk-use]")!.textContent).toBe("root disk 380 MB free")
+    expect(d.querySelector("[data-testid=root-disk]")!.textContent).toContain("Root disk (/tmp, home) · 380 MB free of 5.0 GB")
+    expect(d.querySelector("[data-testid=disk-breakdown]")!.textContent).toContain("Work disk · 3.0 GB free of 5.0 GB")
+    const report = d.querySelector("[data-testid=cleanup-report]")!
+    expect(report.textContent).toContain("Routine upkeep (stale temp folders): freed 180 MB (tmp 180 MB)")
+    expect(report.querySelector("[data-testid=cleanup-root]")!.textContent).toBe("Root disk: 200 MB → 380 MB free")
+    expect(report.textContent).toContain("3 stale temp folders (180 MB)")
+  })
+
+  it("leaves the root disk out when it's the work disk", () => {
+    render("/boxes#idle-box")
+    const d = dialog()!
+    click([...d.querySelectorAll("[role=tab]")].find((t) => t.textContent === "Disk & cleanup")!)
+    expect(d.querySelector("[data-testid=root-disk]")).toBeNull()
+    expect(d.querySelector("[data-testid=root-disk-use]")).toBeNull()
+    expect(d.querySelector("[data-testid=disk-breakdown]")!.textContent).not.toContain("Work disk")
   })
 
   it("opens details straight from a /boxes#<id> link and drops the hash on close", () => {

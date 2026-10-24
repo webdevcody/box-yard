@@ -2,12 +2,12 @@
 import { formatBytes } from "../../../shared/disk"
 import { TASK_STATUSES, type BoxInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { splitBoxTasks } from "./boxTasks"
-import { cleanupLine, diskMeter } from "./diskCleanup"
+import { cleanupLine, diskMeter, rootMeter, type DiskMeter } from "./diskCleanup"
 
 export type AttentionLevel = "error" | "warn"
 
 export interface AttentionReason {
-  key: "lost" | "deleting" | "disk" | "cleanup" | "over"
+  key: "lost" | "deleting" | "disk" | "root" | "cleanup" | "over"
   level: AttentionLevel
   /** A few words for the row tooltip. */
   short: string
@@ -15,7 +15,7 @@ export interface AttentionReason {
   detail: string
 }
 
-type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots">
+type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "rootFreeBytes" | "rootTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots">
 
 /** Why a box needs Cody's eye, worst first; empty when it's fine. */
 export function boxAttention(box: AttentionBox): AttentionReason[] {
@@ -39,6 +39,14 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
       detail: `Low on disk (${disk.label})${short}. New tasks go to other boxes while it cleans up; they wait here only when no other box has room.`,
     })
   }
+  const root = rootMeter(box)
+  if (root?.low && box.status !== "lost" && box.status !== "deleting")
+    out.push({
+      key: "root",
+      level: root.free / root.total < CRITICAL_DISK_RATIO ? "error" : "warn",
+      short: `Root disk low: ${formatBytes(root.free)} free`,
+      detail: `Low on the root disk, where /tmp and home live (${root.label}). Box Yard removes stale temp folders there by itself while it stays low, and stages archives on whichever disk has more room.`,
+    })
   if (box.cleanup?.status === "failed") out.push({ key: "cleanup", level: "warn", short: "Last cleanup failed", detail: cleanupLine(box.cleanup) })
   if (box.runningTurns > box.slots)
     out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} agents: over its limit`, detail: `${box.runningTurns} agents are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
@@ -50,7 +58,15 @@ export const CRITICAL_DISK_RATIO = 0.05
 
 /** Tone for the row's disk meter. */
 export function diskTone(box: Pick<BoxInfo, "diskFreeBytes" | "diskTotalBytes" | "diskLow">): "ok" | "warn" | "error" | "unknown" {
-  const disk = diskMeter(box)
+  return meterTone(diskMeter(box))
+}
+
+/** Tone for the root disk's meter. */
+export function rootTone(box: Pick<BoxInfo, "rootFreeBytes" | "rootTotalBytes">): "ok" | "warn" | "error" | "unknown" {
+  return meterTone(rootMeter(box))
+}
+
+function meterTone(disk: DiskMeter | null): "ok" | "warn" | "error" | "unknown" {
   if (!disk) return "unknown"
   if (!disk.low) return "ok"
   return disk.free / disk.total < CRITICAL_DISK_RATIO ? "error" : "warn"
