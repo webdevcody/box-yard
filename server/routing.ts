@@ -66,15 +66,17 @@ function parseRouting(text: string, source: string): { config: RoutingConfig | n
   }
 }
 
+/** Only keys either side has: an empty `defaults: {}` would make resolveDefaultRoute name the route "defaults". */
 function mergeRouting(base: RoutingConfig | null, next: RoutingConfig): RoutingConfig {
   if (!base) return next
+  const either = (key: keyof RoutingConfig) => base[key] !== undefined || next[key] !== undefined
   return {
     ...base,
     ...next,
-    fallback: { ...(base.fallback ?? {}), ...(next.fallback ?? {}) },
-    defaults: { ...(base.defaults ?? {}), ...(next.defaults ?? {}) },
-    projects: { ...(base.projects ?? {}), ...(next.projects ?? {}) },
-    rules: [...(base.rules ?? []), ...(next.rules ?? [])],
+    ...(either("fallback") ? { fallback: { ...base.fallback, ...next.fallback } } : {}),
+    ...(either("defaults") ? { defaults: { ...base.defaults, ...next.defaults } } : {}),
+    ...(either("projects") ? { projects: { ...base.projects, ...next.projects } } : {}),
+    ...(either("rules") ? { rules: [...(base.rules ?? []), ...(next.rules ?? [])] } : {}),
   }
 }
 

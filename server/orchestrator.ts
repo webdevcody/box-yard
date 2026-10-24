@@ -31,7 +31,7 @@ const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
 const WAKE_DEBOUNCE_MS = 4000
 /** Automatic turns in a row (no message from Cody in between) before it stops waking itself. */
-const MAX_AUTO_TURNS = 8
+export const MAX_AUTO_TURNS = 8
 /** What the orchestrator says on an automatic turn when there's nothing to tell Cody; not shown. */
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
@@ -105,6 +105,10 @@ export class Orchestrator {
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private autoTurns = 0
+  /** Read on every nudge; tests shorten it. */
+  readonly tuning = { wakeDebounceMs: WAKE_DEBOUNCE_MS }
+  /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
+  private stopped = false
   /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
   private readonly runNotes = new Map<string, string>()
   private child: ChildProcess | null = null
@@ -203,11 +207,12 @@ export class Orchestrator {
       if (!ready) return
       this.wakeWanted = true
       void this.drain()
-    }, WAKE_DEBOUNCE_MS)
+    }, this.tuning.wakeDebounceMs)
     this.wakeTimer.unref?.()
   }
 
   stop() {
+    this.stopped = true
     if (this.wakeTimer) clearTimeout(this.wakeTimer)
     this.wakeTimer = null
     this.cancel()
@@ -371,11 +376,11 @@ export class Orchestrator {
   }
 
   private async drain() {
-    if (this.running) return
+    if (this.running || this.stopped) return
     this.running = true
     this.hub.broadcast({ type: "chat.busy", busy: true })
     try {
-      while (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun()) {
+      while (!this.stopped && (this.pending || this.wakeWanted || this.compactWanted || this.nextScheduledRun())) {
         if (this.compactWanted) {
           await this.doCompact()
         } else if (this.pending) {
@@ -389,6 +394,9 @@ export class Orchestrator {
           await this.autoTurn()
         }
       }
+    } catch (err) {
+      // stop() killed the turn and closed the database under it: nothing left to record.
+      if (!this.stopped) throw err
     } finally {
       this.running = false
       this.hub.broadcast({ type: "chat.busy", busy: false })
@@ -599,6 +607,8 @@ export class Orchestrator {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         let msg: any
         try {
           msg = JSON.parse(line)
@@ -694,6 +704,7 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
             source: "orchestrator",
