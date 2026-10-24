@@ -212,6 +212,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     repo: p.repo,
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
+    ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
     notes: p.notes.map((n) => `(${n.author}) ${n.content}`),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })

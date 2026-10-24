@@ -27,9 +27,11 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "limits",
     label: "Boxes & limits",
-    description: "Worker box size, capacity, disk headroom and cleanup retention.",
+    description: "Worker box size and resizing, capacity, disk headroom and cleanup retention.",
     fields: [
       "workerSize",
+      "autoResizeEnabled",
+      "autoResizeMaxSize",
       "maxBoxes",
       "slotsPerBox",
       "maxAgents",
@@ -115,6 +117,8 @@ export function changedSections(keys: (keyof Settings)[]): Set<SettingsSection> 
 
 const POOL_KEYS = [
   "workerSize",
+  "autoResizeEnabled",
+  "autoResizeMaxSize",
   "maxBoxes",
   "slotsPerBox",
   "maxAgents",
@@ -127,7 +131,7 @@ const POOL_KEYS = [
   "diskCloneFactor",
 ] as const
 
-/** What Save sends. Pool limits go only when edited, so an untouched form doesn't pin them over env changes. */
+/** What Save sends. Pool limits (and the resize guardrails) go only when edited, so an untouched form doesn't pin them over env changes. */
 export function savePatch(draft: Settings, current: Settings | null | undefined): Partial<Settings> {
   const patch: Partial<Settings> = { ...draft }
   for (const k of POOL_KEYS) if (current && draft[k] === current[k]) delete patch[k]
