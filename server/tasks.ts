@@ -35,9 +35,9 @@ import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { loadRouting, resolveDefaultRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
-import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
+import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor } from "./janitor.js"
-import { GIT_MARK, MIRROR_MARK, keepPackStage, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
+import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import {
   compareSizes,
@@ -84,6 +84,8 @@ const BRANCH_MARK = "boxyard-branch="
 const CLONE_SIZE_MARK = "boxyard-clone-kb="
 /** How often routine upkeep runs a light gc (`gc --auto`) on each box's repo mirrors. */
 const MIRROR_GC_MS = 6 * 60 * 60_000
+/** A box whose root disk stays low gets its stale temp folders swept at most this often. */
+const ROOT_SWEEP_MS = 10 * 60_000
 /** A df reading this fresh is good enough for placement. */
 const DISK_CACHE_MS = 20_000
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
@@ -241,6 +243,8 @@ export class TaskManager {
   private reserved = new Map<string, Map<string, number>>()
   /** Boxes the last placement check found too full for a new workspace. */
   private lowBoxes = new Set<string>()
+  /** When each box's root disk was last swept for being low (sweepRootDisks). */
+  private rootSweptAt = new Map<string, number>()
   /** Boxes being cleared, deleted or resized: nothing is placed on them and their tasks wait. */
   private boxOps = new Map<string, BoxOp>()
   /** Resizes in progress, by box (the old box and, once made, the new one). */
@@ -713,6 +717,8 @@ export class TaskManager {
         diskFreeBytes: b.disk_free_bytes ?? null,
         diskTotalBytes: b.disk_total_bytes ?? null,
         diskCheckedAt: b.disk_checked_at ?? null,
+        rootFreeBytes: b.root_free_bytes ?? null,
+        rootTotalBytes: b.root_total_bytes ?? null,
         diskLow: this.lowBoxes.has(b.id) || (b.disk_free_bytes !== null && b.disk_free_bytes !== undefined && b.disk_free_bytes < floor),
         cleanup: this.janitor.current(b.id),
         operation: this.boxOperation(b.id),
@@ -1444,10 +1450,14 @@ export class TaskManager {
       const before = this.store.getBox(boxId)
       const size = normalizeBoxSize(before?.size)
       if (space.totalBytes > 0 && this.store.getKv(diskTotalKey(size)) !== String(space.totalBytes)) this.store.setKv(diskTotalKey(size), String(space.totalBytes))
-      this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now })
+      const root = space.root ?? null
+      this.store.meterBox(boxId, { diskFreeBytes: space.freeBytes, diskTotalBytes: space.totalBytes, diskCheckedAt: now, rootFreeBytes: root?.freeBytes ?? null, rootTotalBytes: root?.totalBytes ?? null })
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
-      const changed = Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 || before?.disk_total_bytes !== space.totalBytes
+      const changed =
+        Math.abs((before?.disk_free_bytes ?? 0) - space.freeBytes) > 16 * 1024 * 1024 ||
+        before?.disk_total_bytes !== space.totalBytes ||
+        Math.abs((before?.root_free_bytes ?? 0) - (root?.freeBytes ?? 0)) > 16 * 1024 * 1024
       if (changed || now - (before?.disk_checked_at ?? 0) > 60_000) this.emitBoxes()
     }
     return space
@@ -2617,16 +2627,17 @@ export class TaskManager {
         if (!res.ok) console.warn(`[box-yard] git-first archive of ${taskId} failed, archiving the whole workspace: ${res.error}`)
       }
       if (!res?.ok) {
-        // A clone that borrows the mirror's objects: stage the borrowed ones GitHub may not have on /tmp, so the
-        // archive restores anywhere (server/gitShare.ts). Nothing is written to the work disk.
-        const keep = await this.provider.exec(boxId, keepPackScript(this.taskDir(boxId, taskId), taskId))
+        // A clone that borrows the mirror's objects: stage the borrowed ones GitHub may not have, so the archive
+        // restores anywhere (server/gitShare.ts). On /tmp or the work disk, whichever has more room.
+        const keep = await this.provider.exec(boxId, keepPackScript(this.taskDir(boxId, taskId), taskId, this.provider.root(boxId)))
         if (keep.exitCode !== 0) console.warn(`[box-yard] keep pack for ${taskId} failed: ${keep.stderr.slice(-300)}`)
+        const keepStage = keep.stdout.match(new RegExp(`${KEEP_STAGE_MARK}(\\S+)`))?.[1]
         kind = "whole"
-        res = await this.streamArchive(boxId, taskId, part, {})
+        res = await this.streamArchive(boxId, taskId, part, { keepStage })
         // Too big: keep the Claude session, the log and git history, with any uncommitted work as a WIP commit on a side ref.
         if (!res.ok && res.tooBig && project?.repo) {
           kind = "partial"
-          res = await this.streamArchive(boxId, taskId, part, { partial: true })
+          res = await this.streamArchive(boxId, taskId, part, { partial: true, keepStage })
         }
         // Still too big: a thin archive, git's view of the work without its history (what origin's base lacks).
         let thinError: string | null = null
@@ -2669,7 +2680,7 @@ export class TaskManager {
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
       fs.rmSync(part, { force: true })
-      const stages = [keepPackStage(taskId), ...gitStages(this.provider.root(boxId), taskId)]
+      const stages = [...keepPackStages(this.provider.root(boxId), taskId), ...gitStages(this.provider.root(boxId), taskId)]
       await this.provider.exec(boxId, `rm -rf ${stages.map(q).join(" ")}`).catch(() => {})
       this.archiving.delete(taskId)
     }
@@ -2742,12 +2753,12 @@ export class TaskManager {
     boxId: string,
     taskId: string,
     dest: string,
-    mode: { partial?: boolean; git?: { stage: string; ignored: boolean } },
+    mode: { partial?: boolean; git?: { stage: string; ignored: boolean }; keepStage?: string },
   ): Promise<ArchiveOutcome> {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     const partial = Boolean(mode.partial)
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, git: mode.git, keepStage: mode.git ? undefined : keepPackStage(taskId) })
+    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, git: mode.git, keepStage: mode.keepStage })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {
@@ -3065,6 +3076,7 @@ export class TaskManager {
       if (box.status !== "ready" || box.disk_free_bytes === null || box.disk_free_bytes === undefined) continue
       if (box.disk_free_bytes < floor && !this.janitor.isRunning(box.id) && !this.boxOps.has(box.id)) this.janitor.ensure(box.id, floor)
     }
+    await this.sweepRootDisks(now)
     await this.routineUpkeep(now)
     this.schedule()
   }
@@ -3087,8 +3099,26 @@ export class TaskManager {
       if (!idle.length && !gc) continue
       if (gc) this.mirrorGcAt.set(box.id, now)
       for (const r of idle) this.buildsCleaned.set(r.id, r.last_active_at)
-      const steps: CleanupStepKey[] = [...(gc ? (["partials", "git"] as const) : []), ...(idle.length ? (["builds"] as const) : [])]
+      const steps: CleanupStepKey[] = [...(gc ? (["tmp", "partials", "git"] as const) : []), ...(idle.length ? (["builds"] as const) : [])]
       runs.push(this.janitor.run(box.id, { reason: "routine", target: null, parkBelow: 0, steps, builds: idle.map((r) => r.id), light: true }))
+    }
+    await Promise.all(runs)
+  }
+
+  /**
+   * A box whose root disk (/tmp, HOME) is filling up: a quiet run that removes stale temp folders and old /tmp
+   * files and package caches (the caches step). At most every ROOT_SWEEP_MS per box, so a disk that stays full
+   * isn't swept on every tick.
+   */
+  private async sweepRootDisks(now: number) {
+    const runs: Promise<unknown>[] = []
+    for (const box of this.store.listBoxes()) {
+      if (this.stopped || box.status !== "ready" || this.boxOps.has(box.id) || this.janitor.isRunning(box.id)) continue
+      if (!rootLow({ freeBytes: box.root_free_bytes, totalBytes: box.root_total_bytes })) continue
+      if (now - (this.rootSweptAt.get(box.id) ?? 0) < ROOT_SWEEP_MS) continue
+      this.rootSweptAt.set(box.id, now)
+      console.log(`[box-yard] box ${box.id} is low on its root disk: ${formatBytes(box.root_free_bytes)} free of ${formatBytes(box.root_total_bytes)}`)
+      runs.push(this.janitor.run(box.id, { reason: "routine", target: null, parkBelow: 0, steps: ["tmp", "caches"], light: true }))
     }
     await Promise.all(runs)
   }

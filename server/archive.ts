@@ -32,7 +32,7 @@ export interface ArchiveScript {
    */
   partial: boolean
   /**
-   * Where archive() staged the task's git-keep.pack (server/gitShare.ts keepPackStage), on /tmp. When
+   * Where archive() staged the task's git-keep.pack (server/gitShare.ts keepPackScript), on /tmp or the work disk. When
    * `<keepStage>/<taskId>/git-keep.pack` exists, it goes into the archive as `<taskId>/git-keep.pack`.
    */
   keepStage?: string

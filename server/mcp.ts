@@ -18,7 +18,7 @@ import type { SettingsStore } from "./settings.js"
 import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type Project, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
-import { cleanupSummary, diskLine } from "../shared/disk.js"
+import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 
 export interface McpDeps {
@@ -881,6 +881,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             b.diskFreeBytes !== null && b.diskTotalBytes !== null
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
               : null,
+          ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
           ...(b.resize && (b.resize.status === "running" || Date.now() - (b.resize.finishedAt ?? 0) < 24 * 3600_000)
             ? { resize: `${resizeTitle(b.resize)}: ${resizeSummary(b.resize)}${b.resize.finishedAt ? ` ${ago(b.resize.finishedAt)}` : ""}` }
