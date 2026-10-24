@@ -334,14 +334,14 @@ export class HookEngine {
     // Logged before acting, so the fire counts toward the caps even if the action throws.
     let run = hooks.addRun({ ...this.base(hook, task, row, event, key, prompt), status: "fired", result: "Firing…" })
     const meta: HookMeta = { source: "hook", hookId: hook.id, hookName: hook.name, trigger: hook.trigger, taskId: task.id, hookRunId: run.id }
-    const labelled = `${hookLabel(hook, this.deps.ownerName?.())}:\n\n${prompt}`
+    const prefix = `${hookLabel(hook, this.deps.ownerName?.())}:\n\n`
     const pr = task.prUrl ? ` (PR #${prNumber(task.prUrl) ?? "?"}${row.pr_head_sha ? ` at ${shortSha(row.pr_head_sha)}` : ""})` : ""
     try {
       let result: string
       let target: string | null = null
       if (hook.action === "send_to_task" && hook.template === "pr_merge") {
         // The merge template takes the Merge PR button's path: its pending guard, merge_requested event and 🚢 notices.
-        const by = { source: `hook:${hook.id}` as const, who: `hook "${hook.name}"`, prompt, hook: { queued: labelled, meta } }
+        const by = { source: `hook:${hook.id}` as const, who: `hook "${hook.name}"`, prompt, hook: { prefix, meta } }
         try {
           tasks.requestMerge(task.id, by)
         } catch (err) {
@@ -355,7 +355,7 @@ export class HookEngine {
         result = `Asked the agent to merge${pr}.`
       } else if (hook.action === "send_to_task") {
         // Like send_to_task: queued while the agent is busy, resumed (from its archive if needed) when it rests.
-        tasks.sendInput(task.id, prompt, `hook:${hook.id}`, [], null, { queued: labelled, meta })
+        tasks.sendInput(task.id, prompt, `hook:${hook.id}`, [], null, { prefix, meta })
         target = task.id
         result = `Sent to the task's agent${pr}.`
         this.notice(hook, task, `sent to the agent${pr}: ${preview(prompt, 240, "see the task transcript")}`, meta)

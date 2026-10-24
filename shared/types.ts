@@ -128,6 +128,8 @@ export interface Task {
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
+  /** Changes whenever the queued messages do (added, edited, cancelled, being delivered); "" when none. */
+  queueRev?: string
   lastArchivedAt: number | null
   /** Set when a schedule started this task. */
   scheduleId: string | null
@@ -251,6 +253,30 @@ export interface Attachment {
   size: number
   mime: string
   path?: string
+}
+
+/** Who sent a queued message: shapes its row on the task page. */
+export type QueuedSender = "owner" | "coordinator" | "captain" | "hook" | "agent" | "system"
+
+/**
+ * A message waiting for a task's next turn (GET /api/tasks/:id/queue). "queued" ones can be edited and deleted;
+ * "delivering" ones are being handed to a turn that is starting, and are locked.
+ */
+export interface QueuedMessage {
+  id: string
+  taskId: string
+  /** The raw input source: cody, cody:merge, orchestrator, captain:<project>, hook:<id>, agent:<task>, system. */
+  source: string
+  kind: QueuedSender
+  /** Who sent it, as the row says it: "Cody", "Coordinator", "box-yard Captain", "Hook: On PR ready". */
+  sender: string
+  text: string
+  attachments: Attachment[]
+  status: "queued" | "delivering"
+  /** Bumped on every edit; pass it back to an edit to refuse it when someone else changed the message first. */
+  version: number
+  createdAt: number
+  updatedAt: number
 }
 
 export type TaskMessageRole = "user" | "assistant" | "tool" | "event" | "agent"
