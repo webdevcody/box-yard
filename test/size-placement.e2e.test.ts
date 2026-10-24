@@ -185,6 +185,13 @@ describe("placement by project box size", () => {
     // A notice says Box Yard did it, and why.
     const notice = r.yard.store.listChat(50).find((m) => m.content.startsWith("📦 Box Yard resized box"))
     expect(notice?.content).toContain(`Reason: big needs large boxes, the pool is at its limit and ${small} was idle`)
+    // The box history log says Box Yard did it, and why.
+    const { events } = await call<{ events: { boxId: string; type: string; actor: string; reason: string | null; toSize: string | null }[] }>(r, "GET", `/api/box-history?actor=scheduler`)
+    expect(events.find((e) => e.boxId === small && e.type === "resized")).toMatchObject({
+      actor: "scheduler",
+      toSize: "large",
+      reason: `big needs large boxes, the pool is at its limit and ${small} was idle`,
+    })
   })
 
   it("grows the idle box with the least on its disk first", async () => {
