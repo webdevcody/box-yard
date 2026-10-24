@@ -69,12 +69,12 @@ class FakeEventSource {
 let root: Root
 let host: HTMLElement
 
-function render(path = "/") {
+function render(path = "/", tokens = 84_000) {
   history.replaceState(null, "", path)
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.me, { authed: true, authRequired: false })
   qc.setQueryData(keys.health, { ok: true, provider: "mock", mock: true, bus: "file", claude: { available: true, version: "x" }, problems: [], pool: {}, orchestratorBusy: false, scheduler: "local" })
-  qc.setQueryData(keys.orchestrator, { busy: false, usage: { tokens: 84_000, window: 1_000_000, updatedAt: now }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
+  qc.setQueryData(keys.orchestrator, { busy: false, usage: { tokens, window: 1_000_000, updatedAt: now }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
   qc.setQueryData(keys.chat, CHAT)
   qc.setQueryData(keys.chatBusy, false)
   qc.setQueryData(keys.tasks, TASKS)
@@ -94,7 +94,7 @@ const settle = () => act(() => new Promise((r) => setTimeout(r, 20)))
 
 beforeEach(() => {
   localStorage.clear()
-  vi.stubGlobal("fetch", () => new Promise(() => {}))
+  vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})))
   vi.stubGlobal("EventSource", FakeEventSource)
   host = document.createElement("div")
   document.body.append(host)
@@ -116,15 +116,56 @@ describe("Zen mode", () => {
     expect(chat()).not.toBeNull()
     expect(sidebarOrPage()).toBeNull()
     expect(document.querySelector("[aria-label='Open navigation']")).toBeNull()
-    // The same chat: transcript, context meter (Compact, no Clear) and composer.
+    // The same chat: transcript, context reading with Compact (no Clear) and composer.
     expect(chat()!.textContent).toContain("One agent is on")
     expect([...chat()!.querySelectorAll("button")].some((b) => b.textContent?.includes("Compact"))).toBe(true)
     expect([...chat()!.querySelectorAll("button")].some((b) => /clear|reset/i.test(b.textContent ?? ""))).toBe(false)
     expect(chat()!.querySelector("textarea")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Leave Zen mode']")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Zen mode']")).toBeNull()
+    expect(chat()!.querySelector("header")!.textContent).toContain("Box Yard Coordinator")
     // Every row pads in to the one centered column.
-    expect(chat()!.querySelectorAll(".zen-column").length).toBe(4)
+    expect(chat()!.querySelectorAll(".zen-column").length).toBe(3)
+  })
+
+  it("puts the context reading and Compact in the header, left of the other controls, and nowhere else", async () => {
+    render(ZEN_PATH)
+    const header = chat()!.querySelector("header")!
+    const ctx = header.querySelector<HTMLElement>("[data-testid=zen-context]")!
+    expect(chat()!.querySelector("[data-testid=context-meter]")).toBeNull()
+    expect(ctx.querySelector("[data-testid=context-mini]")!.textContent).toContain("8%")
+    expect(ctx.querySelector("[data-testid=context-mini]")!.getAttribute("title")).toContain("84k / 1m")
+    const controls = [...header.querySelectorAll("[data-testid=zen-context], [aria-label=Settings], [aria-label='Leave Zen mode']")]
+    expect(controls.map((c) => c.getAttribute("data-testid") ?? c.getAttribute("aria-label"))).toEqual(["zen-context", "Settings", "Leave Zen mode"])
+    // Quiet below 75%; one fetch per click.
+    const compact = ctx.querySelector<HTMLButtonElement>("button[aria-label=Compact]")!
+    expect(compact.className).not.toContain("amber")
+    await act(async () => {
+      compact.click()
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect((fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls.some(([url, init]) => url.includes("compact") && init?.method === "POST")).toBe(true)
+  })
+
+  it("emphasises Compact from 75% and offers it from the phone chip's menu", () => {
+    render(ZEN_PATH, 800_000)
+    const ctx = chat()!.querySelector<HTMLElement>("[data-testid=zen-context]")!
+    expect(ctx.querySelector("button[aria-label=Compact]")!.className).toContain("amber")
+    const chip = ctx.querySelector<HTMLButtonElement>("button[aria-haspopup=menu]")!
+    expect(chip.getAttribute("aria-label")).toContain("800k / 1m · 80%")
+    act(() => chip.click())
+    const menu = ctx.querySelector("[role=menu]")!
+    expect(menu.textContent).toContain("Context 800k / 1m · 80%")
+    act(() => menu.querySelector<HTMLButtonElement>("[role=menuitem]")!.click())
+    expect(ctx.querySelector("[role=menu]")).toBeNull()
+  })
+
+  it("the side panel keeps its own context meter row and its short title", () => {
+    render("/")
+    expect(chat()!.querySelector("header")!.textContent).toContain("Coordinator")
+    expect(chat()!.querySelector("header")!.textContent).not.toContain("Box Yard Coordinator")
+    expect(chat()!.querySelector("[data-testid=context-meter]")).not.toBeNull()
+    expect(chat()!.querySelector("[data-testid=zen-context]")).toBeNull()
   })
 
   it("a plain load of / is never Zen, and the panel offers the way in", () => {
