@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
 import { createPortal, flushSync } from "react-dom"
 import { AlertTriangle, FileText, Loader2, Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
@@ -24,6 +24,12 @@ interface Pending {
 
 let nextKey = 0
 
+/** Lets a parent put text in the box (an example prompt) without owning the draft. */
+export interface ComposerHandle {
+  /** Replace the draft with `text` and focus the box, selecting `select` (e.g. a placeholder) if it's in the text. */
+  fill(text: string, select?: string): void
+}
+
 /**
  * The bar a Composer sits in at the bottom of a chat: top border, padding and the safe-area inset. Every chat
  * (Coordinator, Captain tab, task page) uses it, so their composers line up when shown side by side; add only
@@ -45,11 +51,13 @@ export function Composer({
   className = cx(COMPOSER_FOOTER, "px-3"),
   textareaRef,
   panelRef,
+  handleRef,
 }: {
   onSubmit: (text: string, attachments: Attachment[]) => void
   placeholder: string
   className?: string
   textareaRef?: Ref<HTMLTextAreaElement>
+  handleRef?: Ref<ComposerHandle>
   /** The panel that accepts dropped files, message list included. It must be `relative`. */
   panelRef: RefObject<HTMLElement | null>
 }) {
@@ -189,6 +197,22 @@ export function Composer({
     },
     send: () => submitRef.current(),
   })
+
+  useImperativeHandle(
+    handleRef,
+    () => ({
+      fill: (text, select) => {
+        flushSync(() => setValue(text))
+        const el = input.current
+        if (!el) return
+        el.focus()
+        const at = select ? text.indexOf(select) : -1
+        if (at >= 0) el.setSelectionRange(at, at + select!.length)
+        else el.setSelectionRange(text.length, text.length)
+      },
+    }),
+    [],
+  )
 
   const onPaste = (e: ClipboardEvent) => {
     const pasted = Array.from(e.clipboardData.files)

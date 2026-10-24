@@ -1,40 +1,19 @@
 // First-run setup (the card Zen shows until the required keys are set) and Settings › Credentials. Keys go to the
 // server and never come back: a field shows only whether its key is set and where it comes from.
-import { useEffect, useId, useState, useSyncExternalStore, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
+import { useEffect, useId, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { Check, Copy, KeyRound, Play, X } from "lucide-react"
 import { useAgentSettings, useSaveCredentials, useSaveSettings, useSetup, useTestCredential } from "../lib/queries"
 import { Button, LineIcon, NewTabLink, cx, inputClass } from "./ui"
+import { localFlag } from "../lib/localFlag"
 import { Panel, Row, SourceHint } from "./SettingsDialog"
 import { CREDENTIAL_INFO, GITHUB_TOKEN_SCOPES, SETUP_TOKEN_COMMAND, type CredentialKey, type CredentialStatus, type SetupStatus } from "../../../shared/setup"
 
 // ------------------------------------------------------------------ "Skip for now" (this browser)
 
-const SKIP_KEY = "box-yard:setup-skipped"
-const skipListeners = new Set<() => void>()
-const readSkip = () => {
-  try {
-    return localStorage.getItem(SKIP_KEY) === "1"
-  } catch {
-    return false
-  }
-}
-export function setSetupSkipped(on: boolean) {
-  try {
-    if (on) localStorage.setItem(SKIP_KEY, "1")
-    else localStorage.removeItem(SKIP_KEY)
-  } catch {}
-  for (const fn of skipListeners) fn()
-}
-const subscribeSkip = (fn: () => void) => {
-  skipListeners.add(fn)
-  window.addEventListener("storage", fn)
-  return () => {
-    skipListeners.delete(fn)
-    window.removeEventListener("storage", fn)
-  }
-}
+const skip = localFlag("box-yard:setup-skipped")
+export const setSetupSkipped = skip.set
 /** The setup card was put off in this browser: Zen shows the chat with a one-line reminder instead. */
-export const useSetupSkipped = () => useSyncExternalStore(subscribeSkip, readSkip, () => false)
+export const useSetupSkipped = skip.use
 
 /** Setup still needs something required (never in mock mode). Undefined while loading. */
 export function useSetupNeeded(): { status: SetupStatus | undefined; needed: boolean } {

@@ -163,6 +163,7 @@ export function useServerEvents(enabled: boolean): Connection {
         case "setup":
           qc.setQueryData(keys.setup, ev.status)
           void qc.invalidateQueries({ queryKey: keys.health })
+          void qc.invalidateQueries({ queryKey: keys.setupRepos })
           break
         case "tts":
           setTtsInfo(ev.info)

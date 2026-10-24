@@ -7,7 +7,7 @@ import { useTail } from "../lib/tail"
 import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
-import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
@@ -19,6 +19,7 @@ import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
 import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
+import { TryFirst, markTryFirstDone, useTryFirstDone } from "./TryFirst"
 import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
 
 const SUGGESTIONS = [
@@ -26,9 +27,6 @@ const SUGGESTIONS = [
   "Create a project for webdevcody/box-yard and add a dark mode toggle",
   "Spin up 3 agents to research Upstash Box pricing, write a summary, and draft a tweet",
 ]
-
-/** Zen's first chat, once setup is done. */
-const WELCOME_CHIPS = ["Create your first project from a GitHub repo", "What can you do?"]
 
 const NO_MESSAGES: ChatMessage[] = []
 
@@ -50,6 +48,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const tasks = useTasks()
   const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
+  const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
@@ -57,12 +56,17 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const skipped = useSetupSkipped()
   const showSetup = zen && setup.needed && !skipped
   const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
+  // Then an empty Zen chat shows example requests, until one message is sent or they're dismissed.
+  const tryFirstDone = useTryFirstDone()
+  const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
+  const addGithub = useCallback(() => openSettings("credentials"), [openSettings])
 
   const submit = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
       send.mutate({ id: newClientId("chat"), content, attachments })
+      markTryFirstDone()
       box.current?.focus()
     },
     [send.mutate],
@@ -168,8 +172,14 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       <div className={showSetup ? "hidden" : "contents"}>
         <SelectionToTask source={selectionSource} onPrompt={submit}>
           <StickyScroll count={messages.length} hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
-            {messages.length === 0 && !chat.isLoading && zen && (
-              <ZenWelcome onPick={submit} needsGithub={setup.status?.github.state === "unset" && !setup.status.mock} onGithub={() => openSettings("credentials")} />
+            {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
+              <TryFirst
+                ready={!setup.needed}
+                github={setup.status?.github.state === "set" && !setup.status.mock}
+                needsGithub={setup.status?.github.state === "unset" && !setup.status.mock}
+                onPick={fill}
+                onGithub={addGithub}
+              />
             )}
             {messages.length === 0 && !chat.isLoading && !zen && (
               <div className="space-y-3 pt-6 text-center">
@@ -196,6 +206,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           onSubmit={submit}
           placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
           textareaRef={box}
+          handleRef={composer}
           panelRef={panel}
           className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
         />
@@ -203,39 +214,6 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     </section>
   )
 })
-
-/** An empty Zen chat: a short welcome and two ways to start. */
-function ZenWelcome({ onPick, needsGithub, onGithub }: { onPick: (text: string) => void; needsGithub: boolean; onGithub: () => void }) {
-  return (
-    <div className="flex flex-col items-center pt-[12dvh] text-center" data-testid="zen-welcome">
-      <Bot className="h-6 w-6 text-yard-400" aria-hidden />
-      <h2 className="mt-3 text-lg font-semibold text-zinc-50">Welcome to Box Yard</h2>
-      <p className="mt-1.5 max-w-md text-sm leading-relaxed text-zinc-400">
-        Ask the Coordinator for work in plain words. It sets up projects, starts agents in their own boxes and reports back here.
-      </p>
-      <div className="mt-6 flex flex-wrap justify-center gap-2">
-        {WELCOME_CHIPS.map((c) => (
-          <button
-            key={c}
-            type="button"
-            onClick={() => onPick(c)}
-            className="min-h-11 rounded-full border border-zinc-800 px-4 text-sm text-zinc-200 transition hover:border-zinc-700 hover:bg-zinc-900 sm:min-h-9"
-          >
-            {c}
-          </button>
-        ))}
-      </div>
-      {needsGithub && (
-        <p className="mt-6 text-xs text-zinc-500">
-          Agents need a GitHub token to push branches and open PRs.{" "}
-          <button type="button" onClick={onGithub} className="text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400">
-            Add one
-          </button>
-        </p>
-      )}
-    </div>
-  )
-}
 
 const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
 

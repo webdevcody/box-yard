@@ -7,7 +7,7 @@ import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
-import type { CredentialKey, CredentialTest, CredentialsPatch, SetupStatus } from "../../../shared/setup"
+import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import type {
@@ -70,6 +70,7 @@ export const keys = {
   agentSettings: ["agent-settings"] as const,
   tts: ["tts-settings"] as const,
   setup: ["setup"] as const,
+  setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
   /** A project's hooks, or "global" for the Coordinator's. */
@@ -177,6 +178,9 @@ export function useSaveTts() {
 /** First-run setup and Settings › Credentials: what's set and where from, never a value. Kept live by the "setup" event. */
 export const useSetup = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.setup, queryFn: () => api<SetupStatus>("/api/setup"), staleTime: Infinity, enabled: o.enabled })
+/** The GitHub token's most recently pushed repos, for Zen's first prompts. Empty without a token or on any error. */
+export const useRecentRepos = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.setupRepos, queryFn: () => api<RecentRepos>("/api/setup/repos"), staleTime: Infinity, enabled: o.enabled })
 /** Save or remove credentials. Errors show next to the field, so there's no toast. */
 export function useSaveCredentials() {
   const qc = useQueryClient()
@@ -185,6 +189,7 @@ export function useSaveCredentials() {
     onSuccess: (status) => {
       qc.setQueryData(keys.setup, status)
       void qc.invalidateQueries({ queryKey: keys.health })
+      void qc.invalidateQueries({ queryKey: keys.setupRepos })
     },
   })
 }
