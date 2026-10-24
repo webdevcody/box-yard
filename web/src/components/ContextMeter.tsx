@@ -42,7 +42,8 @@ export function ContextMiniBar({ tokens, window, hint = CONTEXT_HINT, className 
       <span aria-hidden className="block h-1.5 w-6 shrink-0 overflow-hidden rounded-full bg-zinc-800">
         <span className={cx("block h-full rounded-full", tone.bar)} style={{ width: `${Math.max(pct, 4)}%` }} />
       </span>
-      <span aria-hidden>{pct}%</span>
+      {/* Room for "100%", so the width holds as the number grows. */}
+      <span aria-hidden className="min-w-[4ch]">{pct}%</span>
       <span className="sr-only">{label}</span>
     </span>
   )
