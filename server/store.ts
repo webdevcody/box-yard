@@ -1324,6 +1324,19 @@ export class Store {
     })()
   }
 
+  /**
+   * Take one input out of the queue some other way than a turn's claim (handed to an agent mid-turn, say).
+   * Compare-and-set like the claim: only while it is still queued; returns it, or null when it's taken, cancelled or gone.
+   */
+  takeInput(taskId: string, id: string): PendingInput | null {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM task_inputs WHERE id = ? AND task_id = ? AND status = 'queued'").get(id, taskId) as InputRow | undefined
+      if (!row) return null
+      this.db.prepare("DELETE FROM task_inputs WHERE id = ? AND status = 'queued'").run(id)
+      return pendingInput(row)
+    })()
+  }
+
   /** The turn couldn't start: its claimed inputs are queued (and editable) again. Without a turn id: every claim (startup). */
   releaseInputs(turnId?: string) {
     if (turnId) this.db.prepare("UPDATE task_inputs SET status = 'queued', claim = NULL WHERE claim = ? AND status = 'delivering'").run(turnId)
