@@ -27,7 +27,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "hooks",
     label: "Hooks",
-    description: "Global hooks: automations the Coordinator runs on any project's task events, like asking an agent to merge its PR once it's ready. Each change saves right away.",
+    description:
+      "Global hooks: automations the Coordinator runs on every project's task events, like asking an agent to merge its PR once it's ready. Project hooks live on each project's Hooks tab. Changes here save right away.",
     fields: [],
   },
   {

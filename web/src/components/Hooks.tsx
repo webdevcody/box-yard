@@ -1,7 +1,7 @@
 // Hooks: automations on task events. One panel serves a project's Hooks tab (the Captain's hooks) and the
 // global section in Settings (the Coordinator's). A list with on/off switches and a "Recent runs" view as
 // tabs, a one-click template strip, and a centered editor Modal with a live preview of the prompt.
-import { useMemo, useRef, useState, type ReactNode } from "react"
+import { useId, useMemo, useRef, useState, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
 import { ChevronDown, ChevronRight, GitMerge, History, Pencil, Plus, Trash2, Webhook } from "lucide-react"
 import {
@@ -62,8 +62,8 @@ import { toast } from "../lib/toast"
 /** The param that picks the panel's view: `?hooks=runs` for Recent runs. */
 const VIEW_PARAM = "hooks"
 
-/** A project's hooks (projectId), or the global ones (null). */
-export function HooksPanel({ projectId }: { projectId: string | null }) {
+/** A project's hooks (projectId), or the global ones (null). `intro: false` when the page already explains them (Settings). */
+export function HooksPanel({ projectId, intro = true }: { projectId: string | null; intro?: boolean }) {
   const scope = projectId ?? "global"
   const hooks = useHooks(scope)
   const runs = useHookRuns(scope)
@@ -90,12 +90,14 @@ export function HooksPanel({ projectId }: { projectId: string | null }) {
 
   return (
     <section className="space-y-4" data-testid="hooks-panel">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-        <p className="min-w-0 flex-1 text-sm text-zinc-500">
-          {projectId
-            ? "Automations on this project's task events, run by its Captain. A hook sends a prompt to the task, the Captain or the Coordinator, or starts a task, when a task finishes, opens a PR, fails, needs you, or its PR merges."
-            : "Global hooks belong to the Coordinator and see every project's task events. Project hooks live on each project's Hooks tab."}
-        </p>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-end">
+        {intro && (
+          <p className="min-w-0 flex-1 text-sm text-zinc-500">
+            {projectId
+              ? "Automations on this project's task events, run by its Captain. A hook sends a prompt to the task, the Captain or the Coordinator, or starts a task, when a task finishes, opens a PR, fails, needs you, or its PR merges."
+              : "Global hooks belong to the Coordinator and see every project's task events. Project hooks live on each project's Hooks tab."}
+          </p>
+        )}
         <Button type="button" variant="primary" className="w-full sm:w-auto" onClick={() => setEditing({ hook: null, draft: emptyDraft() })}>
           <Plus className="h-4 w-4" /> New hook
         </Button>
@@ -232,12 +234,17 @@ function TemplateCard({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium text-zinc-100">{t.name}</span>
           <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-zinc-400 uppercase">Template</span>
+          {existing && (
+            <span className={cx("rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide uppercase", existing.enabled ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-800 text-zinc-400")}>
+              {existing.enabled ? "Added · on" : "Added · off"}
+            </span>
+          )}
         </div>
         <p className="mt-0.5 text-xs text-zinc-400">{t.description}</p>
       </div>
       {existing ? (
         <Button type="button" size="sm" variant="subtle" onClick={() => onEdit(existing)} className="w-full sm:w-auto">
-          <Pencil className="h-3.5 w-3.5" /> {existing.enabled ? "Added, on" : "Added, off"}: edit
+          <Pencil className="h-3.5 w-3.5" /> Edit
         </Button>
       ) : (
         <Button type="button" size="sm" variant="primary" loading={busy} onClick={onAdd} className="w-full sm:w-auto">
@@ -506,7 +513,7 @@ function HookEditor({
     >
       <div data-testid="hook-editor" className="space-y-5">
         {!hook && templates.length > 0 && (
-          <Field label="Start from">
+          <FieldGroup label="Start from">
             <div className="flex flex-wrap gap-1.5">
               <Chip on={d.template === null} onClick={() => setD(emptyDraft())}>
                 Blank
@@ -517,7 +524,7 @@ function HookEditor({
                 </Chip>
               ))}
             </div>
-          </Field>
+          </FieldGroup>
         )}
 
         {d.template === "pr_merge" && (
@@ -579,7 +586,7 @@ function HookEditor({
                   <input className={cx(inputClass, "font-mono")} value={d.promptRegex} onChange={(e) => set("promptRegex", e.target.value)} placeholder="deploy|release" />
                 </Field>
               </div>
-              <Field label="Started by" hint="None picked: anyone.">
+              <FieldGroup label="Started by" hint="None picked: anyone.">
                 <div className="flex flex-wrap gap-1.5">
                   {HOOK_SOURCES.map((s) => (
                     <Chip key={s} on={d.sources.includes(s)} onClick={() => set("sources", d.sources.includes(s) ? d.sources.filter((x) => x !== s) : [...d.sources, s])}>
@@ -587,7 +594,7 @@ function HookEditor({
                     </Chip>
                   ))}
                 </div>
-              </Field>
+              </FieldGroup>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="PR has a label" hint="Any of these, comma-separated.">
                   <input className={inputClass} value={d.labels} onChange={(e) => set("labels", e.target.value)} placeholder="automerge" />
@@ -678,9 +685,10 @@ function HookEditor({
             <Switch checked={d.enabled} onChange={(v) => set("enabled", v)} label={d.enabled ? "On" : "Off"} />
             {d.enabled ? "On" : "Off"}
           </label>
-          <label className="flex items-center gap-2">
-            Fires per task, at most
-            <input type="number" min={1} max={50} className={cx(inputClass, "w-20")} value={d.maxFiresPerTask} onChange={(e) => set("maxFiresPerTask", e.target.value)} />
+          <label className="flex items-center gap-2 whitespace-nowrap">
+            At most
+            <input type="number" min={1} max={50} className={cx(inputClass, "max-w-20")} value={d.maxFiresPerTask} onChange={(e) => set("maxFiresPerTask", e.target.value)} />
+            fires per task
           </label>
           <Check checked={d.allowSelfTrigger} onChange={(v) => set("allowSelfTrigger", v)}>
             Fire on its own turns too
@@ -688,6 +696,20 @@ function HookEditor({
         </div>
       </div>
     </Modal>
+  )
+}
+
+/** Field's look for a group of buttons. Not a <label>: that would make the label click its first button. */
+function FieldGroup({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  const id = useId()
+  return (
+    <div role="group" aria-labelledby={id} className="space-y-1.5">
+      <span id={id} className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">
+        {label}
+      </span>
+      {children}
+      {hint && <span className="block text-xs text-zinc-500">{hint}</span>}
+    </div>
   )
 }
 

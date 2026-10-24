@@ -340,7 +340,7 @@ export function SettingsDialog({
           <VoicePanel fid={fid} />
         ) : section === "hooks" ? (
           <Panel section="hooks">
-            <HooksPanel projectId={null} />
+            <HooksPanel projectId={null} intro={false} />
           </Panel>
         ) : !s ? (
           <p className="text-sm text-zinc-500">Loading…</p>
