@@ -124,17 +124,24 @@ describe("fire keys and task sources", () => {
   const ev = (type: Parameters<typeof fireKey>[0]["type"], over: Partial<Parameters<typeof fireKey>[0]> = {}) => ({ type, taskId: "t", turnId: "turn1", originHookIds: [], ...over })
 
   it("keys pr_ready by head commit, so a new push fires again and the same commit doesn't", () => {
-    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: "abc1234", pr_url: "u" })).toBe("sha:abc1234")
-    expect(fireKey(ev("task.pr_ready", { turnId: "turn2" }), { pr_head_sha: "abc1234", pr_url: "u" })).toBe("sha:abc1234")
-    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: "def5678", pr_url: "u" })).toBe("sha:def5678")
+    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: "abc1234", pr_url: "u", pr_state: "open" })).toBe("sha:abc1234")
+    expect(fireKey(ev("task.pr_ready", { turnId: "turn2" }), { pr_head_sha: "abc1234", pr_url: "u", pr_state: "open" })).toBe("sha:abc1234")
+    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: "def5678", pr_url: "u", pr_state: "open" })).toBe("sha:def5678")
     // No known commit: only a turn that pushed counts, once.
-    expect(fireKey(ev("task.pr_ready", { sawPr: true }), { pr_head_sha: null, pr_url: "u" })).toBe("turn:turn1")
-    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: null, pr_url: "u" })).toBeNull()
+    expect(fireKey(ev("task.pr_ready", { sawPr: true }), { pr_head_sha: null, pr_url: "u", pr_state: "open" })).toBe("turn:turn1")
+    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: null, pr_url: "u", pr_state: "open" })).toBeNull()
+  })
+
+  it("never keys pr_ready for a merged, closed or missing PR", () => {
+    expect(fireKey(ev("task.pr_ready", { sawPr: true }), { pr_head_sha: "abc1234", pr_url: "u", pr_state: "merged" })).toBeNull()
+    expect(fireKey(ev("task.pr_ready", { sawPr: true }), { pr_head_sha: "abc1234", pr_url: "u", pr_state: "closed" })).toBeNull()
+    expect(fireKey(ev("task.pr_ready", { sawPr: true }), { pr_head_sha: "abc1234", pr_url: null, pr_state: null })).toBeNull()
+    expect(fireKey(ev("task.pr_ready"), { pr_head_sha: "abc1234", pr_url: "u", pr_state: "draft" })).toBe("sha:abc1234")
   })
 
   it("keys pr.merged by PR and the rest by the turn that ended", () => {
-    expect(fireKey(ev("pr.merged"), { pr_head_sha: "abc", pr_url: "u" })).toBe("merged:u")
-    expect(fireKey(ev("task.finished"), { pr_head_sha: null, pr_url: null })).toBe("turn:turn1")
+    expect(fireKey(ev("pr.merged"), { pr_head_sha: "abc", pr_url: "u", pr_state: "merged" })).toBe("merged:u")
+    expect(fireKey(ev("task.finished"), { pr_head_sha: null, pr_url: null, pr_state: null })).toBe("turn:turn1")
   })
 
   it("labels a hook's messages as the hook's, by the owner's configured name", () => {
