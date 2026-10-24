@@ -5,7 +5,7 @@ import path from "node:path"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { CaptainNoticeEntry, Store } from "./store.js"
-import { BadRequestError } from "./store.js"
+import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
@@ -259,6 +259,18 @@ export class CaptainManager {
     }
   }
 
+  editQueued(projectId: string, id: string, content: string) {
+    return this.get(projectId).editQueued(id, content)
+  }
+
+  cancelQueued(projectId: string, id: string) {
+    return this.get(projectId).cancelQueued(id)
+  }
+
+  restoreQueued(projectId: string, id: string) {
+    return this.get(projectId).restoreQueued(id)
+  }
+
   requestCompact(projectId: string) {
     return this.get(projectId).requestCompact("button")
   }
@@ -405,6 +417,34 @@ class Captain {
     }
     this.publishState()
     void this.drain()
+    return msg
+  }
+
+  /** Edit a message still queued for the next turn. Refused once that turn has taken it. */
+  editQueued(id: string, content: string): CaptainMessage {
+    return this.queuedChanged(this.store.editQueuedChat("captain_messages", id, this.project.id, content.trim()))
+  }
+
+  /** Delete a queued message before a turn reads it. Undo with restoreQueued. */
+  cancelQueued(id: string): CaptainMessage {
+    return this.queuedChanged(this.store.cancelQueuedChat("captain_messages", id, this.project.id))
+  }
+
+  restoreQueued(id: string): CaptainMessage {
+    const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
+    const msg = this.queuedChanged(
+      this.store.restoreQueuedChat("captain_messages", id, this.project.id, { queued: this.running, at: Math.max(Date.now(), since) }),
+    )
+    this.pending = true
+    this.publishState()
+    void this.drain()
+    return msg
+  }
+
+  private queuedChanged(change: QueuedChatChange): CaptainMessage {
+    if (!change.ok) throw queuedChatError(change.reason, "the Captain")
+    const msg: CaptainMessage = { role: "user", projectId: this.project.id, ...change.row }
+    this.hub.broadcast({ type: "captain.message", message: msg })
     return msg
   }
 
@@ -586,7 +626,7 @@ class Captain {
 
   private unansweredUserMessages(): CaptainMessage[] {
     const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
-    return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since)
+    return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since && m.meta?.cancelled !== true)
   }
 
   private async turn() {
@@ -743,7 +783,7 @@ class Captain {
       now = this.projectNow()
       const recap = this.store
         .listCaptainMessages(this.project.id, 30)
-        .filter((m) => m.role === "user" || m.role === "assistant")
+        .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
       result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)

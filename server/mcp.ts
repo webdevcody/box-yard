@@ -17,7 +17,7 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
@@ -660,13 +660,71 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const t = tasks.sendInput(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
+      const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
         model: a.model,
         effort: a.effort,
         routingRule: a.routing_rule,
         routingReason: a.routing_reason,
       })
-      return ok({ ...brief(t), delivery: how })
+      // Until a turn takes it, the message can still be changed or withdrawn by this id.
+      const queued = store.getQueuedInput(t.id, inputId) ? inputId : undefined
+      return ok({ ...brief(t), delivery: how, queuedMessageId: queued })
+    }),
+  )
+
+  const queuedView = (m: QueuedMessage) => ({
+    id: m.id,
+    from: m.sender,
+    text: preview(m.text, 2000, "the rest is in the task page's queue"),
+    attachments: m.attachments.length ? m.attachments.map((f) => f.name) : undefined,
+    status: m.status === "delivering" ? "delivering: a turn is starting with it, it can't be changed any more" : "queued",
+    version: m.version,
+    queued: ago(m.createdAt),
+  })
+
+  server.registerTool(
+    "list_queued_messages",
+    {
+      description:
+        "List the messages queued for a task's next turn (sent with send_to_task, by Cody, a Captain, a hook or another agent while it was busy), oldest first. Use it before cancel_queued_message or edit_queued_message, or to check what an agent will get when its turn ends.",
+      inputSchema: { task: z.string() },
+    },
+    safe(async (a: { task: string }) => {
+      const t = task(a.task)
+      const list = tasks.listQueue(t.id)
+      return ok({ task: t.id, title: t.title, status: t.status, messages: list.map(queuedView) })
+    }),
+  )
+
+  server.registerTool(
+    "cancel_queued_message",
+    {
+      description:
+        "Withdraw a message queued for a task's next turn, before the agent gets it (ids from list_queued_messages or send_to_task's queuedMessageId). Fails with \"already delivered\" once a turn has taken it: then send a correction with send_to_task instead. If it was the only message, the agent isn't woken for it.",
+      inputSchema: { task: z.string(), message_id: z.string() },
+    },
+    safe(async (a: { task: string; message_id: string }) => {
+      const t = task(a.task)
+      const m = tasks.cancelQueued(t.id, a.message_id)
+      return ok({ cancelled: m.id, from: m.sender, remaining: tasks.listQueue(t.id).length })
+    }),
+  )
+
+  server.registerTool(
+    "edit_queued_message",
+    {
+      description:
+        "Replace the text of a message queued for a task's next turn, before the agent gets it. Fails with \"already delivered\" once a turn has taken it. Pass version (from list_queued_messages) to refuse the edit if someone changed the message meanwhile.",
+      inputSchema: {
+        task: z.string(),
+        message_id: z.string(),
+        message: z.string().min(1).describe("The new text; it replaces the old text entirely"),
+        version: z.number().int().positive().optional(),
+      },
+    },
+    safe(async (a: { task: string; message_id: string; message: string; version?: number }) => {
+      const t = task(a.task)
+      return ok(queuedView(tasks.editQueued(t.id, a.message_id, a.message, a.version)))
     }),
   )
 

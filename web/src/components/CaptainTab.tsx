@@ -38,7 +38,8 @@ import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
 import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
-import { ChatLine, CollapsibleMarkdown, QueuedLabel } from "./ChatLine"
+import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
+import { QueuedChatMessage } from "./QueuedMessages"
 import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
@@ -241,21 +242,36 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   const Icon = s.icon
   // An agent's message is always message_captain, and "From task" says so: the room goes to the task title.
   const tool = source !== "agent" && typeof m.meta?.tool === "string" ? m.meta.tool : null
-  return (
-    <div id={`captain-${m.id}`} data-testid="captain-inbound" data-source={source} className={cx("flex", source === "cody" && "justify-end")}>
-      <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
-        <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
-          <Icon className="h-3 w-3 shrink-0" />{" "}
-          {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
-          {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
-          <span className="ml-auto shrink-0 pl-2 font-normal tracking-normal whitespace-nowrap normal-case text-zinc-500">
-            <TimeAgo ts={m.createdAt} />
-          </span>
-        </div>
-        {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
-        <AttachmentList files={m.meta?.attachments} />
-        {m.meta?.queued === true && <QueuedLabel who="the Captain" className="mt-1" />}
+  const bubble = (
+    <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
+      <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
+        <Icon className="h-3 w-3 shrink-0" />{" "}
+        {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
+        {tool && <span className="min-w-0 truncate font-mono font-normal tracking-normal normal-case opacity-70">· {tool}</span>}
+        <span className="ml-auto shrink-0 pl-2 font-normal tracking-normal whitespace-nowrap normal-case text-zinc-500">
+          <TimeAgo ts={m.createdAt} />
+        </span>
       </div>
+      {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
+      <AttachmentList files={m.meta?.attachments} />
+    </div>
+  )
+  // Queued (sent mid-turn): the bubble, then the Queued label with Edit and Delete under it.
+  const queued = m.meta?.queued === true
+  return (
+    <div
+      id={`captain-${m.id}`}
+      data-testid="captain-inbound"
+      data-source={source}
+      className={cx("flex", queued && "flex-col gap-1", source === "cody" && (queued ? "items-end" : "justify-end"))}
+    >
+      {queued ? (
+        <QueuedChatMessage m={m} projectId={m.projectId} who="the Captain">
+          {bubble}
+        </QueuedChatMessage>
+      ) : (
+        bubble
+      )}
     </div>
   )
 })

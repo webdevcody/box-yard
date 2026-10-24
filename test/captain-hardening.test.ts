@@ -255,15 +255,15 @@ describe("Captain message labels (#51)", () => {
     const { tool } = await mcpAs(r, { kind: "captain", projectId: p.id })
     expect((await tool("send_to_task", { task: t.id, message: "Make it rhyme." })).isError).not.toBe(true)
 
-    const msg = r.yard.store.listTaskMessages(t.id, 50).find((m) => m.role === "user" && m.content === "Make it rhyme.")!
-    expect(msg.meta).toMatchObject({ source: "captain", captainProjectId: p.id, captainName: "alpha" })
-    expect(userMessageLabel(msg.meta)).toBe("alpha Captain")
-
     // The fake worker writes the prompt it got into box-yard-demo.md.
     const task = await waitFor(async () => {
       const x = await call<Task>(r, "GET", `/api/tasks/${t.id}`)
       return x.turnCount >= 2 && x.status === "done" ? x : null
     }, "follow-up turn")
+    // Its transcript line is written when the turn takes it.
+    const msg = r.yard.store.listTaskMessages(t.id, 50).find((m) => m.role === "user" && m.content === "Make it rhyme.")!
+    expect(msg.meta).toMatchObject({ source: "captain", captainProjectId: p.id, captainName: "alpha" })
+    expect(userMessageLabel(msg.meta)).toBe("alpha Captain")
     const demo = fs.readFileSync(path.join(r.dataDir, "local-boxes", task.boxId!, "tasks", t.id, "work", "box-yard-demo.md"), "utf8")
     expect(demo).toContain("Message from the alpha Captain (on Cody's behalf):\n\nMake it rhyme.")
     expect(demo).not.toContain("Coordinator")

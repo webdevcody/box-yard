@@ -32,6 +32,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./Co
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
+import { QueuedLink } from "./QueuedMessages"
 
 /** A boolean saved in localStorage, so a toggle keeps its state across tasks and reloads. */
 export function useStoredFlag(key: string): [boolean, (v: boolean) => void] {
@@ -109,7 +110,11 @@ export function TaskMetaRow({ task, files }: { task: Task; files: Artifact[] }) 
   return (
     <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
       <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
-        {task.pendingCount > 0 && <span className="font-normal text-zinc-500">· {task.pendingCount} queued</span>}
+        {task.pendingCount > 0 && (
+          <span className="font-normal text-zinc-500">
+            · <QueuedLink taskId={task.id} count={task.pendingCount} />
+          </span>
+        )}
       </StatusDot>
       {hasChips && (
         <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
