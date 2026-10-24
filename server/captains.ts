@@ -348,7 +348,8 @@ class Captain {
   }
 
   send(content: string, { id, attachments = [], source = "coordinator", tool, meta: extra }: CaptainSendOptions = {}): CaptainMessage {
-    const meta = { ...extra, source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}) }
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+    const meta = { ...extra, source, ...(tool ? { tool } : {}), ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
     const msg = this.store.addCaptainMessage(this.project.id, "user", content.trim(), meta, id)
     this.hub.broadcast({ type: "captain.message", message: msg })
     this.pending = true
@@ -505,7 +506,13 @@ class Captain {
       .map((m) => `[${withOwner(sourceLabel(m), this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
     if (!messages.length) return
-    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Date.now() + 1))
+    // Messages sent during the last turn move to now, right before this turn's reply.
+    const moved = this.store.deliverQueued("captain_messages", answering.map((m) => m.id), this.project.id)
+    for (const d of moved) {
+      const m = answering.find((x) => x.id === d.id)!
+      this.hub.broadcast({ type: "captain.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
+    }
+    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
     const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]

@@ -466,7 +466,9 @@ export class TaskManager {
     const inputId = this.store.queueInput(row.id, source, hook?.queued ?? (content.trim() || "(no text)"), attachments.map((f) => f.id))
     if (source === "cody" || source === MERGE_BUTTON_SOURCE || source === "orchestrator" || source.startsWith("captain:") || hook) {
       const from = hook ? hook.meta : source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
-      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
+      // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+      const queued = row.current_turn_id ? { queued: true, inputId } : {}
+      const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}), ...queued })
       this.hub.broadcast({ type: "task.message", message: msg })
     }
     const patch: Parameters<Store["updateTask"]>[1] = { lastActiveAt: Date.now() }
@@ -557,6 +559,7 @@ export class TaskManager {
       // The runner writes turn_end after it stops; that settles the status.
     } else if (row.status === "queued" || row.status === "starting") {
       this.store.clearInputs(row.id)
+      this.dropQueuedMessages(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
     }
     this.addEvent(row.id, withOwner("Stopped by Cody.", this.owner()))
@@ -564,11 +567,26 @@ export class TaskManager {
     return this.store.getTask(row.id)!
   }
 
+  /** Feedback sent during the last turn moves to now, right before this turn's output. */
+  private deliverQueuedMessages(taskId: string, inputIds: string[]) {
+    const ids = this.store.queuedTaskMessageIds(taskId, inputIds)
+    if (!ids.length) return
+    this.store.deliverQueued("task_messages", ids, taskId)
+    const moved = new Set(ids)
+    for (const m of this.store.listTaskMessages(taskId, 100)) if (moved.has(m.id)) this.hub.broadcast({ type: "task.message", message: m })
+  }
+
+  /** Queued feedback whose inputs were cleared: it never reaches the agent, so it stops saying "queued". */
+  private dropQueuedMessages(taskId: string) {
+    for (const m of this.store.dropQueuedTaskMessages(taskId)) this.hub.broadcast({ type: "task.message", message: m })
+  }
+
   /** Finish a task: stop it, archive it, free its box folder. */
   async closeTask(taskId: string): Promise<Task> {
     const row = this.requireRow(taskId)
     if (row.current_turn_id) await this.stopTask(taskId)
     this.store.clearInputs(row.id)
+    this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
     this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
@@ -1830,6 +1848,7 @@ export class TaskManager {
         this.store.updateTask(taskId, { mergeRequest: { ...merge, deliveredAt: Date.now() } }, { quiet: true, touch: false })
       }
       this.store.deleteInputs(queued.map((i) => i.id))
+      this.deliverQueuedMessages(taskId, queued.map((i) => i.id))
       this.diskRetried.delete(taskId)
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)

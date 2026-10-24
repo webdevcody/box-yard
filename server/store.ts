@@ -1247,6 +1247,78 @@ export class Store {
     return Boolean(this.db.prepare("SELECT 1 FROM task_inputs WHERE task_id = ? LIMIT 1").get(taskId))
   }
 
+  // ---------- queued messages ----------
+  //
+  // A message sent while the Coordinator, a Captain or an agent is mid-turn waits for the next turn. It is stored
+  // right away with meta.queued, and the UI shows it under the live turn, labelled "Queued". When the turn that
+  // reads it starts, deliverQueued moves it to that moment (created_at = delivery, meta.queuedAt = when it was
+  // sent), so it sits right before that turn's output, after the reply it was typed over, and stays there after a reload.
+
+  /**
+   * Deliver these queued messages now; returns the ones that moved, with their new createdAt and meta. `thread`
+   * names the Captain's project or the task, for captain_messages and task_messages.
+   */
+  deliverQueued(
+    table: "chat_messages" | "captain_messages" | "task_messages",
+    ids: string[],
+    thread?: string,
+    now = Date.now(),
+  ): { id: string; createdAt: number; meta: Record<string, unknown> }[] {
+    if (!ids.length) return []
+    const scope = table === "captain_messages" ? "WHERE project_id = ?" : table === "task_messages" ? "WHERE task_id = ?" : ""
+    return this.db.transaction(() => {
+      // Strictly after everything already in the thread (the previous turn may have ended in this very millisecond).
+      // Later rows that tie still sort after it, by rowid.
+      const last = (this.db.prepare(`SELECT MAX(created_at) AS t FROM ${table} ${scope}`).get(...(scope ? [thread] : [])) as { t: number | null }).t ?? 0
+      const at = Math.max(now, last + 1)
+      const get = this.db.prepare(`SELECT meta_json, created_at FROM ${table} WHERE id = ?`)
+      const set = this.db.prepare(`UPDATE ${table} SET meta_json = ?, created_at = ? WHERE id = ?`)
+      const moved: { id: string; createdAt: number; meta: Record<string, unknown> }[] = []
+      for (const id of ids) {
+        const r = get.get(id) as { meta_json: string | null; created_at: number } | undefined
+        const prev = json<Record<string, unknown> | null>(r?.meta_json, null)
+        if (!r || !prev?.queued) continue
+        const { queued: _, ...rest } = prev
+        const meta = { ...rest, queuedAt: r.created_at }
+        set.run(JSON.stringify(meta), at, id)
+        moved.push({ id, createdAt: at, meta })
+      }
+      return moved
+    })()
+  }
+
+  /** Queued task messages whose inputs were dropped (the task was stopped or closed first): no longer queued, never delivered. */
+  dropQueuedTaskMessages(taskId: string): TaskMessage[] {
+    const rows = this.db
+      .prepare("SELECT id, meta_json FROM task_messages WHERE task_id = ? AND json_extract(meta_json, '$.queued') = 1")
+      .all(taskId) as { id: string; meta_json: string }[]
+    if (!rows.length) return []
+    const set = this.db.prepare("UPDATE task_messages SET meta_json = ? WHERE id = ?")
+    this.db.transaction(() => {
+      for (const r of rows) {
+        const { queued: _, ...rest } = json<Record<string, unknown>>(r.meta_json, {})
+        set.run(JSON.stringify({ ...rest, undelivered: true }), r.id)
+      }
+    })()
+    const ids = new Set(rows.map((r) => r.id))
+    return this.listTaskMessages(taskId).filter((m) => ids.has(m.id))
+  }
+
+  /** Ids of a task's queued transcript messages for these inputs. */
+  queuedTaskMessageIds(taskId: string, inputIds: string[]): string[] {
+    if (!inputIds.length) return []
+    const want = new Set(inputIds)
+    const rows = this.db
+      .prepare("SELECT id, json_extract(meta_json, '$.inputId') AS input_id FROM task_messages WHERE task_id = ? AND json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC")
+      .all(taskId) as { id: string; input_id: string | null }[]
+    return rows.filter((r) => r.input_id && want.has(r.input_id)).map((r) => r.id)
+  }
+
+  /** Ids of Coordinator chat messages still waiting for a turn (after a restart, say). */
+  queuedChatIds(): string[] {
+    return (this.db.prepare("SELECT id FROM chat_messages WHERE json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC").all() as { id: string }[]).map((r) => r.id)
+  }
+
   // ---------- task transcript ----------
 
   addTaskMessage(

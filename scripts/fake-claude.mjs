@@ -15,6 +15,7 @@
 //   wait captain <project>                    (wait_for_captain)
 //   status
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
+// Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
 // replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
@@ -151,7 +152,7 @@ async function say(text) {
   if (partial) {
     for (const word of text.split(/(?<= )/)) {
       out({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: word } } })
-      await sleep(15)
+      await sleep(Number(process.env.FAKE_CLAUDE_WORD_MS) || 15)
     }
   }
   out({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } })
