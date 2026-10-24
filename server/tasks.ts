@@ -221,6 +221,9 @@ export class TaskManager {
   private directoryTimer: NodeJS.Timeout | null = null
   private stopped = false
   private lastBoxProbeAt = new Map<string, number>()
+  /** Last delete attempt of a box stuck in "deleting". */
+  private lastReclaimAt = new Map<string, number>()
+  private lastOrphanSweepAt = Date.now()
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
@@ -277,6 +280,7 @@ export class TaskManager {
       archive: (taskId) => this.archiveFresh(taskId),
       archiveProblem: (taskId) => this.archiveProblem(taskId),
       park: (taskId, boxId, note) => this.park(taskId, boxId, withOwner(note, this.owner())),
+      dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
@@ -319,6 +323,9 @@ export class TaskManager {
       const r = this.resizeReport(box.id)
       if (r?.status !== "running") continue
       this.finishResize(r, "failed", "Box Yard restarted during the resize; nothing was moved. Try again.")
+      // The box it was making holds no work yet: delete it rather than leave it empty.
+      const made = r.newBoxId ? this.store.getBox(r.newBoxId) : null
+      if (made && !this.store.listTaskRows({ boxId: made.id }).length) void this.dropBox(made.id).then((note) => this.noteResizeCleanup(r, note))
     }
     for (const row of this.store.listTaskRows({ status: ["starting"] })) {
       // We died while launching. Inputs are only deleted after a launch
@@ -344,8 +351,10 @@ export class TaskManager {
     if (!this.provider.listIds) return
     try {
       const label = this.installLabel()
-      const known = new Set(this.store.listBoxes().map((b) => b.id))
       const ids = await this.provider.listIds(label)
+      // A box being created is at the provider before it's in the database.
+      if (this.creatingBoxes) return
+      const known = new Set(this.store.listBoxes().map((b) => b.id))
       for (const id of ids) {
         if (!known.has(id)) {
           console.log(`[box-yard] deleting orphan box ${id}`)
@@ -978,10 +987,17 @@ export class TaskManager {
     let created: string | null = null
     try {
       await this.resizeStep(r, "create", async () => {
-        const id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to }).catch((err) => {
+        // Counted like a pool box being created, so the orphan sweep leaves it alone until it's in the database.
+        this.creatingBoxes++
+        let id: string
+        try {
+          id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
+          this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+        } catch (err) {
           throw new Error(`Couldn't create a ${r.to} box: ${errorMessage(err)}`)
-        })
-        this.store.upsertBox({ id, provider: this.provider.name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
+        } finally {
+          this.creatingBoxes--
+        }
         created = id
         // Nothing lands on it until the move is done.
         this.boxOps.set(id, "resize")
@@ -1002,7 +1018,8 @@ export class TaskManager {
         return rows.length ? `${rows.length} ${rows.length === 1 ? "workspace" : "workspaces"} archived` : "no workspaces on the box"
       })
     } catch (err) {
-      if (created) await this.dropBox(created)
+      // Nothing moved to it, so it must not sit there empty (and billed).
+      if (created) r.cleanup = await this.dropBox(created)
       throw err
     }
     const to = r.newBoxId!
@@ -1032,14 +1049,61 @@ export class TaskManager {
     })
   }
 
-  /** Remove a box Box Yard made but never used (a failed migration). */
-  private async dropBox(boxId: string) {
+  /**
+   * Delete a box Box Yard made but never used (a failed migration). Its row stays, as "deleting", until the provider
+   * confirms, so a failed delete is retried (maintain) instead of leaving a box nobody sees. Says what happened.
+   */
+  private async dropBox(boxId: string): Promise<string> {
+    const box = this.store.getBox(boxId)
     this.boxOps.delete(boxId)
     this.resizes.delete(boxId)
     this.store.setKv(boxOwnerKey(boxId), null)
-    this.store.removeBox(boxId)
-    await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
+    if (!box) return `The new box ${boxId} is already gone.`
+    this.store.setBoxStatus(boxId, "deleting")
     this.emitBoxes()
+    try {
+      await this.provider.destroy(boxId)
+      this.store.removeBox(boxId)
+      console.log(`[box-yard] deleted unused box ${boxId}`)
+      return `Deleted the new ${normalizeBoxSize(box.size)} box ${boxId}.`
+    } catch (err) {
+      console.warn(`[box-yard] destroy ${boxId}: ${errorMessage(err)}`)
+      return `Couldn't delete the new box ${boxId} yet (${errorMessage(err)}); Box Yard keeps trying.`
+    } finally {
+      this.emitBoxes()
+    }
+  }
+
+  /**
+   * Boxes that must not linger: ones whose delete failed (status "deleting"), and empty boxes a failed resize made
+   * that are still here (a restart mid-resize, or a failure from before failed resizes cleaned up after themselves).
+   */
+  private async reclaimUnusedBoxes(now: number) {
+    for (const box of this.store.listBoxes()) {
+      if (this.boxOps.has(box.id) || this.store.listTaskRows({ boxId: box.id }).length) continue
+      if (box.status === "deleting") {
+        if (now - (this.lastReclaimAt.get(box.id) ?? 0) < 5 * 60_000) continue
+        this.lastReclaimAt.set(box.id, now)
+        await this.dropBox(box.id)
+        continue
+      }
+      const r = this.resizeReport(box.id)
+      if (box.status !== "ready" || r?.status !== "failed" || r.newBoxId !== box.id || r.boxId === box.id) continue
+      // Used since (it took tasks once the resize gave up): it's a pool box like any other now.
+      if (box.last_used_at > (r.finishedAt ?? r.startedAt) + 60_000) continue
+      const note = await this.dropBox(box.id)
+      console.log(`[box-yard] reclaimed ${box.id}, left empty by the failed resize of ${r.boxId}: ${note}`)
+      this.noteResizeCleanup(r, note)
+    }
+  }
+
+  /** Add what happened to a failed resize's new box to its report, on the box that was being resized. */
+  private noteResizeCleanup(r: BoxResize, note: string) {
+    const current = this.resizeReport(r.boxId)
+    if (current?.id !== r.id) return
+    const updated = { ...current, cleanup: note }
+    this.store.setKv(resizeKey(r.boxId), JSON.stringify(updated))
+    this.hub.broadcast({ type: "box.resize", resize: updated })
   }
 
   private async resizeStep(r: BoxResize, key: ResizeStep["key"], fn: () => Promise<string | null>) {
@@ -1094,7 +1158,7 @@ export class TaskManager {
     const content =
       r.status === "done"
         ? `📦 ${who} resized box ${r.boxId} ${r.from} → ${r.to}: ${resizeSummary(r)}.${why}`
-        : `⚠️ ${who} couldn't resize box ${r.boxId} ${r.from} → ${r.to}: ${r.error ?? "unknown error"}.${why}`
+        : `⚠️ ${who} couldn't resize box ${r.boxId} ${r.from} → ${r.to}: ${resizeSummary(r)}${/[.!?]$/.test(resizeSummary(r)) ? "" : "."}${why}`
     this.notice(content, { boxId, resizeId: r.id, projectIds, ...(captainProject ? { captainProjectId: captainProject } : {}) })
     const names = projectIds.map((id) => this.store.getProject(id)!.name)
     this.store.addBoxNotification({
@@ -1430,6 +1494,26 @@ export class TaskManager {
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] }, { touch: false })
     await this.removeTaskDir(boxId, taskId)
     this.addEvent(taskId, note)
+    this.emitTask(taskId)
+  }
+
+  /**
+   * Emergency cleanup: remove a done task's folder without an archive because its PR is merged and nothing in it is
+   * unpushed (the janitor checked), so GitHub has all of it. An older archive is let go too: the next message starts
+   * from a recap of the task instead of an out-of-date session.
+   */
+  private async dropPushed(taskId: string, boxId: string) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [], archivePath: null, lastArchivedAt: null }, { touch: false })
+    if (row.archive_path) this.store.noteTaskArchiveUnavailable(taskId, row.archive_path, "out of date; workspace removed after its PR merged")
+    await this.removeTaskDir(boxId, taskId)
+    const pr = prNumber(row.pr_url)
+    console.log(`[box-yard] removed workspace ${taskId} from ${boxId} without an archive: PR${pr ? ` #${pr}` : ""} merged, nothing unpushed`)
+    this.addEvent(
+      taskId,
+      `Workspace removed from box ${boxId} to free disk, without an archive: its PR${pr ? ` #${pr}` : ""} is merged and nothing in it was unpushed, so GitHub has all of it. The next message starts from a recap.`,
+    )
     this.emitTask(taskId)
   }
 
@@ -2742,6 +2826,13 @@ export class TaskManager {
     if (now - this.lastRetentionAt > 5 * 60_000) {
       this.lastRetentionAt = now
       await this.maintainRestingStorage(now)
+    }
+    await this.reclaimUnusedBoxes(now)
+    // Boxes at the provider that Box Yard has no row for (a delete that failed before rows waited for it). Not while
+    // a box is being created: it's at the provider before it's in the database.
+    if (now - this.lastOrphanSweepAt > 60 * 60_000 && !this.creatingBoxes) {
+      this.lastOrphanSweepAt = now
+      await this.cleanupOrphanBoxes()
     }
     // Clean a box that is filling up before a task trips over it.
     const floor = this.diskNeed(null)
