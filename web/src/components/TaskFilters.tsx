@@ -54,9 +54,17 @@ export interface TabItem<K extends string> {
 
 /** The sticky underline tab bar used at the top of the project and yard pages. */
 export function TabBar<K extends string>({ tabs, selected, label }: { tabs: TabItem<K>[]; selected: K; label?: string }) {
+  const strip = useRef<HTMLDivElement>(null)
+  // On a phone the later tabs are off to the right: bring the selected one into view (sideways only).
+  useEffect(() => {
+    const s = strip.current
+    const tab = s?.querySelector<HTMLElement>('[aria-current="page"]')
+    if (!s || !tab) return
+    if (tab.offsetLeft < s.scrollLeft || tab.offsetLeft + tab.offsetWidth > s.scrollLeft + s.clientWidth) s.scrollLeft = Math.max(0, tab.offsetLeft - 16)
+  }, [selected])
   return (
     <nav aria-label={label} className="sticky top-0 z-10 -mx-4 -mt-1 border-b border-zinc-900 bg-zinc-950/90 px-4 backdrop-blur sm:-mx-6 sm:px-6">
-      <div className="scroll-thin -mb-px flex gap-1 overflow-x-auto">
+      <div ref={strip} className="scroll-thin relative -mb-px flex gap-1 overflow-x-auto">
         {tabs.map((t) => {
           const Icon = t.icon
           const on = t.key === selected
