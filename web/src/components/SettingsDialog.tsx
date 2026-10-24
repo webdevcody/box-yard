@@ -630,6 +630,23 @@ function LimitsPanel({
           ))}
         </Select>
       </Row>
+      <Row
+        id={fid("pre")}
+        label="Resize an idle box when no big-enough box is free"
+        help="For projects with a box size: when the pool is at Max boxes and no box of that size has room, Box Yard may grow an idle smaller box (no agent running on it) to that size and run the task there. Larger boxes cost more. Off, the task waits for a box of its size; it never runs on a smaller one."
+        hint={hint("placementResizeEnabled")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input
+            id={fid("pre")}
+            type="checkbox"
+            checked={s.placementResizeEnabled}
+            onChange={(e) => set("placementResizeEnabled", e.target.checked)}
+            data-testid="placement-resize"
+          />
+          {s.placementResizeEnabled ? "On: an idle box may be resized" : "Off: the task waits"}
+        </label>
+      </Row>
       <SizeCapacityTable s={s} sources={sources} changed={changed} />
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />

@@ -1750,16 +1750,19 @@ export class TaskManager {
 
   /**
    * A task of a project with a box size, the pool full and no box of at least that size with a free slot.
-   * The rule: when an idle box exists (ready, no agent running or starting on it, no other operation or cleanup
+   * The rule, when Settings › Resize an idle box… (placementResizeEnabled, off by default) is on: when an idle box exists (ready, no agent running or starting on it, no other operation or cleanup
    * on it), it's resized up to the size through the usual resize (in place, or by migration: archive every
    * workspace, move them to a new box, delete the old one), and the task waits for it. The box with the least on
    * its disk goes first, since that's the least to archive; agents are never stopped. With no idle box the task
-   * waits. Either way the reason is on the task, and it never falls back to a smaller box.
+   * waits, and with the setting off it always waits. Either way the reason is on the task, and it never falls back to
+   * a smaller box.
    */
   private async ensureSizedBox(row: TaskRow, min: BoxSize) {
     const waitFor = `Waiting for a ${min} box`
     const pending = this.sizedBoxComing(min)
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
+    // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
+    if (!this.settings.get().placementResizeEnabled) return this.setWaitReason(row.id, `${waitFor}: the pool is full and none has room`, min)
     const idle = this.idleBoxesBelow(min)
     for (const box of idle) {
       const project = this.store.getProject(row.project_id)

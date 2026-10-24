@@ -58,6 +58,8 @@ export const DEFAULT_SETTINGS: Settings = {
   workerSize: "small",
   autoResizeEnabled: true,
   autoResizeMaxSize: "large",
+  // Off: a task whose project needs a bigger box than any free one waits for it; placement never resizes a box.
+  placementResizeEnabled: false,
   maxBoxes: 5,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
@@ -157,6 +159,7 @@ export const settingsPatch = z
     workerSize: z.enum(WORKER_SIZES),
     autoResizeEnabled: z.boolean(),
     autoResizeMaxSize: z.enum(BOX_SIZES),
+    placementResizeEnabled: z.boolean(),
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
