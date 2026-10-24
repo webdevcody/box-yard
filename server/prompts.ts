@@ -17,6 +17,8 @@ export function workerSystemPrompt(input: {
   port: number
   /** Settings.ownerName; the built-in "Cody" when unset. */
   ownerName?: string
+  /** Box Yard pushes the branch and uncommitted work after every turn (TaskManager.pushAtTurnEnd). */
+  pushAtTurnEnd?: boolean
 }): string {
   const { project, task, branch, port } = input
   const header = [
@@ -41,6 +43,9 @@ export function workerSystemPrompt(input: {
       `When the change is ready: run the tests/linters the repo has, commit with clear messages, then call create_pull_request.`,
       `If Cody gives feedback later, push more commits to the same branch and call create_pull_request again to update it.`,
       `Never push to ${project.baseBranch} directly and never force-push.`,
+      input.pushAtTurnEnd
+        ? `Box Yard pushes your branch, and any uncommitted work to a hidden ref, at the end of every turn. So add new commits rather than amending or rebasing ones from earlier turns.`
+        : ``,
     )
   } else {
     lines.push(
