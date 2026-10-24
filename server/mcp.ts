@@ -1151,7 +1151,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "clean_up_box",
       {
         description:
-          "Coordinator tool: free disk on a worker box now, in safe steps (partial clones, caches, git-ignored node_modules/build dirs of resting tasks, git gc, then parking archived done workspaces only if still low). " +
+          "Coordinator tool: free disk on a worker box now, in safe steps (partial clones, caches, git-ignored node_modules/build dirs of resting tasks, git gc, then parking archived done workspaces only if still low). Under 100 MB free it first drops session temp files and removes done workspaces whose PR is merged and fully pushed (no archive needed: GitHub has them). " +
           "Never touches uncommitted work. Runs in the background; check pool_status for the result. Box Yard also does this on its own when a box runs low.",
         inputSchema: { box: z.string().describe("Box id, from pool_status") },
       },

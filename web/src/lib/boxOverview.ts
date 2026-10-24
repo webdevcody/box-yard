@@ -7,7 +7,7 @@ import { cleanupLine, diskMeter } from "./diskCleanup"
 export type AttentionLevel = "error" | "warn"
 
 export interface AttentionReason {
-  key: "lost" | "disk" | "cleanup" | "over"
+  key: "lost" | "deleting" | "disk" | "cleanup" | "over"
   level: AttentionLevel
   /** A few words for the row tooltip. */
   short: string
@@ -22,8 +22,15 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
   const out: AttentionReason[] = []
   if (box.status === "lost")
     out.push({ key: "lost", level: "error", short: "Not responding", detail: "Box Yard lost touch with this box. Its tasks are moved or retried when they run again." })
+  if (box.status === "deleting")
+    out.push({
+      key: "deleting",
+      level: "warn",
+      short: "Delete didn't go through yet",
+      detail: "Box Yard asked the provider to delete this unused box and it hasn't confirmed yet. Box Yard retries every few minutes; nothing is placed here meanwhile.",
+    })
   const disk = diskMeter(box)
-  if (disk?.low && box.status !== "lost") {
+  if (disk?.low && box.status !== "lost" && box.status !== "deleting") {
     const short = box.cleanup?.status === "done" && box.cleanup.targetFreeBytes !== null && !box.cleanup.enough ? `; the last cleanup still left it short of ${formatBytes(box.cleanup.targetFreeBytes)}` : ""
     out.push({
       key: "disk",

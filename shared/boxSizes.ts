@@ -114,6 +114,8 @@ export interface BoxResize {
   by: ResizeInitiator
   reason: string | null
   error: string | null
+  /** After a failed migration: what happened to the box it created ("Deleted the new medium box …"). */
+  cleanup?: string | null
   startedAt: number
   finishedAt: number | null
 }
@@ -138,9 +140,15 @@ export function resizeTitle(r: Pick<BoxResize, "boxId" | "from" | "to" | "status
   return `${verb} ${r.boxId}: ${r.from} → ${r.to}`
 }
 
+/** A failed resize's error, then what happened to the box it made: "archive step failed: …. Deleted the new medium box …." */
+export function resizeFailure(r: Pick<BoxResize, "error" | "cleanup">): string {
+  const error = r.error ?? "unknown error"
+  return r.cleanup ? `${error}${/[.!?]$/.test(error) ? "" : "."} ${r.cleanup}` : error
+}
+
 /** One line for toasts, notices and pool_status. */
 export function resizeSummary(r: BoxResize): string {
-  if (r.status === "failed") return r.error ?? "unknown error"
+  if (r.status === "failed") return resizeFailure(r)
   if (r.status === "running") {
     const step = r.steps.find((s) => s.status === "running")
     return step ? `${step.label}…` : "Starting…"

@@ -36,9 +36,14 @@ export class LocalProvider implements BoxProvider {
 
   async wake() {}
 
+  /** Environment box commands run with. Tests override it to put fake tools on PATH. */
+  protected env(_boxId: string): NodeJS.ProcessEnv {
+    return process.env
+  }
+
   exec(boxId: string, command: string): Promise<ExecResult> {
     return new Promise((resolve) => {
-      const child = spawn("bash", ["-c", command], { cwd: this.root(boxId), env: process.env })
+      const child = spawn("bash", ["-c", command], { cwd: this.root(boxId), env: this.env(boxId) })
       let stdout = ""
       let stderr = ""
       child.stdout.on("data", (d) => (stdout += d))
@@ -48,9 +53,20 @@ export class LocalProvider implements BoxProvider {
     })
   }
 
+  execStream(boxId: string, command: string, onOutput: (chunk: string) => void): Promise<{ exitCode: number }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn("bash", ["-c", command], { cwd: this.root(boxId), env: this.env(boxId) })
+      // Merged like Upstash's exec stream.
+      child.stdout.setEncoding("utf8").on("data", onOutput)
+      child.stderr.setEncoding("utf8").on("data", onOutput)
+      child.on("error", reject)
+      child.on("close", (code) => resolve({ exitCode: code ?? 1 }))
+    })
+  }
+
   hold(boxId: string, command: string, signal: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
-      const child = spawn("bash", ["-c", command], { cwd: this.root(boxId), env: process.env, stdio: "ignore" })
+      const child = spawn("bash", ["-c", command], { cwd: this.root(boxId), env: this.env(boxId), stdio: "ignore" })
       const onAbort = () => child.kill("SIGTERM")
       signal.addEventListener("abort", onAbort, { once: true })
       child.on("error", () => resolve())
