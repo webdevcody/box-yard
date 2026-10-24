@@ -34,7 +34,7 @@ import {
 import { useTail } from "../lib/tail"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
-import { AppLink, Button, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
 import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
@@ -239,12 +239,11 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       onClick={toggle}
       onKeyDown={toggle}
       className={cx(
-        "flex min-w-0 cursor-pointer gap-2 rounded-lg px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900/60 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
-        full ? "items-start" : "items-center",
+        "flex min-w-0 cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900/60 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
       )}
       {...PREVIEW_GROUP}
     >
-      <Icon className={cx("h-3.5 w-3.5 shrink-0", full && "mt-px", className)} aria-label={label} />
+      <LineIcon icon={Icon} className={cx("h-3.5 w-3.5", className)} label={label} />
       <div className={cx("min-w-0 flex-1", full ? "whitespace-normal wrap-anywhere" : "truncate")}>
         {n.title &&
           (taskId ? (
