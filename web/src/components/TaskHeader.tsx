@@ -85,7 +85,7 @@ export function TaskHeader({
             {task.title}
           </h1>
           <StatusBadge status={badgeStatus(task)} />
-          <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} className="hidden sm:block" />
+          <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." />
         </div>
         <div className="flex shrink-0 items-center gap-1 max-sm:w-full max-sm:justify-end">
           {primary === "stop" && (
