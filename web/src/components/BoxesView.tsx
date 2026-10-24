@@ -5,9 +5,9 @@ import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTas
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
-import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
+import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
 import { hours, money } from "../lib/usage"
-import { cleanupLine, diskMeter } from "../lib/diskCleanup"
+import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
 import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo } from "./ui"
 import { Modal } from "./Modal"
@@ -366,7 +366,7 @@ function BoxRow({
           </span>
           <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="w-8 @2xl:w-full" />
         </div>
-        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={disk ? `${disk.label}${box.diskCheckedAt ? ` · ${measuredAgo(box.diskCheckedAt)}` : ""}` : "Free space not measured yet"}>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={rowDiskTitle(box)}>
           <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[tone])}>{disk ? `${formatBytes(disk.free)} free` : "disk —"}</span>
           {disk && <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="w-8 @2xl:w-full" />}
         </div>
@@ -532,7 +532,7 @@ function BoxDetails({
   const attention = boxAttention(box)
   const { active, finished } = splitBoxTasks(tasks)
   const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
-  const [tab, setTab] = useState<DetailTab>(() => (attention.some((r) => r.key === "disk" || r.key === "cleanup") ? "disk" : active.length || !finished.length ? "running" : "finished"))
+  const [tab, setTab] = useState<DetailTab>(() => (attention.some((r) => r.key === "disk" || r.key === "root" || r.key === "cleanup") ? "disk" : active.length || !finished.length ? "running" : "finished"))
   const tabs: { key: DetailTab; label: string; count?: number }[] = [
     { key: "running", label: "Running", count: active.length },
     { key: "finished", label: "Finished", count: finished.length },
@@ -813,6 +813,7 @@ function useNow(ms: number) {
 function DiskSummary({ box }: { box: BoxInfo }) {
   const now = useNow(5_000)
   const disk = diskMeter(box)
+  const root = rootMeter(box)
   const tone = diskTone(box)
   if (!disk)
     return (
@@ -829,8 +830,21 @@ function DiskSummary({ box }: { box: BoxInfo }) {
           {measuredAgo(box.diskCheckedAt, now)}
         </div>
       )}
+      {root && (
+        <div className={cx("mt-1 text-[11px]", root.low ? TONE_TEXT[rootTone(box)] : "text-zinc-500")} title={`Root disk (/tmp, home): ${root.label}`} data-testid="root-disk-use">
+          root disk {formatBytes(root.free)} free
+        </div>
+      )}
     </div>
   )
+}
+
+/** The row's disk cell tooltip: the work disk, and the root disk when it's another one. */
+function rowDiskTitle(box: BoxInfo): string {
+  const disk = diskMeter(box)
+  const root = rootMeter(box)
+  const work = disk ? `${disk.label}${box.diskCheckedAt ? ` · ${measuredAgo(box.diskCheckedAt)}` : ""}` : "Free space not measured yet"
+  return root ? `${work}\nRoot disk (/tmp, home): ${root.label}${root.low ? " · low" : ""}` : work
 }
 
 /**
@@ -840,6 +854,7 @@ function DiskSummary({ box }: { box: BoxInfo }) {
 function DiskPanel({ box }: { box: BoxInfo }) {
   const now = useNow(5_000)
   const disk = diskMeter(box)
+  const root = rootMeter(box)
   const tone = diskTone(box)
   const ours = disk && box.diskBytes !== null ? Math.min(box.diskBytes, disk.used) : null
   const parts = disk
@@ -855,7 +870,10 @@ function DiskPanel({ box }: { box: BoxInfo }) {
       {disk ? (
         <div data-testid="disk-breakdown">
           <div className="flex items-baseline justify-between gap-3">
-            <span className={TONE_TEXT[tone]}>{disk.label}</span>
+            <span>
+              {root && <span className="text-zinc-500">Work disk · </span>}
+              <span className={TONE_TEXT[tone]}>{disk.label}</span>
+            </span>
             {box.diskCheckedAt && <span className="text-zinc-500">{measuredAgo(box.diskCheckedAt, now)}</span>}
           </div>
           <div className="mt-2 flex h-2.5 overflow-hidden rounded-sm bg-zinc-800" role="img" aria-label={`Disk: ${parts.map((p) => `${p.label} ${formatBytes(p.bytes)}`).join(", ")}, ${formatBytes(disk.free)} free`}>
@@ -879,7 +897,25 @@ function DiskPanel({ box }: { box: BoxInfo }) {
       ) : (
         <p className="text-zinc-500">Free space is measured with df when Box Yard next places a task or checks the box.</p>
       )}
+      {root && <RootDisk box={box} root={root} />}
       <CleanupReport box={box} />
+    </div>
+  )
+}
+
+/** The root disk (/tmp, HOME) when it isn't the work disk: archive and git stages and temp files land there. */
+function RootDisk({ box, root }: { box: BoxInfo; root: NonNullable<ReturnType<typeof rootMeter>> }) {
+  const tone = rootTone(box)
+  return (
+    <div data-testid="root-disk">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+        <span>
+          <span className="text-zinc-500">Root disk (/tmp, home) · </span>
+          <span className={TONE_TEXT[tone]}>{root.label}</span>
+        </span>
+      </div>
+      <Meter used={root.used} total={root.total} tone={tone} label="Root disk used" className="mt-2" />
+      {root.low && <p className="mt-1.5 text-amber-300/90">Low: Box Yard removes temp folders here that haven't changed in 30 minutes, and stages archives on whichever disk has more room.</p>}
     </div>
   )
 }
@@ -927,6 +963,12 @@ function CleanupReport({ box }: { box: BoxInfo }) {
           {cleanup && cleanup.freeBefore !== null && cleanup.freeAfter !== null && (
             <div className="mt-0.5 text-zinc-500">
               {formatBytes(cleanup.freeBefore)} → {formatBytes(cleanup.freeAfter)} free
+              {typeof cleanup.rootFreeBefore === "number" && typeof cleanup.rootFreeAfter === "number" && (
+                <span className="whitespace-nowrap" data-testid="cleanup-root">
+                  {" "}
+                  · root disk {formatBytes(cleanup.rootFreeBefore)} → {formatBytes(cleanup.rootFreeAfter)}
+                </span>
+              )}
             </div>
           )}
         </div>

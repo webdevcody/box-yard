@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, statusCounts } from "../web/src/lib/boxOverview"
+import { boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, statusCounts } from "../web/src/lib/boxOverview"
 import type { BoxCleanup, BoxInfo, Task, TaskStatus } from "../shared/types"
 
 const MB = 1024 * 1024
@@ -63,6 +63,17 @@ describe("box attention", () => {
     expect(low[0]!.short).toBe("Low on disk: 542 MB free")
     expect(low[0]!.detail).toContain("the last cleanup still left it short of 1.0 GB")
     expect(boxAttention(box("a", { diskFreeBytes: 100 * MB, diskLow: true }))[0]!.level).toBe("error")
+  })
+
+  it("flags a low root disk (/tmp, home) on its own", () => {
+    const low = boxAttention(box("a", { rootFreeBytes: 380 * MB, rootTotalBytes: 5 * GB }))
+    expect(low.map((r) => [r.key, r.level, r.short])).toEqual([["root", "warn", "Root disk low: 380 MB free"]])
+    expect(low[0]!.detail).toContain("380 MB free of 5.0 GB")
+    expect(boxAttention(box("a", { rootFreeBytes: 100 * MB, rootTotalBytes: 5 * GB }))[0]!.level).toBe("error")
+    expect(boxAttention(box("a", { rootFreeBytes: 2 * GB, rootTotalBytes: 5 * GB }))).toEqual([])
+    expect(boxAttention(box("a", { status: "lost", rootFreeBytes: 100 * MB, rootTotalBytes: 5 * GB })).map((r) => r.key)).toEqual(["lost"])
+    expect(rootTone(box("a", { rootFreeBytes: 380 * MB, rootTotalBytes: 5 * GB }))).toBe("warn")
+    expect(rootTone(box("a"))).toBe("unknown")
   })
 
   it("flags a lost box, a failed cleanup and too many agents", () => {

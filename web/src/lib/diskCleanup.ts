@@ -1,5 +1,5 @@
 // Disk and cleanup display for the Boxes page and the cleanup toasts.
-import { cleanupSummary, diskLine, formatBytes, LOW_DISK_RATIO } from "../../../shared/disk"
+import { CLEANUP_STEPS, CLEAR_STEPS, cleanupSummary, diskLine, formatBytes, LOW_DISK_RATIO, rootLow, type CleanupStepKey } from "../../../shared/disk"
 import type { BoxCleanup, BoxInfo } from "../../../shared/types"
 import { toast } from "./toast"
 
@@ -30,6 +30,25 @@ export function diskMeter(box: Pick<BoxInfo, "diskFreeBytes" | "diskTotalBytes" 
   }
 }
 
+/**
+ * The box's root disk (/, holding /tmp and HOME on Upstash) from its last df, or null when it's the work disk or
+ * not measured yet. Low is the server's rootLow: when it sweeps stale temp folders there by itself.
+ */
+export function rootMeter(box: Pick<BoxInfo, "rootFreeBytes" | "rootTotalBytes">): DiskMeter | null {
+  const free = box.rootFreeBytes ?? null
+  const total = box.rootTotalBytes ?? null
+  if (free === null || total === null || total <= 0) return null
+  const used = Math.max(0, total - free)
+  return {
+    free,
+    total,
+    used,
+    usedRatio: Math.min(1, used / total),
+    low: rootLow({ freeBytes: free, totalBytes: total }),
+    label: diskLine({ freeBytes: free, totalBytes: total }),
+  }
+}
+
 const REASON: Record<BoxCleanup["reason"], string> = {
   "low-disk": "it was low on disk",
   "out-of-space": "a task ran out of space",
@@ -42,17 +61,21 @@ const REASON: Record<BoxCleanup["reason"], string> = {
 const clearedCount = (c: BoxCleanup) => c.steps.find((s) => s.key === "archive")?.removed.length ?? 0
 const workspaces = (n: number) => `${n} ${n === 1 ? "workspace" : "workspaces"}`
 
+/** What a routine upkeep step is for, in a few words. */
+const ROUTINE_WORK: Partial<Record<CleanupStepKey, string>> = { tmp: "stale temp folders", caches: "caches", builds: "idle build output", git: "mirror gc" }
+const routineWork = (c: BoxCleanup) => c.steps.flatMap((s) => ROUTINE_WORK[s.key] ?? []).join(", ") || "idle build output, mirror gc"
+
 /** One line about a cleanup for the box card, without its time. */
 export function cleanupLine(c: BoxCleanup): string {
   const clear = c.reason === "clear"
   if (c.status === "running") {
     const done = c.steps.filter((s) => !s.skipped || s.freedBytes > 0).length
     const verb = clear ? "Clearing" : "Cleaning up"
-    return c.freedBytes > 0 ? `${verb}: freed ${formatBytes(c.freedBytes)} so far (${done} of ${clear ? 4 : 5} steps)` : `${verb}…`
+    return c.freedBytes > 0 ? `${verb}: freed ${formatBytes(c.freedBytes)} so far (${done} of ${clear ? CLEAR_STEPS.length : CLEANUP_STEPS.length} steps)` : `${verb}…`
   }
   if (c.status === "failed") return `${clear ? "Clear" : "Cleanup"} failed: ${c.error ?? "unknown error"}`
   if (clear) return `Cleared: archived and removed ${workspaces(clearedCount(c))}, ${cleanupSummary(c)}`
-  const why = c.reason === "manual" ? "Cleaned up" : c.reason === "routine" ? "Routine upkeep (idle build output, mirror gc)" : `Cleaned up because ${REASON[c.reason]}`
+  const why = c.reason === "manual" ? "Cleaned up" : c.reason === "routine" ? `Routine upkeep (${routineWork(c)})` : `Cleaned up because ${REASON[c.reason]}`
   const short = c.targetFreeBytes !== null && !c.enough ? `; still short of the ${formatBytes(c.targetFreeBytes)} new workspaces need` : ""
   return `${why}: ${cleanupSummary(c)}${short}`
 }
