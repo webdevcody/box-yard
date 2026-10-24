@@ -8,7 +8,7 @@ import { memoryMeter, memoryShort } from "./memoryMeter"
 export type AttentionLevel = "error" | "warn"
 
 export interface AttentionReason {
-  key: "lost" | "deleting" | "disk" | "root" | "memory" | "cleanup" | "over"
+  key: "lost" | "deleting" | "unreachable" | "disk" | "root" | "memory" | "cleanup" | "over"
   level: AttentionLevel
   /** A few words for the row tooltip. */
   short: string
@@ -17,7 +17,7 @@ export interface AttentionReason {
 }
 
 type AttentionBox = Pick<BoxInfo, "status" | "diskFreeBytes" | "diskTotalBytes" | "rootFreeBytes" | "rootTotalBytes" | "diskLow" | "cleanup" | "runningTurns" | "slots"> &
-  Partial<Pick<BoxInfo, "memUsedBytes" | "memTotalBytes" | "loadAvg" | "cpuCount" | "memoryPressure" | "limitLoweredFrom">>
+  Partial<Pick<BoxInfo, "memUsedBytes" | "memTotalBytes" | "loadAvg" | "cpuCount" | "memoryPressure" | "limitLoweredFrom" | "unreachableSince">>
 
 /** Why a box needs Cody's eye, worst first; empty when it's fine. */
 export function boxAttention(box: AttentionBox): AttentionReason[] {
@@ -30,6 +30,13 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
       level: "warn",
       short: "Delete didn't go through yet",
       detail: "Box Yard asked the provider to delete this unused box and it hasn't confirmed yet. Box Yard retries every few minutes; nothing is placed here meanwhile.",
+    })
+  if (box.unreachableSince && box.status === "ready")
+    out.push({
+      key: "unreachable",
+      level: "warn",
+      short: "Not answering",
+      detail: "Box Yard can't reach this box, so its disk and memory numbers are from the last check that worked. If the provider no longer has it (deleted in its console), Box Yard drops it and its tasks restore elsewhere.",
     })
   const disk = diskMeter(box)
   if (disk?.low && box.status !== "lost" && box.status !== "deleting") {
@@ -64,6 +71,15 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
     out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} agents: over its limit`, detail: `${lowered}${box.runningTurns} agents are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
   }
   return out
+}
+
+/** Box Yard probes every box every few minutes; numbers older than this aren't current. */
+export const STATS_STALE_MS = 15 * 60_000
+
+/** The box's disk and memory numbers aren't current: it stopped answering, or its last probe is old. */
+export function statsStale(box: Pick<BoxInfo, "diskCheckedAt"> & Partial<Pick<BoxInfo, "unreachableSince">>, now = Date.now()): boolean {
+  if (box.unreachableSince) return true
+  return box.diskCheckedAt !== null && now - box.diskCheckedAt > STATS_STALE_MS
 }
 
 /** Below this share of the disk free, the disk meter and attention icon turn red instead of amber. */

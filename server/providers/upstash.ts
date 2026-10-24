@@ -109,8 +109,7 @@ export class UpstashProvider implements BoxProvider {
       if (status === "error") return "error"
       return "running"
     } catch (err) {
-      const code = (err as { statusCode?: number }).statusCode
-      if (code === 404 || /not found/i.test(String((err as Error).message))) {
+      if (isNotFound(err)) {
         this.cache.delete(boxId)
         return "gone"
       }
@@ -209,6 +208,12 @@ export class UpstashProvider implements BoxProvider {
     return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
   }
 
+  async liveIds(): Promise<string[]> {
+    // No label: boxes made before install labels existed must count as alive too.
+    const boxes = await retry(() => Box.list({ apiKey: this.apiKey }))
+    return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
+  }
+
   async usage(boxId: string): Promise<BoxUsageProbe> {
     const box = await this.box(boxId)
     const status = await retry(() => box.getStatus()).catch(() => ({}))
@@ -230,12 +235,22 @@ export class UpstashProvider implements BoxProvider {
       const box = await this.box(boxId)
       await retry(() => box.delete())
     } catch (err) {
-      const code = (err as { statusCode?: number }).statusCode
-      if (code !== 404) throw err
+      // Already gone (deleted in the console, or by an earlier try): that's what was asked for.
+      if (!isNotFound(err)) throw err
     } finally {
       this.cache.delete(boxId)
     }
   }
+}
+
+/**
+ * The provider says the box doesn't exist: 404/410, or a "not found" error with no status. Anything else (network,
+ * 5xx, timeouts, 401/403 even when the text says "not found", e.g. an API key) may pass, so it isn't "gone".
+ */
+export function isNotFound(err: unknown): boolean {
+  const code = (err as { statusCode?: number } | null)?.statusCode
+  if (typeof code === "number") return code === 404 || code === 410
+  return /not found/i.test(String((err as Error | null)?.message ?? ""))
 }
 
 function sizeOf(obj: Record<string, unknown>): BoxUsageProbe["size"] | undefined {

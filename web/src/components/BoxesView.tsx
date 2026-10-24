@@ -5,7 +5,7 @@ import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTas
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
-import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
+import { BOX_FILTERS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, statsStale, type AttentionReason, type BoxFilter } from "../lib/boxOverview"
 import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { memoryMeter, memoryShort } from "../lib/memoryMeter"
@@ -30,6 +30,17 @@ const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string; dot: 
   ready: { label: "Running", chip: "bg-emerald-500/10 text-emerald-300", dot: "bg-emerald-400" },
   lost: { label: "Error", chip: "bg-red-500/10 text-red-300", dot: "bg-red-500" },
   deleting: { label: "Deleting", chip: "bg-zinc-800 text-zinc-300", dot: "bg-zinc-500" },
+}
+
+/** A running box that stopped answering isn't shown green. */
+const NOT_ANSWERING = { label: "Not answering", chip: "bg-amber-500/10 text-amber-300", dot: "bg-amber-400" }
+const statusStyle = (box: BoxInfo) => (box.status === "ready" && box.unreachableSince ? NOT_ANSWERING : BOX_STATUS[box.status])
+
+/** Why a box's disk and memory numbers are grey, for tooltips and the details; null while they're current. */
+function staleNote(box: BoxInfo, now = Date.now()): string | null {
+  if (!statsStale(box, now)) return null
+  const when = box.diskCheckedAt ? measuredAgo(box.diskCheckedAt, now) : "not measured yet"
+  return box.unreachableSince ? `Not answering: from the last check that worked, ${when}` : `Stale: ${when}`
 }
 
 const TONE_BAR = { ok: "bg-yard-500", warn: "bg-amber-400", error: "bg-red-500", unknown: "bg-zinc-600" } as const
@@ -314,11 +325,13 @@ function BoxRow({
   onOpen: (id: string) => void
   onAction: (boxId: string, kind: BoxAction) => void
 }) {
-  const st = BOX_STATUS[box.status]
+  const st = statusStyle(box)
   const attention = boxAttention(box)
   const disk = diskMeter(box)
-  const tone = diskTone(box)
+  const stale = staleNote(box)
+  const tone = stale ? "unknown" : diskTone(box)
   const mem = memoryMeter(box)
+  const memTone = mem && !stale ? mem.tone : "unknown"
   const now = nowRunning(tasks)
   const over = box.runningTurns > box.slots
   const busy = boxBusyReason(box)
@@ -382,10 +395,10 @@ function BoxRow({
           <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[tone])}>{disk ? `${formatBytes(disk.free)} free` : "disk —"}</span>
           {disk && <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="w-8 @2xl:w-full" />}
         </div>
-        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={mem?.title ?? "Memory not measured yet"} data-testid="box-row-memory">
-          <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[mem?.tone ?? "unknown"])}>{mem ? memoryShort(mem) : "mem —"}</span>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={mem ? [mem.title, stale].filter(Boolean).join("\n") : "Memory not measured yet"} data-testid="box-row-memory">
+          <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[memTone])}>{mem ? memoryShort(mem) : "mem —"}</span>
           {/* On the two-line phone row the text alone says it, leaving room for "running now". */}
-          {mem && <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="hidden @2xl:block @2xl:w-full" />}
+          {mem && <Meter used={mem.used} total={mem.total} tone={memTone} label="Memory used" className="hidden @2xl:block @2xl:w-full" />}
         </div>
         <div className="hidden min-w-0 items-center gap-1 @2xl:flex">
           {box.projects.length === 0 ? (
@@ -545,7 +558,7 @@ function BoxDetails({
   onAction: (boxId: string, kind: BoxAction) => void
 }) {
   const busy = boxBusyReason(box)
-  const st = BOX_STATUS[box.status]
+  const st = statusStyle(box)
   const attention = boxAttention(box)
   const { active, finished } = splitBoxTasks(tasks)
   const previews = tasks.flatMap((t) => t.previews.map((p) => ({ ...p, taskTitle: t.title })))
@@ -836,7 +849,8 @@ function DiskSummary({ box }: { box: BoxInfo }) {
   const now = useNow(5_000)
   const disk = diskMeter(box)
   const root = rootMeter(box)
-  const tone = diskTone(box)
+  const stale = staleNote(box, now)
+  const tone = stale ? "unknown" : diskTone(box)
   if (!disk)
     return (
       <span className="text-zinc-500" title="Free space is measured with df when Box Yard next places a task or checks the box." data-testid="disk-use">
@@ -848,12 +862,12 @@ function DiskSummary({ box }: { box: BoxInfo }) {
       <span className={TONE_TEXT[tone]}>{disk.label}</span>
       <Meter used={disk.used} total={disk.total} tone={tone} label="Disk used" className="mt-1.5" />
       {box.diskCheckedAt && (
-        <div className="mt-1 text-[11px] text-zinc-500" title={new Date(box.diskCheckedAt).toLocaleString()}>
-          {measuredAgo(box.diskCheckedAt, now)}
+        <div className="mt-1 text-[11px] text-zinc-500" title={new Date(box.diskCheckedAt).toLocaleString()} data-testid="disk-measured">
+          {stale ?? measuredAgo(box.diskCheckedAt, now)}
         </div>
       )}
       {root && (
-        <div className={cx("mt-1 text-[11px]", root.low ? TONE_TEXT[rootTone(box)] : "text-zinc-500")} title={`Root disk (/tmp, home): ${root.label}`} data-testid="root-disk-use">
+        <div className={cx("mt-1 text-[11px]", root.low && !stale ? TONE_TEXT[rootTone(box)] : "text-zinc-500")} title={`Root disk (/tmp, home): ${root.label}`} data-testid="root-disk-use">
           root disk {formatBytes(root.free)} free
         </div>
       )}
@@ -864,6 +878,8 @@ function DiskSummary({ box }: { box: BoxInfo }) {
 /** Memory in use (without reclaimable page cache) and the load average, from the same probe as the disk. */
 function MemorySummary({ box }: { box: BoxInfo }) {
   const mem = memoryMeter(box)
+  const stale = staleNote(box)
+  const tone = mem && !stale ? mem.tone : "unknown"
   if (!mem)
     return (
       <span className="text-zinc-500" title="Memory and load are read with the disk check when Box Yard next places a task or checks the box." data-testid="memory-use">
@@ -872,9 +888,10 @@ function MemorySummary({ box }: { box: BoxInfo }) {
     )
   return (
     <div data-testid="memory-use" title={mem.title}>
-      <span className={TONE_TEXT[mem.tone]}>{mem.label}</span>
-      <Meter used={mem.used} total={mem.total} tone={mem.tone} label="Memory used" className="mt-1.5" />
+      <span className={TONE_TEXT[tone]}>{mem.label}</span>
+      <Meter used={mem.used} total={mem.total} tone={tone} label="Memory used" className="mt-1.5" />
       {mem.load && <div className="mt-1 text-[11px] text-zinc-500">{mem.load}</div>}
+      {stale && <div className="mt-1 text-[11px] text-zinc-500">{stale}</div>}
       {mem.busy && <div className="mt-1 text-[11px] text-amber-300">new agents go elsewhere</div>}
     </div>
   )
@@ -884,7 +901,7 @@ function MemorySummary({ box }: { box: BoxInfo }) {
 function rowDiskTitle(box: BoxInfo): string {
   const disk = diskMeter(box)
   const root = rootMeter(box)
-  const work = disk ? `${disk.label}${box.diskCheckedAt ? ` · ${measuredAgo(box.diskCheckedAt)}` : ""}` : "Free space not measured yet"
+  const work = disk ? `${disk.label}${box.diskCheckedAt ? ` · ${staleNote(box) ?? measuredAgo(box.diskCheckedAt)}` : ""}` : "Free space not measured yet"
   return root ? `${work}\nRoot disk (/tmp, home): ${root.label}${root.low ? " · low" : ""}` : work
 }
 
@@ -896,7 +913,8 @@ function DiskPanel({ box }: { box: BoxInfo }) {
   const now = useNow(5_000)
   const disk = diskMeter(box)
   const root = rootMeter(box)
-  const tone = diskTone(box)
+  const stale = staleNote(box, now)
+  const tone = stale ? "unknown" : diskTone(box)
   const ours = disk && box.diskBytes !== null ? Math.min(box.diskBytes, disk.used) : null
   const parts = disk
     ? ours !== null
@@ -915,7 +933,7 @@ function DiskPanel({ box }: { box: BoxInfo }) {
               {root && <span className="text-zinc-500">Work disk · </span>}
               <span className={TONE_TEXT[tone]}>{disk.label}</span>
             </span>
-            {box.diskCheckedAt && <span className="text-zinc-500">{measuredAgo(box.diskCheckedAt, now)}</span>}
+            {box.diskCheckedAt && <span className="text-zinc-500">{stale ?? measuredAgo(box.diskCheckedAt, now)}</span>}
           </div>
           <div className="mt-2 flex h-2.5 overflow-hidden rounded-sm bg-zinc-800" role="img" aria-label={`Disk: ${parts.map((p) => `${p.label} ${formatBytes(p.bytes)}`).join(", ")}, ${formatBytes(disk.free)} free`}>
             {parts.map((p) => (
@@ -946,7 +964,7 @@ function DiskPanel({ box }: { box: BoxInfo }) {
 
 /** The root disk (/tmp, HOME) when it isn't the work disk: temp files land there. Why it's low is in the attention list above. */
 function RootDisk({ box, root }: { box: BoxInfo; root: NonNullable<ReturnType<typeof rootMeter>> }) {
-  const tone = rootTone(box)
+  const tone = staleNote(box) ? "unknown" : rootTone(box)
   return (
     <div data-testid="root-disk">
       <span className="text-zinc-500">Root disk (/tmp, home) · </span>

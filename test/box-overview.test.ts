@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, statusCounts } from "../web/src/lib/boxOverview"
+import { STATS_STALE_MS, boxAttention, boxBusyReason, boxFilterCounts, diskTone, filterBoxes, nowRunning, parseBoxFilter, poolSummary, rootTone, statsStale, statusCounts } from "../web/src/lib/boxOverview"
 import type { BoxCleanup, BoxInfo, Task, TaskStatus } from "../shared/types"
 
 const MB = 1024 * 1024
@@ -81,6 +81,20 @@ describe("box attention", () => {
     expect(boxAttention(box("a", { status: "deleting" })).map((r) => [r.key, r.short])).toEqual([["deleting", "Delete didn't go through yet"]])
     expect(boxAttention(box("a", { cleanup: cleanup({ status: "failed", error: "ssh timeout" }) }))[0]!.detail).toBe("Cleanup failed: ssh timeout")
     expect(boxAttention(box("a", { runningTurns: 3 })).map((r) => r.key)).toEqual(["over"])
+  })
+
+  it("flags a running box that stopped answering, but not one that's lost or being deleted", () => {
+    expect(boxAttention(box("a", { unreachableSince: 5 })).map((r) => [r.key, r.level, r.short])).toEqual([["unreachable", "warn", "Not answering"]])
+    expect(boxAttention(box("a", { unreachableSince: 5, status: "lost" })).map((r) => r.key)).toEqual(["lost"])
+    expect(boxAttention(box("a", { unreachableSince: null })).map((r) => r.key)).toEqual([])
+  })
+
+  it("reads disk and memory as stale when the box stopped answering or the last probe is old", () => {
+    const now = 100 * 60_000
+    expect(statsStale(box("a", { diskCheckedAt: now - 60_000 }), now)).toBe(false)
+    expect(statsStale(box("a", { diskCheckedAt: now - STATS_STALE_MS - 1 }), now)).toBe(true)
+    expect(statsStale(box("a", { diskCheckedAt: now - 60_000, unreachableSince: now - 30_000 }), now)).toBe(true)
+    expect(statsStale(box("a", { diskCheckedAt: null }), now)).toBe(false)
   })
 
   it("colors the disk meter by how low it is", () => {

@@ -263,6 +263,38 @@ describe("Boxes overview", () => {
     )
   })
 
+  it("doesn't show a box that stopped answering as green, or its old numbers as fresh", () => {
+    const stats = { memUsedBytes: 0.3 * GB, memTotalBytes: 4 * GB, loadAvg: 0.1, cpuCount: 2 }
+    const gone = box("moved-possum-73248", { ...stats, diskCheckedAt: now - 9 * 60_000, unreachableSince: now - 4 * 60_000 })
+    const old = box("old-box", { ...stats, diskCheckedAt: now - 40 * 60_000 })
+    const fresh = box("fresh-box", stats)
+    render("/boxes", [gone, old, fresh])
+
+    const dot = (id: string) => row(id).querySelector("[role=img]")!
+    expect(dot("fresh-box").getAttribute("aria-label")).toBe("Running")
+    expect(dot("fresh-box").className).toContain("bg-emerald-400")
+    expect(dot("moved-possum-73248").getAttribute("aria-label")).toBe("Not answering")
+    expect(dot("moved-possum-73248").className).not.toContain("emerald")
+    expect(row("moved-possum-73248").querySelector("[data-testid=box-attention]")!.getAttribute("title")).toBe("Not answering")
+    expect(row("old-box").querySelector("[data-testid=box-attention]")).toBeNull()
+
+    const mem = (id: string) => row(id).querySelector("[data-testid=box-row-memory]")!
+    const disk = (id: string) => mem(id).previousElementSibling!
+    for (const id of ["moved-possum-73248", "old-box"]) {
+      expect(mem(id).querySelector("span")!.className).toContain("text-zinc-500")
+      expect(disk(id).querySelector("span")!.className).toContain("text-zinc-500")
+      expect(mem(id).querySelector("[role=meter] > div")!.className).toContain("bg-zinc-600")
+    }
+    expect(mem("fresh-box").querySelector("span")!.className).not.toContain("text-zinc-500")
+    expect(mem("moved-possum-73248").getAttribute("title")).toContain("Not answering: from the last check that worked, measured 9m ago")
+    expect(disk("old-box").getAttribute("title")).toContain("Stale: measured 40m ago")
+
+    click(row("moved-possum-73248"))
+    act(() => void window.dispatchEvent(new HashChangeEvent("hashchange")))
+    expect(dialog()!.textContent).toContain("Not answering")
+    expect(dialog()!.querySelector("[data-testid=box-attention-list]")!.textContent).toContain("Box Yard can't reach this box")
+  })
+
   it("opens details straight from a /boxes#<id> link and drops the hash on close", () => {
     render("/boxes#idle-box")
     expect(dialog()!.textContent).toContain("idle-box")

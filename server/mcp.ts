@@ -1191,8 +1191,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
-    safe(async () =>
-      ok({
+    safe(async () => {
+      // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
+      await Promise.race([tasks.reconcileBoxes(), new Promise((r) => setTimeout(r, 5_000).unref?.())])
+      return ok({
         boxes: tasks.boxes().map((b) => ({
           id: b.id,
           status: b.status,
@@ -1201,6 +1203,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           running: `${b.runningTurns}/${b.slots}`,
           tasks: b.residentTasks.length,
           disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
+          ...(b.unreachableSince ? { unreachable: `stopped answering ${ago(b.unreachableSince)}; disk and memory are from the last check that worked` } : {}),
           disk_mb:
             b.diskFreeBytes !== null && b.diskTotalBytes !== null
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
@@ -1217,8 +1220,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         pool: tasks.poolLimits(),
         resize_box: resizeGuard(),
         queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason})` : ""}`),
-      }),
-    ),
+      })
+    }),
   )
 
   // ---------------------------------------------------------------- hooks
