@@ -103,8 +103,22 @@ export interface Task {
   routingRule: string | null
   /** Short explanation of why that route was picked. */
   routingReason: string | null
+  /** Cody pressed "Merge PR" and the agent hasn't finished that turn yet (null otherwise). */
+  mergeRequest?: MergeRequest | null
   createdAt: number
   updatedAt: number
+}
+
+/**
+ * A pending "Merge PR" request: the standard merge message went to the task's session (or waits in its queue).
+ * It stays until the turn that handled it ends or the PR is merged or closed; a second one for the same PR is refused meanwhile.
+ */
+export interface MergeRequest {
+  prNumber: number
+  prUrl: string
+  requestedAt: number
+  /** When the message went out in a turn; null while it waits for the agent's current turn to end. */
+  deliveredAt: number | null
 }
 
 /** What to do when runs were missed (the server was down or its box was paused). */

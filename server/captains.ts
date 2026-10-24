@@ -13,7 +13,7 @@ import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
 import { attachmentNote } from "./orchestrator.js"
-import { withOwner } from "../shared/owner.js"
+import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { captainSourceOf } from "../shared/captain.js"
 import {
@@ -67,8 +67,9 @@ const SOURCE_LABEL: Record<CaptainSource, string> = { cody: "From Cody", coordin
 /** Up to this much of a Captain's reply is kept on the Coordinator's tool line. */
 const TOOL_REPLY_MAX = 20_000
 
-function briefTask(t: Task) {
-  return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}`
+function briefTask(t: Task, ownerName?: string) {
+  const merge = t.mergeRequest ? ` (merge requested by ${ownerName?.trim() || DEFAULT_OWNER_NAME} with the Merge button: pending, don't start another merge of this PR)` : ""
+  return `- ${t.id} "${t.title}" ${t.status}${t.pendingCount ? ` (+${t.pendingCount} queued messages)` : ""}${t.prUrl ? ` PR ${t.prUrl}` : ""}${merge}`
 }
 
 export interface CaptainTuning {
@@ -429,7 +430,7 @@ class Captain {
     const tasks = this.store
       .listTasks({ projectId: this.project.id })
       .filter((t) => t.status !== "done")
-      .map(briefTask)
+      .map((t) => briefTask(t, this.owner()))
     const notes = this.store.listNotes(this.project.id).slice(-12).map((n) => `- (${n.author}) ${n.content}`)
     return [
       `[Project now: ${this.project.name}]`,

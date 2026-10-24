@@ -318,6 +318,10 @@ export function createBoxYard(
   api.post("/tasks/:id/close", async (req, res) => {
     res.json(await tasks.closeTask(req.params.id!))
   })
+  // The "Merge PR" button: the standard merge message to the task's session (409 while one is pending for the PR).
+  api.post("/tasks/:id/merge", (req, res) => {
+    res.json(tasks.requestMerge(req.params.id!))
+  })
   api.post("/tasks/:id/retry", (req, res) => {
     res.json(tasks.retryTask(req.params.id!))
   })

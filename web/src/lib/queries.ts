@@ -351,6 +351,20 @@ function useTaskAction(action: "stop" | "close" | "retry", optimistic: (t: Task)
   })
 }
 
+/** The "Merge PR" button: POST /api/tasks/:id/merge. The button guards against double sends (lib/mergePr.ts). */
+export function useRequestMerge() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (taskId: string) => api<{ task: Task; delivery: "now" | "queued" }>(`/api/tasks/${taskId}/merge`, { method: "POST" }),
+    onError: fail("Couldn't request the merge"),
+    onSuccess: ({ task, delivery }) => {
+      qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+      if (delivery === "queued") toast.info("Merge request queued", `${task.title} is mid-turn; the request goes out when that turn ends.`)
+      else toast.info("Merge requested", task.title)
+    },
+  })
+}
+
 export const useStopTask = () =>
   useTaskAction("stop", (t) => (t.status === "queued" ? { status: (t.turnCount ? "idle" : "failed") as TaskStatus } : {}), "stop the task")
 export const useCloseTask = () => useTaskAction("close", () => ({ status: "done" as TaskStatus, question: null }), "close the task")

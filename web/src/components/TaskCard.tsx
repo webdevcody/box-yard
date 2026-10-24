@@ -7,6 +7,8 @@ import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
 import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
+import { MergePrCardButton } from "./MergePr"
+import { mergeButtonState } from "../lib/mergePr"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
@@ -84,6 +86,7 @@ export const TaskCard = memo(function TaskCard({
 
       <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 pt-3 text-xs text-zinc-500 sm:flex-nowrap sm:whitespace-nowrap">
         <PrChip task={task} variant="link" />
+        {mergeButtonState(task) !== "hidden" && <MergePrCardButton task={task} />}
         {task.scheduleId && (
           <span className="inline-flex shrink-0 items-center gap-1" title="Started by a schedule">
             <AlarmClock className="h-3.5 w-3.5" /> scheduled

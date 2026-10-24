@@ -13,8 +13,10 @@ import type { Redis } from "./redis.js"
 import type { Artifacts } from "./artifacts.js"
 import { MAX_ARTIFACT_BYTES } from "./artifacts.js"
 import {
+  MERGE_BUTTON_SOURCE,
   firstTurnPrompt,
   followupPrompt,
+  mergeRequestPrompt,
   recapPrompt,
   recapWorkspaceNote,
   workerSystemPrompt,
@@ -23,7 +25,7 @@ import {
 import type { Uploads, StoredUpload } from "./uploads.js"
 import { DEFAULT_EFFORT, RESTING_STATUSES, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type Effort, type PrState, type PreviewLink, type Task, type TaskStatus } from "../shared/types.js"
 import { autocompactFlag, type SettingsStore } from "./settings.js"
-import { withOwner } from "../shared/owner.js"
+import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage } from "./util/retry.js"
 import { capReply, preview } from "./replies.js"
@@ -66,8 +68,8 @@ export interface TaskManagerDeps {
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
 
-/** Who a queued task input is from. `captain:<projectId>` is that project's Captain. */
-export type InputSource = "cody" | "orchestrator" | "system" | `agent:${string}` | `captain:${string}`
+/** Who a queued task input is from. `captain:<projectId>` is that project's Captain; `cody:merge` is the "Merge PR" button. */
+export type InputSource = "cody" | typeof MERGE_BUTTON_SOURCE | "orchestrator" | "system" | `agent:${string}` | `captain:${string}`
 /** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
 const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
 
@@ -322,11 +324,18 @@ export class TaskManager {
     attachments: StoredUpload[] = [],
     route?: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null } | null,
   ): Task {
-    const row = this.requireRow(taskId)
+    this.enqueue(this.requireRow(taskId), content, source, attachments, route)
+    this.emitTask(taskId)
+    this.schedule()
+    return this.store.getTask(taskId)!
+  }
+
+  /** sendInput without the broadcast: queue the message, mark the task queued if it rests, and return the input's id. */
+  private enqueue(row: TaskRow, content: string, source: InputSource, attachments: StoredUpload[], route?: Parameters<TaskManager["sendInput"]>[4]): string {
     if (!content.trim() && !attachments.length) throw new BadRequestError("message is empty")
     // The files are copied into the box when the next turn starts, so this works while the agent is mid-turn.
-    this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
-    if (source === "cody" || source === "orchestrator" || source.startsWith("captain:")) {
+    const inputId = this.store.queueInput(row.id, source, content.trim() || "(no text)", attachments.map((f) => f.id))
+    if (source === "cody" || source === MERGE_BUTTON_SOURCE || source === "orchestrator" || source.startsWith("captain:")) {
       const from = source.startsWith("captain:") ? captainMeta(this.store, source.slice("captain:".length)) : { source }
       const msg = this.store.addTaskMessage(row.id, "user", content.trim(), { ...from, ...(attachments.length ? { attachments: publicFiles(attachments) } : {}) })
       this.hub.broadcast({ type: "task.message", message: msg })
@@ -345,9 +354,48 @@ export class TaskManager {
     if (source !== "system" && (route?.model || route?.effort)) {
       this.addEvent(row.id, `Routing updated for the next turn: ${this.routeLabel({ model: route.model ?? row.model, effort: route.effort ?? row.effort, routingRule: route.routingRule ?? row.routing_rule, routingReason: route.routingReason ?? row.routing_reason })}.`)
     }
+    return inputId
+  }
+
+  /**
+   * The "Merge PR" button: send the standard merge message (prompts.ts MERGE_REQUEST_PROMPT) to the task's
+   * session, right away or queued behind its current turn, like send_to_task. The request stays pending until
+   * the turn that handles it ends or the PR is merged or closed, and a second one for the same PR is refused
+   * meanwhile. A merge_requested event goes to the transcript, and the notice to the project Captain and the Coordinator.
+   */
+  requestMerge(taskId: string): { task: Task; delivery: "now" | "queued" } {
+    const row = this.requireRow(taskId)
+    const n = prNumber(row.pr_url)
+    if (!row.pr_url || n === null) throw new BadRequestError("This task has no GitHub pull request to merge.")
+    if (row.pr_state && row.pr_state !== "open") {
+      throw new BadRequestError(`PR #${n} is ${row.pr_state === "draft" ? "a draft" : row.pr_state}, so there is nothing to merge.`)
+    }
+    const pending = this.store.mergeRequestOf(row)
+    if (pending) {
+      throw new ConflictError(`A merge of PR #${n} was already requested ${pending.deliveredAt ? "and the agent is on it" : "and is queued"}. Wait for that turn to end.`)
+    }
+    const busy = Boolean(row.current_turn_id) || row.status === "starting" || row.status === "working"
+    const inputId = this.enqueue(row, mergeRequestPrompt(n), MERGE_BUTTON_SOURCE, [])
+    this.store.updateTask(row.id, { mergeRequest: { prNumber: n, prUrl: row.pr_url, requestedAt: Date.now(), deliveredAt: null, inputId } }, { quiet: true })
+    const owner = this.owner()?.trim() || DEFAULT_OWNER_NAME
+    this.addEvent(row.id, `${owner} asked for a merge of PR #${n} with the Merge button${busy ? "; it goes out when the current turn ends" : ""}.`, {
+      kind: "merge_requested",
+      prNumber: n,
+      prUrl: row.pr_url,
+    })
     this.emitTask(row.id)
     this.schedule()
-    return this.store.getTask(row.id)!
+    // The Captain wakes on it once the task's turn ends; the Coordinator reads it with its next updates.
+    this.notice(`🚢 ${owner} asked **${row.title}** to merge PR #${n} (Merge button): ${row.pr_url}`, { taskId: row.id, kind: "merge_requested", prNumber: n, prUrl: row.pr_url }, { coordinator: true })
+    return { task: this.store.getTask(row.id)!, delivery: busy ? "queued" : "now" }
+  }
+
+  /** The turn that carried a pending merge request ended (or the PR moved on): it is no longer pending. */
+  private settleMergeRequest(taskId: string, when: "turn" | "pr") {
+    const row = this.store.getTaskRow(taskId)
+    const req = row ? this.store.mergeRequestOf(row) : null
+    if (!row?.merge_request_json || (when === "turn" && req && !req.deliveredAt)) return
+    this.store.updateTask(taskId, { mergeRequest: null }, { quiet: true, touch: false })
   }
 
   setTaskModel(taskId: string, route: { model?: string | null; effort?: Effort | null; routingRule?: string | null; routingReason?: string | null }): Task {
@@ -1144,6 +1192,10 @@ export class TaskManager {
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
 
+      const merge = this.store.mergeRequestOf(row)
+      if (merge && !merge.deliveredAt && queued.some((i) => i.id === merge.inputId)) {
+        this.store.updateTask(taskId, { mergeRequest: { ...merge, deliveredAt: Date.now() } }, { quiet: true, touch: false })
+      }
       this.store.deleteInputs(queued.map((i) => i.id))
       this.diskRetried.delete(taskId)
       this.diskHold.delete(taskId)
@@ -1616,6 +1668,7 @@ export class TaskManager {
     if (!row) return
     if (info.state === "merged") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was merged${info.mergedBy ? ` by ${info.mergedBy}` : ""}: ${row.pr_url}`)
     else if (info.state === "closed") this.addEvent(taskId, `Pull request #${prNumber(row.pr_url) ?? "?"} was closed without merging: ${row.pr_url}`)
+    if (info.state !== "open") this.settleMergeRequest(taskId, "pr")
     this.emitTask(taskId)
     if (status) this.publishDirectory()
   }
@@ -1663,6 +1716,7 @@ export class TaskManager {
       turnFlags: { interrupts: 0 },
       outcome,
     }, { quiet: stopped })
+    this.settleMergeRequest(row.id, "turn")
     if (row.box_id) this.store.touchBox(row.box_id)
 
     const cost = turnCost !== null ? ` · $${turnCost.toFixed(3)}` : ""
@@ -2204,6 +2258,7 @@ export class TaskManager {
     }
     if (interrupts > MAX_INTERRUPTS) {
       this.store.updateTask(row.id, { status: "failed", currentTurnId: null, error: `Interrupted: ${reason}`, turnFlags: { interrupts: 0 } })
+      this.settleMergeRequest(row.id, "turn")
       this.addEvent(row.id, `Turn interrupted (${reason}). Gave up after ${MAX_INTERRUPTS} retries.`)
       this.notice(`❌ **${row.title}** was interrupted: ${reason}`, { taskId: row.id })
     } else {
@@ -2281,13 +2336,16 @@ export class TaskManager {
     return bits.length ? bits.join(", ") : "global defaults"
   }
 
-  /** A line for the owner of a task update; by default the Coordinator reads it on its next turn. */
-  notice(content: string, meta: Record<string, unknown> | null = null) {
+  /**
+   * A line for the owner of a task update; by default the Coordinator reads it on its next turn.
+   * `coordinator: true` keeps it in the Coordinator's updates even when a Captain handles it too.
+   */
+  notice(content: string, meta: Record<string, unknown> | null = null, opts: { coordinator?: boolean } = {}) {
     const handled = Boolean(this.onNotice?.(content, meta))
     const msg = this.store.addChat("notice", content, meta)
     // Keep the historical main-chat notice for existing installs, but do not
     // make the Coordinator process every project task event once a Captain owns it.
-    if (handled) this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
+    if (handled && !opts.coordinator) this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
     this.hub.broadcast({ type: "chat.message", message: msg })
   }
 
