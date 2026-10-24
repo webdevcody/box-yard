@@ -222,7 +222,7 @@ export class TtsService {
     const fail = (err: unknown): never => {
       clearTimeout(timer)
       if (err instanceof TtsError) throw err
-      if (timedOut) throw new TtsError(`${label} didn't answer within ${Math.round(this.timeoutMs / 1000)} s.`, 504, call.provider)
+      if (timedOut) throw new TtsError(`${label} didn't answer within ${Math.max(1, Math.round(this.timeoutMs / 1000))} s.`, 504, call.provider)
       const cause = (err as { cause?: { code?: string; message?: string } })?.cause
       throw new TtsError(`Can't reach ${label}: ${cause?.code ?? cause?.message ?? (err as Error)?.message ?? String(err)}`, 502, call.provider)
     }
