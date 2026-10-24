@@ -159,7 +159,7 @@ describe("clear box", () => {
     const report = await call<BoxCleanup>(r, "POST", `/api/boxes/${boxId}/clear`, {})
     expect(report.reason).toBe("clear")
     expect(report.status).toBe("done")
-    expect(report.steps.map((s) => s.key)).toEqual(["archive", "partials", "caches", "git"])
+    expect(report.steps.map((s) => s.key)).toEqual(["archive", "partials", "tmp", "caches", "git"])
     expect(report.steps[0]!.removed).toEqual([t.id])
     expect(fs.existsSync(r.yard.tasks.taskDir(boxId, t.id))).toBe(false)
     expect(archived(r, t.id)).toContain(`${t.id}/work/draft.md`)
