@@ -1,4 +1,4 @@
-import { useCallback } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api, clientId } from "./api"
 import { toast } from "./toast"
@@ -31,6 +31,7 @@ import type {
   NoteSuggestion,
   Project,
   ProjectNote,
+  QueuedMessage,
   Schedule,
   ScheduleRun,
   ScheduleTarget,
@@ -50,6 +51,7 @@ export const keys = {
   projects: ["projects"] as const,
   tasks: ["tasks"] as const,
   taskMessages: (id: string) => ["task-messages", id] as const,
+  taskQueue: (id: string) => ["task-queue", id] as const,
   chat: ["chat"] as const,
   chatStream: ["chat-stream"] as const,
   chatBusy: ["chat-busy"] as const,
@@ -122,6 +124,65 @@ export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
 }
+/**
+ * A task's queued messages (the task page's Queued rows). Refetched when the task's queueRev changes, which only
+ * this hook's component reads, so live task updates don't re-render the transcript.
+ */
+export function useTaskQueue(id: string) {
+  const qc = useQueryClient()
+  const select = useCallback((list: Task[]) => list.find((t) => t.id === id)?.queueRev ?? "", [id])
+  const rev = useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? ""
+  const queue = useQuery({ queryKey: keys.taskQueue(id), queryFn: () => api<QueuedMessage[]>(`/api/tasks/${id}/queue`) })
+  const seen = useRef<string | null>(null)
+  useEffect(() => {
+    // The first rev is what the first fetch already reflects.
+    if (seen.current !== null && seen.current !== rev) void qc.invalidateQueries({ queryKey: keys.taskQueue(id) })
+    seen.current = rev
+  }, [qc, id, rev])
+  return queue
+}
+
+/** Edit, delete and undo a queued message. Optimistic; a 409 (already delivered) rolls back and refetches. */
+export function useQueuedMessageActions(taskId: string) {
+  const qc = useQueryClient()
+  const key = keys.taskQueue(taskId)
+  const patch = (fn: (list: QueuedMessage[]) => QueuedMessage[]) => {
+    void qc.cancelQueries({ queryKey: key })
+    const undo = snapshot<QueuedMessage[]>(qc, key)
+    qc.setQueryData<QueuedMessage[]>(key, (list) => (list ? fn(list) : list))
+    return { undo }
+  }
+  const settle = () => void qc.invalidateQueries({ queryKey: key })
+  const edit = useMutation({
+    mutationFn: (m: { id: string; text: string; version: number }) => api<QueuedMessage>(`/api/tasks/${taskId}/queue/${m.id}`, { method: "PATCH", body: { text: m.text, version: m.version } }),
+    onMutate: (m) => patch((list) => list.map((x) => (x.id === m.id ? { ...x, text: m.text } : x))),
+    onError: (err, _m, ctx) => {
+      ctx?.undo()
+      fail("Couldn't save the edit")(err)
+    },
+    onSettled: settle,
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api<QueuedMessage>(`/api/tasks/${taskId}/queue/${id}`, { method: "DELETE" }),
+    onMutate: (id) => patch((list) => list.filter((x) => x.id !== id)),
+    onError: (err, _id, ctx) => {
+      ctx?.undo()
+      fail("Couldn't delete the message")(err)
+    },
+    onSettled: settle,
+  })
+  const restore = useMutation({
+    mutationFn: (m: QueuedMessage) => api<QueuedMessage>(`/api/tasks/${taskId}/queue/${m.id}/restore`, { method: "POST" }),
+    onMutate: (m) => patch((list) => [...list.filter((x) => x.id !== m.id), m].sort((a, b) => a.createdAt - b.createdAt)),
+    onError: (err, _m, ctx) => {
+      ctx?.undo()
+      fail("Couldn't undo")(err)
+    },
+    onSettled: settle,
+  })
+  return { edit, remove, restore }
+}
+
 export const useTaskMessages = (id: string) =>
   useQuery({ queryKey: keys.taskMessages(id), queryFn: () => api<TaskMessage[]>(`/api/tasks/${id}/messages`) })
 export const useChat = () => useQuery({ queryKey: keys.chat, queryFn: () => api<ChatMessage[]>("/api/chat") })
@@ -506,21 +567,26 @@ export function useSendTaskMessage(taskId: string) {
       api<Task>(`/api/tasks/${taskId}/messages`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
     onMutate: async ({ content, attachments }) => {
       const undoTasks = snapshot<Task[]>(qc, keys.tasks)
-      const undoMsgs = snapshot<TaskMessage[]>(qc, keys.taskMessages(taskId))
+      const undoQueue = snapshot<QueuedMessage[]>(qc, keys.taskQueue(taskId))
       const task = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.id === taskId)
       const running = task?.status === "working" || task?.status === "starting"
       patchTask(qc, taskId, running ? { pendingCount: (task?.pendingCount ?? 0) + 1 } : { status: "queued", question: null })
-      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => [
+      // It shows as a Queued row until a turn delivers it into the transcript.
+      const now = Date.now()
+      qc.setQueryData<QueuedMessage[]>(keys.taskQueue(taskId), (list) => [
         ...(list ?? []),
-        { id: `tmp-${Date.now()}`, taskId, role: "user", content, meta: { pending: true, ...(attachments?.length ? { attachments } : {}) }, createdAt: Date.now() },
+        { id: `tmp-${now}`, taskId, source: "cody", kind: "owner", sender: "", text: content, attachments: attachments ?? [], status: "queued", version: 0, createdAt: now, updatedAt: now },
       ])
-      return { undo: () => (undoTasks(), undoMsgs()) }
+      return { undo: () => (undoTasks(), undoQueue()) }
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
       fail("Couldn't send the message")(err)
     },
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (task) => {
+      qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+      void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) })
+    },
   })
 }
 

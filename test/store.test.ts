@@ -51,18 +51,56 @@ describe("store", () => {
     expect(() => s.createProject({ name: "docs" })).toThrow()
   })
 
-  it("queues inputs in order and deletes only the ones taken", () => {
+  it("queues inputs in order and delivers only the ones a turn claimed", () => {
     const s = store()
     const p = s.createProject({ name: "x" })
     const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
-    s.queueInput(t.id, "cody", "one")
+    s.queueInput(t.id, "cody", "one", [], { message: { source: "cody" } })
     s.queueInput(t.id, "agent:task_x", "two")
-    const first = s.peekInputs(t.id)
+    const first = s.claimInputs(t.id, "turn-1")
     expect(first.map((i) => i.content)).toEqual(["one", "two"])
     s.queueInput(t.id, "cody", "three")
-    s.deleteInputs(first.map((i) => i.id))
+    // Only Cody's message gets a transcript line; the agent's goes to the prompt only.
+    expect(s.deliverInputs("turn-1").map((m) => m.content)).toEqual(["one"])
     expect(s.peekInputs(t.id).map((i) => i.content)).toEqual(["three"])
     expect(s.getTask(t.id)!.pendingCount).toBe(1)
+  })
+
+  it("gives a hook's label to the agent only, and never lets an edit or cancel change a claimed input", () => {
+    const s = store()
+    const p = s.createProject({ name: "x" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const id = s.queueInput(t.id, "hook:hk_1", "merge it", [], { prefix: "From the hook:\n\n", message: { source: "hook" } })
+    expect(s.peekInputs(t.id)[0]!.content).toBe("From the hook:\n\nmerge it")
+    expect(s.editInput(t.id, id, "merge it now", 1)).toMatchObject({ ok: true, row: { content: "merge it now", version: 2 } })
+    expect(s.editInput(t.id, id, "stale", 1)).toMatchObject({ ok: false, row: { content: "merge it now" } })
+    const rev = s.getTask(t.id)!.queueRev
+    s.claimInputs(t.id, "turn-1")
+    expect(s.getTask(t.id)!.queueRev).not.toBe(rev)
+    expect(s.editInput(t.id, id, "late")).toMatchObject({ ok: false, row: { status: "delivering" } })
+    expect(s.cancelInput(t.id, id)).toMatchObject({ ok: false, row: { status: "delivering" } })
+    expect(s.deliverInputs("turn-1")).toMatchObject([{ content: "merge it now", meta: { source: "hook" } }])
+    expect(s.editInput(t.id, id, "gone")).toEqual({ ok: false, row: null })
+    expect(s.getTask(t.id)).toMatchObject({ pendingCount: 0, queueRev: "" })
+  })
+
+  it("keeps a cancelled input out of the queue but restorable, and drops it once Undo is over", () => {
+    const s = store()
+    const p = s.createProject({ name: "x" })
+    const t = s.createTask({ projectId: p.id, title: "t", prompt: "p" })
+    const a = s.queueInput(t.id, "cody", "a")
+    s.queueInput(t.id, "cody", "b")
+    expect(s.cancelInput(t.id, a).ok).toBe(true)
+    expect(s.listQueuedInputs(t.id).map((i) => i.content)).toEqual(["b"])
+    expect(s.getTask(t.id)!.pendingCount).toBe(1)
+    expect(s.cancelInput(t.id, a).ok).toBe(false)
+    expect(s.restoreInput(t.id, a).ok).toBe(true)
+    expect(s.listQueuedInputs(t.id).map((i) => i.content)).toEqual(["a", "b"])
+    s.cancelInput(t.id, a)
+    // Long cancelled: the next claim clears it for good.
+    s.db.prepare("UPDATE task_inputs SET updated_at = 0 WHERE id = ?").run(a)
+    expect(s.claimInputs(t.id, "turn-1").map((i) => i.content)).toEqual(["b"])
+    expect(s.restoreInput(t.id, a)).toEqual({ ok: false, row: null })
   })
 
   it("marks notices unseen until the orchestrator takes them", () => {

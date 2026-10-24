@@ -1402,15 +1402,17 @@ export class TaskManager {
     if (this.budgetBlocked()) return
     const waiting = this.store
       .listTaskRows()
-      .filter((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
-      .filter((r) => r.status !== "starting" && r.status !== "working")
+      .filter((r) => this.wantsTurn(r))
       .sort((a, b) => a.last_active_at - b.last_active_at)
 
     this.wantsBox.clear()
-    for (const row of waiting) {
+    for (const listed of waiting) {
       // Over the total agent cap: wait without growing the pool. Running work is never stopped.
       const cap = this.limits().maxAgents
-      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(row)
+      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(listed)
+      // Placement awaits: the task may have moved on meanwhile (its last queued message cancelled, stopped, started).
+      const row = this.store.getTaskRow(listed.id)
+      if (!row || !this.wantsTurn(row)) continue
       if (!boxId) {
         if (row.status !== "queued") {
           this.store.updateTask(row.id, { status: "queued" })
@@ -1444,6 +1446,12 @@ export class TaskManager {
       const need = Math.ceil(n / this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox) - (this.creatingFor.get(projectId) ?? 0)
       for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
     }
+  }
+
+  /** A task that waits for a turn: queued, or resting with queued messages or a compaction to run. */
+  private wantsTurn(r: TaskRow): boolean {
+    if (r.current_turn_id || r.status === "starting" || r.status === "working") return false
+    return r.status === "queued" || (r.status !== "failed" && (Boolean(r.compact_pending) || this.store.hasInputs(r.id)))
   }
 
   /** Pick a box for a task's next turn, or null to wait. */

@@ -22,6 +22,7 @@ import { PublishedFile } from "./TaskFiles"
 import { PREVIEW_GROUP } from "./FileLink"
 import { runsOf } from "../lib/publishedNotices"
 import { AttachmentList } from "./Attachments"
+import { TaskQueue } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
@@ -151,6 +152,7 @@ const TaskThread = memo(function TaskThread({
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" /> {working}
           </div>
         )}
+        <TaskQueue taskId={id} />
       </StickyScroll>
     </SelectionToTask>
   )

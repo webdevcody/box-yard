@@ -9,6 +9,7 @@ import { NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
+import { QueuedLink } from "./QueuedMessages"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
@@ -102,8 +103,13 @@ export const TaskCard = memo(function TaskCard({
             {[task.model, task.effort].filter(Boolean).join(" · ")}
           </span>
         )}
-        <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0" title={task.pendingCount > 0 ? `${task.pendingCount} messages wait for the next turn` : undefined}>
-          {task.pendingCount > 0 && `${task.pendingCount} queued · `}
+        <span className="ml-auto min-w-0 truncate max-sm:w-full max-sm:pl-0">
+          {task.pendingCount > 0 && (
+            <>
+              <QueuedLink taskId={task.id} count={task.pendingCount} />
+              {" · "}
+            </>
+          )}
           <TimeAgo ts={task.updatedAt} />
         </span>
         {onMarkDone && (
