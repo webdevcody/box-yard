@@ -3,7 +3,6 @@ import type { DB } from "./db.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
-import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
 import { normalizeRunner, type Runner } from "../shared/runner.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
@@ -225,6 +224,21 @@ export interface CaptainNoticeEntry {
   meta: Record<string, unknown> | null
 }
 
+/** A project's own box settings; null uses the global one (shared/types.ts Project). */
+export interface ProjectBoxLimits {
+  agentsPerBox: number | null
+  tasksPerBox: number | null
+  maxBoxes: number | null
+}
+
+/**
+ * The old per-project "heavy tasks" choice (projects.heavy_tasks), which Agents per box replaced: "one-per-box" and
+ * "whole-box" both mean 1. The migration copied them into agents_per_box; they're still read while it's NULL.
+ */
+const legacyAgentsPerBox = (heavy: string | null | undefined): number | null => (heavy === "one-per-box" || heavy === "whole-box" ? 1 : null)
+/** legacyAgentsPerBox in SQL, for the slot claim. */
+const AGENTS_PER_BOX = "COALESCE(agents_per_box, CASE WHEN heavy_tasks IN ('one-per-box', 'whole-box') THEN 1 END)"
+
 interface ProjectRow {
   id: string
   name: string
@@ -238,6 +252,9 @@ interface ProjectRow {
   dep_cache?: number | null
   runner?: string | null
   heavy_tasks: string | null
+  agents_per_box?: number | null
+  tasks_per_box?: number | null
+  max_boxes?: number | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -617,7 +634,9 @@ export class Store {
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
-      heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
+      agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
+      tasksPerBox: row.tasks_per_box ?? null,
+      maxBoxes: row.max_boxes ?? null,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -649,9 +668,12 @@ export class Store {
     return (this.db.prepare("SELECT name FROM projects WHERE id = ?").get(id) as { name: string } | undefined)?.name ?? null
   }
 
-  /** The project's "heavy tasks" setting, without loading the rest (placement asks per box and running task). */
-  projectHeavyTasks(id: string): HeavyTasks {
-    return normalizeHeavyTasks((this.db.prepare("SELECT heavy_tasks FROM projects WHERE id = ?").get(id) as { heavy_tasks: string | null } | undefined)?.heavy_tasks)
+  /** The project's own box limits (null: the global one applies), without loading the rest (placement asks per box and running task). */
+  projectBoxLimits(id: string): ProjectBoxLimits {
+    const row = this.db.prepare(`SELECT ${AGENTS_PER_BOX} AS agents, tasks_per_box AS tasks, max_boxes AS boxes FROM projects WHERE id = ?`).get(id) as
+      | { agents: number | null; tasks: number | null; boxes: number | null }
+      | undefined
+    return { agentsPerBox: row?.agents ?? null, tasksPerBox: row?.tasks ?? null, maxBoxes: row?.boxes ?? null }
   }
 
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
@@ -683,7 +705,9 @@ export class Store {
     pushAtTurnEnd?: boolean | null
     depCache?: boolean | null
     runner?: Runner
-    heavyTasks?: HeavyTasks
+    agentsPerBox?: number | null
+    tasksPerBox?: number | null
+    maxBoxes?: number | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -709,7 +733,7 @@ export class Store {
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
     this.setRunner(id, input.runner)
-    this.setHeavyTasks(id, input.heavyTasks)
+    this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     return this.getProject(id)!
   }
@@ -733,8 +757,12 @@ export class Store {
       depCache?: boolean | null
       /** Where its agents run: Upstash boxes or this computer (shared/runner.ts). */
       runner?: Runner
-      /** How its running agents share boxes (shared/memory.ts HEAVY_TASKS). */
-      heavyTasks?: HeavyTasks
+      /** null clears it (the box's own Agents per box applies). */
+      agentsPerBox?: number | null
+      /** null clears it (the box's own Resident tasks per box applies). */
+      tasksPerBox?: number | null
+      /** null clears it (only Settings › Max boxes applies). */
+      maxBoxes?: number | null
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -764,7 +792,7 @@ export class Store {
         id,
       )
     this.setRunner(id, patch.runner)
-    this.setHeavyTasks(id, patch.heavyTasks)
+    this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
   }
@@ -786,10 +814,14 @@ export class Store {
     this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(normalizeRunner(v) === "local" ? "local" : null, id)
   }
 
-  /** undefined leaves it as it is; "off" is stored as NULL. */
-  private setHeavyTasks(id: string, v: HeavyTasks | undefined) {
-    if (v === undefined) return
-    this.db.prepare("UPDATE projects SET heavy_tasks = ? WHERE id = ?").run(v === "off" ? null : normalizeHeavyTasks(v), id)
+  /**
+   * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
+   * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
+   */
+  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits>) {
+    if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
+    if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
+    if (b.maxBoxes !== undefined) this.db.prepare("UPDATE projects SET max_boxes = ? WHERE id = ?").run(b.maxBoxes, id)
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
@@ -1180,15 +1212,31 @@ export class Store {
   }
 
   /**
-   * The one way a turn starts: check that `boxId` has a free slot (`slots`) and claim it, in one write
-   * transaction (BEGIN IMMEDIATE), so two starts in the same tick, or two servers on one database, can't both take
-   * the last slot. Refused (false) when the box is full or the task already has a turn; nothing changes then.
+   * The strictest Agents per box among the task's project and the projects with an agent on `boxId` (the same
+   * rule as slotsInUse), or null when none sets one.
+   */
+  projectSlotCap(boxId: string, taskId: string): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT MIN(${AGENTS_PER_BOX}) AS cap FROM projects WHERE id IN (
+           SELECT project_id FROM tasks WHERE id = ?
+           UNION SELECT project_id FROM tasks WHERE box_id = ? AND id != ? AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working')))`,
+      )
+      .get(taskId, boxId, taskId) as { cap: number | null }
+    return row.cap
+  }
+
+  /**
+   * The one way a turn starts: check that `boxId` has a free slot (`slots`, or fewer when a project there or the
+   * task's own sets Agents per box: the stricter wins) and claim it, in one write transaction (BEGIN IMMEDIATE), so
+   * two starts in the same tick, or two servers on one database, can't both take the last slot. Refused (false)
+   * when the box is full or the task already has a turn; nothing changes then.
    */
   claimTurnSlot(taskId: string, boxId: string, slots: number, patch: TaskPatch): boolean {
     return this.db.transaction(() => {
       const row = this.db.prepare("SELECT current_turn_id, status FROM tasks WHERE id = ?").get(taskId) as { current_turn_id: string | null; status: TaskStatus } | undefined
       if (!row || row.current_turn_id || row.status === "starting" || row.status === "working") return false
-      if (this.slotsInUse(boxId, taskId) >= slots) return false
+      if (this.slotsInUse(boxId, taskId) >= Math.min(slots, this.projectSlotCap(boxId, taskId) ?? slots)) return false
       this.updateTask(taskId, { ...patch, boxId })
       return true
     }).immediate()

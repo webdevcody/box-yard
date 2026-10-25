@@ -17,12 +17,12 @@ import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, EFFORTS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
-import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
+import { loadLine, memLine } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import type { Runner } from "../shared/runner.js"
@@ -139,6 +139,14 @@ function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
       : undefined
     return register(name, { ...config, description: named(config.description), ...(inputSchema ? { inputSchema } : {}) }, cb)
   }) as typeof server.registerTool
+}
+
+/** The box settings create_project and update_project take. */
+interface BoxSettingsArgs {
+  box_size?: BoxSize | null
+  agents_per_box?: number | null
+  tasks_per_box?: number | null
+  max_boxes?: number | null
 }
 
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
@@ -379,6 +387,41 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     reason: s.reason ?? undefined,
     suggested: ago(s.createdAt),
   })
+  /** A project's own box settings, for create_project and update_project (null clears one: the global applies). */
+  const boxSettingsInput = {
+    box_size: z
+      .enum(BOX_SIZES)
+      .nullable()
+      .optional()
+      .describe("Size of new boxes made for the project, and the smallest box its tasks run on. null: Settings › Worker size."),
+    agents_per_box: z
+      .number()
+      .int()
+      .min(PROJECT_BOX_LIMITS.agentsPerBox.min)
+      .max(PROJECT_BOX_LIMITS.agentsPerBox.max)
+      .nullable()
+      .optional()
+      .describe(
+        "Most agents running at once on a box while one of this project's agents runs there, every project's agents counted. 1 gives each of its agents a box to itself, for game engines, big builds, test suites and headless browsers that run a box out of memory; 2-4 suits light projects. The stricter of this, the box's own limit and other running projects' wins. null: the box's own limit (Settings › Agents per box).",
+      ),
+    tasks_per_box: z
+      .number()
+      .int()
+      .min(PROJECT_BOX_LIMITS.tasksPerBox.min)
+      .max(PROJECT_BOX_LIMITS.tasksPerBox.max)
+      .nullable()
+      .optional()
+      .describe("Most task folders on a box that holds one of this project's (fewer for a big repo); older archived ones are parked. The stricter limit wins, as for agents_per_box. null: Settings › Resident tasks per box."),
+    max_boxes: z
+      .number()
+      .int()
+      .min(PROJECT_BOX_LIMITS.maxBoxes.min)
+      .max(PROJECT_BOX_LIMITS.maxBoxes.max)
+      .nullable()
+      .optional()
+      .describe("Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes."),
+  }
+  const boxSettingsPatch = (a: BoxSettingsArgs) => ({ boxSize: a.box_size, agentsPerBox: a.agents_per_box, tasksPerBox: a.tasks_per_box, maxBoxes: a.max_boxes })
   const projectView = (p: Project) => ({
     id: p.id,
     name: p.name,
@@ -386,8 +429,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     repo: p.repo,
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
-    ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
-    ...(p.heavyTasks !== "off" ? { heavyTasks: p.heavyTasks } : {}),
+    boxSettings: tasks.projectBoxSettings(p),
     ...(p.snapshot
       ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
       : {}),
@@ -472,83 +514,93 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           repo: z.string().optional(),
           base_branch: z.string().optional(),
           env: envSchema,
+          ...boxSettingsInput,
         },
       },
-      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> }) => {
+      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> } & BoxSettingsArgs) => {
         if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
-        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.() })
+        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), ...boxSettingsPatch(a) })
         hub.broadcast({ type: "project", project: p })
         return ok(projectView(p))
       }),
     ),
   )
 
-  coordinatorOnly(
-    server.registerTool(
-      "update_project",
-      {
-        description: "Change a project's name, description, repo, base branch, env vars, heavy-tasks placement or its own notes budget.",
-        inputSchema: {
-          project: z.string().describe("Project id or name"),
-          name: z.string().optional(),
-          description: z.string().optional(),
-          repo: z.string().nullable().optional(),
-          base_branch: z.string().optional(),
-          env: envSchema,
-          remove_env: z.array(z.string()).optional(),
-          heavy_tasks: z
-            .enum(HEAVY_TASKS)
-            .optional()
-            .describe(
-              "How its running agents share boxes, for test suites and headless browsers that run a box out of memory: off, one-per-box (at most one of its agents per box) or whole-box (each of its agents runs alone on a box).",
-            ),
-          notes_max: z
-            .number()
-            .int()
-            .min(NOTE_BUDGET_LIMITS.maxNotes.min)
-            .max(NOTE_BUDGET_LIMITS.maxNotes.max)
-            .nullable()
-            .optional()
-            .describe("This project's max notes; null goes back to Settings › Max notes."),
-          notes_max_tokens: z
-            .number()
-            .int()
-            .min(NOTE_BUDGET_LIMITS.maxTokens.min)
-            .max(NOTE_BUDGET_LIMITS.maxTokens.max)
-            .nullable()
-            .optional()
-            .describe("This project's notes token budget; null goes back to the one in Settings."),
-        },
-      },
-      safe(
-        async (a: {
-          project: string
+  // The Coordinator changes any of a project's settings; a Captain only its own project's box settings.
+  server.registerTool(
+    "update_project",
+    {
+      description: scopeId
+        ? "Change your project's box settings. Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits applies again. list_projects shows them (boxSettings). Running agents are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, tasks_per_box, max_boxes: null clears one so the global setting applies) or its own notes budget.",
+      inputSchema: scopeId
+        ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
+        : {
+            project: z.string().describe("Project id or name"),
+            name: z.string().optional(),
+            description: z.string().optional(),
+            repo: z.string().nullable().optional(),
+            base_branch: z.string().optional(),
+            env: envSchema,
+            remove_env: z.array(z.string()).optional(),
+            ...boxSettingsInput,
+            notes_max: z
+              .number()
+              .int()
+              .min(NOTE_BUDGET_LIMITS.maxNotes.min)
+              .max(NOTE_BUDGET_LIMITS.maxNotes.max)
+              .nullable()
+              .optional()
+              .describe("This project's max notes; null goes back to Settings › Max notes."),
+            notes_max_tokens: z
+              .number()
+              .int()
+              .min(NOTE_BUDGET_LIMITS.maxTokens.min)
+              .max(NOTE_BUDGET_LIMITS.maxTokens.max)
+              .nullable()
+              .optional()
+              .describe("This project's notes token budget; null goes back to the one in Settings."),
+          },
+    },
+    safe(
+      async (
+        a: {
+          project?: string
           name?: string
           description?: string
           repo?: string | null
           base_branch?: string
           env?: Record<string, string>
           remove_env?: string[]
-          heavy_tasks?: HeavyTasks
           notes_max?: number | null
           notes_max_tokens?: number | null
-        }) => {
-          const p = store.updateProject(project(a.project).id, {
-            name: a.name,
-            description: a.description,
-            repo: a.repo,
-            baseBranch: a.base_branch,
-            env: a.env,
-            removeEnv: a.remove_env,
-            heavyTasks: a.heavy_tasks,
-            notesMaxCount: a.notes_max,
-            notesMaxTokens: a.notes_max_tokens,
-          })
-          hub.broadcast({ type: "project", project: p })
-          notes.checkBudget(p.id)
-          return ok(projectView(p))
-        },
-      ),
+        } & BoxSettingsArgs,
+      ) => {
+        if (!a.project && !scopeId) return fail("Name the project to update.")
+        const id = a.project ? project(a.project).id : ownProject().id
+        const box = boxSettingsPatch(a)
+        const p = store.updateProject(
+          id,
+          scopeId
+            ? box
+            : {
+                name: a.name,
+                description: a.description,
+                repo: a.repo,
+                baseBranch: a.base_branch,
+                env: a.env,
+                removeEnv: a.remove_env,
+                ...box,
+                notesMaxCount: a.notes_max,
+                notesMaxTokens: a.notes_max_tokens,
+              },
+        )
+        hub.broadcast({ type: "project", project: p })
+        notes.checkBudget(p.id)
+        // Waiting tasks may fit under the new limits.
+        if (Object.values(box).some((v) => v !== undefined)) tasks.schedule()
+        return ok(projectView(p))
+      },
     ),
   )
 
@@ -1531,7 +1583,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (a box running one of their agents takes at most their agents per box: limit). Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1543,6 +1595,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           size: `${b.size} (${sizeSpecLine(b.size)})`,
           projects: b.projects,
           running: `${b.runningTurns}/${b.slots}`,
+          ...(b.projectLimit ? { limit: `${b.projectLimit.slots} while ${b.projectLimit.project} runs here (its Agents per box)` } : {}),
           tasks: b.residentTasks.length,
           disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
           ...(b.unreachableSince ? { unreachable: `stopped answering ${ago(b.unreachableSince)}; disk and memory are from the last check that worked` } : {}),
@@ -1560,7 +1613,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             ? { resize: `${resizeTitle(b.resize)}: ${resizeSummary(b.resize)}${b.resize.finishedAt ? ` ${ago(b.resize.finishedAt)}` : ""}` }
             : {}),
         })),
-        pool: tasks.poolLimits(),
+        pool: {
+          ...tasks.poolLimits(),
+          // Projects that set their own box settings (a Captain sees only its own).
+          projects: Object.fromEntries(
+            (scopeId ? [ownProject()] : store.listProjects())
+              .filter((p) => p.boxSize || p.agentsPerBox !== null || p.tasksPerBox !== null || p.maxBoxes !== null)
+              .map((p) => [p.name, tasks.projectBoxSettings(p)]),
+          ),
+        },
         resize_box: resizeGuard(),
         queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason})` : ""}`),
       })

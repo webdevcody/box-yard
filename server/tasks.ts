@@ -101,6 +101,8 @@ const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
 const RESTING: TaskStatus[] = [...RESTING_STATUSES]
 /** A task that takes one of its box's agent slots: a turn id, or starting/working (the same rule as Store.slotsInUse). */
 const holdsSlot = (r: TaskRow) => Boolean(r.current_turn_id) || r.status === "starting" || r.status === "working"
+/** "1 box", "3 boxes". */
+const boxCount = (n: number) => `${n} ${n === 1 ? "box" : "boxes"}`
 /** The biggest archive a task moves to another box with: a restore uploads it as one file (Upstash takes up to 100 MB). */
 const MOVE_MAX_ARCHIVE_BYTES = 90 * 1024 * 1024
 const PORT_BASE = 4000
@@ -973,10 +975,6 @@ export class TaskManager {
     return was > slots ? was : null
   }
 
-  private residentsFor(boxId: string) {
-    return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).maxResidentPerBox
-  }
-
   /** Size for a new box made for a project: its preferred size, else Settings → Worker size. */
   newBoxSize(projectId?: string | null): BoxSize {
     return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? this.settings.get().workerSize
@@ -1013,6 +1011,26 @@ export class TaskManager {
     }
   }
 
+  /**
+   * A project's box settings as they apply now (list_projects, pool_status): each one its own ("… (this project)")
+   * or the global setting it falls back to. Agents and task folders per box follow each box's size unless Settings
+   * or env set one number for every box.
+   */
+  projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes">) {
+    const s = this.settings.get()
+    const o = this.settings.boxLimitOverrides()
+    const global = (k: "slotsPerBox" | "maxResidentPerBox", label: string) =>
+      o[k] !== null ? `global: ${o[k]} (Settings › ${label})` : `global: each box's size default (${BOX_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z][k]}`).join(", ")})`
+    const own = (v: number | string) => `${v} (this project)`
+    const used = this.projectBoxCap(p.id)?.used.size ?? 0
+    return {
+      boxSize: p.boxSize ? own(p.boxSize) : `global: ${s.workerSize} (Settings › Worker size)`,
+      agentsPerBox: p.agentsPerBox !== null ? own(p.agentsPerBox === 1 ? "1: each agent alone on a box" : p.agentsPerBox) : global("slotsPerBox", "Agents per box"),
+      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Resident tasks per box"),
+      maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
+    }
+  }
+
   /** Box creation for pool_status: how many are on their way, how many may be at once, and any backoff. */
   private boxCreation() {
     const wait = this.boxCreate.retryAt - Date.now()
@@ -1043,6 +1061,7 @@ export class TaskManager {
         keepAlive: Boolean(b.keep_alive),
         slots: this.slotsFor(b.id),
         runningTurns: residents.filter(holdsSlot).length,
+        projectLimit: this.projectLimitOn(b.id, residents),
         limitLoweredFrom: this.limitLoweredFrom(b.id, residents),
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
@@ -2126,7 +2145,10 @@ export class TaskManager {
     }
     const need = new Map<string, number>()
     for (const [projectId, n] of perProject) {
-      const more = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
+      const creating = this.creatingFor.get(projectId) ?? 0
+      // Never past the project's own Max boxes, counting the boxes it uses and those on their way.
+      const cap = this.projectBoxCap(projectId)
+      const more = Math.min(Math.ceil(n / this.growthSlots(projectId)), cap ? cap.max - cap.used.size : Infinity) - creating
       if (more > 0) need.set(projectId, more)
     }
     // Several at once, up to Settings › Boxes created at once (each finished create runs another pass). The project
@@ -2190,9 +2212,10 @@ export class TaskManager {
     return r.status === "queued" || (r.status !== "failed" && (Boolean(r.compact_pending) || this.store.hasInputs(r.id)))
   }
 
-  /** Agents of a project one new box takes: its slots, or one when the project runs heavy tasks. */
+  /** Agents of a project one new box takes: its slots, or fewer when the project sets Agents per box. */
   private growthSlots(projectId: string): number {
-    return this.store.projectHeavyTasks(projectId) === "off" ? this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox : 1
+    const slots = this.sizeLimits(this.newBoxSize(projectId)).slotsPerBox
+    return Math.min(slots, this.store.projectBoxLimits(projectId).agentsPerBox ?? slots)
   }
 
   /** Pick a box for a task's next turn, or null to wait. */
@@ -2226,9 +2249,9 @@ export class TaskManager {
           const moved = await this.leaveSmallBox(row, box.id, min!)
           if (moved !== "stay") return moved
         }
-        // Busy: no free slot, or a free one its project's heavy-tasks setting or the box's memory rules out.
+        // Busy: no free slot, or a free one that a project's Agents per box or the box's memory rules out.
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
-        const busy = full ? null : (this.heavyBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
+        const busy = full ? null : (this.limitBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
         if (!full && !busy) return box.id
         // Its box is busy. Its workspace lives there, so it waits for a slot unless it can move without losing work.
         const noSlot = full ? `Waiting for a free slot on ${box.id}` : null
@@ -2380,15 +2403,15 @@ export class TaskManager {
     return isLocalRunnerBox(row.box_id) ? LOCAL_BOX_ID : this.assign(row.id, LOCAL_BOX_ID)
   }
 
-  /** A free Local agents slot that the project's heavy-tasks setting lets this task take; else false, with the reason. */
+  /** A free Local agents slot that the projects' Agents per box let this task take; else false, with the reason. */
   private localRoom(row: TaskRow): boolean {
     if (this.runningOn(LOCAL_BOX_ID) >= this.slotsFor(LOCAL_BOX_ID)) {
       this.setWaitReason(row.id, LOCAL_SLOT_WAIT)
       return false
     }
-    const heavy = this.heavyBlock(row, LOCAL_BOX_ID)
-    if (heavy) this.setWaitReason(row.id, `Waiting: ${heavy}`)
-    return !heavy
+    const limit = this.limitBlock(row, LOCAL_BOX_ID)
+    if (limit) this.setWaitReason(row.id, `Waiting: ${limit}`)
+    return !limit
   }
 
   /** Add a line to a task's log the first time `key` comes up (a placement decision every pass would repeat). */
@@ -2405,7 +2428,9 @@ export class TaskManager {
    * 3. nothing yet, when the pool has room: a new box is made for the project,
    * 4. a free slot on a box another project uses (the pool is full).
    * Only boxes of at least the project's box size count (`minBoxSize`); when none has a free slot and the pool
-   * is full, `ensureSizedBox` grows an idle box or the task waits with the reason.
+   * is full, `ensureSizedBox` grows an idle box or the task waits with the reason. A project at its own Max boxes
+   * only uses the boxes it already has, and a box's agents and task folders are capped by the strictest of its own
+   * limit, the task's project's and those of the projects already there (`limitBlock`, `residentCap`).
    * A box without enough free disk for a new workspace is skipped and cleaned up
    * in the background; the task waits for that cleanup only when no other box
    * (or new one) can take it.
@@ -2416,9 +2441,10 @@ export class TaskManager {
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
     const min = this.minBoxSize(projectId)
+    const cap = projectId ? this.projectBoxCap(projectId, taskId) : null
     const candidates = this.store
       .listBoxes()
-      .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id) && sizeFits(b.size, min))
+      .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id) && sizeFits(b.size, min) && (!cap?.full || cap.used.has(b.id)))
       .map((b) => {
         const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
         // A box made for a project belongs to it, even before its first task lands.
@@ -2428,22 +2454,25 @@ export class TaskManager {
         // 0 = this project's box, 1 = empty unowned box, 2 = another project's box
         const rank = mine ? 0 : others ? 2 : 1
         const limits = this.sizeLimits(normalizeBoxSize(b.size))
-        return { id: b.id, rank, running: residents.filter(holdsSlot).length, residents: residents.length, ...limits }
+        const maxResidentPerBox = this.residentCap(limits.maxResidentPerBox, projectId, residents)
+        return { id: b.id, rank, running: residents.filter(holdsSlot).length, residents: residents.length, slotsPerBox: limits.slotsPerBox, maxResidentPerBox }
       })
       .filter((b) => b.running < b.slotsPerBox)
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     const low: { boxId: string; state: "running" | "exhausted" }[] = []
-    // Boxes with a free slot that heavy tasks or memory rule out, why (the first one is the wait reason).
+    // Boxes with a free slot that a project's Agents per box or memory rule out, why (the first one is the wait reason).
     const busy: string[] = busyHere ? [busyHere] : []
+    // A new box may be made for it: the pool has room, and so does its project (its own Max boxes).
+    const canGrow = this.poolHasRoom() && !cap?.full
     for (const b of candidates) {
-      if (b.rank === 2 && this.poolHasRoom()) {
+      if (b.rank === 2 && canGrow) {
         // Rather than crowd another project's box, make one for this project.
         this.wantsBox.add(taskId)
         this.holdForDisk(taskId, low, busy[0], waitHere)
         return null
       }
       if (b.residents >= b.maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
-      const why = row ? (this.heavyBlock(row, b.id) ?? (await this.memoryBlock(b.id, taskId))) : null
+      const why = row ? (this.limitBlock(row, b.id) ?? (await this.memoryBlock(b.id, taskId))) : null
       if (why) {
         busy.push(why)
         continue
@@ -2459,23 +2488,23 @@ export class TaskManager {
         return b.id
       }
     }
-    if (this.poolHasRoom()) this.wantsBox.add(taskId)
+    if (canGrow) this.wantsBox.add(taskId)
     else {
       // Its setup already ran out of space once and no box has room even after cleanup:
       // the threshold is cautious, so make the one retry on the cleaned box instead of waiting forever.
-      const cleaned = this.diskRetried.has(taskId) ? low.find((l) => l.state === "exhausted") : undefined
-      if (cleaned && (this.store.listTaskRows({ boxId: cleaned.boxId }).filter((r) => r.id !== taskId).length < this.residentsFor(cleaned.boxId) || this.evictOne(cleaned.boxId, taskId))) {
+      const cleaned = this.diskRetried.has(taskId) ? candidates.find((c) => c.id === low.find((l) => l.state === "exhausted")?.boxId) : undefined
+      if (cleaned && (cleaned.residents < cleaned.maxResidentPerBox || this.evictOne(cleaned.id, taskId))) {
         this.holdForDisk(taskId, [])
-        return cleaned.boxId
+        return cleaned.id
       }
-      // No box of the project's size has a free slot and the pool can't grow.
+      // No box of the project's size has a free slot and the pool (or the project) can't grow.
       if (min && !candidates.length && row) {
-        await this.ensureSizedBox(row, min)
+        await this.ensureSizedBox(row, min, cap?.full ? cap : null)
         return null
       }
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
-    const poolFull = !this.wantsBox.has(taskId) && !this.poolHasRoom() ? this.noNewBoxReason() : null
+    const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : this.noNewBoxReason()) : null
     this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull)
     return null
   }
@@ -2497,13 +2526,15 @@ export class TaskManager {
    * waits, and with the setting off it always waits. Either way the reason is on the task, and it never falls back to
    * a smaller box.
    */
-  private async ensureSizedBox(row: TaskRow, min: BoxSize) {
+  private async ensureSizedBox(row: TaskRow, min: BoxSize, own: { max: number; used: Set<string> } | null = null) {
     const waitFor = `Waiting for a ${min} box`
-    const pending = this.sizedBoxComing(min)
+    // A project at its own Max boxes waits for (or grows) one of its own boxes; a box on its way for another doesn't help.
+    const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : "the pool is full"
+    const pending = this.sizedBoxComing(min, own?.used)
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
     // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
-    if (!this.settings.get().placementResizeEnabled) return this.setWaitReason(row.id, `${waitFor}: the pool is full and none has room`, min)
-    const idle = this.idleBoxesBelow(min)
+    if (!this.settings.get().placementResizeEnabled) return this.setWaitReason(row.id, `${waitFor}: ${full} and none has room`, min)
+    const idle = this.idleBoxesBelow(min).filter((b) => !own || own.used.has(b.id))
     for (const box of idle) {
       const project = this.store.getProject(row.project_id)
       try {
@@ -2517,13 +2548,17 @@ export class TaskManager {
       }
       return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
     }
-    this.setWaitReason(row.id, `${waitFor}: the pool is full and no box is idle to resize`, min)
+    this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min)
   }
 
-  /** A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. */
-  private sizedBoxComing(size: BoxSize): string | null {
+  /**
+   * A box of at least `size` on its way: being created, or a resize up to it running. Says which, or null. With
+   * `only` (a project at its Max boxes), just a resize of one of those boxes counts.
+   */
+  private sizedBoxComing(size: BoxSize, only?: Set<string>): string | null {
     // A migration's old box leaves the list before its resize is over, so the resizes are read on their own.
-    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size)) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
+    for (const r of this.resizes.values()) if (r.status === "running" && sizeFits(r.to, size) && (!only || only.has(r.boxId))) return `resizing box ${r.boxId} (${r.from} → ${r.to})`
+    if (only) return null
     return this.store.listBoxes().some((b) => b.status === "creating" && sizeFits(b.size, size)) ? "a new one is being created" : null
   }
 
@@ -2576,7 +2611,7 @@ export class TaskManager {
   }
 
   /**
-   * Say on a queued task why it's waiting when that's about disk space (or else `busy`: heavy tasks, memory; or
+   * Say on a queued task why it's waiting when that's about disk space (or else `busy`: Agents per box, memory; or
    * else `waitHere`: no free slot on the box its workspace is on), or clear it.
    */
   private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: string | null, waitHere?: string | null) {
@@ -2601,10 +2636,16 @@ export class TaskManager {
     this.emitTask(taskId)
   }
 
-  /** The box facts a worker's system prompt states (stable from turn to turn, so the prompt cache holds). */
+  /**
+   * The box facts a worker's system prompt states (stable from turn to turn, so the prompt cache holds): agents
+   * that may share it are the box's slots, or fewer under its project's Agents per box.
+   */
   private boxPromptInfo(boxId: string, project: Project): BoxPromptInfo {
-    if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots: this.slotsFor(boxId), heavyTasks: project.heavyTasks, local: true }
-    return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots: this.slotsFor(boxId), heavyTasks: project.heavyTasks }
+    const box = this.slotsFor(boxId)
+    const slots = Math.min(box, project.agentsPerBox ?? box)
+    const alone = project.agentsPerBox === 1
+    if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots, alone, local: true }
+    return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots, alone }
   }
 
   /** Settings → Boxes & limits → Memory and load: when placement skips a box. */
@@ -2628,20 +2669,71 @@ export class TaskManager {
   }
 
   /**
-   * Why the projects' "heavy tasks" settings keep this task off a box right now, or null. "one-per-box": no second
-   * running agent of its project there. "whole-box": no other running agent at all, and nothing joins a box where
-   * one of those runs.
+   * Why the projects' Agents per box keep this task off a box right now, or null. A box runs at most the strictest
+   * of the task's project's limit and those of the projects with an agent running there (1: alone), every project's
+   * agents counted; the box's own limit is checked apart. Store.claimTurnSlot holds the same rule when the turn
+   * claims its slot.
    */
-  private heavyBlock(row: TaskRow, boxId: string): string | null {
-    const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id && r.id !== row.id)
+  private limitBlock(row: TaskRow, boxId: string): string | null {
+    const running = this.store.listTaskRows({ boxId }).filter((r) => holdsSlot(r) && r.id !== row.id)
     if (!running.length) return null
     const name = (projectId: string) => this.store.getProjectName(projectId) ?? projectId
     const where = isLocalRunnerBox(boxId) ? "this computer" : `box ${boxId}`
-    const mine = this.store.projectHeavyTasks(row.project_id)
-    if (mine === "whole-box") return `${name(row.project_id)} runs heavy tasks on a whole box, and ${where} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
-    if (mine === "one-per-box" && running.some((r) => r.project_id === row.project_id)) return `${name(row.project_id)} runs heavy tasks one per box, and another of its agents runs on ${where}`
-    const hog = running.find((r) => this.store.projectHeavyTasks(r.project_id) === "whole-box")
-    return hog ? `${where} is running a heavy ${name(hog.project_id)} task alone` : null
+    const mine = this.store.projectBoxLimits(row.project_id).agentsPerBox
+    if (mine !== null && running.length >= mine) {
+      const rule = mine === 1 ? "runs each of its agents alone on a box" : `runs at most ${mine} agents on a box`
+      return `${name(row.project_id)} ${rule}, and ${where} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
+    }
+    for (const projectId of new Set(running.map((r) => r.project_id))) {
+      const cap = this.store.projectBoxLimits(projectId).agentsPerBox
+      if (cap === null || running.length < cap) continue
+      return cap === 1 ? `${where} is running a ${name(projectId)} agent alone` : `${where} is running a ${name(projectId)} agent, and ${name(projectId)} allows at most ${cap} agents on a box`
+    }
+    return null
+  }
+
+  /** The strictest Agents per box among the projects running agents on a box, when it's below the box's slots (BoxInfo). */
+  private projectLimitOn(boxId: string, residents: TaskRow[]): BoxInfo["projectLimit"] {
+    const slots = this.slotsFor(boxId)
+    let out: BoxInfo["projectLimit"] = null
+    for (const projectId of new Set(residents.filter(holdsSlot).map((r) => r.project_id))) {
+      const cap = this.store.projectBoxLimits(projectId).agentsPerBox
+      if (cap !== null && cap < (out?.slots ?? slots)) out = { slots: cap, project: this.store.getProjectName(projectId) ?? projectId }
+    }
+    return out
+  }
+
+  /**
+   * Task folders a box may hold with this project's: the box's own limit, or less when the project or one with a
+   * folder there (`residents`) sets Tasks per box. The stricter wins, like Agents per box.
+   */
+  private residentCap(boxLimit: number, projectId: string | undefined, residents: TaskRow[]): number {
+    let cap = boxLimit
+    for (const p of new Set([...(projectId ? [projectId] : []), ...residents.map((r) => r.project_id)])) {
+      const n = this.store.projectBoxLimits(p).tasksPerBox
+      if (n !== null && n < cap) cap = n
+    }
+    return cap
+  }
+
+  /**
+   * A project's own Max boxes and the ready boxes its tasks use now: made for it, or holding one of its task folders
+   * (`except` left out, so a task that moves doesn't count the box it leaves). `full` also counts the boxes being
+   * created for it. null when it sets none: only Settings › Max boxes applies.
+   */
+  private projectBoxCap(projectId: string, except?: string): { max: number; used: Set<string>; full: boolean } | null {
+    const max = this.store.projectBoxLimits(projectId).maxBoxes
+    if (max === null) return null
+    const ready = new Set(this.store.listBoxes().filter((b) => b.status === "ready").map((b) => b.id))
+    const used = new Set<string>()
+    for (const r of this.store.listTaskRows({ projectId })) if (r.id !== except && r.box_id && ready.has(r.box_id)) used.add(r.box_id)
+    for (const id of ready) if (this.store.getKv(boxOwnerKey(id)) === projectId) used.add(id)
+    return { max, used, full: used.size + (this.creatingFor.get(projectId) ?? 0) >= max }
+  }
+
+  /** Why a task waits when its project's own boxes are full and it's at its Max boxes. */
+  private projectFullReason(projectId: string, max: number) {
+    return `Waiting for a free slot: ${this.store.getProjectName(projectId) ?? projectId} is at its limit of ${boxCount(max)}`
   }
 
   /** df on a box's work disk, cached for `maxAgeMs`. Saves the numbers on the box row for the Boxes page. */

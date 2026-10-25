@@ -6,7 +6,6 @@ import type { BoxResize } from "./boxSizes.js"
 import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
-import type { HeavyTasks } from "./memory.js"
 import type { Runner } from "./runner.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -60,8 +59,16 @@ export interface Project {
   depCache: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
-  /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
-  heavyTasks: HeavyTasks
+  /**
+   * Most agents running at once on a box while one of its agents runs there, every project's counted (1: each of its
+   * agents has a box to itself). The stricter of this, the box's own limit and every other running project's wins.
+   * null uses the box's limit (Settings › Agents per box).
+   */
+  agentsPerBox: number | null
+  /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Resident tasks per box. */
+  tasksPerBox: number | null
+  /** Most boxes its tasks use at once (boxes made for it or holding its task folders); null: only Settings › Max boxes. */
+  maxBoxes: number | null
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number
@@ -360,6 +367,11 @@ export interface BoxInfo {
   keepAlive: boolean
   slots: number
   runningTurns: number
+  /**
+   * Fewer than `slots` while a project with an agent running here sets Agents per box: the strictest of those
+   * limits (no agent joins until running drops below it), with the project. Absent otherwise.
+   */
+  projectLimit?: { slots: number; project: string } | null
   /**
    * Over its slots because the limit was lowered while these agents ran: the limit they started under
    * (null when that's not why, or not known since a restart).
@@ -661,6 +673,13 @@ export function agentCapacity(p: { maxBoxes: number; slotsPerBox: number; maxAge
   const perBoxes = p.maxBoxes * p.slotsPerBox
   return p.maxAgents > 0 ? Math.min(p.maxAgents, perBoxes) : perBoxes
 }
+
+/** A project's own box settings (Project › Settings) take the same ranges as the global ones they override. */
+export const PROJECT_BOX_LIMITS = {
+  agentsPerBox: { min: 1, max: 20 },
+  tasksPerBox: { min: 1, max: 200 },
+  maxBoxes: { min: 1, max: 100 },
+} as const
 
 /** Settings › Boxes created at once: its default and range. */
 export const BOX_CREATE_CONCURRENCY = { default: 10, min: 1, max: 50 } as const

@@ -98,20 +98,3 @@ export const memLine = (mem: Pick<BoxMemory, "usedBytes" | "totalBytes">) =>
 
 /** "load 3.20 on 2 CPUs". */
 export const loadLine = (mem: Pick<BoxMemory, "load1" | "cpus">) => `load ${mem.load1.toFixed(2)} on ${mem.cpus} CPU${mem.cpus === 1 ? "" : "s"}`
-
-/**
- * Per-project "heavy tasks": how a project's running agents share boxes, for test suites and headless browsers
- * that OOM a box when several run at once. "one-per-box": at most one of its agents runs on a box (other
- * projects may share it). "whole-box": one of its agents has the box to itself while it runs.
- */
-export const HEAVY_TASKS = ["off", "one-per-box", "whole-box"] as const
-export type HeavyTasks = (typeof HEAVY_TASKS)[number]
-
-/** Short enough for the project settings dropdown; the field's hint explains them. */
-export const HEAVY_TASKS_LABEL: Record<HeavyTasks, string> = {
-  off: "Off: share boxes",
-  "one-per-box": "One of its agents per box",
-  "whole-box": "Whole box: each agent alone",
-}
-
-export const normalizeHeavyTasks = (v: unknown): HeavyTasks => (HEAVY_TASKS.includes(v as HeavyTasks) ? (v as HeavyTasks) : "off")
