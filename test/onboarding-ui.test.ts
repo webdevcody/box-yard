@@ -43,6 +43,10 @@ function setup(creds: Partial<Record<CredentialKey, CredentialStatus>> = {}): Se
     claude: { required: true, state: claude ? "set" : "unset", using: credentials.anthropicApiKey.state === "set" ? "anthropicApiKey" : claude ? "claudeOauthToken" : null },
     github: { state: credentials.githubToken.state },
     owner: { name: "Cody", source: "default" },
+    // These tests follow the Upstash path; the "This computer" path has its own (local-onboarding-ui.test.ts).
+    runner: { choice: "box", default: "box" },
+    upstash: { available: boxes },
+    local: null,
     restart: [],
   }
 }
@@ -197,7 +201,7 @@ describe("first-run setup", () => {
     expect(links.some(([h]) => h!.includes("generate-a-long-lived-token"))).toBe(true)
     expect(card()!.querySelector("[aria-label='Copy claude setup-token']")).not.toBeNull()
     // The Claude choice: subscription token or pay-per-use API key, in a button group.
-    const group = card()!.querySelector("[role=group]")!
+    const group = card()!.querySelector("[role=group][aria-label='How Claude signs in']")!
     act(() => byText("API key", group)!.click())
     expect(card()!.textContent).toContain("Pay per use, billed to your Claude Console account.")
   })
