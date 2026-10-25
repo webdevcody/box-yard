@@ -320,6 +320,11 @@ export class TaskManager {
   /** Tasks whose turn was picked (starting) when Cody cancelled every message it was for: launch drops that turn. */
   private cancelledAll = new Set<string>()
   private creatingBoxes = 0
+  /**
+   * Pool boxes being created by createBox: what Settings › Boxes created at once caps. Not `creatingBoxes`, which
+   * also counts a snapshot job's scratch box for as long as the job runs.
+   */
+  private poolCreates = 0
   /** Boxes being created, per project they're for. */
   private creatingFor = new Map<string, number>()
   /** Tasks that found no box this scheduling pass and want a new one. */
@@ -1013,7 +1018,7 @@ export class TaskManager {
     const wait = this.boxCreate.retryAt - Date.now()
     const atOnce = this.createConcurrency()
     return {
-      now: this.creatingBoxes,
+      now: this.poolCreates,
       atOnce: atOnce < this.settings.get().boxCreateConcurrency ? `${atOnce} (lowered after a rate limit; Settings › Boxes created at once is ${this.settings.get().boxCreateConcurrency})` : atOnce,
       ...(wait > 0 ? { backoff: `the next create waits ${Math.ceil(wait / 1000)}s after ${this.boxCreate.failures || 1} failure${this.boxCreate.failures > 1 ? "s" : ""}${this.lastBoxError ? `: ${this.lastBoxError.message}` : ""}` } : {}),
     }
@@ -2143,7 +2148,7 @@ export class TaskManager {
 
   /** Another box create may start: the pool has room, no backoff is running and fewer than `cap` are on their way. */
   private canCreateBox(cap: number) {
-    return this.creatingBoxes < cap && Date.now() >= this.boxCreate.retryAt && this.poolHasRoom()
+    return this.poolCreates < cap && Date.now() >= this.boxCreate.retryAt && this.poolHasRoom()
   }
 
   /** Box creation keeps failing (twice or more in a row, and backing off): placement stops counting on new boxes. */
@@ -2164,7 +2169,7 @@ export class TaskManager {
     let delay = Math.min(t.retryMaxMs, t.retryBaseMs * 2 ** (b.failures - 1))
     if (isRateLimited(err)) {
       // Once per backoff: the other creates of the same burst often hit the same limit.
-      if (now >= b.retryAt) b.window = Math.max(1, Math.floor(Math.min(b.window, this.creatingBoxes) / 2))
+      if (now >= b.retryAt) b.window = Math.max(1, Math.floor(Math.min(b.window, this.poolCreates) / 2))
       delay = Math.max(delay, t.rateLimitMs)
     }
     delay = Math.round(delay * (0.9 + Math.random() * 0.2))
@@ -2920,6 +2925,7 @@ export class TaskManager {
 
   private async createBox(projectId?: string) {
     this.creatingBoxes++
+    this.poolCreates++
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
     const size = this.newBoxSize(projectId)
@@ -2965,6 +2971,7 @@ export class TaskManager {
       setTimeout(() => this.schedule(), delay).unref()
     } finally {
       this.creatingBoxes--
+      this.poolCreates--
       if (projectId) {
         const left = (this.creatingFor.get(projectId) ?? 1) - 1
         if (left > 0) this.creatingFor.set(projectId, left)
