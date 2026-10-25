@@ -25,6 +25,7 @@ import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../share
 import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
+import type { Runner } from "../shared/runner.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
@@ -47,6 +48,8 @@ export interface McpDeps {
   notes?: ProjectNotes
   /** The Coordinator's compaction log folder, for search_history. Without it, the Coordinator's summaries aren't searched. */
   coordinatorCompactionsDir?: string
+  /** Where new projects run (the setup choice). Without it, Upstash boxes. */
+  defaultRunner?: () => Runner
 }
 
 /** Who is calling the MCP server. Captains only see and touch their own project. */
@@ -446,7 +449,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
       safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> }) => {
         if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
-        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env })
+        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.() })
         hub.broadcast({ type: "project", project: p })
         return ok(projectView(p))
       }),

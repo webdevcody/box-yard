@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, Camera, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
-import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
+import { AlertTriangle, Boxes, Camera, Laptop, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useSetup, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
@@ -59,6 +59,7 @@ export function BoxesView() {
   const tasks = useTasks()
   const projects = useProjects()
   const health = useHealth()
+  const setup = useSetup()
   useScrollToHash(Boolean(boxes.data), "box-")
   const hash = useHash()
   const openSettings = useOpenSettings()
@@ -78,6 +79,9 @@ export function BoxesView() {
   const [action, setAction] = useState<{ boxId: string; kind: BoxAction } | null>(null)
   const actionBox = action ? list.find((b) => b.id === action.boxId) ?? null : null
   const onAction = (boxId: string, kind: BoxAction) => setAction({ boxId, kind })
+  // Agents run on this computer and there's no Upstash key: boxes don't apply yet, so the page says so calmly.
+  const onComputer = setup.data?.runner.choice === "local"
+  const noBoxes = onComputer && setup.data?.upstash.available === false && list.length === 0
 
   // Opening a row pushes #<id> so Back closes the details; closing pops it again (or drops a hash we arrived with).
   const openedHere = useRef(false)
@@ -112,13 +116,24 @@ export function BoxesView() {
         </button>
       </header>
 
-      <CapacityNotice onEdit={() => openSettings("limits")} />
+      {!noBoxes && <CapacityNotice onEdit={() => openSettings("limits")} />}
 
-      {pool && <SummaryStrip boxes={list} maxBoxes={pool.maxBoxes} running={running} maxAgents={agentCapacity(pool)} />}
+      {pool && !noBoxes && <SummaryStrip boxes={list} maxBoxes={pool.maxBoxes} running={running} maxAgents={agentCapacity(pool)} />}
 
-      {boxes.isLoading ? null : list.length === 0 ? (
+      {boxes.isLoading ? null : noBoxes ? (
+        <Empty icon={<Laptop className="h-8 w-8" />} title="Agents run on this computer">
+          <span data-testid="boxes-on-computer">
+            Your projects run here, so there are no boxes. To run agents in isolated cloud boxes, add an Upstash Box API key later in Settings.
+          </span>
+          <span className="mt-3 block">
+            <Button size="sm" onClick={() => openSettings("credentials")}>
+              Add Upstash in Settings
+            </Button>
+          </span>
+        </Empty>
+      ) : list.length === 0 ? (
         <Empty icon={<Boxes className="h-8 w-8" />} title="No boxes yet">
-          Boxes are created when a task needs one.
+          {onComputer ? "New projects run on this computer. Projects set to Upstash box get one when a task needs it." : "Boxes are created when a task needs one."}
         </Empty>
       ) : (
         <section className="space-y-2">

@@ -1,12 +1,22 @@
 // First-run setup (the card Zen shows until the required keys are set) and Settings › Credentials. Keys go to the
 // server and never come back: a field shows only whether its key is set and where it comes from.
 import { useEffect, useId, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
-import { Check, Copy, KeyRound, Play, X } from "lucide-react"
-import { useAgentSettings, useSaveCredentials, useSaveSettings, useSetup, useTestCredential } from "../lib/queries"
+import { Check, Cloud, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, X } from "lucide-react"
+import { useAgentSettings, useCheckLocal, useSaveCredentials, useSaveRunnerChoice, useSaveSettings, useSettings, useSetup, useTestCredential } from "../lib/queries"
 import { Button, LineIcon, NewTabLink, cx, inputClass } from "./ui"
 import { localFlag } from "../lib/localFlag"
 import { Panel, Row, SourceHint } from "./SettingsDialog"
-import { CREDENTIAL_INFO, GITHUB_TOKEN_SCOPES, SETUP_TOKEN_COMMAND, type CredentialKey, type CredentialStatus, type SetupStatus } from "../../../shared/setup"
+import {
+  CREDENTIAL_INFO,
+  GITHUB_TOKEN_SCOPES,
+  LOCAL_TOOL_INFO,
+  SETUP_TOKEN_COMMAND,
+  type CredentialKey,
+  type CredentialStatus,
+  type LocalTool,
+  type SetupStatus,
+} from "../../../shared/setup"
+import { LOCAL_UNSANDBOXED, type Runner } from "../../../shared/runner"
 
 // ------------------------------------------------------------------ "Skip for now" (this browser)
 
@@ -37,6 +47,8 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
   const [value, setValue] = useState("")
   const [result, setResult] = useState<TestState | null>(null)
   const fromEnv = status.source === "env"
+  // GitHub only: this computer's `gh auth` login stands in until a token is saved here.
+  const fromGh = status.source === "gh"
   const showInput = !fromEnv && (editing || status.state === "unset")
 
   // A save elsewhere (another tab, the other form) settles this one.
@@ -107,7 +119,11 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
             ••••••••••••
           </span>
           <span className="ml-auto">
-            <SourceHint source={fromEnv ? "env" : "ui"} changed={false} />
+            {fromGh ? (
+              <span className="rounded bg-zinc-800 px-1.5 py-px text-[11px] text-zinc-400">gh auth</span>
+            ) : (
+              <SourceHint source={fromEnv ? "env" : "ui"} changed={false} />
+            )}
           </span>
         </div>
       )}
@@ -123,6 +139,10 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
               </Button>
             )}
           </>
+        ) : fromGh ? (
+          <Button type="button" size="sm" onClick={() => (setEditing(true), setResult(null))}>
+            Use a token instead
+          </Button>
         ) : (
           !fromEnv && (
             <>
@@ -149,6 +169,7 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
       </div>
       <div id={`${id}-result`} aria-live="polite">
         {fromEnv && <p className="text-xs leading-relaxed text-zinc-500">Set on the server by {info.env}, which always wins. Change it there.</p>}
+        {fromGh && !showInput && <p className="text-xs leading-relaxed text-zinc-500">Using this computer's gh login. A token saved here wins over it.</p>}
         {save.error && <ResultLine ok={false} text={save.error.message} />}
         {result && result.state !== "running" && <ResultLine ok={result.state === "ok"} text={result.text} />}
       </div>
@@ -265,6 +286,139 @@ function ClaudeChoice({ status, id }: { status: SetupStatus; id: string }) {
   )
 }
 
+// ------------------------------------------------------------------ where agents run: this computer or Upstash boxes
+
+const RUNNER_CHOICES: { runner: Runner; icon: typeof Laptop; title: string; body: string; needs: string }[] = [
+  {
+    runner: "local",
+    icon: Laptop,
+    title: "This computer",
+    body: "Agents run right here, with this computer's claude, gh and browser.",
+    needs: "No account needed",
+  },
+  {
+    runner: "box",
+    icon: Cloud,
+    title: "Upstash boxes",
+    body: "Each agent works in its own isolated cloud box.",
+    needs: "Needs an Upstash Box API key",
+  },
+]
+
+/** Two cards, one per place agents can run. Picking one saves it right away; new projects follow it. */
+export function RunnerChoice({ status, compact }: { status: SetupStatus; compact?: boolean }) {
+  const save = useSaveRunnerChoice()
+  const current = save.isPending ? save.variables : status.runner.choice
+  return (
+    <div className="space-y-2">
+      <div role="group" aria-label="Where agents run" className={cx("grid gap-2", !compact && "sm:grid-cols-2")}>
+        {RUNNER_CHOICES.map((c) => {
+          const on = current === c.runner
+          return (
+            <button
+              key={c.runner}
+              type="button"
+              aria-pressed={on}
+              data-runner-choice={c.runner}
+              onClick={() => !on && save.mutate(c.runner)}
+              className={cx(
+                "flex min-h-11 items-start gap-3 rounded-lg border p-3 text-left transition",
+                on ? "border-yard-500/60 bg-yard-500/10" : "border-zinc-800 bg-zinc-900 hover:border-zinc-700",
+              )}
+            >
+              <LineIcon icon={c.icon} className={cx("h-4 w-4", on ? "text-yard-300" : "text-zinc-400")} />
+              <span className="min-w-0 flex-1 space-y-0.5">
+                <span className="flex items-center gap-1.5 text-sm font-medium text-zinc-100">
+                  {c.title}
+                  {on && <Check className="h-3.5 w-3.5 text-yard-300" aria-label="chosen" />}
+                </span>
+                <span className="block text-xs leading-relaxed text-zinc-400">{c.body}</span>
+                <span className="block text-[11px] text-zinc-500">{c.needs}</span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
+      {current === "local" && (
+        <p role="note" className="flex items-start gap-2 text-xs leading-relaxed text-amber-200/90" data-testid="runner-choice-warning">
+          <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+          <span>{LOCAL_UNSANDBOXED}</span>
+        </p>
+      )}
+      {save.error && <ResultLine ok={false} text={save.error.message} />}
+    </div>
+  )
+}
+
+function toolLine(t: LocalTool, s: SetupStatus): { ok: boolean; text: string } {
+  const local = s.local!
+  if (!t.found) return { ok: false, text: "Not found" }
+  const version = t.version ?? "Found"
+  if (t.key === "claude") {
+    if (s.credentials.claudeOauthToken.state === "set" || s.credentials.anthropicApiKey.state === "set") return { ok: true, text: `${version} · signs in with the token below` }
+    if (local.claudeLogin === true) return { ok: true, text: `${version} · signed in` }
+    if (local.claudeLogin === false) return { ok: false, text: `${version} · not signed in: run claude, then /login` }
+    return { ok: true, text: version }
+  }
+  if (t.key === "gh") return local.ghLogin ? { ok: true, text: `${version} · signed in` } : { ok: false, text: `${version} · not signed in: run gh auth login` }
+  return { ok: true, text: version }
+}
+
+/** What local agents use on this computer (#120): Node, claude, gh and Chrome, each found or not, with a way to get it. */
+export function LocalPrereqs({ status }: { status: SetupStatus }) {
+  const check = useCheckLocal()
+  const server = useSettings()
+  const local = status.local
+  return (
+    <div className="space-y-2" data-testid="local-prereqs">
+      {!local ? (
+        <p className="text-xs text-zinc-500">Looking at this computer…</p>
+      ) : (
+        <ul className="divide-y divide-zinc-800/80 rounded-lg border border-zinc-800 bg-zinc-900/60">
+          {local.tools.map((t) => {
+            const info = LOCAL_TOOL_INFO[t.key]
+            const line = toolLine(t, status)
+            // Something optional that's missing is just that: no warning colour.
+            const icon = line.ok ? Check : info.required ? X : Minus
+            return (
+              <li key={t.key} className="flex items-start gap-2.5 px-3 py-2" data-local-tool={t.key} data-found={t.found || undefined}>
+                <LineIcon icon={icon} className={cx("h-3.5 w-3.5", line.ok ? "text-emerald-400" : info.required ? "text-amber-300" : "text-zinc-500")} />
+                <div className="min-w-0 flex-1 text-xs leading-relaxed">
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="font-medium text-zinc-200">{info.label}</span>
+                    {!info.required && <span className="text-[11px] text-zinc-500">optional</span>}
+                    <span className={cx("min-w-0 wrap-anywhere", line.ok ? "text-zinc-400" : info.required ? "text-amber-200" : "text-zinc-500")}>{line.text}</span>
+                  </div>
+                  <div className="text-zinc-500">
+                    {info.help}
+                    {!t.found && (
+                      <>
+                        {" "}
+                        <NewTabLink href={info.link.href} className={linkClass}>
+                          {info.link.label}
+                        </NewTabLink>
+                        .
+                      </>
+                    )}
+                  </div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Button type="button" size="sm" variant="ghost" loading={check.isPending} onClick={() => check.mutate()}>
+          <RefreshCw className="h-3.5 w-3.5" /> Check again
+        </Button>
+        <span className="text-xs text-zinc-500">
+          Each task works in its own folder in <span className="font-mono">{server.data?.localDir ?? "~/boxyard-workspaces"}</span>.
+        </span>
+      </div>
+    </div>
+  )
+}
+
 // ------------------------------------------------------------------ the setup card (Zen)
 
 function Step({ n, done, title, tag, help, children }: { n: number; done: boolean; title: string; tag?: string; help?: ReactNode; children: ReactNode }) {
@@ -328,27 +482,52 @@ function OwnerNameField({ id }: { id: string }) {
   )
 }
 
-/** Zen's first-run card: the keys the Coordinator needs, in order, then the optional ones. */
+/** Zen's first-run card: where agents run, then what that needs, in order, then the optional bits. */
 export function SetupCard({ status, className }: { status: SetupStatus; className?: string }) {
   const id = useId()
   const owner = useAgentSettings().data?.sources.ownerName
   const set = (k: CredentialKey) => status.credentials[k].state === "set"
+  const choice = status.runner.choice
+  const local = choice === "local"
+  const localReady = Boolean(status.local?.tools.every((t) => t.found || !LOCAL_TOOL_INFO[t.key].required))
+  const computerLogin = local && status.local?.claudeLogin === true
   let n = 0
   return (
     <div className={cx("scroll-thin min-h-0 flex-1 overflow-y-auto", className)} data-testid="setup-card">
       <div className="space-y-1.5 pt-8 pb-6 sm:pt-12">
         <h2 className="text-lg font-semibold text-zinc-50">Set up Box Yard</h2>
         <p className="text-sm leading-relaxed text-zinc-400">
-          {status.boxes.required ? "Two keys" : "One key"} and the Coordinator is ready. Keys stay on this server: the browser never sees them again.
+          {choice === null
+            ? "Pick where your agents run, sign in to Claude, and the Coordinator is ready."
+            : local
+              ? "Agents run on this computer, so there's no Upstash account to set up."
+              : status.boxes.required
+                ? "Two keys and the Coordinator is ready."
+                : "One key and the Coordinator is ready."}{" "}
+          Keys stay on this server: the browser never sees them again.
         </p>
       </div>
       <ol className="space-y-3">
-        {status.boxes.required && (
+        <Step n={++n} done={choice !== null} title="Where agents run" help="You can change this later in Settings › Credentials. Each project can also pick its own.">
+          <RunnerChoice status={status} />
+        </Step>
+        {local && (
+          <Step n={++n} done={localReady} title="This computer" help="What local agents use here. Install anything missing, then check again.">
+            <LocalPrereqs status={status} />
+          </Step>
+        )}
+        {choice === "box" && status.boxes.required && (
           <Step n={++n} done={set("upstashBoxApiKey")} title={CREDENTIAL_INFO.upstashBoxApiKey.label} help={<CredentialHelp k="upstashBoxApiKey" />}>
             <CredentialField k="upstashBoxApiKey" status={status.credentials.upstashBoxApiKey} id={`${id}-box`} />
           </Step>
         )}
-        <Step n={++n} done={status.claude.state === "set"} title="Claude">
+        <Step
+          n={++n}
+          done={status.claude.state === "set"}
+          title="Claude"
+          tag={computerLogin ? "Optional" : undefined}
+          help={computerLogin ? "Signed in with this computer's claude login. A token here is only needed to use a different account." : undefined}
+        >
           <ClaudeChoice status={status} id={`${id}-claude`} />
         </Step>
         <Step n={++n} done={set("githubToken")} title={CREDENTIAL_INFO.githubToken.label} tag="Recommended" help={<CredentialHelp k="githubToken" />}>
@@ -397,9 +576,39 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
       ) : (
         <>
           {s.mock && <p className="mb-4 text-xs text-zinc-500">Mock mode: nothing here is needed, and nothing calls a real service.</p>}
+          <Row
+            id={fid("runner")}
+            label="Where agents run"
+            help="Where new projects run. Projects you already have stay where they are; change one in its Settings › Runs on."
+          >
+            <RunnerChoice status={s} compact />
+          </Row>
+          {s.runner.choice === "local" && (
+            <Row id={fid("local")} label="This computer" help="What local agents use on the computer running Box Yard.">
+              <LocalPrereqs status={s} />
+            </Row>
+          )}
           {(["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "githubToken"] as const).map((k) => (
-            <Row key={k} id={fid(`cred-${k}`)} label={CREDENTIAL_INFO[k].label} help={<CredentialHelp k={k} />}>
+            <Row
+              key={k}
+              id={fid(`cred-${k}`)}
+              label={CREDENTIAL_INFO[k].label}
+              help={
+                k === "upstashBoxApiKey" && s.runner.choice === "local" ? (
+                  <>
+                    Optional while agents run on this computer. Add one later to let projects run in isolated Upstash boxes. <CredentialHelp k={k} />
+                  </>
+                ) : (
+                  <CredentialHelp k={k} />
+                )
+              }
+            >
               <CredentialField k={k} status={s.credentials[k]} id={fid(`cred-${k}`)} />
+              {k === "upstashBoxApiKey" && s.runner.choice === "local" && s.credentials.upstashBoxApiKey.state === "set" && (
+                <p className="text-xs leading-relaxed text-zinc-500" data-testid="upstash-ready">
+                  Upstash boxes are ready: pick Upstash box in a project's Settings › Runs on, or make it the default above.
+                </p>
+              )}
             </Row>
           ))}
           {s.credentials.claudeOauthToken.state === "set" && s.credentials.anthropicApiKey.state === "set" && (

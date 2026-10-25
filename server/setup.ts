@@ -7,11 +7,13 @@ import os from "node:os"
 import path from "node:path"
 import { Box } from "@upstash/box"
 import type { Config } from "./config.js"
-import { BadRequestError } from "./store.js"
+import { BadRequestError, type Store } from "./store.js"
 import { credentialValue, redact, type CredentialStore } from "./credentials.js"
 import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
-import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type RecentRepos, type SetupStatus } from "../shared/setup.js"
+import { checkLocal, type LocalCheckResult } from "./localCheck.js"
+import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
+import { RUNNERS, type Runner } from "../shared/runner.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
@@ -19,6 +21,7 @@ export const CLAUDE_CHECK_TIMEOUT_MS = 60_000
 
 export interface SetupDeps {
   c: Config
+  store: Store
   credentials: CredentialStore
   settings: SettingsStore
   /** Where new boxes are made right now. */
@@ -29,23 +32,86 @@ export interface SetupDeps {
   githubFetch?: typeof fetch
   anthropicBaseUrl?: string
   timeoutMs?: number
+  /** Stand-in for looking at this computer's tools and logins (tests). */
+  localCheck?: () => Promise<LocalCheckResult>
 }
+
+/** The setup choice of where agents run, in its own kv entry. */
+const RUNNER_KV = "setup_runner"
+/** What's missing on a first run before the owner picks This computer or Upstash boxes. */
+export const NO_RUNNER_CHOICE = "a choice of where agents run"
+/** A look at this computer's tools and logins is reused this long. */
+export const LOCAL_CHECK_TTL_MS = 60_000
 
 /** Mock mode, or a fake `claude` standing in for the real one: nothing needs a key. */
 export const isMockRun = (c: Pick<Config, "mock" | "claudeBin">) => c.mock || /fake-claude/.test(c.claudeBin)
 
 export class Setup {
-  constructor(private readonly d: SetupDeps) {}
+  private local: { result: LocalCheckResult; at: number } | null = null
+  private checking: Promise<boolean> | null = null
+
+  constructor(private readonly d: SetupDeps) {
+    // With agents on this computer, its `gh auth` login stands in for a GitHub token nobody set.
+    d.credentials.setGhFallback(() => (this.runnerChoice() === "local" ? (this.local?.result.ghToken ?? "") : ""))
+  }
+
+  /** Where the owner chose to run agents, or null before they chose (and on installs from before the choice). */
+  runnerChoice(): Runner | null {
+    const v = this.d.store.getKv(RUNNER_KV)
+    return (RUNNERS as readonly string[]).includes(v ?? "") ? (v as Runner) : null
+  }
+
+  /** What new projects run on: the setup choice, else Upstash boxes, as before the choice existed. */
+  defaultRunner(): Runner {
+    return this.runnerChoice() ?? "box"
+  }
+
+  /** Save the choice. Projects that exist keep running where they do; only new ones follow it. */
+  setRunner(runner: unknown) {
+    if (!(RUNNERS as readonly unknown[]).includes(runner)) throw new BadRequestError(`runner must be ${RUNNERS.join(" or ")}`)
+    this.d.store.setKv(RUNNER_KV, runner as Runner)
+  }
+
+  /** The last look at this computer, when agents run here. */
+  localCheck(): LocalCheck | null {
+    return this.runnerChoice() === "local" ? (this.local?.result.check ?? null) : null
+  }
+
+  /**
+   * Look at this computer's tools and logins again, unless the last look is under a minute old (`force` skips
+   * that). Resolves true when anything the status shows changed. Calls made meanwhile share one look.
+   */
+  refreshLocal(force = false): Promise<boolean> {
+    if (!force && this.local && Date.now() - this.local.at < LOCAL_CHECK_TTL_MS) return Promise.resolve(false)
+    if (this.checking) return this.checking
+    const look = this.d.localCheck ?? (() => checkLocal({ claudeBin: this.d.c.claudeBin, fakeClaude: isMockRun(this.d.c) }))
+    this.checking = look()
+      .then((result) => {
+        const before = this.local
+        this.local = { result, at: Date.now() }
+        const strip = (r?: LocalCheckResult) => (r ? JSON.stringify({ ...r.check, checkedAt: 0, gh: Boolean(r.ghToken) }) : "")
+        return strip(before?.result) !== strip(result)
+      })
+      .catch(() => false)
+      .finally(() => (this.checking = null))
+    return this.checking
+  }
 
   status(): SetupStatus {
     const { c, credentials } = this.d
     const mock = isMockRun(c)
     const creds = credentials.status()
     const set = (k: CredentialKey) => creds[k].state === "set"
-    const boxesRequired = !mock && c.boxProvider !== "local"
-    const claudeSet = set("claudeOauthToken") || set("anthropicApiKey")
+    const choice = this.runnerChoice()
+    const onComputer = choice === "local"
+    const local = this.localCheck()
+    // "This computer" needs no box at all, so no Upstash key.
+    const boxesRequired = !mock && c.boxProvider !== "local" && !onComputer
+    const claudeSet = set("claudeOauthToken") || set("anthropicApiKey") || (onComputer && local?.claudeLogin === true)
     const missing: string[] = []
-    if (boxesRequired && !set("upstashBoxApiKey")) missing.push(CREDENTIAL_INFO.upstashBoxApiKey.label)
+    // Before the choice, a box key isn't the only way: "This computer" needs none.
+    if (boxesRequired && !set("upstashBoxApiKey")) missing.push(choice === null ? NO_RUNNER_CHOICE : CREDENTIAL_INFO.upstashBoxApiKey.label)
+    if (onComputer && !mock && local && !local.tools.find((t) => t.key === "claude")?.found) missing.push("Claude Code on this computer")
     if (!mock && !claudeSet) missing.push("Claude sign-in")
     const restart: string[] = []
     if (c.boxProvider === "local" && !mock && set("upstashBoxApiKey")) {
@@ -65,6 +131,9 @@ export class Setup {
       },
       github: { state: creds.githubToken.state },
       owner: { name: info.settings.ownerName, source: info.sources.ownerName },
+      runner: { choice, default: choice ?? "box" },
+      upstash: { available: mock || c.boxProvider === "local" || set("upstashBoxApiKey") },
+      local,
       restart,
     }
   }

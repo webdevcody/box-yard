@@ -75,6 +75,8 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
 
+**No Upstash account?** The first-run setup card (and Settings › Credentials) asks where agents run. Pick **This computer** and there's no Upstash key to set up: projects run on the local runner (below), with this computer's own `claude` login (or a token) and its `gh auth` login standing in for `GITHUB_TOKEN` (a token saved or in the env wins). The card lists what local agents use and whether it's there: Node, `claude` and its login, `gh` and its login, and Chrome (optional, for browser checks). New projects default to the choice. Add an Upstash key in Settings › Credentials any time to make **Upstash box** available per project; projects already on this computer stay there until you change them. Until then the Boxes page just says agents run here. Installs that already have an Upstash key don't see the question and keep using boxes.
+
 ## Deploy
 
 ```bash
@@ -152,7 +154,7 @@ A project whose box has all its slots busy gets a second box while there's room.
 - **Sleep.** While a turn runs, `caffeinate` keeps a Mac out of idle sleep (and out of system sleep on AC power), but a closed lid still sleeps. A turn that sleep cut off carries on once the Mac wakes instead of failing.
 - **Archives and folders.** Local tasks keep no archives: the push at turn end covers them. Their folders stay until the task is deleted, even after Close.
 - **Switching back.** Switching a project between boxes and this computer moves each task at its next turn, but only when its work is safe (pushed and archived first). Otherwise the task stays where it is and its log says why.
-- **Claude login.** Without a token in Settings › Credentials, local agents use the computer's own `claude` login. `CLAUDE_BIN` picks the binary.
+- **Claude login.** Without a token in Settings › Credentials, local agents use the computer's own `claude` login. `CLAUDE_BIN` picks the binary. When setup chose This computer, that login also counts as the Claude sign-in setup asks for, and `gh auth token` stands in for a missing GitHub token (read on the server, never sent to the browser).
 
 **Nothing gets lost.**
 - Every transcript line, question, PR, preview, note and artifact is stored in SQLite.
