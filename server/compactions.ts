@@ -4,9 +4,12 @@ import type { CompactionInfo, CompactionRecord, CompactionTaskSnapshot } from ".
 import { mentionedTaskIds } from "./compactionTasks.js"
 import { withOwner } from "../shared/owner.js"
 
-/** `2026-10-22T18-40-05Z`: ISO time without colons or millis, so names sort chronologically on every filesystem. */
+/**
+ * `2026-10-22T18-40-05.123Z`: ISO time without colons, so it is a valid file name on every filesystem.
+ * Files written before milliseconds were added are `2026-10-22T18-40-05Z`; listCompactions orders both by time.
+ */
 export function compactionStamp(at: number): string {
-  return new Date(at).toISOString().replace(/\.\d+Z$/, "Z").replace(/:/g, "-")
+  return new Date(at).toISOString().replace(/:/g, "-")
 }
 
 export function compactionsDir(dataDir: string) {
@@ -148,7 +151,7 @@ export interface CompactionFiles {
 const frontmatter = (m: CompactionMeta, after: number | null | "pending", tasks: CompactionTaskSnapshot[] = []) =>
   [
     "---",
-    `timestamp: ${isoSeconds(m.at)}`,
+    `timestamp: ${new Date(m.at).toISOString()}`,
     `session_id: ${m.sessionId}`,
     `model: ${m.model}`,
     `trigger: ${m.trigger}`,
@@ -180,7 +183,7 @@ const sidecar = (file: string) => file.replace(/\.md$/, ".json")
 function sidecarPayload(meta: CompactionMeta, after: number | null | "pending", markdownFile: string, summary: string, tasks: CompactionTaskSnapshot[]) {
   return {
     id: compactionIdFromMarkdown(markdownFile),
-    timestamp: isoSeconds(meta.at),
+    timestamp: new Date(meta.at).toISOString(),
     sessionId: meta.sessionId,
     model: meta.model,
     trigger: meta.trigger,
@@ -227,10 +230,13 @@ export function finishCompaction(file: string, tokensAfter: number | null) {
   }
 }
 
-/** `<stamp>.md`, then `<stamp>-2.md`, `-3`…: plain string order puts `-2` before the first one and `-10` before `-2`. */
-function compactionOrder(name: string): [string, number] {
+/**
+ * `<stamp>.md`, then `<stamp>-2.md`, `-3`… for the same stamp, ordered by time: plain string order puts `-2` before
+ * the first one, `-10` before `-2`, and an old second-precision stamp after a new one from the same second.
+ */
+function compactionOrder(name: string): [number, number, string] {
   const m = /^(.*Z)(?:-(\d+))?\.md$/.exec(name)
-  return m ? [m[1]!, Number(m[2] ?? 1)] : [name, 0]
+  return m ? [compactionTime(m[1]!) ?? 0, Number(m[2] ?? 1), name] : [0, 0, name]
 }
 
 /** Log files, oldest first. */
@@ -240,9 +246,9 @@ export function listCompactions(dir: string): string[] {
       .readdirSync(dir)
       .filter((f) => f.endsWith(".md"))
       .sort((a, b) => {
-        const [x, i] = compactionOrder(a)
-        const [y, j] = compactionOrder(b)
-        return x < y ? -1 : x > y ? 1 : i - j
+        const [x, i, m] = compactionOrder(a)
+        const [y, j, n] = compactionOrder(b)
+        return x - y || i - j || (m < n ? -1 : m > n ? 1 : 0)
       })
   } catch {
     return []
@@ -322,10 +328,13 @@ export function readCompactionRecords(dir: string, filter: { taskId?: string; li
   return out
 }
 
-/** A compaction id (2026-10-22T18-40-05Z, maybe with a -2 suffix) or an ISO time, as ms; null when it is neither. */
+/**
+ * A compaction id (2026-10-22T18-40-05.123Z, or 2026-10-22T18-40-05Z from before milliseconds, maybe with a -2
+ * suffix) or an ISO time, as ms; null when it is neither.
+ */
 export function compactionTime(ref: string): number | null {
-  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z/.exec(ref.trim())
-  const t = m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}Z`) : Date.parse(ref.trim())
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})(\.\d{3})?Z/.exec(ref.trim())
+  const t = m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}${m[5] ?? ""}Z`) : Date.parse(ref.trim())
   return Number.isFinite(t) ? t : null
 }
 

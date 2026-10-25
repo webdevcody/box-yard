@@ -358,7 +358,7 @@ export class Orchestrator {
     const previous = this.latestSummary()
     const since = this.previousCompactionAt()
     const ids = new Set([
-      ...this.store.listTasks().filter((t) => t.updatedAt > since).map((t) => t.id),
+      ...this.store.listTasks().filter((t) => t.updatedAt >= since).map((t) => t.id),
       ...mentionedTaskIds(this.store.listChatSince(since).flatMap((m) => [m.content, m.meta])),
     ])
     return summaryPrompt(withOwner(SUMMARY_PROMPT, this.owner()), { previous, liveTasks: liveTaskLines(this.store, ids, { busy: true }) })
