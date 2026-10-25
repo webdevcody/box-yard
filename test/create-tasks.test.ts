@@ -9,7 +9,7 @@ import { buildMcpServer, MAX_TASK_BATCH, type McpCaller } from "../server/mcp.js
 import { Artifacts } from "../server/artifacts.js"
 import { LocalProvider } from "../server/providers/local.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
-import { FAKE_CLAUDE, freePort, testConfig } from "./helpers.js"
+import { FAKE_CLAUDE, freePort, testConfig, waitFor } from "./helpers.js"
 
 // create_tasks: many tasks in one MCP call, checked all at once, scoped like create_task.
 
@@ -57,6 +57,9 @@ async function start(overrides: Parameters<typeof testConfig>[0] = {}): Promise<
 afterEach(async () => {
   for (const c of clients.splice(0)) await c.close().catch(() => {})
   for (const r of running.splice(0)) {
+    // runs_on "local" tasks start on the local runner (the box provider never makes a box): let their turns end.
+    for (const t of r.yard.store.listTaskRows()) if (t.current_turn_id) await r.yard.tasks.stopTask(t.id).catch(() => {})
+    await waitFor(() => r.yard.store.listTaskRows().every((t) => !t.current_turn_id), "turns to end").catch(() => {})
     r.yard.stop()
     await new Promise((res) => r.server.close(() => res(null)))
   }
@@ -242,5 +245,56 @@ describe("create_tasks", () => {
     }
     // Started by the Captain, like create_task.
     expect(store.getTaskRow(res.tasks[0].id)!.source).toBe(`captain:${alpha.id}`)
+  })
+
+  it("takes runs_on per item and as a shared default, and checks every runner before creating anything", async () => {
+    const r = await start()
+    const { store } = r.yard
+    const p = store.createProject({ name: "mac", runner: "local" })
+    const coordinator = await mcpAs(r, { kind: "coordinator" })
+
+    const res = await coordinator.json("create_tasks", {
+      project: "mac",
+      runs_on: "box",
+      tasks: [
+        { title: "Shared", prompt: "a" },
+        { title: "Own", prompt: "b", runs_on: "local" },
+      ],
+    })
+    const [shared, own] = res.tasks.map((t: { id: string }) => store.getTask(t.id)!)
+    expect(shared.runsOn).toBe("box")
+    expect(own.runsOn).toBe("local")
+    expect(store.taskRunner(store.getTaskRow(shared.id)!)).toBe("box")
+    // Without runs_on a task follows its project.
+    const plain = await coordinator.json("create_tasks", { project: "mac", tasks: [{ title: "Plain", prompt: "c" }] })
+    const plainRow = store.getTaskRow(plain.tasks[0].id)!
+    expect(store.getTask(plainRow.id)!.runsOn).toBeNull()
+    expect(store.taskRunner(plainRow)).toBe("local")
+    // create_task takes it too, and says so in its reply.
+    const one = await coordinator.json("create_task", { project: "mac", title: "One", prompt: "d", runs_on: "box" })
+    expect(one.runsOn).toBe("box")
+
+    // This computer can't run agents: every item that wants it is listed, and nothing is created.
+    r.yard.tasks.runnerProblem = async (runner) => (runner === "local" ? "Claude Code isn't installed on this computer" : null)
+    const before = store.listTasks().length
+    const err = await coordinator.error("create_tasks", {
+      project: "mac",
+      runs_on: "local",
+      tasks: [
+        { title: "Here", prompt: "a" },
+        { title: "There", prompt: "b", runs_on: "box" },
+        { title: "Also here", prompt: "c" },
+      ],
+    })
+    expect(err).toMatch(/^No task was created: 2 problems/)
+    expect(err).toContain(`- #1 "Here": runs_on "local": Can't run it on this computer: Claude Code isn't installed on this computer.`)
+    expect(err).toContain(`- #3 "Also here": runs_on "local"`)
+    expect(err).not.toContain("#2")
+    expect(await coordinator.error("create_task", { project: "mac", title: "Here", prompt: "a", runs_on: "local" })).toContain("Can't run it on this computer")
+    expect(store.listTasks()).toHaveLength(before)
+    // send_to_task with runs_on is refused the same way, and nothing is sent or pinned.
+    expect(await coordinator.error("send_to_task", { task: one.id, message: "continue locally", runs_on: "local" })).toContain("Can't run it on this computer")
+    expect(store.getTask(one.id)!.runsOn).toBe("box")
+    expect(store.getTask(one.id)!.pendingCount).toBe(0)
   })
 })
