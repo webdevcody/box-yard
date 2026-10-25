@@ -43,7 +43,7 @@ const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit:
     help: "The most one project's pods may cost together; a project can set its own (Project › Settings › Boxes). Its next pod waits when it would go over, and GPU types priced above this are skipped.",
   },
   { key: "totalMaxHourlyUsd", label: "Max for all pods", unit: "$/hr", step: 0.05, help: "No new pod starts when it would take the GPU spend of every running pod over this; its task waits and says so." },
-  { key: "volumeGb", label: "Network volume", unit: "GB", help: "Each GPU project gets a volume this size at /workspace for caches, datasets and model weights, kept across pods (about $0.07/GB/month). 0: none, and pods start in any datacenter." },
+  { key: "volumeGb", label: "Network volume", unit: "GB", help: "Each GPU project on Secure Cloud gets a volume this size at /workspace for caches, datasets and model weights, kept across pods (about $0.07/GB/month). 0: none, and pods start in any datacenter." },
   { key: "containerDiskGb", label: "Pod disk", unit: "GB", help: "The pod's own disk, where task folders live while it runs. It goes with the pod." },
   { key: "watchdogMinutes", label: "Watchdog", unit: "min", help: "Each pod terminates itself when this Box Yard hasn't been in touch for this long (this computer slept or went offline), so a pod never runs up a bill on its own." },
 ]
