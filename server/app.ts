@@ -6,7 +6,7 @@ import { execFile } from "node:child_process"
 import { z } from "zod"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
-import { Store, BadRequestError } from "./store.js"
+import { Store, BadRequestError, NotFoundError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
@@ -435,9 +435,26 @@ export function createBoxYard(
     const id = req.params.id!
     for (const s of store.listSchedules({ projectId: id })) await scheduler.remove(s.id)
     for (const t of store.listTasks({ projectId: id })) await tasks.deleteTask(t.id)
+    await tasks.projectDeleted(id)
     store.deleteProject(id)
     hub.broadcast({ type: "project.deleted", projectId: id })
     res.json({ ok: true })
+  })
+  // ---- project snapshots (shared/snapshots.ts): new boxes for the project start from one
+  /** The project's snapshot and its running or last snapshot job. */
+  api.get("/projects/:id/snapshot", (req, res) => {
+    const project = store.getProject(req.params.id!)
+    if (!project) throw new NotFoundError(`Project ${req.params.id} not found`)
+    res.json({ snapshot: project.snapshot, job: tasks.snapshotJob(project.id) })
+  })
+  /** Take (or replace) the project's snapshot from one of its boxes; answers right away with the running job (SSE project.snapshot follows). 409 while agents run on it. */
+  api.post("/projects/:id/snapshot", async (req, res) => {
+    const body = parse(z.object({ boxId: z.string().min(1), reason: z.string().max(500).optional() }), req.body ?? {})
+    res.status(202).json(await tasks.snapshotBox(body.boxId, req.params.id!, { by: { kind: "cody" }, reason: body.reason ?? null }))
+  })
+  /** Forget the project's snapshot and delete it at the provider; its new boxes start cold. */
+  api.delete("/projects/:id/snapshot", async (req, res) => {
+    res.json(await tasks.clearProjectSnapshot(req.params.id!))
   })
   // ---- project notes (curated by the Captain) and agents' note suggestions
   const ownerEditor = () => ({ by: settings.get().ownerName })

@@ -5,6 +5,7 @@ import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
 import { normalizeRunner, type Runner } from "../shared/runner.js"
+import type { ProjectSnapshot } from "../shared/snapshots.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -239,6 +240,12 @@ interface ProjectRow {
   heavy_tasks: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
+  snapshot_id?: string | null
+  snapshot_provider?: string | null
+  snapshot_size?: string | null
+  snapshot_box_id?: string | null
+  snapshot_bytes?: number | null
+  snapshot_at?: number | null
   sort_order: number
   created_at: number
   updated_at: number
@@ -611,6 +618,16 @@ export class Store {
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
       heavyTasks: normalizeHeavyTasks(row.heavy_tasks),
+      snapshot: row.snapshot_id
+        ? {
+            id: row.snapshot_id,
+            provider: row.snapshot_provider ?? "upstash",
+            size: normalizeBoxSize(row.snapshot_size),
+            boxId: row.snapshot_box_id ?? "",
+            bytes: row.snapshot_bytes ?? null,
+            takenAt: row.snapshot_at ?? 0,
+          }
+        : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -750,6 +767,17 @@ export class Store {
     this.setHeavyTasks(id, patch.heavyTasks)
     this.setProjectNotesBudget(id, patch)
     return this.getProject(id)!
+  }
+
+  /** The box snapshot new boxes for the project start from; null clears it (they start cold). */
+  setProjectSnapshot(id: string, snap: ProjectSnapshot | null): Project | null {
+    this.db
+      .prepare(
+        `UPDATE projects SET snapshot_id = ?, snapshot_provider = ?, snapshot_size = ?, snapshot_box_id = ?, snapshot_bytes = ?, snapshot_at = ?,
+           updated_at = ? WHERE id = ?`,
+      )
+      .run(snap?.id ?? null, snap?.provider ?? null, snap?.size ?? null, snap?.boxId ?? null, snap?.bytes ?? null, snap?.takenAt ?? null, Date.now(), id)
+    return this.getProject(id)
   }
 
   /** undefined leaves it as it is; "box" is stored as NULL, like a project from before the setting. */

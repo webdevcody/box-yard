@@ -8,6 +8,7 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { HeavyTasks } from "./memory.js"
 import type { Runner } from "./runner.js"
+import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -61,6 +62,8 @@ export interface Project {
   runner: Runner
   /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
   heavyTasks: HeavyTasks
+  /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
+  snapshot: ProjectSnapshot | null
   createdAt: number
   updatedAt: number
 }
@@ -365,6 +368,8 @@ export interface BoxInfo {
   residentTasks: string[]
   /** Names of the projects whose tasks live on this box. */
   projects: string[]
+  /** Ids of the projects with work on this box, or that it was made for (the ones it can be snapshotted for). */
+  projectIds?: string[]
   activeMs: number
   uptimeMs: number
   diskBytes: number | null
@@ -399,7 +404,7 @@ export interface BoxInfo {
   lastUsedAt: number
 }
 
-export type BoxOperation = "cleanup" | "clear" | "delete" | "resize"
+export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot"
 
 /** What Clear box and Delete box would touch, for their confirmations. */
 export interface BoxContents {
@@ -466,6 +471,8 @@ export type UiEvent =
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
   | { type: "box.resize"; resize: BoxResize }
+  /** A project snapshot job started, moved on a step or finished (shared/snapshots.ts). */
+  | { type: "project.snapshot"; job: SnapshotJob }
   /** A new box history row (server/boxHistory.ts). */
   | { type: "box.event"; event: BoxEvent }
   | { type: "schedule"; schedule: Schedule }
