@@ -4,6 +4,7 @@ import { BadRequestError, type Store } from "./store.js"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
   DEFAULT_AUTOCOMPACT_TOKENS,
   DEFAULT_CAPTAIN_EFFORT,
@@ -68,6 +69,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Off: a task whose project needs a bigger box than any free one waits for it; placement never resizes a box.
   placementResizeEnabled: false,
   maxBoxes: 5,
+  boxCreateConcurrency: BOX_CREATE_CONCURRENCY.default,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
   localAgents: 2,
@@ -116,6 +118,7 @@ export function parseSettingKeys(raw: unknown): (keyof Settings)[] {
 const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   workerSize: "WORKER_SIZE",
   maxBoxes: "BOX_POOL_MAX",
+  boxCreateConcurrency: "BOX_CREATE_CONCURRENCY",
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
   localAgents: "BOXYARD_LOCAL_AGENTS",
@@ -173,6 +176,7 @@ export const settingsPatch = z
     autoResizeMaxSize: z.enum(BOX_SIZES),
     placementResizeEnabled: z.boolean(),
     maxBoxes: z.number().int().min(1).max(100),
+    boxCreateConcurrency: z.number().int().min(BOX_CREATE_CONCURRENCY.min).max(BOX_CREATE_CONCURRENCY.max),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
     localAgents: z.number().int().min(LOCAL_AGENTS_LIMITS.min).max(LOCAL_AGENTS_LIMITS.max),
@@ -218,6 +222,7 @@ export class SettingsStore {
       | "captainEffort"
       | "workerSize"
       | "maxBoxes"
+      | "boxCreateConcurrency"
       | "slotsPerBox"
       | "maxAgents"
       | "localAgents"
@@ -298,6 +303,7 @@ export class SettingsStore {
     // Config already holds either explicit env vars or defaults derived from the effective worker size.
     const pool = {
       maxBoxes: this.c.maxBoxes ?? DEFAULT_SETTINGS.maxBoxes,
+      boxCreateConcurrency: within(this.c.boxCreateConcurrency ?? DEFAULT_SETTINGS.boxCreateConcurrency, BOX_CREATE_CONCURRENCY),
       slotsPerBox: slotsExplicit ? configSlots : sizeDefaults.slotsPerBox,
       maxAgents: this.c.maxAgents ?? DEFAULT_SETTINGS.maxAgents,
       localAgents: within(this.c.localAgents ?? DEFAULT_SETTINGS.localAgents, LOCAL_AGENTS_LIMITS),

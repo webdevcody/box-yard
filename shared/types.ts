@@ -590,6 +590,8 @@ export interface Settings {
   placementResizeEnabled: boolean
   /** Most worker boxes alive at once. */
   maxBoxes: number
+  /** Most worker boxes being created at the same time, when many tasks wait for one (still within maxBoxes). */
+  boxCreateConcurrency: number
   /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
   slotsPerBox: number
   /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
@@ -652,6 +654,9 @@ export function agentCapacity(p: { maxBoxes: number; slotsPerBox: number; maxAge
   const perBoxes = p.maxBoxes * p.slotsPerBox
   return p.maxAgents > 0 ? Math.min(p.maxAgents, perBoxes) : perBoxes
 }
+
+/** Settings › Boxes created at once: its default and range. */
+export const BOX_CREATE_CONCURRENCY = { default: 10, min: 1, max: 50 } as const
 
 /** Free-plan box limit, from https://upstash.com/pricing/box (checked 2026-10-22). */
 export const UPSTASH_FREE_CONCURRENT_BOXES = 10
