@@ -318,7 +318,7 @@ export class TaskManager {
   private wantsBox = new Set<string>()
   private lastBoxError: { at: number; message: string } | null = null
   /**
-   * Box creation's backoff (#122): failed creates in a row, when the next one may start, and how many may run at
+   * Box creation's backoff: failed creates in a row, when the next one may start, and how many may run at
    * once right now (Settings › Boxes created at once, halved by a rate limit and grown back by one per new box).
    */
   private boxCreate = { failures: 0, retryAt: 0, window: Number.POSITIVE_INFINITY }
@@ -540,7 +540,7 @@ export class TaskManager {
   }
 
   /**
-   * Start several tasks at once (create_tasks, #122). Every input is checked before anything is written, and all
+   * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
    * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
    * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
    * per call.

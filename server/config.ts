@@ -97,7 +97,7 @@ export const config = {
 
   /** Max worker boxes alive at once (the free plan allows about 5). */
   maxBoxes: int("BOX_POOL_MAX", 5),
-  /** Worker boxes created at the same time when many tasks wait for one (#122). */
+  /** Worker boxes created at the same time when many tasks wait for one. */
   boxCreateConcurrency: int("BOX_CREATE_CONCURRENCY", BOX_CREATE_CONCURRENCY.default),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
