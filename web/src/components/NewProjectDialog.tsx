@@ -1,8 +1,10 @@
 import { useState } from "react"
 import { useLocation } from "wouter"
-import { newClientId, useCreateProject } from "../lib/queries"
+import { ShieldAlert } from "lucide-react"
+import { newClientId, useCreateProject, useSetup } from "../lib/queries"
 import { Modal } from "./Modal"
-import { Button, Field, inputClass, parseEnv } from "./ui"
+import { Button, Field, LineIcon, Select, inputClass, parseEnv } from "./ui"
+import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 
 export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [, navigate] = useLocation()
@@ -12,17 +14,22 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [repo, setRepo] = useState("")
   const [baseBranch, setBaseBranch] = useState("main")
   const [env, setEnv] = useState("")
+  const setup = useSetup()
+  // Where setup chose (This computer or Upstash boxes) until picked here.
+  const [picked, setPicked] = useState<Runner | null>(null)
+  const runner = picked ?? setup.data?.runner.default ?? null
+  const noUpstash = setup.data?.upstash.available === false
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
     const id = newClientId("prj")
-    create.mutate({ id, name: name.trim(), description, repo: repo.trim() || null, baseBranch, env: parseEnv(env) })
+    create.mutate({ id, name: name.trim(), description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), ...(runner && { runner }) })
     onClose()
     navigate(`/projects/${id}`)
   }
 
-  const dirty = Boolean(name || description || repo || env || baseBranch !== "main")
+  const dirty = Boolean(name || description || repo || env || baseBranch !== "main" || picked)
 
   return (
     <Modal
@@ -60,6 +67,26 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
           </Field>
         </div>
       </div>
+      {runner && (
+        <div className="space-y-2">
+          <Field label="Runs on" hint="Change it any time in the project's Settings.">
+            <Select className="w-full sm:w-80" value={runner} onChange={(e) => setPicked(e.target.value as Runner)} data-testid="new-project-runner">
+              {RUNNERS.map((r) => (
+                <option key={r} value={r} disabled={r === "box" && noUpstash}>
+                  {RUNNER_LABEL[r]}
+                  {r === "local" ? " (not sandboxed)" : noUpstash ? " (add an Upstash key in Settings first)" : ""}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          {runner === "local" && (
+            <p role="note" className="flex items-start gap-2 text-xs leading-relaxed text-amber-200/90">
+              <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+              <span>{LOCAL_UNSANDBOXED}</span>
+            </p>
+          )}
+        </div>
+      )}
       <Field label="Env vars (optional)" hint="KEY=value, one per line. Every task in the project gets them.">
         <textarea className={`${inputClass} font-mono text-xs`} rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder="DATABASE_URL=..." />
       </Field>

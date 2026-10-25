@@ -38,6 +38,8 @@ export interface SetupDeps {
 
 /** The setup choice of where agents run, in its own kv entry. */
 const RUNNER_KV = "setup_runner"
+/** What's missing on a first run before the owner picks This computer or Upstash boxes. */
+export const NO_RUNNER_CHOICE = "a choice of where agents run"
 /** A look at this computer's tools and logins is reused this long. */
 export const LOCAL_CHECK_TTL_MS = 60_000
 
@@ -107,7 +109,8 @@ export class Setup {
     const boxesRequired = !mock && c.boxProvider !== "local" && !onComputer
     const claudeSet = set("claudeOauthToken") || set("anthropicApiKey") || (onComputer && local?.claudeLogin === true)
     const missing: string[] = []
-    if (boxesRequired && !set("upstashBoxApiKey")) missing.push(CREDENTIAL_INFO.upstashBoxApiKey.label)
+    // Before the choice, a box key isn't the only way: "This computer" needs none.
+    if (boxesRequired && !set("upstashBoxApiKey")) missing.push(choice === null ? NO_RUNNER_CHOICE : CREDENTIAL_INFO.upstashBoxApiKey.label)
     if (onComputer && !mock && local && !local.tools.find((t) => t.key === "claude")?.found) missing.push("Claude Code on this computer")
     if (!mock && !claudeSet) missing.push("Claude sign-in")
     const restart: string[] = []

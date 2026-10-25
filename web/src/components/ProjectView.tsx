@@ -10,6 +10,7 @@ import {
   useProjects,
   useSchedules,
   useSettings,
+  useSetup,
   useTasks,
   useUpdateProject,
 } from "../lib/queries"
@@ -382,6 +383,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
   const server = useSettings()
+  const setup = useSetup()
+  // Without an Upstash key there's nowhere to make a box: "Upstash box" waits until one is added (unless it's already set).
+  const noUpstash = setup.data?.upstash.available === false
   const defaults = settings.data?.settings
 
   return (
@@ -443,13 +447,18 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
-              <option key={r} value={r}>
+              <option key={r} value={r} disabled={r === "box" && noUpstash && project.runner === "local"}>
                 {RUNNER_LABEL[r]}
-                {r === "local" ? " (not sandboxed)" : ""}
+                {r === "local" ? " (not sandboxed)" : r === "box" && noUpstash && project.runner === "local" ? " (add an Upstash key in Settings first)" : ""}
               </option>
             ))}
           </Select>
         </Field>
+        {noUpstash && project.runner === "local" && (
+          <p className="text-xs text-zinc-500" data-testid="runner-upstash-later">
+            To run this project in isolated Upstash boxes, add an Upstash Box API key in Settings › Credentials.
+          </p>
+        )}
         {runner === "local" && (
           <div role="note" className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 sm:max-w-xl" data-testid="runner-warning">
             <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
