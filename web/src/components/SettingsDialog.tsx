@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, DollarSign, ExternalLink, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, Cpu, DollarSign, ExternalLink, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -19,6 +19,7 @@ import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
 import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
+import { RunPodPanel } from "./RunPodSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
@@ -46,7 +47,7 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, runpod: Cpu, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -376,6 +377,8 @@ export function SettingsDialog({
           <VoicePanel fid={fid} />
         ) : section === "credentials" ? (
           <CredentialsPanel fid={fid} />
+        ) : section === "runpod" ? (
+          <RunPodPanel fid={fid} />
         ) : section === "hooks" ? (
           <Panel section="hooks">
             <HooksPanel projectId={null} intro={false} />

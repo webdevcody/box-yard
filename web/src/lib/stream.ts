@@ -11,6 +11,7 @@ import { placeMessage } from "./queued"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
+import type { RunPodStatus } from "../../../shared/runpod"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -167,6 +168,9 @@ export function useServerEvents(enabled: boolean): Connection {
           qc.setQueryData(keys.setup, ev.status)
           void qc.invalidateQueries({ queryKey: keys.health })
           void qc.invalidateQueries({ queryKey: keys.setupRepos })
+          break
+        case "runpod.build":
+          qc.setQueryData<RunPodStatus>(keys.runpod, (old) => (old ? { ...old, build: ev.build } : old))
           break
         case "tts":
           setTtsInfo(ev.info)

@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!bootstrap.sh
+!init.sh
+!watchdog.sh
+!start.sh

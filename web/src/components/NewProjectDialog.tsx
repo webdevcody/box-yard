@@ -19,6 +19,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [picked, setPicked] = useState<Runner | null>(null)
   const runner = picked ?? setup.data?.runner.default ?? null
   const noUpstash = setup.data?.upstash.available === false
+  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -72,9 +73,9 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
           <Field label="Runs on" hint="Change it any time in the project's Settings.">
             <Select className="w-full sm:w-80" value={runner} onChange={(e) => setPicked(e.target.value as Runner)} data-testid="new-project-runner">
               {RUNNERS.map((r) => (
-                <option key={r} value={r} disabled={r === "box" && noUpstash}>
+                <option key={r} value={r} disabled={(r === "box" && noUpstash) || (r === "gpu" && noRunPod)}>
                   {RUNNER_LABEL[r]}
-                  {r === "local" ? " (not sandboxed)" : noUpstash ? " (add an Upstash key in Settings first)" : ""}
+                  {r === "local" ? " (not sandboxed)" : r === "gpu" ? (noRunPod ? " (add a RunPod key in Settings first)" : "") : noUpstash ? " (add an Upstash key in Settings first)" : ""}
                 </option>
               ))}
             </Select>

@@ -76,6 +76,7 @@ describe("GET /api/setup", () => {
       claudeOauthToken: { state: "unset", source: null },
       anthropicApiKey: { state: "unset", source: null },
       githubToken: { state: "unset", source: null },
+      runpodApiKey: { state: "unset", source: null },
     })
     expect(body.boxes).toEqual({ provider: "local", required: true })
     expect(body.claude).toEqual({ required: true, state: "unset", using: null })

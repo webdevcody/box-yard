@@ -138,6 +138,8 @@ export const config = {
   claudeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
   githubToken: env.GITHUB_TOKEN ?? "",
+  /** RunPod GPU pods (Settings › RunPod GPU, docs/runpod.md). Optional. */
+  runpodApiKey: env.RUNPOD_API_KEY ?? "",
   gitUserName: env.GIT_USER_NAME ?? "Box Yard Agent",
   gitUserEmail: env.GIT_USER_EMAIL ?? "box-yard@users.noreply.github.com",
 
