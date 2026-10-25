@@ -30,6 +30,7 @@ import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
   BOX_SIZES,
+  DEFAULT_AUTOCOMPACT_TOKENS,
   EFFORTS,
   SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
@@ -115,7 +116,20 @@ export function Panel({ section, children }: { section: SettingsSection; childre
   )
 }
 
-function AutoCompactControl({ id, label, value, onChange }: { id: string; label: string; value: AutoCompact; onChange: (v: AutoCompact) => void }) {
+function AutoCompactControl({
+  id,
+  label,
+  value,
+  onChange,
+  tokens = 800_000,
+}: {
+  id: string
+  label: string
+  value: AutoCompact
+  onChange: (v: AutoCompact) => void
+  /** The token count a switch to "tokens" starts from. */
+  tokens?: number
+}) {
   const percent = value.unit === "percent"
   return (
     <div className="space-y-2">
@@ -142,7 +156,7 @@ function AutoCompactControl({ id, label, value, onChange }: { id: string; label:
           aria-label={`${label} unit`}
           onChange={(e) => {
             const unit = e.target.value as AutoCompact["unit"]
-            onChange({ ...value, unit, value: unit === "percent" ? 80 : 800_000 })
+            onChange({ ...value, unit, value: unit === "percent" ? 80 : tokens })
           }}
         >
           <option value="percent">% of window</option>
@@ -407,7 +421,7 @@ export function SettingsDialog({
             <Row
               id={fid("oac")}
               label="Auto-compact"
-              help="Compacts between turns once context usage passes this. A summary is saved to the compaction log first. Off: only the CLI's own last-resort compaction near the window limit."
+              help={`Compacts the Coordinator and every Captain between turns once context usage passes this. A summary is saved to the compaction log first and shown again after the compaction. Default: ${DEFAULT_AUTOCOMPACT_TOKENS / 1000}k tokens; every turn re-sends the whole context, so a lower threshold makes turns cheaper. Off: only the CLI's own last-resort compaction near the window limit.`}
               hint={hint("orchestratorAutoCompact")}
             >
               <AutoCompactControl
@@ -415,6 +429,7 @@ export function SettingsDialog({
                 label="Coordinator auto-compact"
                 value={s.orchestratorAutoCompact}
                 onChange={(v) => set("orchestratorAutoCompact", v)}
+                tokens={DEFAULT_AUTOCOMPACT_TOKENS}
               />
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>

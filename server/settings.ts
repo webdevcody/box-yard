@@ -5,6 +5,7 @@ import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
   BOX_SIZES,
+  DEFAULT_AUTOCOMPACT_TOKENS,
   DEFAULT_CAPTAIN_EFFORT,
   DEFAULT_CAPTAIN_MODEL,
   DEFAULT_EFFORT,
@@ -51,7 +52,9 @@ export const DEFAULT_SETTINGS: Settings = {
   startInZen: true,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorEffort: DEFAULT_EFFORT,
-  orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 },
+  // A fixed token count, not a share of the window: 80% of a 1M window let every Coordinator and Captain turn
+  // carry up to 800k tokens of history. A value saved in Settings wins (only changed keys are saved).
+  orchestratorAutoCompact: { enabled: true, unit: "tokens", value: DEFAULT_AUTOCOMPACT_TOKENS },
   captainModel: DEFAULT_CAPTAIN_MODEL,
   captainEffort: DEFAULT_CAPTAIN_EFFORT,
   agentModel: DEFAULT_MODEL,

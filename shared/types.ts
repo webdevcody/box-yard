@@ -527,6 +527,8 @@ export const DEFAULT_CAPTAIN_EFFORT: Effort = DEFAULT_EFFORT
 /** The CLI accepts an auto-compact window between these many tokens. */
 export const AUTOCOMPACT_MIN_TOKENS = 100_000
 export const AUTOCOMPACT_MAX_TOKENS = 1_000_000
+/** The Coordinator's and Captains' default auto-compact threshold (Settings › Coordinator › Auto-compact). */
+export const DEFAULT_AUTOCOMPACT_TOKENS = 250_000
 
 export const WORKER_SIZES = ["small", "medium", "large"] as const
 export type WorkerSize = (typeof WORKER_SIZES)[number]
