@@ -31,6 +31,8 @@ export interface BoxProvider {
   readonly claudeBin: string
   /** Folder inside a box that holds `.boxyard/` and `tasks/`. */
   root(boxId: string): string
+  /** Folder holding the task folders, `<root>/tasks` unless the provider says otherwise (the local runner). */
+  tasksRoot?(boxId: string): string
   /** Create a worker box with Claude Code and git ready. Returns its id. */
   create(opts: { labels: string[]; size?: WorkerSize }): Promise<string>
   health(boxId: string): Promise<BoxHealth>
@@ -76,6 +78,12 @@ export interface BoxProvider {
 
 /** The provider behind one box: its name, node and claude binaries can differ from the one new boxes come from. */
 export const providerOf = (p: BoxProvider, boxId: string): BoxProvider => p.of?.(boxId) ?? p
+
+/** The folder a box keeps its task folders in: `<root>/tasks`, or the provider's own (the local runner's). */
+export const tasksRootOf = (p: BoxProvider, boxId: string): string => {
+  const own = providerOf(p, boxId)
+  return own.tasksRoot?.(boxId) ?? `${own.root(boxId)}/tasks`
+}
 
 /** Quote a string for a POSIX shell. */
 export function q(s: string): string {

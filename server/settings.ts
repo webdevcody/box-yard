@@ -27,6 +27,7 @@ import type { CredentialKey } from "../shared/setup.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
 import { DEFAULT_MEMORY_POLICY } from "../shared/memory.js"
+import { LOCAL_AGENTS_LIMITS } from "../shared/runner.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
@@ -66,6 +67,7 @@ export const DEFAULT_SETTINGS: Settings = {
   maxBoxes: 5,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
+  localAgents: 2,
   costRates: {
     boxActiveCpuHourlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].activeCpuHourlyUsd])) as Record<BoxSize, number>,
     boxKeepAliveMonthlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].keepAliveMonthlyUsd])) as Record<BoxSize, number>,
@@ -113,6 +115,7 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   maxBoxes: "BOX_POOL_MAX",
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
+  localAgents: "BOXYARD_LOCAL_AGENTS",
   maxResidentPerBox: "BOX_MAX_RESIDENT",
   boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
@@ -169,6 +172,7 @@ export const settingsPatch = z
     maxBoxes: z.number().int().min(1).max(100),
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
+    localAgents: z.number().int().min(LOCAL_AGENTS_LIMITS.min).max(LOCAL_AGENTS_LIMITS.max),
     costRates,
     budget,
     maxResidentPerBox: z.number().int().min(1).max(200),
@@ -213,6 +217,7 @@ export class SettingsStore {
       | "maxBoxes"
       | "slotsPerBox"
       | "maxAgents"
+      | "localAgents"
       | "maxResidentPerBox"
       | "boxIdleDeleteMinutes"
       | "workspaceRetentionDays"
@@ -292,6 +297,7 @@ export class SettingsStore {
       maxBoxes: this.c.maxBoxes ?? DEFAULT_SETTINGS.maxBoxes,
       slotsPerBox: slotsExplicit ? configSlots : sizeDefaults.slotsPerBox,
       maxAgents: this.c.maxAgents ?? DEFAULT_SETTINGS.maxAgents,
+      localAgents: within(this.c.localAgents ?? DEFAULT_SETTINGS.localAgents, LOCAL_AGENTS_LIMITS),
       maxResidentPerBox: residentsExplicit ? configResidents : sizeDefaults.maxResidentPerBox,
       boxIdleDeleteMinutes: this.c.boxIdleDeleteMinutes ?? DEFAULT_SETTINGS.boxIdleDeleteMinutes,
       workspaceRetentionDays: this.c.workspaceRetentionDays ?? DEFAULT_SETTINGS.workspaceRetentionDays,

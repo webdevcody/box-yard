@@ -25,6 +25,7 @@ import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
+import { LOCAL_AGENTS_LIMITS, LOCAL_UNSANDBOXED } from "../../../shared/runner"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
@@ -584,8 +585,9 @@ function LimitsPanel({
   resetting: (keyof Settings)[] | null
 }) {
   const health = useHealth()
+  const server = useSettings()
   const int =
-    (k: "maxBoxes" | "maxAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
+    (k: "maxBoxes" | "maxAgents" | "localAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -675,6 +677,23 @@ function LimitsPanel({
       </Row>
       <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
+      </Row>
+      <Row
+        id={fid("la")}
+        label="Local agents"
+        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
+        hint={hint("localAgents")}
+      >
+        <input
+          id={fid("la")}
+          type="number"
+          min={LOCAL_AGENTS_LIMITS.min}
+          max={LOCAL_AGENTS_LIMITS.max}
+          className={inputClass}
+          value={s.localAgents}
+          onChange={int("localAgents")}
+          data-testid="local-agents"
+        />
       </Row>
       <Row
         id={fid("mr")}

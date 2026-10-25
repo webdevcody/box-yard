@@ -1,5 +1,6 @@
 import path from "node:path"
 import fs from "node:fs"
+import os from "node:os"
 import { fileURLToPath } from "node:url"
 import { EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
 import { DEFAULT_NOTE_BUDGET } from "../shared/notes.js"
@@ -40,6 +41,17 @@ function workerSize(name: string, fallback: WorkerSize): WorkerSize {
   return v && (WORKER_SIZES as readonly string[]).includes(v) ? (v as WorkerSize) : fallback
 }
 
+/** A folder from an env value, with a leading `~` meaning the home folder (.env files don't expand it). */
+export function homePath(value: string) {
+  return path.resolve(value.replace(/^~(?=[/\\]|$)/, os.homedir()))
+}
+
+/** `dir` with the home folder shown as `~`, for the UI. */
+export function tildePath(dir: string) {
+  const home = os.homedir()
+  return dir === home || dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir
+}
+
 /** An effort level from an env value; empty (use the Settings default) when unset or unknown. */
 export function envEffort(value: string | undefined): Effort | "" {
   const v = value?.trim().toLowerCase()
@@ -61,6 +73,12 @@ export const config = {
   port: int("PORT", 3000),
   host: env.HOST ?? "0.0.0.0",
   dataDir: path.resolve(env.BOXYARD_DATA_DIR ?? "./data"),
+  /**
+   * Where agents of "Runs on: This computer" projects work, a folder per task. Not under the data folder: that's
+   * `./data` in Box Yard's own checkout, and Claude Code reads every CLAUDE.md above the folder it runs in, so Box
+   * Yard's own agent rules would reach every other project's agents.
+   */
+  localDir: homePath(env.BOXYARD_LOCAL_DIR?.trim() || "~/boxyard-workspaces"),
   /** Shared password for the web UI. Empty means no login (fine on localhost). */
   password: env.BOXYARD_PASSWORD ?? "",
   /** Public URL of this server, used in links handed to agents. */
@@ -81,6 +99,8 @@ export const config = {
   maxBoxes: int("BOX_POOL_MAX", 5),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
+  /** Local runner: most agents of "This computer" projects running at once on this machine (their own queue, apart from box slots). */
+  localAgents: int("BOXYARD_LOCAL_AGENTS", 2),
   /** Claude turns that may run at the same time inside one box. */
   slotsPerBox: int("BOX_SLOTS", sizeDefaults.slotsPerBox),
   /** Task folders kept in one box before old, finished ones are evicted. */

@@ -28,6 +28,7 @@ function render(start: SettingsInfo) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.agentSettings, start)
   qc.setQueryData(keys.health, { provider: "local" })
+  qc.setQueryData(keys.settings, { defaultTimezone: "UTC", scheduler: "local", maxUploadMb: 20, localDir: "/Volumes/fast/agents" })
   act(() => root.render(createElement(QueryClientProvider, { client: qc }, createElement(SettingsDialog, { section: "limits", onSection: () => {}, onClose: () => {} }))))
 }
 
@@ -129,5 +130,11 @@ describe("box limit fields", () => {
     act(() => field("slotsPerBox").dispatchEvent(new FocusEvent("focusout", { bubbles: true })))
     expect(field("slotsPerBox").value).toBe("")
     expect(saveButton().disabled).toBe(true)
+  })
+
+  it("say where local tasks work, from the server (BOXYARD_LOCAL_DIR)", () => {
+    render(info())
+    expect(document.body.textContent).toContain("Each task works in its own folder in /Volumes/fast/agents (BOXYARD_LOCAL_DIR).")
+    expect(requests).toEqual([])
   })
 })

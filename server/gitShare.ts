@@ -38,6 +38,8 @@ const EMPTY_PACK_BYTES = 32
 export interface MirrorSpec {
   /** The box's root folder (holds tasks/ and .boxyard/). */
   root: string
+  /** The folder of task folders, when it isn't `<root>/tasks` (the local runner's). */
+  tasks?: string
   /** The mirror's folder, `<root>/.boxyard/repos/<name>.git`. */
   mirror: string
   /** Clone URL (GitHub https; the token comes from the credential helper). */
@@ -50,9 +52,9 @@ export interface MirrorSpec {
 
 export const mirrorObjects = (mirror: string) => `${mirror}/objects`
 
-/** Shell test: some task folder on the box borrows this mirror's objects. */
-export function mirrorInUseTest(root: string, mirrorVar: string) {
-  return `grep -qsxF "${mirrorVar}/objects" ${q(root)}/tasks/*/work/.git/objects/info/alternates`
+/** Shell test: some task folder on the box (in `tasks`, `<root>/tasks` on a box) borrows this mirror's objects. */
+export function mirrorInUseTest(tasks: string, mirrorVar: string) {
+  return `grep -qsxF "${mirrorVar}/objects" ${q(tasks)}/*/work/.git/objects/info/alternates`
 }
 
 /** Shell test: the mirror is a partial clone. */
@@ -64,7 +66,7 @@ const isPartial = (m: string) => `[ -n "$(git -C "${m}" config --get remote.orig
  * alone. Runs under a per-mirror flock so two tasks starting on one box don't race.
  */
 export function syncMirrorScript(s: MirrorSpec): string {
-  const inUse = mirrorInUseTest(s.root, "$bym")
+  const inUse = mirrorInUseTest(s.tasks ?? `${s.root}/tasks`, "$bym")
   const filter = s.partial ? " --filter=blob:none" : ""
   return [
     `bym=${q(s.mirror)}`,
@@ -186,7 +188,7 @@ export function mirrorGcScript(root: string, keep: string[], light: boolean): st
     `[ -d ${repos} ] || exit 0`,
     `for bym in ${repos}/*.git; do`,
     `  [ -e "$bym" ] || continue; b=$(basename "$bym")`,
-    `  if ${mirrorInUseTest(root, "$bym")}; then`,
+    `  if ${mirrorInUseTest(`${root}/tasks`, "$bym")}; then`,
     `    n=$(grep -lsxF "$bym/objects" ${q(root)}/tasks/*/work/.git/objects/info/alternates | wc -l)`,
     `    git -C "$bym" -c gc.pruneExpire=never gc${auto} --quiet >/dev/null 2>&1${light ? "" : ` && echo "gc $b (kept unreachable objects: $n $( [ "$n" = 1 ] && echo task borrows || echo tasks borrow ) from it)"`}`,
     `  else case " ${keep.join(" ")} " in`,
@@ -201,5 +203,5 @@ export function mirrorGcScript(root: string, keep: string[], light: boolean): st
 /** Remove the mirrors not in `keep` that no task folder borrows from (retention pass). */
 export function pruneMirrorsScript(root: string, keep: string[]): string {
   const repos = q(`${root}/.boxyard/repos`)
-  return `[ -d ${repos} ] || exit 0; for bym in ${repos}/*.git; do [ -e "$bym" ] || continue; b=$(basename "$bym"); case " ${keep.join(" ")} " in *" $b "*) ;; *) ${mirrorInUseTest(root, "$bym")} || rm -rf "$bym" "$bym.lock";; esac; done`
+  return `[ -d ${repos} ] || exit 0; for bym in ${repos}/*.git; do [ -e "$bym" ] || continue; b=$(basename "$bym"); case " ${keep.join(" ")} " in *" $b "*) ;; *) ${mirrorInUseTest(`${root}/tasks`, "$bym")} || rm -rf "$bym" "$bym.lock";; esac; done`
 }

@@ -22,6 +22,8 @@ const INDEX_MESSAGE = "box-yard: staged changes"
 export interface ArchiveScript {
   /** The box's tasks folder. */
   root: string
+  /** The box's root folder (for its stage fallback), when it isn't `root`'s parent (the local runner's). */
+  boxRoot?: string
   taskId: string
   /** tar --exclude patterns. */
   excludes: string[]
@@ -99,7 +101,7 @@ export function archiveScript(o: ArchiveScript): string {
       `  m=(); for f in claude events.jsonl events.seq; do [ -e ${id}/"$f" ] && m+=(${id}/"$f"); done`,
       `  if [ -e ${id}/work/.git ]; then`,
       // Staged like the partial archive's snapshot, on whichever of /tmp and the work disk has more room.
-      `    ${stageBaseScript(o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
+      `    ${stageBaseScript(o.boxRoot ?? o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
       `    stage=$(mktemp -d "$bybase"/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${thinSnapshot(o.taskId, o.mirror)}) || wip=failed`,
       `  else echo "no git repo in work/ to archive thin" >>"$err"; wip=failed; fi`,
       `  [ -n "$stage" ] && [ -d "$stage"/${id} ] && x=(-C "$stage" ${id}) || x=()`,
@@ -111,7 +113,7 @@ export function archiveScript(o: ArchiveScript): string {
       `  m=(); while IFS= read -r -d '' f; do m+=("$f"); done < <(find ${id} -mindepth 1 -maxdepth 1 ! -name work -print0 2>>"$err"); [ -e ${id}/work/.git ] && m+=(${id}/work/.git)`,
       `  if [ -e ${id}/work/.git ]; then`,
       // The index copy and the snapshot's objects go to whichever of /tmp and the work disk has more room.
-      `    ${stageBaseScript(o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
+      `    ${stageBaseScript(o.boxRoot ?? o.root.replace(/\/[^/]+\/?$/, "")).split("\n").join("; ")}`,
       `    stage=$(mktemp -d "$bybase"/boxyard-wip.XXXXXX 2>>"$err") && wip=$(cd ${id}/work && ${wipSnapshot(o.taskId)}) || wip=failed`,
       // No repo: without its files there would be nothing of the work left.
       `  else wip=nogit; fi`,

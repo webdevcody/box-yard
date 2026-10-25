@@ -1,4 +1,5 @@
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 import { fileURLToPath } from "node:url"
@@ -7,7 +8,7 @@ import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
 import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
-import { providerOf, q } from "./providers/types.js"
+import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
 import { deleteWipScript, gitPrepScript, gitRestoreScript, gitStages, parseGitPrep, parseGitRestore, wipRef, type GitPrepResult } from "./gitFirst.js"
 import { EventReader, parseCursor, redisEventsKey, type Cursor, type WorkerEvent } from "./bus.js"
@@ -47,6 +48,8 @@ import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
+import { LOCAL_BOX_ID, isLocalRunnerBox } from "../shared/runner.js"
+import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import {
@@ -100,6 +103,14 @@ const PORT_BASE = 4000
 const MAX_INTERRUPTS = 2
 const STALL_MS = 45_000
 const START_TIMEOUT_MS = 15 * 60_000
+/** Local turns that sleep cut off in a row before one counts as failed after all (each needs a real sleep). */
+const MAX_SLEEP_RESUMES = 10
+/** A local turn that fails within this long of the computer waking counts as cut off by the sleep. */
+const SLEEP_WAKE_GRACE_MS = 15 * 60_000
+/** Below this the runner's own clocks saw a hiccup, not a sleep (SleepWatch's threshold). */
+const RUNNER_SLEEP_MIN_MS = 20_000
+/** A local task waits with this while every Settings › Local agents slot is taken. */
+const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
 const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 /** Note suggestions one task can leave for its retro; past that the agent is logging, not suggesting. */
@@ -144,6 +155,9 @@ interface PreparedWorkspace {
   branch?: "origin" | "base"
   fallback?: { reason: string; wip: boolean }
 }
+
+/** "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. */
+const onBox = (boxId: string) => (isLocalRunnerBox(boxId) ? "on this computer" : `on box ${boxId}`)
 
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
@@ -268,6 +282,8 @@ export class TaskManager {
   private readonly settings: SettingsStore
   /** Polls GitHub for the state of every open PR. */
   readonly prs: PrTracker
+  /** When this computer slept: local-runner turns and starts that sleep broke resume instead of failing (#104). */
+  readonly sleep: SleepWatch
 
   private timers: NodeJS.Timeout[] = []
   private scheduling = false
@@ -327,7 +343,7 @@ export class TaskManager {
   private boxOps = new Map<string, BoxOp>()
   /** Resizes in progress, by box (the old box and, once made, the new one). */
   private resizes = new Map<string, BoxResize>()
-  /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive). */
+  /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive), and noteOnce keys. */
   private smallBoxNoted = new Set<string>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
@@ -353,6 +369,7 @@ export class TaskManager {
     this.settings = deps.settings
     this.uploads = deps.uploads
     this.reader = new EventReader(deps.provider, deps.redis)
+    this.sleep = new SleepWatch()
     this.prs = new PrTracker({
       store: deps.store,
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")) || null)),
@@ -405,12 +422,14 @@ export class TaskManager {
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
+    this.sleep.start(5_000, (gap) => console.log(`[box-yard] this computer slept for ${Math.round(gap.ms / 1000)}s`))
     this.schedule()
   }
 
   stop() {
     this.stopped = true
     this.prs.stop()
+    this.sleep.stop()
     for (const t of this.timers) clearInterval(t)
     if (this.emitBoxesTimer) clearTimeout(this.emitBoxesTimer)
     if (this.directoryTimer) clearTimeout(this.directoryTimer)
@@ -784,7 +803,7 @@ export class TaskManager {
     if (row.current_turn_id) await this.stopTask(taskId)
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
-    this.addEvent(row.id, "Closed. Its workspace was archived and its box slot freed.")
+    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder on this computer stays until the task is deleted." : "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
@@ -883,6 +902,7 @@ export class TaskManager {
 
   /** Turns that may run at once on this box (its own size decides the default). */
   private slotsFor(boxId: string) {
+    if (isLocalRunnerBox(boxId)) return this.settings.get().localAgents
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
   }
 
@@ -908,9 +928,9 @@ export class TaskManager {
     return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? this.settings.get().workerSize
   }
 
-  /** Agents (running turns) across all boxes. */
+  /** Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Local agents). */
   runningTotal() {
-    return this.store.listTaskRows().filter(holdsSlot).length
+    return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id)).length
   }
 
   /**
@@ -933,6 +953,8 @@ export class TaskManager {
       overridden: { agentsPerBox: why("slotsPerBox", "BOX_SLOTS"), tasksPerBox: why("maxResidentPerBox", "BOX_MAX_RESIDENT") },
       boxes: this.store.listBoxes().length,
       agentsRunning: this.runningTotal(),
+      localAgents: this.slotsFor(LOCAL_BOX_ID),
+      localAgentsRunning: this.runningOn(LOCAL_BOX_ID),
     }
   }
 
@@ -1002,7 +1024,7 @@ export class TaskManager {
     const changed = new Map<string, number>()
     if (box.status === "ready" && rows.length) {
       // One exec for the whole box: "<taskId> <changed files>" per workspace that is a git repo.
-      const root = `${this.provider.root(boxId)}/tasks`
+      const root = tasksRootOf(this.provider, boxId)
       const script = rows
         .map((r) => `[ -d ${q(`${root}/${r.id}/work/.git`)} ] && echo ${q(r.id)} $(git -C ${q(`${root}/${r.id}/work`)} status --porcelain 2>/dev/null | wc -l)`)
         .join("; ")
@@ -1593,9 +1615,11 @@ export class TaskManager {
     const live = new Set(this.store.listTaskRows().map((r) => r.current_turn_id).filter(Boolean))
     for (const id of this.claimedSlots.keys()) if (!live.has(id)) this.claimedSlots.delete(id)
     for (const listed of waiting) {
-      // Over the total agent cap: wait without growing the pool. Running work is never stopped.
+      // Over the total agent cap: wait without growing the pool. Running work is never stopped. Projects that run
+      // on this computer only count against Settings › Local agents (place).
       const cap = this.limits().maxAgents
-      const boxId = cap > 0 && this.runningTotal() >= cap ? null : await this.place(listed)
+      const local = this.store.projectRunner(listed.project_id) === "local"
+      const boxId = !local && cap > 0 && this.runningTotal() >= cap ? null : await this.place(listed)
       // Placement awaits: the task may have moved on meanwhile (its last queued message cancelled, stopped, started).
       const row = this.store.getTaskRow(listed.id)
       if (!row || !this.wantsTurn(row)) continue
@@ -1620,7 +1644,7 @@ export class TaskManager {
       })
       if (!claimed) {
         if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
-        this.setWaitReason(row.id, `Waiting for a free slot on ${boxId}`)
+        this.setWaitReason(row.id, isLocalRunnerBox(boxId) ? LOCAL_SLOT_WAIT : `Waiting for a free slot on ${boxId}`)
         this.emitTask(row.id)
         continue
       }
@@ -1663,6 +1687,14 @@ export class TaskManager {
       // Its workspace is being archived off the box; it moves to another box once that's done.
       this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : "deleted"}`)
       return null
+    }
+    // A project's "Runs on" setting: its tasks move to (or off) this computer when nothing would be lost.
+    if (this.store.projectRunner(row.project_id) === "local") {
+      const here = await this.toLocal(row)
+      if (here !== "stay") return here
+    } else if (isLocalRunnerBox(row.box_id)) {
+      const moved = await this.fromLocal(row)
+      return moved === "stay" ? this.localSlot(row) : moved
     }
     if (row.box_id) {
       const box = this.store.getBox(row.box_id)
@@ -1719,11 +1751,11 @@ export class TaskManager {
    * in a repo project its code must be on origin from a turn-end push (git-first: the branch and WIP ref) after
    * its last turn, so the new box checks the branch out rather than unpacking it.
    */
-  private moveBlock(row: TaskRow): string | null {
+  private moveBlock(row: TaskRow, maxBytes = MOVE_MAX_ARCHIVE_BYTES): string | null {
     if (!this.archiveHoldsWorkspace(row)) return "its workspace has no archive from after its last turn"
     const bytes = fs.statSync(row.archive_path!, { throwIfNoEntry: false })?.size
     if (bytes === undefined) return "its workspace has no archive from after its last turn"
-    if (bytes > MOVE_MAX_ARCHIVE_BYTES) return `its archive is ${formatBytes(bytes)}, over the ${formatBytes(MOVE_MAX_ARCHIVE_BYTES)} a restore uploads safely`
+    if (bytes > maxBytes) return `its archive is ${formatBytes(bytes)}, over the ${formatBytes(MOVE_MAX_ARCHIVE_BYTES)} a restore uploads safely`
     if (this.store.getProject(row.project_id)?.repo) {
       const push = this.store.getTask(row.id)?.pushState
       const ended = this.store.lastTurnFinishedAt(row.id) ?? 0
@@ -1768,6 +1800,85 @@ export class TaskManager {
     void this.removeTaskDir(boxId, row.id).catch(() => {})
     this.addEvent(row.id, `Moved from ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) to ${other}: its project needs ${min} boxes.`)
     return this.assign(row.id, other)
+  }
+
+  /**
+   * A task of a project that runs on this computer (the local runner, shared/runner.ts): its turn takes a Settings ›
+   * Local agents slot here, never a box slot. One whose workspace is still on a box (the project ran on boxes when it
+   * last worked) moves here when nothing would be lost, like `canMove` but with no upload limit (a restore here is a
+   * copy); otherwise it stays on that box ("stay") and its log says why. One whose box is gone restores here.
+   */
+  private async toLocal(row: TaskRow): Promise<string | null | "stay"> {
+    if (row.box_id && !isLocalRunnerBox(row.box_id)) {
+      const box = this.store.getBox(row.box_id)
+      if (box?.status === "creating") return null
+      if (box?.status === "ready") {
+        // Its turn-end archive is being written right now; it can move in a moment.
+        if (this.archiving.has(row.id)) return null
+        const block = row.session_started ? this.moveBlock(row, Infinity) : null
+        if (block) {
+          this.noteOnce(row.id, `${row.id}:${box.id}:local`, `Its project runs on this computer now, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
+          return "stay"
+        }
+        if (!this.localRoom(row)) return null
+        this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+        void this.removeTaskDir(box.id, row.id).catch(() => {})
+        this.addEvent(row.id, `Moved from box ${box.id} to this computer: its project runs its agents here now.`)
+        return this.assign(row.id, LOCAL_BOX_ID)
+      }
+      // Box is gone or lost; the workspace comes back from the archive, here.
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    }
+    return this.localSlot(row)
+  }
+
+  /**
+   * A task on this computer whose project runs on boxes again: it moves to a box (through `pickBox`) once its
+   * workspace is archived and pushed (`moveBlock`). Local tasks keep no archive, so the first look makes one.
+   * One that can't move (the archive failed, is too big to upload, or origin lacks its work) stays here ("stay").
+   */
+  private async fromLocal(row: TaskRow): Promise<string | null | "stay"> {
+    if (this.archiving.has(row.id)) return null
+    const block = row.session_started ? this.moveBlock(row) : null
+    if (block && this.c.archiveWorkspaces && !this.archiveHoldsWorkspace(row) && !this.archiveErrors.has(row.id)) {
+      this.setWaitReason(row.id, "Waiting for its workspace on this computer to be archived, so it can move to a box")
+      void this.archive(row.id, { forMove: true }).finally(() => this.schedule())
+      return null
+    }
+    if (block) {
+      this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:box`, `Its project runs on Upstash boxes now, but its workspace stays on this computer: it can't move safely (${block}).`)
+      return "stay"
+    }
+    const other = await this.pickBox(row.id)
+    if (!other) return null
+    this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    void this.removeTaskDir(LOCAL_BOX_ID, row.id).catch(() => {})
+    this.addEvent(row.id, `Moved from this computer to box ${other}: its project runs on Upstash boxes again.`)
+    return this.assign(row.id, other)
+  }
+
+  /** This computer for a local task's next turn, or null (with the reason) while its Local agents slots are taken. */
+  private localSlot(row: TaskRow): string | null {
+    if (!this.localRoom(row)) return null
+    return isLocalRunnerBox(row.box_id) ? LOCAL_BOX_ID : this.assign(row.id, LOCAL_BOX_ID)
+  }
+
+  /** A free Local agents slot that the project's heavy-tasks setting lets this task take; else false, with the reason. */
+  private localRoom(row: TaskRow): boolean {
+    if (this.runningOn(LOCAL_BOX_ID) >= this.slotsFor(LOCAL_BOX_ID)) {
+      this.setWaitReason(row.id, LOCAL_SLOT_WAIT)
+      return false
+    }
+    const heavy = this.heavyBlock(row, LOCAL_BOX_ID)
+    if (heavy) this.setWaitReason(row.id, `Waiting: ${heavy}`)
+    return !heavy
+  }
+
+  /** Add a line to a task's log the first time `key` comes up (a placement decision every pass would repeat). */
+  private noteOnce(taskId: string, key: string, line: string) {
+    if (this.smallBoxNoted.has(key)) return
+    this.smallBoxNoted.add(key)
+    this.addEvent(taskId, line)
   }
 
   /**
@@ -1975,6 +2086,7 @@ export class TaskManager {
 
   /** The box facts a worker's system prompt states (stable from turn to turn, so the prompt cache holds). */
   private boxPromptInfo(boxId: string, project: Project): BoxPromptInfo {
+    if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots: this.slotsFor(boxId), heavyTasks: project.heavyTasks, local: true }
     return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots: this.slotsFor(boxId), heavyTasks: project.heavyTasks }
   }
 
@@ -2007,11 +2119,12 @@ export class TaskManager {
     const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id && r.id !== row.id)
     if (!running.length) return null
     const name = (projectId: string) => this.store.getProjectName(projectId) ?? projectId
+    const where = isLocalRunnerBox(boxId) ? "this computer" : `box ${boxId}`
     const mine = this.store.projectHeavyTasks(row.project_id)
-    if (mine === "whole-box") return `${name(row.project_id)} runs heavy tasks on a whole box, and box ${boxId} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
-    if (mine === "one-per-box" && running.some((r) => r.project_id === row.project_id)) return `${name(row.project_id)} runs heavy tasks one per box, and another of its agents runs on box ${boxId}`
+    if (mine === "whole-box") return `${name(row.project_id)} runs heavy tasks on a whole box, and ${where} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
+    if (mine === "one-per-box" && running.some((r) => r.project_id === row.project_id)) return `${name(row.project_id)} runs heavy tasks one per box, and another of its agents runs on ${where}`
     const hog = running.find((r) => this.store.projectHeavyTasks(r.project_id) === "whole-box")
-    return hog ? `box ${boxId} is running a heavy ${name(hog.project_id)} task alone` : null
+    return hog ? `${where} is running a heavy ${name(hog.project_id)} task alone` : null
   }
 
   /** df on a box's work disk, cached for `maxAgeMs`. Saves the numbers on the box row for the Boxes page. */
@@ -2341,12 +2454,13 @@ export class TaskManager {
   // ------------------------------------------------------------------ turns
 
   taskDir(boxId: string, taskId: string) {
-    return `${this.provider.root(boxId)}/tasks/${taskId}`
+    return `${tasksRootOf(this.provider, boxId)}/${taskId}`
   }
 
   private async launch(taskId: string, boxId: string, turnId: string) {
     let row = this.requireRow(taskId)
     const dir = this.taskDir(boxId, taskId)
+    const launchedAt = Date.now()
     /** The workspace is being made fresh, so a failure leaves nothing worth keeping in its folder. */
     let fresh = false
     try {
@@ -2457,12 +2571,12 @@ export class TaskManager {
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
       // Hooks whose prompts are in this turn (a retried turn keeps the interrupted one's), so they don't fire on it.
-      const hookIds = [...new Set([...queued.filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length)), ...(flags.interrupts ? (flags.hookIds ?? []) : [])])]
+      const hookIds = [...new Set([...queued.filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length)), ...(flags.interrupts || flags.sleeps ? (flags.hookIds ?? []) : [])])]
       this.store.updateTask(taskId, {
         status: "working",
         sessionStarted: true,
         ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
-        turnFlags: { interrupts: flags.interrupts, ...(hookIds.length ? { hookIds } : {}) } as TurnFlags,
+        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, ...(hookIds.length ? { hookIds } : {}) } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
       })
@@ -2490,13 +2604,25 @@ export class TaskManager {
       if (!current) return
       // A compaction that couldn't start isn't worth failing the task over.
       const wasCompact = Boolean(current.compact_pending || current.compacting)
+      const local = isLocalRunnerBox(boxId)
+      // This computer slept while the agent was being set up (a clone or fetch lost its connection): start it again (#104).
+      if (local && !stopped && this.sleep.sleptBetween(launchedAt) > 0) {
+        this.store.finishTaskTurn(turnId, { status: "interrupted", error: message })
+        this.store.updateTask(taskId, { status: "queued", currentTurnId: null, error: null })
+        this.addEvent(taskId, `This computer slept while the agent was starting (${message}); starting it again.`)
+        this.emitTask(taskId)
+        this.schedule()
+        return
+      }
       const outOfSpace = !stopped && isOutOfSpace(message)
-      if (outOfSpace && !wasCompact && !this.diskRetried.has(taskId)) {
+      // The disk cleanup and its retry are for boxes: the janitor never touches this computer.
+      if (outOfSpace && !local && !wasCompact && !this.diskRetried.has(taskId)) {
         this.store.finishTaskTurn(turnId, { status: "failed", error: message })
         await this.retryAfterOutOfSpace(current, boxId, fresh)
         return
       }
-      if (outOfSpace) {
+      if (outOfSpace && local) message = `this computer is out of disk space. Free some space on it, then retry. ${message}`
+      else if (outOfSpace) {
         this.diskRetried.delete(taskId)
         this.diskHold.delete(taskId)
         const space = await this.probeDisk(boxId, 0)
@@ -2693,6 +2819,7 @@ export class TaskManager {
   /** Unpack the task's archive into its folder and rebuild work/. Throws (leaving no folder) when that fails. */
   private async restoreArchive(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null): Promise<PreparedWorkspace> {
     const root = this.provider.root(boxId)
+    const tasks = tasksRootOf(this.provider, boxId)
     const remote = `${root}/.boxyard/restore-${row.id}.tgz`
     let from: "git" | "partial" | null = null
     try {
@@ -2700,7 +2827,7 @@ export class TaskManager {
       await putFile(this.provider, boxId, row.archive_path!, remote)
       const res = await this.provider.exec(
         boxId,
-        `mkdir -p ${q(root + "/tasks")} && tar xzf ${q(remote)} -C ${q(root + "/tasks")} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
+        `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
       // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
@@ -2719,7 +2846,7 @@ export class TaskManager {
     const cursor = parseCursor(row.event_cursor)
     const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
     this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
-    this.addEvent(row.id, from === "git" ? `Workspace restored on box ${boxId}: its session from the archive, its code from git.` : `Workspace restored on box ${boxId}.`)
+    this.addEvent(row.id, from === "git" ? `Workspace restored ${onBox(boxId)}: its session from the archive, its code from git.` : `Workspace restored ${onBox(boxId)}.`)
     return { restored: true }
   }
 
@@ -2750,8 +2877,8 @@ export class TaskManager {
     const checkout = !row.branch ? "a fresh workspace" : prepared.branch === "base" ? `branch ${row.branch} recreated from ${project.baseBranch}` : `a fresh checkout of branch ${row.branch}`
     const work = wip ? ", with the uncommitted work its last turn pushed" : ""
     const where = kept ? ` The archive is kept on the server as ${kept} (removed after ${this.settings.get().archiveRetentionDays || "no"} days).` : ""
-    this.addEvent(row.id, `Couldn't restore the workspace archive on box ${boxId} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
-    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored on box ${boxId} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
+    this.addEvent(row.id, `Couldn't restore the workspace archive ${onBox(boxId)} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
+    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored ${onBox(boxId)} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
     return { ...prepared, fallback: { reason, wip } }
   }
 
@@ -2841,7 +2968,7 @@ export class TaskManager {
     if (res.stdout.includes(`${MIRROR_MARK}recreate`)) {
       this.addEvent(row.id, `Re-created the box's mirror of ${project.repo} as a ${mirror!.spec.partial ? "partial (blob:none)" : "full"} clone to match the project's partial clone setting.`)
     }
-    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} on box ${boxId}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready on box ${boxId}.`)
+    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} ${onBox(boxId)}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready ${onBox(boxId)}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
   }
@@ -2857,6 +2984,7 @@ export class TaskManager {
     const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
     const spec: MirrorSpec = {
       root: this.provider.root(boxId),
+      tasks: tasksRootOf(this.provider, boxId),
       mirror: `${this.provider.root(boxId)}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`,
       url: cloneUrl(project.repo!),
       partial: this.partialClone(project),
@@ -2945,15 +3073,15 @@ export class TaskManager {
     const ctrl = new AbortController()
     this.holds.set(taskId, ctrl)
     const pidFile = `${this.taskDir(boxId, taskId)}/turn.pid`
+    const wait = `while [ -f ${q(pidFile)} ] && kill -0 $(cat ${q(pidFile)}) 2>/dev/null; do sleep 15; echo .; done`
+    // On this computer it keeps a Mac out of idle sleep while the turn runs (caffeinate; -s holds off system sleep on
+    // AC power too), as the stream keeps a box awake. Closing the lid still sleeps it: the turn resumes on wake.
+    const command = isLocalRunnerBox(boxId) ? `if command -v caffeinate >/dev/null 2>&1 && [ -f ${q(pidFile)} ]; then exec caffeinate -is -w "$(cat ${q(pidFile)})"; fi; ${wait}` : wait
     const loop = async () => {
       let quickExits = 0
       while (!ctrl.signal.aborted && !this.stopped) {
         const started = Date.now()
-        await this.provider.hold(
-          boxId,
-          `while [ -f ${q(pidFile)} ] && kill -0 $(cat ${q(pidFile)}) 2>/dev/null; do sleep 15; echo .; done`,
-          ctrl.signal,
-        )
+        await this.provider.hold(boxId, command, ctrl.signal)
         if (ctrl.signal.aborted) break
         const row = this.store.getTaskRow(taskId)
         if (!row?.current_turn_id || row.box_id !== boxId) break
@@ -3206,6 +3334,10 @@ export class TaskManager {
     this.stopRequested.delete(row.id)
     this.holds.get(row.id)?.abort()
     this.holds.delete(row.id)
+    if (!stopped && !ev.ok && isLocalRunnerBox(row.box_id) && (flags.sleeps ?? 0) < MAX_SLEEP_RESUMES) {
+      const slept = this.sleptBeforeEnd(row, ev)
+      if (slept > 0) return this.resumeAfterSleep(row, ev, flags, slept)
+    }
 
     // A merged PR means the work landed; a closed one means there's no PR to review.
     // (The tracker already wrote "Pull request ... was merged" to the transcript when it saw the change.)
@@ -3268,6 +3400,46 @@ export class TaskManager {
     this.emitTask(row.id)
     this.publishDirectory()
     void this.archive(row.id).finally(() => this.schedule())
+    this.schedule()
+  }
+
+  /**
+   * How long this computer slept under a local turn that just failed, when the failure came soon after waking
+   * (SLEEP_WAKE_GRACE_MS): a dropped API connection or a timeout that fired on wake. 0 when it didn't sleep, or ran on
+   * for a while after. A turn that started before this server did has only the runner's own count (no timing).
+   */
+  private sleptBeforeEnd(row: TaskRow, ev: WorkerEvent): number {
+    const started = (row.current_turn_id ? this.store.getTaskTurn(row.current_turn_id)?.started_at : null) ?? row.updated_at
+    const seen = this.sleep.sleptBetween(Math.max(started, Date.now() - SLEEP_WAKE_GRACE_MS))
+    const runner = typeof ev.sleptMs === "number" && this.sleep.since > started && ev.sleptMs >= RUNNER_SLEEP_MIN_MS ? ev.sleptMs : 0
+    return Math.max(seen, runner)
+  }
+
+  /**
+   * A local turn this computer's sleep cut off (a laptop lid closed): queued again to carry on in the same session
+   * instead of failing (#104). Each needs a real sleep; after MAX_SLEEP_RESUMES in a row the next failure counts.
+   */
+  private resumeAfterSleep(row: TaskRow, ev: WorkerEvent, flags: TurnFlags, sleptMs: number) {
+    const error = String(ev.error ?? "The agent exited with an error.")
+    const asleep = sleepLength(sleptMs)
+    const turnCost = this.recordTaskClaudeUsage(row, ev)
+    this.store.finishTaskTurn(row.current_turn_id!, { status: "interrupted", costUsd: turnCost, error })
+    this.store.queueInput(
+      row.id,
+      "system",
+      `Your previous turn was cut off when this computer went to sleep (asleep ${asleep}; it ended with: ${error.slice(0, 300)}). Check where things stand (git status, files, any server or benchmark you started) and continue the task.`,
+    )
+    this.store.updateTask(row.id, {
+      status: "queued",
+      error: null,
+      currentTurnId: null,
+      ...usageFields(ev.usage),
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
+      turnFlags: { interrupts: flags.interrupts ?? 0, sleeps: (flags.sleeps ?? 0) + 1, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}) },
+    })
+    this.addEvent(row.id, `Turn ${row.turn_count} was cut off while this computer slept (${asleep}); it carries on now instead of failing.`)
+    this.emitTask(row.id)
+    this.publishDirectory()
     this.schedule()
   }
 
@@ -3554,7 +3726,11 @@ export class TaskManager {
   }
 
   private hasFreshArchive(row: TaskRow) {
-    return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - 1000 && fs.existsSync(row.archive_path))
+    // A box task archives as each turn ends, a moment before last_active_at is stamped. A task on this computer
+    // never does, so an archive there is current only from after its last activity: a box archive from just
+    // before a fast local turn must not pass for one.
+    const slack = isLocalRunnerBox(row.box_id) ? 0 : 1000
+    return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - slack && fs.existsSync(row.archive_path))
   }
 
   /** Archive a task unless its archive is already fresh, waiting for one that's being written right now. */
@@ -3572,8 +3748,10 @@ export class TaskManager {
    * archive (HEAD, the refs and a bundle of the commits GitHub lacks; server/archive.ts). Archives stream off the box
    * (server/archive.ts), so this works on a box whose work disk is full. A failure is kept for `archiveProblem`.
    * `closing`: the task is done, so its WIP ref is removed from origin once an archive has the work.
+   * A task on this computer (the local runner) only pushes: its folder is already on this disk, so it gets an archive
+   * only `forMove`, when it's about to move to a box.
    */
-  async archive(taskId: string, opts: { closing?: boolean } = {}) {
+  async archive(taskId: string, opts: { closing?: boolean; forMove?: boolean } = {}) {
     // One at a time per task. Wait rather than return: the one running may predate the work this call is for.
     while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
     if (this.stopped) return
@@ -3581,7 +3759,8 @@ export class TaskManager {
     if (!row?.box_id || row.current_turn_id) return
     const project = this.store.getProject(row.project_id)
     const push = Boolean(project && this.pushAtTurnEnd(project))
-    if (!this.c.archiveWorkspaces && !push) return
+    const keep = this.c.archiveWorkspaces && (!isLocalRunnerBox(row.box_id) || Boolean(opts.forMove))
+    if (!keep && !push) return
     this.archiving.add(taskId)
     const boxId = row.box_id
     const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
@@ -3593,7 +3772,7 @@ export class TaskManager {
         pushed = await this.prepGit(row, project!, boxId, { packMaxBytes: this.c.archiveWorkspaces ? Math.floor(maxBytes / 2) : 0 })
         this.recordPush(taskId, pushed)
       }
-      if (!this.c.archiveWorkspaces) return
+      if (!keep) return
       let res: ArchiveOutcome | null = null
       let kind: "git" | "whole" | "partial" | "thin" = "git"
       let note: string | null = null
@@ -3744,7 +3923,7 @@ export class TaskManager {
     const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
     const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
     const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
-    const script = archiveScript({ root: `${this.provider.root(boxId)}/tasks`, taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
+    const script = archiveScript({ root: tasksRootOf(this.provider, boxId), boxRoot: this.provider.root(boxId), taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
     const fd = fs.openSync(dest, "w")
     let writeError: unknown = null
     try {
@@ -3802,6 +3981,7 @@ export class TaskManager {
     await this.archive(taskId, { closing: true })
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
+    if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays until the task is deleted
     if (this.c.archiveWorkspaces && !this.hasFreshArchive(row)) return // keep the folder if we have no current copy
     const boxId = row.box_id
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] })
@@ -3932,7 +4112,8 @@ export class TaskManager {
     const cutoff = now - days * 24 * 60 * 60_000
     for (const row of this.store.listTaskRows()) {
       if (!row.box_id || row.current_turn_id || !RESTING.includes(row.status) || this.store.hasInputs(row.id)) continue
-      if (row.last_active_at > cutoff || !this.hasFreshArchive(row)) continue
+      // A folder on this computer is already on this disk: parking it would only swap it for an archive beside it.
+      if (isLocalRunnerBox(row.box_id) || row.last_active_at > cutoff || !this.hasFreshArchive(row)) continue
       const boxId = row.box_id
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
       await this.removeTaskDir(boxId, row.id).catch((err) => console.warn(`[box-yard] park ${row.id}: ${errorMessage(err)}`))
@@ -4011,7 +4192,9 @@ export class TaskManager {
     for (const row of active) {
       if (!row.box_id || !row.current_turn_id) continue
       if (row.status === "starting") {
-        if (now - row.updated_at > START_TIMEOUT_MS) {
+        // On this computer the time asleep doesn't count: the setup carries on when it wakes.
+        const asleep = isLocalRunnerBox(row.box_id) ? this.sleep.sleptBetween(row.updated_at, now) : 0
+        if (now - row.updated_at - asleep > START_TIMEOUT_MS) {
           this.store.updateTask(row.id, { status: "failed", currentTurnId: null, error: "Starting the agent timed out." })
           this.emitTask(row.id)
         }

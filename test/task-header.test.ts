@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { TaskHeader } from "../web/src/components/TaskHeader.js"
 import type { Artifact, MergeRequest, Project, Task } from "../shared/types.js"
+import { LOCAL_UNSANDBOXED } from "../shared/runner.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -142,5 +143,34 @@ describe("TaskHeader", () => {
       expect(text).toContain(s)
     }
     expect(panel.querySelector('button[aria-label="Copy task id"]')).not.toBeNull()
+  })
+
+  it("warns that a local task is unsandboxed, in full on a tap", () => {
+    render(task({ boxId: "this-computer" }))
+    const chip = document.querySelector<HTMLButtonElement>('[data-testid="local-warning"]')!
+    expect(chip.textContent).toContain("This computer · unsandboxed")
+    expect(chip.title).toBe(LOCAL_UNSANDBOXED)
+    expect(chip.getAttribute("aria-expanded")).toBe("false")
+    expect(document.getElementById("local-warning-note")).toBeNull()
+    act(() => chip.click())
+    expect(chip.getAttribute("aria-expanded")).toBe("true")
+    expect(document.getElementById("local-warning-note")!.textContent).toBe(LOCAL_UNSANDBOXED)
+    act(() => chip.click())
+    expect(document.getElementById("local-warning-note")).toBeNull()
+  })
+
+  it("shows the chip for a queued task of a local project, and never on a box task", () => {
+    render(task({ boxId: null, status: "queued" }))
+    expect(document.querySelector('[data-testid="local-warning"]')).toBeNull()
+    act(() =>
+      root.render(
+        createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          createElement(TaskHeader, { task: task({ boxId: null, status: "queued" }), project: { ...project, runner: "local" }, schedule: null, files: [], showTools: false, onShowTools: () => {} }),
+        ),
+      ),
+    )
+    expect(document.querySelector('[data-testid="local-warning"]')).not.toBeNull()
   })
 })

@@ -4,7 +4,7 @@ import path from "node:path"
 import { randomBytes } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
-import { configProblems, qstashEnabled, redisEnabled, type Config } from "./config.js"
+import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError } from "./store.js"
 import { Hub } from "./hub.js"
@@ -20,7 +20,7 @@ import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
 import { Redis } from "./redis.js"
-import { LocalProvider } from "./providers/local.js"
+import { LocalProvider, LocalRunnerProvider, LocalRunnerRouter } from "./providers/local.js"
 import { UpstashProvider } from "./providers/upstash.js"
 import { AutoProvider } from "./providers/auto.js"
 import type { BoxProvider } from "./providers/types.js"
@@ -39,6 +39,7 @@ import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../sh
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { HEAVY_TASKS } from "../shared/memory.js"
+import { RUNNERS } from "../shared/runner.js"
 import { BOX_SIZES, EFFORTS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -94,6 +95,7 @@ const schemas = {
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
+    runner: z.enum(RUNNERS).optional(),
     heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
@@ -109,6 +111,7 @@ const schemas = {
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
+    runner: z.enum(RUNNERS).optional(),
     heavyTasks: z.enum(HEAVY_TASKS).optional(),
     ...projectNotesBudget,
   }),
@@ -199,6 +202,11 @@ export function makeProvider(c: Config, credentials?: CredentialStore): BoxProvi
   return new AutoProvider(local, new UpstashProvider(c, credentials), () => Boolean(credentials.get("upstashBoxApiKey")))
 }
 
+/** The local runner: agents of "Runs on: This computer" projects, in `<localDir>/<task_id>` (BOXYARD_LOCAL_DIR). */
+export function localRunner(c: Config): LocalRunnerProvider {
+  return new LocalRunnerProvider(c.localDir, c.claudeBin)
+}
+
 export interface BoxYard {
   app: express.Express
   db: DB
@@ -225,6 +233,8 @@ export function createBoxYard(
   c: Config,
   opts: {
     provider?: BoxProvider
+    /** Stands in for the local runner (tests); it is always routed LOCAL_BOX_ID. */
+    localRunner?: BoxProvider
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -242,7 +252,8 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
-  const provider = opts.provider ?? makeProvider(c, settings.credentials)
+  // Every box provider gets the local runner beside it, for projects that run on this computer (shared/runner.ts).
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c))
   const setup = new Setup({ c, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
@@ -411,10 +422,13 @@ export function createBoxYard(
     res.json({ ids })
   })
   api.patch("/projects/:id", (req, res) => {
-    const project = store.updateProject(req.params.id!, parse(schemas.projectPatch, req.body))
+    const body = parse(schemas.projectPatch, req.body)
+    const project = store.updateProject(req.params.id!, body)
     hub.broadcast({ type: "project", project })
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
+    // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool).
+    if (body.runner) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
@@ -600,7 +614,7 @@ export function createBoxYard(
   })
   api.get("/settings", (_req, res) => {
     // Text-to-speech keys appear only as set/unset plus where they come from.
-    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys })
+    res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys, localDir: tildePath(c.localDir) })
   })
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.

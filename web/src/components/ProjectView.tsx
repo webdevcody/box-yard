@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
-import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Settings, Trash2, Webhook, X } from "lucide-react"
+import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Settings, ShieldAlert, Trash2, Webhook, X } from "lucide-react"
 import {
   useAgentSettings,
   useArtifacts,
@@ -9,6 +9,7 @@ import {
   useHooks,
   useProjects,
   useSchedules,
+  useSettings,
   useTasks,
   useUpdateProject,
 } from "../lib/queries"
@@ -22,7 +23,7 @@ import {
   parseSort,
   type TaskFilter,
 } from "../lib/projectTasks"
-import { Button, Empty, Field, NewTabLink, STATUS, Select, TimeAgo, cx, inputClass, parseEnv } from "./ui"
+import { Button, Empty, Field, LineIcon, NewTabLink, STATUS, Select, TimeAgo, cx, inputClass, parseEnv } from "./ui"
 import { ArtifactLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskGrid, useStableTasks } from "./TaskGrid"
 import { QuietToggle, SearchBox, SortSelect, TabBar, useSetParam, useShowQuiet, useUrlQuery, withParam } from "./TaskFilters"
@@ -35,6 +36,7 @@ import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type T
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { HEAVY_TASKS, HEAVY_TASKS_LABEL, type HeavyTasks } from "../../../shared/memory"
+import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -364,6 +366,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [baseBranch, setBaseBranch] = useState(project.baseBranch)
   const [env, setEnv] = useState("")
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
+  const [runner, setRunner] = useState<Runner>(project.runner ?? "box")
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
@@ -372,13 +375,23 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
+  const server = useSettings()
   const defaults = settings.data?.settings
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
-      onSubmit={(e) => {
+      onSubmit={async (e) => {
         e.preventDefault()
+        if (runner === "local" && project.runner !== "local") {
+          const ok = await confirmDialog({
+            title: "Run agents on this computer?",
+            body: `${project.name}'s agents will run here, not in Upstash boxes. ${LOCAL_UNSANDBOXED} Its tasks move off their boxes when nothing would be lost.`,
+            confirmLabel: "Run on this computer",
+            danger: true,
+          })
+          if (!ok) return
+        }
         update.mutate({
           id: project.id,
           name,
@@ -387,6 +400,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           baseBranch,
           env: parseEnv(env),
           removeEnv: removeKeys,
+          runner,
           boxSize: boxSize || null,
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
@@ -416,6 +430,27 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <Field label="Description">
         <textarea className={inputClass} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
+      <div className="space-y-2">
+        <Field
+          label="Runs on"
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). Tasks move over when nothing would be lost.`}
+        >
+          <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
+            {RUNNERS.map((r) => (
+              <option key={r} value={r}>
+                {RUNNER_LABEL[r]}
+                {r === "local" ? " (not sandboxed)" : ""}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {runner === "local" && (
+          <div role="note" className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 sm:max-w-xl" data-testid="runner-warning">
+            <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+            <span>{LOCAL_UNSANDBOXED}</span>
+          </div>
+        )}
+      </div>
       <Field label="Preferred box size" hint="New boxes made for this project use it. Boxes it already has keep their size; resize them from the Boxes page.">
         <Select className="w-full sm:w-80" value={boxSize} onChange={(e) => setBoxSize(e.target.value as BoxSize | "")} data-testid="project-box-size">
           <option value="">Default ({settings.data?.settings.workerSize ?? "Settings"}: Settings → Worker size)</option>
