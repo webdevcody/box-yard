@@ -14,6 +14,8 @@ import { previewGallery, publishedLabel, sameGroup, type PublishedFileRef, type 
 export const STRIP_MAX = 6
 const STRIP_MAX_NARROW = 4
 
+export const SLIM_TITLE_LINK = "font-medium text-zinc-200 hover:underline"
+
 const kindOf = (f: PublishedFileRef) => previewKind({ url: f.url, name: f.filename })
 const extOf = (f: PublishedFileRef) => {
   const dot = f.filename.lastIndexOf(".")
@@ -53,6 +55,7 @@ function Thumb({ f, gallery, className }: { f: PublishedFileRef; gallery: () => 
  * then the file list. The list's header line (the first titles, or "2 files" when open) carries the Show all / Hide
  * toggle, so the toggle sits on the list it opens and closes, never by the title.
  * `project` adds the task's project and Captain links (the Coordinator's card; the Captain tab is that project already).
+ * `time` is the Captain tab's row: the time on the right of the meta line, and that tab's quieter title.
  */
 function GroupBody({ group, time, project }: { group: PublishedGroup; time?: number; project?: boolean }) {
   const [open, setOpen] = useState(false)
@@ -93,11 +96,12 @@ function GroupBody({ group, time, project }: { group: PublishedGroup; time?: num
         title={group.taskTitle}
         taskId={group.taskId}
         project={project && group.taskId && <NoticeProject taskId={group.taskId} />}
+        titleClassName={time !== undefined ? SLIM_TITLE_LINK : undefined}
         meta={
           <>
             {publishedLabel(files.length)}
             {time !== undefined && (
-              <span className="ml-1.5 text-[11px] text-zinc-600">
+              <span className="float-right ml-2 text-[11px] text-zinc-600">
                 <TimeAgo ts={time} />
               </span>
             )}
@@ -177,7 +181,7 @@ export const PublishedCard = memo(
   (a, b) => sameGroup(a.group, b.group),
 )
 
-/** The Captain tab's slim form, with the newest file's time. */
+/** The Captain tab's slim form, with the newest file's time and its other rows' title (CaptainTab's NoticeRow). */
 export const PublishedRow = memo(
   function PublishedRow({ group }: { group: PublishedGroup }) {
     return (

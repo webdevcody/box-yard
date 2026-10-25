@@ -38,7 +38,7 @@ import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll } from "./StickyScroll"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
-import { PublishedRow } from "./PublishedNotices"
+import { PublishedRow, SLIM_TITLE_LINK } from "./PublishedNotices"
 import { menuItem, usePopover } from "./TaskHeader"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
@@ -255,8 +255,8 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
 
 /**
  * One task notice: status icon, linked task title, a plain summary and the time. Click to see all of it. A wide row is
- * one line, title first; in a narrow one (its own `@container`, not the window) or once opened, the title gets its own
- * row and the summary and time go under it.
+ * one line, title first; in a narrow one (its own `@container`, not the window) or once opened, the whole title gets
+ * its own row and the summary and time go under it.
  */
 const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
   const [full, setFull] = useState(false)
@@ -290,9 +290,9 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       <div className="@container min-w-0 flex-1">
         <div className={cx("grid grid-cols-[minmax(0,1fr)_auto] gap-x-2", inline && "@md:grid-cols-[minmax(0,max-content)_minmax(0,1fr)_auto]")}>
           {n.title && (
-            <div data-testid="notice-title" className={cx("col-span-2", inline && "@md:col-span-1", text)}>
+            <div data-testid="notice-title" className={cx("col-span-2 wrap-anywhere", inline && "@md:col-span-1 @md:truncate")}>
               {taskId ? (
-                <AppLink href={`/tasks/${taskId}`} className="font-medium text-zinc-200 hover:underline">
+                <AppLink href={`/tasks/${taskId}`} className={SLIM_TITLE_LINK}>
                   {n.title}
                 </AppLink>
               ) : (

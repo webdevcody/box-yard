@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { captainRows, captainToolView, groupLabel, isLongMessage, linkLabel, parseNotice, plainText, segments } from "../web/src/lib/captainTranscript"
+import { captainRows, captainToolView, groupLabel, isLongMessage, linkLabel, parseNotice, plainText, segments, splitNotice } from "../web/src/lib/captainTranscript"
 import type { CaptainMessage } from "../shared/types"
 
 let n = 0
@@ -10,6 +10,36 @@ const msg = (role: CaptainMessage["role"], content = "x", meta: Record<string, u
   content,
   meta,
   createdAt: n,
+})
+
+describe("splitNotice", () => {
+  it("splits a notice into its kind, the task title and the rest as markdown", () => {
+    expect(splitNotice("✅ **Fix login** is done: Fixed the `redirect`.\n\n- one\n- two")).toEqual({ kind: "done", title: "Fix login", event: "is done: Fixed the `redirect`.\n\n- one\n- two" })
+    expect(splitNotice("📎 **Brief** published Recent PRs: briefing: https://yard.example.com/artifacts/art_1/b.md")).toEqual({
+      kind: "artifact",
+      title: "Brief",
+      event: "published Recent PRs: briefing: https://yard.example.com/artifacts/art_1/b.md",
+    })
+  })
+
+  it("shortens a PR notice's URL to a PR #N link", () => {
+    expect(splitNotice("🔀 **Inbox** opened a pull request: https://github.com/o/r/pull/16")).toEqual({ kind: "pr", title: "Inbox", event: "opened [PR #16](https://github.com/o/r/pull/16)" })
+  })
+
+  it("moves a merge request's task up to the title and links its PR", () => {
+    expect(splitNotice("🚢 Cody asked **Fix login** to merge PR #12 (Merge button): https://github.com/o/r/pull/12")).toEqual({
+      kind: "merge",
+      title: "Fix login",
+      event: "Cody asked it to merge [PR #12](https://github.com/o/r/pull/12) (Merge button)",
+    })
+    expect(splitNotice("🚢 The Captain asked **Fix login** to merge PR #12: https://github.com/o/r/pull/12").event).toBe("The Captain asked it to merge [PR #12](https://github.com/o/r/pull/12)")
+  })
+
+  it("keeps a hook's name with its colon, and a notice without a title whole", () => {
+    expect(splitNotice('🪝 **Ship** hook "box-yard: auto-merge" (PR ready) sent to the agent: Please merge').event).toBe('hook "box-yard: auto-merge" (PR ready) sent to the agent: Please merge')
+    expect(splitNotice("⚠️ Box box_1 is low on disk.")).toEqual({ kind: "warning", title: null, event: "Box box_1 is low on disk." })
+    expect(splitNotice('Schedule "Nightly" started a run: task task_1.')).toEqual({ kind: "info", title: null, event: 'Schedule "Nightly" started a run: task task_1.' })
+  })
 })
 
 describe("parseNotice", () => {

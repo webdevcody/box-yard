@@ -190,6 +190,7 @@ export function NoticeLayout({
   taskId,
   project,
   meta,
+  titleClassName = NOTICE_TITLE_LINK,
   children,
 }: {
   kind: NoticeKind
@@ -199,6 +200,8 @@ export function NoticeLayout({
   /** The NoticeProject pair, at the start of the meta line. */
   project?: ReactNode
   meta?: ReactNode
+  /** The title link's look; the Captain tab's slim rows pass theirs. */
+  titleClassName?: string
   children?: ReactNode
 }) {
   const { icon, className, label } = NOTICE_ICON[kind]
@@ -209,7 +212,7 @@ export function NoticeLayout({
         {title && (
           <div data-testid="notice-title" className="wrap-anywhere">
             {taskId ? (
-              <AppLink href={`/tasks/${taskId}`} className={NOTICE_TITLE_LINK}>
+              <AppLink href={`/tasks/${taskId}`} className={titleClassName}>
                 {title}
               </AppLink>
             ) : (

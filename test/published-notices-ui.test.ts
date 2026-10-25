@@ -60,7 +60,8 @@ describe("published files card", () => {
     thread(eight)
     const cards = host.querySelectorAll('[data-testid="published-group"]')
     expect(cards).toHaveLength(1)
-    expect(cards[0]!.textContent).toContain("Zen mode published 8 files")
+    expect(cards[0]!.querySelector('[data-testid="notice-title"]')?.textContent).toBe("Zen mode")
+    expect(cards[0]!.querySelector('[data-testid="notice-meta"]')?.textContent).toBe("published 8 files")
     expect(host.querySelector('a[href="/tasks/task_zenmode"]')?.textContent).toBe("Zen mode")
     expect(host.querySelectorAll("img")).toHaveLength(STRIP_MAX)
     expect(button(`+${8 - STRIP_MAX}`)).toBeTruthy()
@@ -79,6 +80,28 @@ describe("published files card", () => {
     expect(host.querySelectorAll("li")).toHaveLength(0)
   })
 
+  it("the title row holds only the title; Show all / Hide sits in the file list's header, next to the list", () => {
+    thread(eight)
+    const card = host.querySelector('[data-testid="published-group"]')!
+    const titleRow = card.querySelector('[data-testid="notice-title"]')!
+    expect(titleRow.children).toHaveLength(1)
+    expect(titleRow.querySelector("button")).toBeNull()
+    // The meta line comes after the title row, not beside it.
+    expect(titleRow.nextElementSibling?.getAttribute("data-testid")).toBe("notice-meta")
+    const header = card.querySelector('[data-testid="published-files-header"]')!
+    const toggle = button("Show all")
+    expect(header.contains(toggle)).toBe(true)
+    expect(toggle.getAttribute("aria-expanded")).toBe("false")
+    click(toggle)
+    const hide = button("Hide")
+    expect(header.contains(hide)).toBe(true)
+    expect(header.textContent).toContain("8 files")
+    // The list it opens is the header's next sibling, and the toggle points at it.
+    const list = header.nextElementSibling!
+    expect(list.tagName).toBe("UL")
+    expect(hide.getAttribute("aria-controls")).toBe(list.id)
+  })
+
   it("a thumbnail opens the preview with ←/→ over the whole group, even files not in the strip", () => {
     thread(eight)
     const thumb = host.querySelector('a[href="/artifacts/art_2/shot-2.png"]')!
@@ -93,7 +116,8 @@ describe("published files card", () => {
     thread([pub("A", "a1", "a1.png"), pub("B", "b1", "b1.md"), pub("A", "a2", "a2.png")])
     const cards = [...host.querySelectorAll('[data-testid="published-group"]')]
     expect(cards.map((c) => c.getAttribute("data-count"))).toEqual(["2", "1"])
-    expect(cards[1]!.textContent).toContain("B published a file")
+    expect(cards[1]!.querySelector('[data-testid="notice-title"]')?.textContent).toBe("B")
+    expect(cards[1]!.querySelector('[data-testid="notice-meta"]')?.textContent).toBe("published a file")
     // Not an image: a file-type chip instead of a thumbnail.
     expect(cards[1]!.querySelector(`a[href$="b1.md"]`)?.textContent).toBe("MD")
   })
