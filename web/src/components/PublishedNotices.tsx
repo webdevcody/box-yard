@@ -6,7 +6,7 @@ import { ChevronDown, Paperclip } from "lucide-react"
 import { AppLink, LineIcon, META_CHIP, TimeAgo, cx } from "./ui"
 import { FileLink } from "./FileLink"
 import { KindIcon } from "./TaskFiles"
-import { NOTICE_CLASS, NoticeCard } from "./ChatLine"
+import { NOTICE_CLASS, NoticeCard, NoticeProject } from "./ChatLine"
 import { previewKind } from "../lib/filePreview"
 import { previewGallery, publishedLabel, sameGroup, type PublishedFileRef, type PublishedGroup } from "../lib/publishedNotices"
 
@@ -48,7 +48,8 @@ function Thumb({ f, gallery, className }: { f: PublishedFileRef; gallery: () => 
   )
 }
 
-function GroupBody({ group, time }: { group: PublishedGroup; time?: number }) {
+/** `project` adds the task's project and Captain links (the Coordinator's card; the Captain tab is that project already). */
+function GroupBody({ group, time, project }: { group: PublishedGroup; time?: number; project?: boolean }) {
   const [open, setOpen] = useState(false)
   const files = group.files
   const gallery = useMemo(() => previewGallery(files), [files])
@@ -98,6 +99,7 @@ function GroupBody({ group, time }: { group: PublishedGroup; time?: number }) {
               </span>
             )}
           </div>
+          {project && group.taskId && <NoticeProject taskId={group.taskId} />}
           {toggle}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
@@ -142,10 +144,16 @@ function GroupBody({ group, time }: { group: PublishedGroup; time?: number }) {
 /** The Coordinator chat's card (also Zen mode): a notice card that opens the task when clicked outside its links. */
 export const PublishedCard = memo(
   function PublishedCard({ group }: { group: PublishedGroup }) {
-    const body = <GroupBody group={group} />
+    const body = <GroupBody group={group} project />
     return (
       <div id={`chat-${group.id}`}>
-        {group.taskId ? <NoticeCard taskId={group.taskId}>{body}</NoticeCard> : <div className={NOTICE_CLASS}>{body}</div>}
+        {group.taskId ? (
+          <NoticeCard taskId={group.taskId} project={false}>
+            {body}
+          </NoticeCard>
+        ) : (
+          <div className={NOTICE_CLASS}>{body}</div>
+        )}
       </div>
     )
   },
