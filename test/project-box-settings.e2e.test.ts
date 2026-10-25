@@ -358,27 +358,39 @@ describe("project box settings: placement on shared boxes", () => {
 })
 
 describe("project box settings: heavy_tasks migration", () => {
-  it("turns one-per-box and whole-box into Agents per box 1, loses nothing, and saving clears the old value", () => {
+  const migration = MIGRATIONS.findIndex((m) => m.includes("agents_per_box"))
+  // Every heavy_tasks value a project can hold: the three the app wrote, unset, and ones it never wrote (main read
+  // those as off, so they stay on the global setting).
+  const HEAVY: [id: string, heavy: string | null, agentsPerBox: number | null][] = [
+    ["prj_off", "off", null],
+    ["prj_one", "one-per-box", 1],
+    ["prj_whole", "whole-box", 1],
+    ["prj_unset", null, null],
+    ["prj_empty", "", null],
+    ["prj_bogus", "WHOLE-BOX", null],
+  ]
+
+  function oldDb() {
     const dir = tmpDir()
     const old = new Database(path.join(dir, "box-yard.sqlite"))
-    migrate(old, MIGRATIONS.findIndex((m) => m.includes("agents_per_box")))
+    migrate(old, migration)
     const insert = old.prepare("INSERT INTO projects (id, name, created_at, updated_at, heavy_tasks) VALUES (?, ?, 1, 1, ?)")
-    for (const [id, heavy] of [
-      ["prj_off", "off"],
-      ["prj_one", "one-per-box"],
-      ["prj_whole", "whole-box"],
-      ["prj_unset", null],
-    ] as const)
-      insert.run(id, id, heavy)
+    for (const [id, heavy] of HEAVY) insert.run(id, id, heavy)
     old.close()
+    return dir
+  }
 
-    const db = openDb(dir)
+  const columns = (db: Database.Database) =>
+    db.prepare("SELECT id, heavy_tasks, agents_per_box, tasks_per_box, max_boxes FROM projects ORDER BY id").all()
+
+  it("turns one-per-box and whole-box into Agents per box 1, loses nothing, and saving clears the old value", () => {
+    const db = openDb(oldDb())
     dbs.push(db)
     const store = new Store(db)
-    expect(store.getProject("prj_off")!.agentsPerBox).toBeNull()
-    expect(store.getProject("prj_one")!.agentsPerBox).toBe(1)
-    expect(store.getProject("prj_whole")!.agentsPerBox).toBe(1)
-    expect(store.getProject("prj_unset")).toMatchObject({ agentsPerBox: null, tasksPerBox: null, maxBoxes: null })
+    for (const [id, heavy, agentsPerBox] of HEAVY) {
+      expect(store.getProject(id), `${id} (${heavy})`).toMatchObject({ agentsPerBox, tasksPerBox: null, maxBoxes: null })
+      expect(store.projectBoxLimits(id), `${id} (${heavy})`).toEqual({ agentsPerBox, tasksPerBox: null, maxBoxes: null })
+    }
     expect(store.projectBoxLimits("prj_whole")).toEqual({ agentsPerBox: 1, tasksPerBox: null, maxBoxes: null })
     // The old column keeps its value until the project's Agents per box is saved.
     const heavy = (id: string) => (db.prepare("SELECT heavy_tasks FROM projects WHERE id = ?").get(id) as { heavy_tasks: string | null }).heavy_tasks
@@ -392,5 +404,29 @@ describe("project box settings: heavy_tasks migration", () => {
     expect(store.getProject("prj_one")!.agentsPerBox).toBeNull()
     expect(store.updateProject("prj_whole", { agentsPerBox: 3 }).agentsPerBox).toBe(3)
     expect(heavy("prj_whole")).toBeNull()
+  })
+
+  it("runs once, and running it again changes nothing", () => {
+    const dir = oldDb()
+    const db = openDb(dir)
+    const after = columns(db)
+    expect(after).toHaveLength(HEAVY.length)
+    db.close()
+
+    // Opening the database again doesn't re-run it: _migrations records it once.
+    const again = openDb(dir)
+    dbs.push(again)
+    expect(columns(again)).toEqual(after)
+    expect(again.prepare("SELECT COUNT(*) AS n FROM _migrations WHERE version = ?").get(migration + 1)).toEqual({ n: 1 })
+
+    // Its UPDATE, run again by hand, leaves every row as it is, including one whose Agents per box was set
+    // afterwards while heavy_tasks still holds the old value.
+    again.prepare("UPDATE projects SET agents_per_box = 3 WHERE id = 'prj_whole'").run()
+    const set = columns(again)
+    const update = MIGRATIONS[migration]!.split("\n").find((l) => l.trim().startsWith("UPDATE projects"))!
+    again.exec(update)
+    again.exec(update)
+    expect(columns(again)).toEqual(set)
+    expect(new Store(again).getProject("prj_whole")!.agentsPerBox).toBe(3)
   })
 })
