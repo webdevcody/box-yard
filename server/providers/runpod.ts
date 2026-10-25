@@ -202,8 +202,9 @@ export class RunPodProvider implements BoxProvider {
 
   /**
    * The project's network volume for its pod #1: found by name, else made in the datacenter with the best stock.
-   * Null when off, and always for pods #2 and up: RunPod lets only one running pod use a volume safely, so the
-   * others keep their caches on their container disk (docs/runpod.md).
+   * Null when off, and always for pods #2 and up: RunPod warns that writes to one volume from several pods at once
+   * may corrupt it, and the caches there don't lock across machines, so the others keep their caches on their
+   * container disk (docs/runpod.md).
    */
   async ensureVolume(boxId: string, gpus?: CatalogGpu[]): Promise<RunPodVolume | null> {
     if (gpuBoxIndex(boxId) > 1) return null

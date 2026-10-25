@@ -42,8 +42,8 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
 - **Starts on demand.** A task starts the pod. Box Yard picks a Secure Cloud data center that has stock of your GPU types and supports volumes. It makes the volume there once and connects over SSH with its own key, kept in `<data dir>/runpod`.
 - **Work survives a stop.** Task folders are archived after each turn, as on boxes, and restored when a new pod starts. Task folders live on each pod's container disk (`/box/tasks/<task>`), never on a shared working tree.
 - **Only pod #1 mounts the volume.** `/workspace` on pod #1 is the project's network volume, which outlives the pod, so `/workspace/data` is a good place for caches. Pods #2 and up have no volume and keep their caches on their container disk.
-  - RunPod's docs say a volume can be used by only one running pod at a time, to prevent data corruption, and warn that concurrent writes can corrupt data.
-  - Box Yard's caches on the volume (npm, pip, uv, Hugging Face, Playwright, the dependency cache) aren't made for writers on several machines over NFS.
+  - RunPod lets a volume attach to several pods, but its docs warn that writing to one volume from several workers at once may corrupt data, and leave locking to the application.
+  - Box Yard's caches on the volume (npm, pip, uv, Hugging Face, Playwright, the dependency cache) don't lock across machines, so a shared volume isn't safe for them.
   - Without a volume, an extra pod can also start in any data center with stock, not only the volume's.
 - **Stops when idle.** A pod is terminated, not paused, so idle pods cost nothing. Each pod stops on its own when no task on it has worked for the idle-stop time, none of its own tasks waits, and nothing is keeping it warm. A project task waiting for any pod keeps a pod with a free slot up.
   - **Keep warm** (1h/4h in Settings › RunPod GPU) keeps a pod up for follow-up prompts.
