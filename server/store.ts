@@ -5,6 +5,7 @@ import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
+import type { ProjectGpuMachine } from "../shared/runpod.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
   AppNotification,
@@ -238,6 +239,16 @@ export interface ProjectBoxLimits {
  * "whole-box" both mean 1. The migration copied them into agents_per_box; they're still read while it's NULL.
  */
 const legacyAgentsPerBox = (heavy: string | null | undefined): number | null => (heavy === "one-per-box" || heavy === "whole-box" ? 1 : null)
+/** A project row's own GPU machine (Project.gpuMachine); anything unreadable is null, so Settings › RunPod GPU's applies. */
+function gpuMachineOf(row: Pick<ProjectRow, "gpu_types_json" | "gpu_cloud" | "gpu_min_ram_gb" | "gpu_min_vcpus">): ProjectGpuMachine {
+  const types = json<unknown>(row.gpu_types_json ?? null, null)
+  return {
+    gpuTypes: Array.isArray(types) && types.length && types.every((t) => typeof t === "string") ? (types as string[]) : null,
+    cloud: row.gpu_cloud === "SECURE" || row.gpu_cloud === "COMMUNITY" ? row.gpu_cloud : null,
+    minRamGb: row.gpu_min_ram_gb ?? null,
+    minVcpus: row.gpu_min_vcpus ?? null,
+  }
+}
 /** legacyAgentsPerBox in SQL, for the slot claim. */
 const AGENTS_PER_BOX = "COALESCE(agents_per_box, CASE WHEN heavy_tasks IN ('one-per-box', 'whole-box') THEN 1 END)"
 
@@ -258,6 +269,10 @@ interface ProjectRow {
   tasks_per_box?: number | null
   max_boxes?: number | null
   gpu_max_hourly_usd?: number | null
+  gpu_types_json?: string | null
+  gpu_cloud?: string | null
+  gpu_min_ram_gb?: number | null
+  gpu_min_vcpus?: number | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -645,6 +660,7 @@ export class Store {
       tasksPerBox: row.tasks_per_box ?? null,
       maxBoxes: row.max_boxes ?? null,
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
+      gpuMachine: gpuMachineOf(row),
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -690,6 +706,12 @@ export class Store {
     return row?.usd ?? null
   }
 
+  /** A GPU project's own machine for new pods (null fields: Settings › RunPod GPU's), without loading the rest. */
+  projectGpuMachine(id: string): ProjectGpuMachine {
+    const row = this.db.prepare("SELECT gpu_types_json, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
+    return gpuMachineOf(row ?? {})
+  }
+
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
   /** Where a task's turns run: its own runs_on when set, else its project's "Runs on". */
   taskRunner(row: Pick<TaskRow, "project_id" | "runs_on">): Runner {
@@ -728,6 +750,7 @@ export class Store {
     tasksPerBox?: number | null
     maxBoxes?: number | null
     gpuMaxHourlyUsd?: number | null
+    gpuMachine?: Partial<ProjectGpuMachine>
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -785,6 +808,8 @@ export class Store {
       maxBoxes?: number | null
       /** null clears it (Settings › RunPod GPU's per-project cap applies). */
       gpuMaxHourlyUsd?: number | null
+      /** Each field: undefined leaves it, null clears it (Settings › RunPod GPU's applies). */
+      gpuMachine?: Partial<ProjectGpuMachine>
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -841,11 +866,16 @@ export class Store {
    * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
    * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
    */
-  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null }) {
+  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine> }) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
     if (b.maxBoxes !== undefined) this.db.prepare("UPDATE projects SET max_boxes = ? WHERE id = ?").run(b.maxBoxes, id)
     if (b.gpuMaxHourlyUsd !== undefined) this.db.prepare("UPDATE projects SET gpu_max_hourly_usd = ? WHERE id = ?").run(b.gpuMaxHourlyUsd, id)
+    const m = b.gpuMachine ?? {}
+    if (m.gpuTypes !== undefined) this.db.prepare("UPDATE projects SET gpu_types_json = ? WHERE id = ?").run(m.gpuTypes?.length ? JSON.stringify(m.gpuTypes) : null, id)
+    if (m.cloud !== undefined) this.db.prepare("UPDATE projects SET gpu_cloud = ? WHERE id = ?").run(m.cloud, id)
+    if (m.minRamGb !== undefined) this.db.prepare("UPDATE projects SET gpu_min_ram_gb = ? WHERE id = ?").run(m.minRamGb, id)
+    if (m.minVcpus !== undefined) this.db.prepare("UPDATE projects SET gpu_min_vcpus = ? WHERE id = ?").run(m.minVcpus, id)
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */

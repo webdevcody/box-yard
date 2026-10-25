@@ -22,6 +22,44 @@ export const MAX_GPU_PODS = 20
 /** Pods start from this public image when no custom image is built: slower (tools install at boot), no Docker needed. */
 export const RUNPOD_STOCK_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 
+/**
+ * Where pods run. Secure: RunPod's own datacenters, the only ones with network volumes. Community: hosts other people
+ * run, cheaper and with GPUs Secure lacks (an RTX 3070), but no network volume, so caches start cold on every pod.
+ */
+export type RunPodCloud = "SECURE" | "COMMUNITY"
+export const RUNPOD_CLOUDS: RunPodCloud[] = ["SECURE", "COMMUNITY"]
+export const cloudLabel = (c: RunPodCloud) => (c === "COMMUNITY" ? "Community Cloud" : "Secure Cloud")
+
+/**
+ * What each GPU type is good for, shown next to it in the pickers. Ids are RunPod's gpuTypeIds exactly (checked
+ * against GET /v2/catalog/gpus); prices are rough, the pickers show RunPod's live ones.
+ */
+export const RUNPOD_GPU_GUIDE: Record<string, { vramGb: number; usd: string; use: string }> = {
+  "NVIDIA GeForce RTX 3070": { vramGb: 8, usd: "~$0.13/hr, Community only", use: "the cheapest: browser and WebGL game testing" },
+  "NVIDIA RTX A4000": { vramGb: 16, usd: "~$0.17–0.25/hr", use: "browser and WebGL game testing" },
+  "NVIDIA RTX 4000 Ada Generation": { vramGb: 20, usd: "~$0.20–0.28/hr", use: "browser and WebGL games, light CUDA" },
+  "NVIDIA RTX A5000": { vramGb: 24, usd: "~$0.16–0.27/hr", use: "games and mid-size models" },
+  "NVIDIA A40": { vramGb: 48, usd: "~$0.35–0.59/hr", use: "big models and datasets" },
+  "NVIDIA RTX A6000": { vramGb: 48, usd: "~$0.33–0.59/hr", use: "big models and datasets" },
+}
+
+/** "16 GB, ~$0.17–0.25/hr, browser and WebGL game testing", or null for a type with no guide entry. */
+export const gpuHint = (id: string) => {
+  const g = RUNPOD_GPU_GUIDE[id]
+  return g ? `${g.vramGb} GB, ${g.usd}, ${g.use}` : null
+}
+
+/** Bounds on the minimum host RAM and vCPUs a pod asks for (global and per project). */
+export const RUNPOD_MACHINE_LIMITS = { minRamGb: { min: 1, max: 512 }, minVcpus: { min: 1, max: 128 } } as const
+
+/** A GPU project's own machine settings; null fields use Settings › RunPod GPU's. */
+export interface ProjectGpuMachine {
+  gpuTypes: string[] | null
+  cloud: RunPodCloud | null
+  minRamGb: number | null
+  minVcpus: number | null
+}
+
 /** Settings › RunPod GPU (kv "runpod"). */
 export interface RunPodSettings {
   /** The image pods start from: one built with Build image, any compatible one, or null for the stock image. */
@@ -30,6 +68,12 @@ export interface RunPodSettings {
   imageRepo: string | null
   /** GPU types to try, in order (RunPod ids, e.g. "NVIDIA RTX A5000"). */
   gpuTypes: string[]
+  /** Where new pods run, unless the project picks (Project.gpuCloud). Network volumes are Secure Cloud only. */
+  cloud: RunPodCloud
+  /** RunPod only places a pod on a host with at least this much RAM (GB), unless the project sets its own. */
+  minRamGb: number
+  /** …and at least this many vCPUs. Cheap Community hosts can come with little of either; a game's browser needs ~12 GB. */
+  minVcpus: number
   /** The datacenter for new volumes; null picks the one with the best stock of `gpuTypes`. */
   dataCenter: string | null
   /** Stop a pod after this many minutes with no agent turn running. */
@@ -54,6 +98,9 @@ export const DEFAULT_RUNPOD_SETTINGS: RunPodSettings = {
   image: null,
   imageRepo: null,
   gpuTypes: ["NVIDIA RTX A5000", "NVIDIA A40"],
+  cloud: "SECURE",
+  minRamGb: 24,
+  minVcpus: 8,
   dataCenter: null,
   idleMinutes: 10,
   agentsPerPod: 3,
@@ -126,9 +173,17 @@ export interface RunPodGpuOption {
   id: string
   name: string
   memoryGb: number
-  securePrice: number
+  /** $/hr on Secure Cloud, or null when it isn't offered there. */
+  securePrice: number | null
+  /** $/hr on Community Cloud, or null when it isn't offered there. */
+  communityPrice: number | null
   availability: string
+  /** gpuHint: VRAM, rough price and what it's good for, or null. */
+  hint: string | null
 }
+
+/** A GPU type's list price on a cloud, or null when it isn't offered there. */
+export const gpuPrice = (g: Pick<RunPodGpuOption, "securePrice" | "communityPrice">, cloud: RunPodCloud) => (cloud === "COMMUNITY" ? g.communityPrice : g.securePrice)
 
 /** Network volume price by tier, $/GB/month (runpod.io/pricing). */
 export const VOLUME_GB_MONTH_USD: Record<string, number> = { STANDARD: 0.07, HIGH_PERFORMANCE: 0.14 }

@@ -40,6 +40,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { RunPodService } from "./runpod/service.js"
+import { gpuMachinePatch } from "./runpod/settings.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -59,6 +60,7 @@ const projectBoxLimits = {
   tasksPerBox: z.number().int().min(PROJECT_BOX_LIMITS.tasksPerBox.min).max(PROJECT_BOX_LIMITS.tasksPerBox.max).nullable().optional(),
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
   gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
+  gpuMachine: gpuMachinePatch.optional(),
 }
 
 const projectNotesBudget = {
@@ -462,7 +464,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {

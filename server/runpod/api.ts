@@ -1,6 +1,8 @@
 // A small client for RunPod's REST API v2 (https://api.runpod.io/v2; v1 retires Nov 15, 2026). Only what the GPU
 // runner uses: pods, network volumes and the catalog. The key comes from Settings › Credentials (RUNPOD_API_KEY).
 
+import type { RunPodCloud } from "../../shared/runpod.js"
+
 export const RUNPOD_API = "https://api.runpod.io/v2"
 
 export type PodStatus = "PROVISIONING" | "STARTING" | "RUNNING" | "EXITED" | "ERROR" | "TERMINATED"
@@ -32,7 +34,9 @@ export interface CatalogGpu {
   id: string
   name: string
   memory: number
+  /** Offered on Secure Cloud / Community Cloud (a price of 0 means not offered either). */
   secure: boolean
+  community?: boolean
   price: { secure: number; community: number }
   availability?: "NONE" | "LOW" | "MEDIUM" | "HIGH"
 }
@@ -48,7 +52,12 @@ export interface CreatePodInput {
   name: string
   image: string
   gpuId: string
-  dataCenterId: string
+  cloud: RunPodCloud
+  /** null lets RunPod pick (Community Cloud). */
+  dataCenterId: string | null
+  /** Placement filters: only hosts with at least this much RAM (GB) and these many vCPUs per GPU. */
+  minRamGb: number
+  minVcpus: number
   volumeId: string | null
   containerDiskGb: number
   ports: string[]
@@ -124,9 +133,9 @@ export class RunPodApi {
     return this.call<RunPodPod>("POST", "/pods", {
       name: input.name,
       image: input.image,
-      cloud: "SECURE",
-      dataCenterIds: [input.dataCenterId],
-      gpu: { id: input.gpuId, count: 1 },
+      cloud: input.cloud,
+      ...(input.dataCenterId ? { dataCenterIds: [input.dataCenterId] } : {}),
+      gpu: { id: input.gpuId, count: 1, minRamPerGpu: input.minRamGb, minVcpuCountPerGpu: input.minVcpus },
       disk: input.containerDiskGb,
       ports: input.ports,
       env: input.env,

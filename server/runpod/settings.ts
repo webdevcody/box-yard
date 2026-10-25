@@ -1,6 +1,6 @@
 import { z } from "zod"
 import { BadRequestError, type Store } from "../store.js"
-import { DEFAULT_RUNPOD_SETTINGS, type RunPodSettings } from "../../shared/runpod.js"
+import { DEFAULT_RUNPOD_SETTINGS, RUNPOD_MACHINE_LIMITS, type RunPodSettings } from "../../shared/runpod.js"
 
 /** Settings › RunPod GPU, in a kv entry of its own (no secrets: the API key is a credential). */
 const KV = "runpod"
@@ -19,6 +19,9 @@ export const runpodSettingsPatch = z
       .refine((v) => !/[:@]/.test(v.split("/").pop() ?? ""), "The repository has no tag: Build image picks one")
       .nullable(),
     gpuTypes: z.array(z.string().trim().min(1).max(100)).min(1, "Pick at least one GPU type").max(10),
+    cloud: z.enum(["SECURE", "COMMUNITY"]),
+    minRamGb: z.number().int().min(RUNPOD_MACHINE_LIMITS.minRamGb.min).max(RUNPOD_MACHINE_LIMITS.minRamGb.max),
+    minVcpus: z.number().int().min(RUNPOD_MACHINE_LIMITS.minVcpus.min).max(RUNPOD_MACHINE_LIMITS.minVcpus.max),
     dataCenter: z.string().trim().min(1).max(40).nullable(),
     idleMinutes: z.number().int().min(1).max(24 * 60),
     agentsPerPod: z.number().int().min(1).max(16),
@@ -27,6 +30,17 @@ export const runpodSettingsPatch = z
     maxHourlyUsd: z.number().min(0).max(100),
     totalMaxHourlyUsd: z.number().min(0).max(1000),
     watchdogMinutes: z.number().int().min(5).max(24 * 60),
+  })
+  .partial()
+  .strict()
+
+/** A project's own GPU machine (Project.gpuMachine): each field left out stays as it is, null clears it. */
+export const gpuMachinePatch = z
+  .object({
+    gpuTypes: z.array(z.string().trim().min(1).max(100)).min(1, "Pick at least one GPU type").max(10).nullable(),
+    cloud: z.enum(["SECURE", "COMMUNITY"]).nullable(),
+    minRamGb: runpodSettingsPatch.shape.minRamGb.nullable(),
+    minVcpus: runpodSettingsPatch.shape.minVcpus.nullable(),
   })
   .partial()
   .strict()
