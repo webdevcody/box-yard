@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express"
 import fs from "node:fs"
 import path from "node:path"
-import { randomBytes } from "node:crypto"
+import { randomBytes, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
@@ -39,6 +39,7 @@ import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../sh
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
+import { RunPodService } from "./runpod/service.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -260,8 +261,20 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
-  // Every box provider gets the local runner beside it, for projects that run on this computer (shared/runner.ts).
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c))
+  // RunPod GPU pods, for projects that run on "RunPod GPU" (docs/runpod.md). Idle until a RunPod key is set.
+  const runpod = new RunPodService({
+    store,
+    credentials: settings.credentials,
+    dataDir: c.dataDir,
+    install: () => {
+      let id = store.getKv("install_id")
+      if (!id) store.setKv("install_id", (id = randomUUID().slice(0, 8)))
+      return id
+    },
+    git: { name: c.gitUserName, email: c.gitUserEmail },
+  })
+  // Every box provider gets the local runner and the GPU pods beside it (shared/runner.ts).
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), runpod.provider)
   const setup = new Setup({ c, store, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
@@ -272,8 +285,11 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu: runpod })
   tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
+  runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
+  runpod.onProgress = (boxId, message) => tasks.gpuProgress(boxId, message)
+  runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
@@ -692,6 +708,45 @@ export function createBoxYard(
     if (!(CREDENTIAL_KEYS as readonly string[]).includes(key)) throw new BadRequestError(`Unknown credential: ${key}`)
     const { value } = parse(z.object({ value: z.string().max(4000).optional() }).strict(), req.body ?? {})
     res.json(await setup.test(key as CredentialKey, value))
+  })
+
+  // ---- RunPod GPU (Settings › RunPod GPU): settings, pods, volumes and the pod image build. No secrets go out.
+  const runpodStatus = () =>
+    runpod.status({ name: (id) => store.getProjectName(id), running: (boxId) => store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length })
+  api.get("/runpod", async (_req, res) => {
+    res.json(await runpodStatus())
+  })
+  api.put("/runpod/settings", async (req, res) => {
+    runpod.store.update(req.body)
+    applyPoolChange()
+    res.json(await runpodStatus())
+  })
+  api.get("/runpod/gpus", async (_req, res) => {
+    res.json(await runpod.gpuOptions())
+  })
+  /** Build Box Yard's pod image with this computer's Docker and push it to `repo` (theirs: docker login is theirs). */
+  api.post("/runpod/image/build", async (req, res) => {
+    const { repo } = parse(z.object({ repo: z.string().trim().min(3).max(300) }).strict(), req.body)
+    runpod.store.update({ imageRepo: repo })
+    try {
+      res.json(await runpod.images.start(repo))
+    } catch (err) {
+      throw new BadRequestError((err as Error).message)
+    }
+  })
+  api.post("/runpod/pods/:boxId/stop", async (req, res) => {
+    const boxId = String(req.params.boxId)
+    await tasks.stopGpuPod(boxId, { actor: { kind: "owner" }, reason: "Stopped from Settings › RunPod GPU." })
+    res.json(await runpodStatus())
+  })
+  api.post("/runpod/pods/:boxId/keep-warm", async (req, res) => {
+    const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
+    await runpod.keepWarm(String(req.params.boxId), minutes)
+    res.json(await runpodStatus())
+  })
+  api.delete("/runpod/volumes/:id", async (req, res) => {
+    await runpod.deleteVolume(String(req.params.id))
+    res.json(await runpodStatus())
   })
 
   // ---- text-to-speech (Settings › Voice): settings, the provider proxy and voice lists

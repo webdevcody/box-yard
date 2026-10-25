@@ -8,6 +8,7 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
+import type { RunPodImageBuild } from "./runpod.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -484,6 +485,8 @@ export type UiEvent =
   | { type: "tts"; info: TtsInfo }
   /** A credential was saved or removed in the app (status only, never a value). */
   | { type: "setup"; status: SetupStatus }
+  /** Settings › RunPod GPU's image build moved on (state and the log's tail; never a secret). */
+  | { type: "runpod.build"; build: RunPodImageBuild }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

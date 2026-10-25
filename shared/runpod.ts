@@ -83,6 +83,8 @@ export interface RunPodImageBuild {
   startedAt: number | null
   finishedAt: number | null
   error: string | null
+  /** It built and pushed, but something needs a look (the registry won't let RunPod pull it anonymously). */
+  warning: string | null
   /** The tail of the docker output. */
   log: string
 }
