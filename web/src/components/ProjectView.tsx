@@ -374,6 +374,7 @@ const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) 
 function ProjectBoxSettings(p: {
   info: SettingsInfo | undefined
   local: boolean
+  gpu: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
   agentsPerBox: string
@@ -403,6 +404,7 @@ function ProjectBoxSettings(p: {
       <p className="text-xs text-zinc-500">
         Leave one blank to use the global setting. Where projects share a box, the strictest limit wins.
         {p.local && " This project runs on this computer: Agents per box also limits its agents here, and the rest apply when it runs on boxes."}
+        {p.gpu && " This project runs on a RunPod GPU pod: Agents per box sets its agents per pod (blank: Settings › RunPod GPU), and the rest apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -628,6 +630,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <ProjectBoxSettings
         info={settings.data}
         local={runner === "local"}
+        gpu={runner === "gpu"}
         boxSize={boxSize}
         setBoxSize={setBoxSize}
         agentsPerBox={agentsPerBox}
