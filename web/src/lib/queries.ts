@@ -5,6 +5,8 @@ import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
+import type { ProjectSnapshotState } from "./projectSnapshot"
+import type { SnapshotJob } from "../../../shared/snapshots"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
@@ -89,6 +91,8 @@ export const keys = {
   projectsOrder: ["projects-order"] as const,
   /** A project's note suggestions from agents: "pending", or "all" for the resolved ones too. */
   noteSuggestions: (projectId: string) => ["note-suggestions", projectId] as const,
+  /** A project's snapshot and its running or last snapshot job. */
+  projectSnapshot: (projectId: string) => ["project-snapshot", projectId] as const,
 }
 
 /** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
@@ -420,6 +424,7 @@ export function useCreateProject() {
           depCache: null,
           runner: "box",
           heavyTasks: "off",
+          snapshot: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -895,6 +900,37 @@ export function useResizeBox() {
       qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => withResize(list, r))
       announceResize(r)
     },
+  })
+}
+
+/** A project's snapshot and its running or last snapshot job; SSE project.snapshot keeps the job live. */
+export const useProjectSnapshot = (projectId: string) =>
+  useQuery({ queryKey: keys.projectSnapshot(projectId), queryFn: () => api<ProjectSnapshotState>(`/api/projects/${encodeURIComponent(projectId)}/snapshot`) })
+
+/** Take (or replace) a project's snapshot from one of its boxes. Answers with the running job; the toast follows it. */
+export function useTakeSnapshot() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { projectId: string; boxId: string; reason?: string }) =>
+      api<SnapshotJob>(`/api/projects/${encodeURIComponent(input.projectId)}/snapshot`, { body: { boxId: input.boxId, ...(input.reason ? { reason: input.reason } : {}) } }),
+    onSuccess: (job) => {
+      qc.setQueryData<ProjectSnapshotState>(keys.projectSnapshot(job.projectId), (s) => (s ? { ...s, job } : s))
+      void qc.invalidateQueries({ queryKey: keys.boxes })
+    },
+  })
+}
+
+/** Forget a project's snapshot and delete it at the provider. */
+export function useClearSnapshot() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (projectId: string) => api<Project>(`/api/projects/${encodeURIComponent(projectId)}/snapshot`, { method: "DELETE" }),
+    onSuccess: (project) => {
+      qc.setQueryData<Project[]>(keys.projects, (list) => (list ? upsert(list, project) : list))
+      qc.setQueryData<ProjectSnapshotState>(keys.projectSnapshot(project.id), (s) => (s ? { ...s, snapshot: null } : s))
+      toast.info(`Cleared ${project.name}'s snapshot`, "New boxes for it start cold.")
+    },
+    onError: fail("Couldn't clear the snapshot"),
   })
 }
 

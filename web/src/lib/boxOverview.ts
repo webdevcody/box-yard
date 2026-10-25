@@ -162,5 +162,6 @@ export function boxBusyReason(box: Pick<BoxInfo, "operation" | "cleanup">): stri
   if (op === "clear") return "This box is being cleared"
   if (op === "delete") return "This box is being deleted"
   if (op === "resize") return "This box is being resized"
+  if (op === "snapshot") return "A project snapshot is being taken of this box"
   return null
 }

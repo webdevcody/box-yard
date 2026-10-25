@@ -6,6 +6,7 @@ import { withActivity } from "./taskSummary"
 import { applyOrder } from "./projectOrder"
 import { announceCleanup, withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
+import { announceSnapshot, type ProjectSnapshotState } from "./projectSnapshot"
 import { placeMessage } from "./queued"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
@@ -196,6 +197,15 @@ export function useServerEvents(enabled: boolean): Connection {
         case "box.event":
           void qc.invalidateQueries({ queryKey: keys.boxHistory })
           break
+        case "project.snapshot": {
+          const job = ev.job
+          qc.setQueryData<ProjectSnapshotState>(keys.projectSnapshot(job.projectId), (s) => (s ? { ...s, job } : s))
+          // The saved snapshot itself comes with the project event; refetch the panel's copy once the job ends.
+          if (job.status !== "running") void qc.invalidateQueries({ queryKey: keys.projectSnapshot(job.projectId) })
+          void qc.invalidateQueries({ queryKey: keys.boxes })
+          announceSnapshot(job, qc.getQueryData<Project[]>(keys.projects)?.find((p) => p.id === job.projectId)?.name)
+          break
+        }
         case "schedule":
           qc.setQueryData<Schedule[]>(keys.schedules, (list) => (list ? upsert(list, ev.schedule) : list))
           break

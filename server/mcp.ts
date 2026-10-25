@@ -24,6 +24,7 @@ import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
+import { snapshotJobLine } from "../shared/snapshots.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
@@ -357,6 +358,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     envKeys: p.envKeys,
     ...(p.boxSize ? { preferredBoxSize: p.boxSize } : {}),
     ...(p.heavyTasks !== "off" ? { heavyTasks: p.heavyTasks } : {}),
+    ...(p.snapshot
+      ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
+      : {}),
+    ...(tasks?.snapshotJob(p.id)?.status === "running" ? { snapshotJob: snapshotJobLine(tasks.snapshotJob(p.id)!) } : {}),
     notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
     ...(p.notesMaxCount !== null || p.notesMaxTokens !== null ? { notesBudget: notes.budgetStatus(p.id).line } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
@@ -528,6 +533,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         const p = project(a.project)
         for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
         for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
+        await tasks.projectDeleted(p.id)
         store.deleteProject(p.id)
         hub.broadcast({ type: "project.deleted", projectId: p.id })
         return ok(`Deleted project ${p.name}.`)
@@ -1420,6 +1426,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             : {}),
           ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
+          ...(b.operation ? { busy: b.operation } : {}),
           ...(b.resize && (b.resize.status === "running" || Date.now() - (b.resize.finishedAt ?? 0) < 24 * 3600_000)
             ? { resize: `${resizeTitle(b.resize)}: ${resizeSummary(b.resize)}${b.resize.finishedAt ? ` ${ago(b.resize.finishedAt)}` : ""}` }
             : {}),
@@ -1780,6 +1787,49 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         to: r.to,
         how: r.mode === "in-place" ? "in place" : "migration to a new box",
         next: "You'll get a notice when it's done; pool_status shows progress.",
+      })
+    }),
+  )
+
+  server.registerTool(
+    "snapshot_box",
+    {
+      description:
+        "Save a box as its project's snapshot, so every new box Box Yard makes for the project starts from it (the repo mirror, node_modules in the box's dependency cache, the npm cache, toolchains, browsers, system packages) instead of from scratch. " +
+        "Use it once a setup or scaffold task has a box fully set up and its turn is over, before you fan out many tasks to new boxes. " +
+        "The box itself isn't changed: Box Yard snapshots it, strips a scratch copy of every workspace, login, token, temp file and log, saves that as the snapshot and deletes the copy. It replaces the project's previous snapshot. " +
+        "Refused while agents run on the box (wait until it's idle). Runs in the background, a few minutes for a big disk; you get a notice when it's saved, and boxes made before then start without it. " +
+        "New boxes of the snapshot's size or bigger use it; list_projects shows it. " +
+        owner("Cody can clear or replace it in the project's Settings. ") +
+        (scopeId ? "As a Captain you can only snapshot a box your project's tasks live on, for your project." : "Pass project when the box holds more than one project's work."),
+      inputSchema: {
+        box: z.string().describe("Box id, from pool_status (the box the setup task ran on)"),
+        project: z.string().optional().describe("Project id or name; defaults to your project (Captain) or the box's only project"),
+        reason: z.string().trim().min(3).max(500).optional().describe("Why, in one sentence for the box history (e.g. \"Scaffold task set up the repo, npm ci and headless Chrome\")."),
+      },
+    },
+    safe(async (a: { box: string; project?: string; reason?: string }) => {
+      const box = store.getBox(a.box)
+      if (!box) return fail(`No box "${a.box}". Use pool_status.`)
+      const on = tasks.projectsOnBox(box.id)
+      const named = a.project ? project(a.project) : scopeId ? ownProject() : on.length === 1 ? store.getProject(on[0]!) : null
+      if (!named) {
+        const names = on.map((id) => store.getProject(id)?.name ?? id)
+        return fail(names.length ? `Box ${box.id} holds work of ${names.join(", ")}: say which project with project.` : `Box ${box.id} holds no project's work: snapshot a box a setup task ran on.`)
+      }
+      if (!on.includes(named.id)) {
+        if (scopeId) throw outOfScope(`box ${box.id} doesn't host project "${named.name}"`)
+        return fail(`Box ${box.id} doesn't hold ${named.name}'s work: snapshot a box its tasks ran on.`)
+      }
+      const by = scopeId ? ({ kind: "captain", projectId: scopeId } as const) : ({ kind: "coordinator" } as const)
+      const job = await tasks.snapshotBox(box.id, named.id, { by, reason: a.reason ?? null })
+      return ok({
+        started: true,
+        project: named.name,
+        box: job.boxId,
+        size: job.size,
+        ...(named.snapshot ? { replaces: named.snapshot.id } : {}),
+        next: `You'll get a notice when it's saved (list_projects shows progress). Fan out after that: boxes made before then start without it. New ${named.name} boxes of ${job.size} or bigger will start from it.`,
       })
     }),
   )

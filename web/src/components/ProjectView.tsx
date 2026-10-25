@@ -32,6 +32,7 @@ import { NewTaskButton } from "./NewTask"
 import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
+import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
@@ -139,7 +140,12 @@ export function ProjectView({ id }: { id: string }) {
       {tab === "hooks" && <HooksPanel projectId={id} />}
       {tab === "notes" && <NotesTab project={project} />}
       {tab === "files" && <Files files={files} tasks={list} />}
-      {tab === "settings" && <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />}
+      {tab === "settings" && (
+        <div className="space-y-4">
+          <ProjectSettings key={project.id} project={project} onDone={() => setParams((p) => withParam(p, "tab", null))} />
+          <ProjectSnapshotPanel project={project} />
+        </div>
+      )}
     </div>
   )
 }

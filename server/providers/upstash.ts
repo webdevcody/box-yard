@@ -1,14 +1,17 @@
-import { Box } from "@upstash/box"
+import { Box, type Snapshot } from "@upstash/box"
 import fs from "node:fs"
 import type { Config } from "../config.js"
 import type { WorkerSize } from "../../shared/types.js"
-import { retry } from "../util/retry.js"
+import { errorMessage, retry } from "../util/retry.js"
 import type { CredentialStore } from "../credentials.js"
 import { UPSTASH_MAX_UPLOAD_BYTES } from "../upload.js"
-import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
+import { q, type BoxHealth, type BoxProvider, type BoxSnapshotInfo, type BoxUsageProbe, type ExecResult } from "./types.js"
 
 const ROOT = "/workspace/home"
 const READ_CHUNK = 8 * 1024 * 1024 // server limit for one ranged read
+/** How long a snapshot of a big disk may take. The SDK gives up after 5 minutes; we keep waiting this long by name. */
+const SNAPSHOT_WAIT_MS = 30 * 60_000
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /** Install Claude Code (unless a snapshot already has it) and set up git. */
 export function workerSetupScript(c: Pick<Config, "gitUserName" | "gitUserEmail">) {
@@ -68,7 +71,7 @@ export class UpstashProvider implements BoxProvider {
     return box
   }
 
-  async create({ labels, size }: { labels: string[]; size?: WorkerSize }): Promise<string> {
+  async create({ labels, size, snapshotId }: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string> {
     const env: Record<string, string> = { DISABLE_AUTOUPDATER: "1", IS_SANDBOX: "1" }
     if (this.creds) Object.assign(env, this.creds.claudeEnv())
     else {
@@ -87,8 +90,10 @@ export class UpstashProvider implements BoxProvider {
         ? { token: gitToken, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail }
         : undefined,
     }
-    // Create is not idempotent, so only one attempt; callers handle failure.
-    const box = this.c.workerSnapshotId ? await Box.fromSnapshot(this.c.workerSnapshotId, opts) : await Box.create(opts)
+    // Create is not idempotent, so only one attempt; callers handle failure. A project's snapshot comes first, then
+    // the install-wide WORKER_SNAPSHOT_ID. A box from a snapshot gets the size, env and git token passed here.
+    const from = snapshotId || this.c.workerSnapshotId
+    const box = from ? await Box.fromSnapshot(from, opts) : await Box.create(opts)
     this.boxes().set(box.id, box)
     try {
       const setup = await this.exec(box.id, workerSetupScript(this.c))
@@ -98,6 +103,47 @@ export class UpstashProvider implements BoxProvider {
       throw err
     }
     return box.id
+  }
+
+  async snapshot(boxId: string, name: string): Promise<BoxSnapshotInfo> {
+    const box = await this.box(boxId)
+    let snap: Snapshot
+    try {
+      snap = await box.snapshot({ name })
+    } catch (err) {
+      // The SDK stops waiting after 5 minutes while a big disk is still being saved: keep waiting for it by name.
+      if (!/timed out/i.test(errorMessage(err))) throw err
+      snap = await this.waitForSnapshot(box, name)
+    }
+    return { id: snap.id, bytes: typeof snap.size_bytes === "number" ? snap.size_bytes : null }
+  }
+
+  private async waitForSnapshot(box: Box, name: string): Promise<Snapshot> {
+    const until = Date.now() + SNAPSHOT_WAIT_MS
+    let found: Snapshot | undefined
+    while (Date.now() < until) {
+      await sleep(5_000)
+      found = (await retry(() => box.listSnapshots())).find((s) => s.name === name)
+      if (found?.status === "ready") return found
+      if (found?.status === "error") throw new Error(`snapshot ${found.id} failed at Upstash`)
+    }
+    // Don't leave a half-made snapshot behind to be billed for.
+    if (found) await this.deleteSnapshot(found.id).catch(() => {})
+    throw new Error(`snapshot ${name} wasn't ready after ${SNAPSHOT_WAIT_MS / 60_000} minutes`)
+  }
+
+  async deleteSnapshot(snapshotId: string): Promise<void> {
+    // Box.deleteSnapshots without ids deletes every snapshot on the account: never let an empty id through.
+    if (!snapshotId.trim()) throw new Error("deleteSnapshot needs a snapshot id")
+    try {
+      await retry(() => Box.deleteSnapshots({ apiKey: this.apiKey, snapshotIds: [snapshotId] }))
+    } catch (err) {
+      if (!isNotFound(err)) throw err
+    }
+  }
+
+  snapshotDirs() {
+    return { home: "$HOME", tmp: "/tmp" }
   }
 
   async health(boxId: string): Promise<BoxHealth> {
