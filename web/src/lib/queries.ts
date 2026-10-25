@@ -10,7 +10,6 @@ import type { SnapshotJob } from "../../../shared/snapshots"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
-import type { HeavyTasks } from "../../../shared/memory"
 import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -447,7 +446,9 @@ export function useCreateProject() {
           depCache: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
-          heavyTasks: "off",
+          agentsPerBox: null,
+          tasksPerBox: null,
+          maxBoxes: null,
           snapshot: null,
           createdAt: now,
           updatedAt: now,
@@ -484,7 +485,9 @@ export function useUpdateProject() {
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
       runner?: Runner
-      heavyTasks?: HeavyTasks
+      agentsPerBox?: number | null
+      tasksPerBox?: number | null
+      maxBoxes?: number | null
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
