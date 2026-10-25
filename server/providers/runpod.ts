@@ -132,6 +132,7 @@ export class RunPodProvider implements BoxProvider {
     const st = this.states.get(boxId)
     if (st?.target) this.d.ssh.close(st.target)
     this.states.delete(boxId)
+    this.lastProgress.delete(boxId)
     this.listed = null
   }
 
@@ -145,7 +146,12 @@ export class RunPodProvider implements BoxProvider {
     return p
   }
 
+  private readonly lastProgress = new Map<string, string>()
+
+  /** Tell the box's starting tasks what's happening, once per change (waits poll every few seconds). */
   private progress(boxId: string, message: string) {
+    if (this.lastProgress.get(boxId) === message) return
+    this.lastProgress.set(boxId, message)
     this.d.onProgress?.(boxId, message)
   }
 
