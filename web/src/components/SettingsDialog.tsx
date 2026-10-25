@@ -29,6 +29,7 @@ import { LOCAL_AGENTS_LIMITS, LOCAL_UNSANDBOXED } from "../../../shared/runner"
 import {
   AUTOCOMPACT_MAX_TOKENS,
   AUTOCOMPACT_MIN_TOKENS,
+  BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
   DEFAULT_AUTOCOMPACT_TOKENS,
   EFFORTS,
@@ -602,7 +603,7 @@ function LimitsPanel({
   const health = useHealth()
   const server = useSettings()
   const int =
-    (k: "maxBoxes" | "maxAgents" | "localAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
+    (k: "maxBoxes" | "boxCreateConcurrency" | "maxAgents" | "localAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -681,6 +682,23 @@ function LimitsPanel({
       <SizeCapacityTable s={s} sources={sources} changed={changed} />
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
+      </Row>
+      <Row
+        id={fid("bcc")}
+        label="Boxes created at once"
+        help="When many tasks wait for a box (say a Captain starts a batch of tasks), Box Yard creates up to this many boxes in parallel, still within Max boxes. Lower it if your box provider rate-limits box creation; Box Yard also backs off by itself when a create fails or is rate-limited."
+        hint={hint("boxCreateConcurrency")}
+      >
+        <input
+          id={fid("bcc")}
+          type="number"
+          min={BOX_CREATE_CONCURRENCY.min}
+          max={BOX_CREATE_CONCURRENCY.max}
+          className={inputClass}
+          value={s.boxCreateConcurrency}
+          onChange={int("boxCreateConcurrency")}
+          data-testid="box-create-concurrency"
+        />
       </Row>
       <Row
         id={fid("spb")}

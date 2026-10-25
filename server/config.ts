@@ -2,7 +2,7 @@ import path from "node:path"
 import fs from "node:fs"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
-import { EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
+import { BOX_CREATE_CONCURRENCY, EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
 import { DEFAULT_NOTE_BUDGET } from "../shared/notes.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
@@ -97,6 +97,8 @@ export const config = {
 
   /** Max worker boxes alive at once (the free plan allows about 5). */
   maxBoxes: int("BOX_POOL_MAX", 5),
+  /** Worker boxes created at the same time when many tasks wait for one. */
+  boxCreateConcurrency: int("BOX_CREATE_CONCURRENCY", BOX_CREATE_CONCURRENCY.default),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
   /** Local runner: most agents of "This computer" projects running at once on this machine (their own queue, apart from box slots). */

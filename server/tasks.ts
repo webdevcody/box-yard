@@ -36,7 +36,7 @@ import { userMessageLabel } from "../shared/sender.js"
 import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
-import { errorMessage } from "./util/retry.js"
+import { errorMessage, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
@@ -115,7 +115,6 @@ const SLEEP_WAKE_GRACE_MS = 15 * 60_000
 const RUNNER_SLEEP_MIN_MS = 20_000
 /** A local task waits with this while every Settings › Local agents slot is taken. */
 const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
-const BOX_RETRY_MS = 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 /** Note suggestions one task can leave for its retro; past that the agent is logging, not suggesting. */
 const MAX_SUGGESTIONS_PER_TASK = 20
@@ -171,6 +170,23 @@ const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, na
  * `hook:<hookId>` a hook (server/hooks.ts).
  */
 export type InputSource = "cody" | typeof MERGE_BUTTON_SOURCE | "orchestrator" | "system" | `agent:${string}` | `captain:${string}` | `hook:${string}`
+
+/** A task to start (TaskManager.createTask / createTasks). */
+export interface NewTask {
+  id?: string
+  projectId: string
+  title: string
+  prompt: string
+  env?: Record<string, string>
+  scheduleId?: string | null
+  model?: string | null
+  effort?: Effort | null
+  routingRule?: string | null
+  routingReason?: string | null
+  attachments?: StoredUpload[]
+  /** Who the attached files are from (a Captain labels them as its own). */
+  source?: InputSource
+}
 
 /**
  * Something happened to a task that hooks (server/hooks.ts) can act on. `originHookIds` are the hooks whose
@@ -304,11 +320,23 @@ export class TaskManager {
   /** Tasks whose turn was picked (starting) when Cody cancelled every message it was for: launch drops that turn. */
   private cancelledAll = new Set<string>()
   private creatingBoxes = 0
+  /**
+   * Pool boxes being created by createBox: what Settings › Boxes created at once caps. Not `creatingBoxes`, which
+   * also counts a snapshot job's scratch box for as long as the job runs.
+   */
+  private poolCreates = 0
   /** Boxes being created, per project they're for. */
   private creatingFor = new Map<string, number>()
   /** Tasks that found no box this scheduling pass and want a new one. */
   private wantsBox = new Set<string>()
   private lastBoxError: { at: number; message: string } | null = null
+  /**
+   * Box creation's backoff: failed creates in a row, when the next one may start, and how many may run at
+   * once right now (Settings › Boxes created at once, halved by a rate limit and grown back by one per new box).
+   */
+  private boxCreate = { failures: 0, retryAt: 0, window: Number.POSITIVE_INFINITY }
+  /** Box creation backoff timings. Tests shorten them. */
+  readonly boxCreateTuning = { retryBaseMs: 2_000, retryMaxMs: 60_000, rateLimitMs: 10_000 }
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
   /** Each task's last archive error, until an archive succeeds. */
@@ -534,42 +562,46 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ public API
 
-  createTask(input: {
-    id?: string
-    projectId: string
-    title: string
-    prompt: string
-    env?: Record<string, string>
-    scheduleId?: string | null
-    model?: string | null
-    effort?: Effort | null
-    routingRule?: string | null
-    routingReason?: string | null
-    attachments?: StoredUpload[]
-    /** Who the attached files are from (a Captain labels them as its own). */
-    source?: InputSource
-  }): Task {
-    const project = this.store.getProject(input.projectId)
-    if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
-    if (!input.title.trim()) throw new BadRequestError("title is required")
-    if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
-    const route = this.initialRoute(input)
-    const task = this.store.createTask({
-      ...input,
-      startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
-      model: route.model,
-      effort: route.effort,
-      routingRule: route.routingRule,
-      routingReason: route.routingReason,
-      branch: project.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
+  createTask(input: NewTask): Task {
+    return this.createTasks([input])[0]!
+  }
+
+  /**
+   * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
+   * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
+   * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
+   * per call.
+   */
+  createTasks(inputs: NewTask[]): Task[] {
+    const projects = inputs.map((input) => {
+      const project = this.store.getProject(input.projectId)
+      if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
+      if (!input.title.trim()) throw new BadRequestError("title is required")
+      if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
+      return project
     })
-    const files = input.attachments ?? []
-    this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
-    if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
-    this.emitTask(task.id)
+    const ids = this.store.db.transaction(() =>
+      inputs.map((input, i) => {
+        const route = this.initialRoute(input)
+        const task = this.store.createTask({
+          ...input,
+          startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
+          model: route.model,
+          effort: route.effort,
+          routingRule: route.routingRule,
+          routingReason: route.routingReason,
+          branch: projects[i]!.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
+        })
+        const files = input.attachments ?? []
+        this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
+        if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
+        return task.id
+      }),
+    )()
+    for (const id of ids) this.emitTask(id)
     this.publishDirectory()
     this.schedule()
-    return this.store.getTask(task.id)!
+    return ids.map((id) => this.store.getTask(id)!)
   }
 
   sendInput(
@@ -977,6 +1009,18 @@ export class TaskManager {
       agentsRunning: this.runningTotal(),
       localAgents: this.slotsFor(LOCAL_BOX_ID),
       localAgentsRunning: this.runningOn(LOCAL_BOX_ID),
+      boxesCreating: this.boxCreation(),
+    }
+  }
+
+  /** Box creation for pool_status: how many are on their way, how many may be at once, and any backoff. */
+  private boxCreation() {
+    const wait = this.boxCreate.retryAt - Date.now()
+    const atOnce = this.createConcurrency()
+    return {
+      now: this.poolCreates,
+      atOnce: atOnce < this.settings.get().boxCreateConcurrency ? `${atOnce} (lowered after a rate limit; Settings › Boxes created at once is ${this.settings.get().boxCreateConcurrency})` : atOnce,
+      ...(wait > 0 ? { backoff: `the next create waits ${Math.ceil(wait / 1000)}s after ${this.boxCreate.failures || 1} failure${this.boxCreate.failures > 1 ? "s" : ""}${this.lastBoxError ? `: ${this.lastBoxError.message}` : ""}` } : {}),
     }
   }
 
@@ -2074,15 +2118,70 @@ export class TaskManager {
       void this.launch(row.id, boxId, turnId)
     }
 
-    // Grow the pool: one new box per project per `slotsPerBox` tasks waiting for one.
+    // Grow the pool: one new box per project per `slotsPerBox` tasks waiting for one, less the boxes already on
+    // their way, so a batch never gets more boxes than it needs.
     const perProject = new Map<string, number>()
     for (const row of waiting) {
       if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
     }
+    const need = new Map<string, number>()
     for (const [projectId, n] of perProject) {
-      const need = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
-      for (let i = 0; i < need && this.poolHasRoom(); i++) void this.createBox(projectId)
+      const more = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
+      if (more > 0) need.set(projectId, more)
     }
+    // Several at once, up to Settings › Boxes created at once (each finished create runs another pass). The project
+    // with the fewest boxes on their way goes next, so one project's big fan-out doesn't hold up another's single
+    // task. createBox counts itself in `creatingFor` before its first await.
+    const cap = this.createConcurrency()
+    while (need.size && this.canCreateBox(cap)) {
+      const [projectId, more] = [...need].reduce((best, next) => ((this.creatingFor.get(next[0]) ?? 0) < (this.creatingFor.get(best[0]) ?? 0) ? next : best))
+      void this.createBox(projectId)
+      if (more > 1) need.set(projectId, more - 1)
+      else need.delete(projectId)
+    }
+  }
+
+  /** Box creates that may run at once: Settings › Boxes created at once, fewer for a while after a rate limit. */
+  private createConcurrency() {
+    return Math.max(1, Math.min(this.settings.get().boxCreateConcurrency, this.boxCreate.window))
+  }
+
+  /** Another box create may start: the pool has room, no backoff is running and fewer than `cap` are on their way. */
+  private canCreateBox(cap: number) {
+    return this.poolCreates < cap && Date.now() >= this.boxCreate.retryAt && this.poolHasRoom()
+  }
+
+  /** Box creation keeps failing (twice or more in a row, and backing off): placement stops counting on new boxes. */
+  private boxCreateFailing() {
+    return this.boxCreate.failures >= 2 && Date.now() < this.boxCreate.retryAt
+  }
+
+  /**
+   * A box create failed: back off before the next one starts and return for how long. Creates already running go
+   * on, so one failure costs the queue a couple of seconds, not a minute. The wait doubles with each failure in a
+   * row (up to `retryMaxMs`), and a rate limit also halves how many run at once.
+   */
+  private boxCreateFailed(err: unknown): number {
+    const t = this.boxCreateTuning
+    const b = this.boxCreate
+    const now = Date.now()
+    b.failures++
+    let delay = Math.min(t.retryMaxMs, t.retryBaseMs * 2 ** (b.failures - 1))
+    if (isRateLimited(err)) {
+      // Once per backoff: the other creates of the same burst often hit the same limit.
+      if (now >= b.retryAt) b.window = Math.max(1, Math.floor(Math.min(b.window, this.poolCreates) / 2))
+      delay = Math.max(delay, t.rateLimitMs)
+    }
+    delay = Math.round(delay * (0.9 + Math.random() * 0.2))
+    b.retryAt = Math.max(b.retryAt, now + delay)
+    return b.retryAt - now
+  }
+
+  /** A box came up: creation works, so the failure count resets and a lowered concurrency grows back by one. */
+  private boxCreateWorked() {
+    const b = this.boxCreate
+    b.failures = 0
+    if (Number.isFinite(b.window)) b.window = b.window + 1 >= this.settings.get().boxCreateConcurrency ? Number.POSITIVE_INFINITY : b.window + 1
   }
 
   /** A task that waits for a turn: queued, or resting with queued messages or a compaction to run. */
@@ -2376,7 +2475,7 @@ export class TaskManager {
       }
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
-    const poolFull = !this.wantsBox.has(taskId) && !this.poolHasRoom() ? "Waiting for a free slot: every box is full and the pool is at its limit" : null
+    const poolFull = !this.wantsBox.has(taskId) && !this.poolHasRoom() ? this.noNewBoxReason() : null
     this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull)
     return null
   }
@@ -2761,11 +2860,18 @@ export class TaskManager {
     return true
   }
 
+  /** Why a task with no free slot can't count on a new box: the pool is at Max boxes, or creating boxes keeps failing. */
+  private noNewBoxReason() {
+    if (this.store.listBoxes().length < this.limits().maxBoxes && this.boxCreateFailing()) {
+      return "Waiting for a free slot or a new box: creating boxes keeps failing, so Box Yard retries with backoff"
+    }
+    return "Waiting for a free slot: every box is full and the pool is at its limit"
+  }
+
   /** Room to create another box (and box creation isn't failing right now). */
   private poolHasRoom() {
-    const recentlyFailed = this.lastBoxError && Date.now() - this.lastBoxError.at < BOX_RETRY_MS
     // listBoxes() includes the placeholders of boxes being created.
-    return !recentlyFailed && this.store.listBoxes().length < this.limits().maxBoxes
+    return !this.boxCreateFailing() && this.store.listBoxes().length < this.limits().maxBoxes
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */
@@ -2819,6 +2925,7 @@ export class TaskManager {
 
   private async createBox(projectId?: string) {
     this.creatingBoxes++
+    this.poolCreates++
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
     const size = this.newBoxSize(projectId)
@@ -2852,16 +2959,19 @@ export class TaskManager {
         this.schedule()
       })
       this.lastBoxError = null
+      this.boxCreateWorked()
       console.log(`[box-yard] created box ${id}${project ? ` for project ${project.name}` : ""}`)
     } catch (err) {
       this.store.removeBox(placeholder)
+      const delay = this.boxCreateFailed(err)
       const message = `Couldn't create a worker box: ${errorMessage(err)}`
       console.error(`[box-yard] ${message}`)
-      if (!this.lastBoxError || this.lastBoxError.message !== message) this.notice(`⚠️ ${message}. Retrying in a minute.`)
+      if (!this.lastBoxError || this.lastBoxError.message !== message) this.notice(`⚠️ ${message}. Retrying in ${Math.max(1, Math.round(delay / 1000))}s.`)
       this.lastBoxError = { at: Date.now(), message }
-      setTimeout(() => this.schedule(), BOX_RETRY_MS).unref()
+      setTimeout(() => this.schedule(), delay).unref()
     } finally {
       this.creatingBoxes--
+      this.poolCreates--
       if (projectId) {
         const left = (this.creatingFor.get(projectId) ?? 1) - 1
         if (left > 0) this.creatingFor.set(projectId, left)
