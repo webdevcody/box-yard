@@ -24,9 +24,12 @@ interface Run {
 function run(bin: string, args: string[], timeoutMs: number): Promise<Run> {
   return new Promise((resolve) => {
     try {
-      execFile(bin, args, { timeout: timeoutMs, env: { ...agentEnv(process.env), DISABLE_AUTOUPDATER: "1" }, windowsHide: true }, (err, stdout) =>
+      const child = execFile(bin, args, { timeout: timeoutMs, env: { ...agentEnv(process.env), DISABLE_AUTOUPDATER: "1" }, windowsHide: true }, (err, stdout) =>
         resolve({ ok: !err, stdout: String(stdout ?? "") }),
       )
+      // Nothing to type: a CLI that reads stdin gets EOF instead of waiting out the timeout.
+      child.stdin?.on("error", () => {})
+      child.stdin?.end()
     } catch {
       resolve({ ok: false, stdout: "" })
     }

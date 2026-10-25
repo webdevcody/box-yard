@@ -77,7 +77,7 @@ export const LOCAL_TOOL_INFO: Record<LocalToolKey, { label: string; required: bo
   gh: {
     label: "GitHub CLI",
     required: false,
-    help: "Agents use it to open PRs. Signed in with `gh auth login`, it can stand in for a GitHub token.",
+    help: "Agents use it to open PRs. Signed in (gh auth login), it can stand in for a GitHub token.",
     link: { href: "https://cli.github.com", label: "Install gh" },
   },
   chrome: {
