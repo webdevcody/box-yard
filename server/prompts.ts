@@ -2,7 +2,6 @@ import { withOwner } from "../shared/owner.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { formatBytes } from "../shared/disk.js"
-import type { HeavyTasks } from "../shared/memory.js"
 import { DEFAULT_NOTE_BUDGET, noteLine, shortTokens, type NoteBudget } from "../shared/notes.js"
 
 export interface DirectoryEntry {
@@ -83,10 +82,10 @@ export function workerSystemPrompt(input: {
 export interface BoxPromptInfo {
   /** The box's memory (its cgroup limit), null before Box Yard first measured it. */
   memoryBytes: number | null
-  /** Agents that may run on the box at once. */
+  /** Agents that may run on the box at once (its slots, or fewer under the project's Agents per box). */
   slots: number
-  /** The project's heavy-tasks setting (shared/memory.ts). */
-  heavyTasks: HeavyTasks
+  /** The project's Agents per box is 1: each of its agents has the box to itself. */
+  alone?: boolean
   /** The local runner: the turn runs on the computer running Box Yard, unsandboxed (shared/runner.ts). */
   local?: boolean
 }
@@ -104,10 +103,9 @@ function boxLines(b: BoxPromptInfo): string[] {
   }
   const mem = b.memoryBytes ? `This box has ${formatBytes(b.memoryBytes)} of memory` : `This box's memory is limited`
   const heavy = `Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need: running out of memory kills every agent on the box.`
-  if (b.heavyTasks === "whole-box") return [`${mem}, and your project runs its agents alone on a box, so it's yours while your turn runs. ${heavy}`]
+  if (b.alone) return [`${mem}, and your project runs its agents alone on a box, so it's yours while your turn runs. ${heavy}`]
   if (b.slots <= 1) return [`${mem}. ${heavy}`]
-  const who = b.heavyTasks === "one-per-box" ? `up to ${b.slots - 1} agents of other projects` : `up to ${b.slots - 1} other agents`
-  return [`${mem}, shared with ${who} that may run at the same time. ${heavy}`]
+  return [`${mem}, shared with up to ${b.slots - 1} other agents that may run at the same time. ${heavy}`]
 }
 
 /** The first prompt a task's agent receives. */
@@ -236,6 +234,7 @@ How the yard is built:
 - A project groups work on one thing, usually one GitHub repo (owner/name), which is cloned into each of its tasks. It can also have no repo (research, writing, ops) and env vars every task gets.
 - A task is one agent: one headless Claude Code session with its own folder and git branch. Its session is kept between messages, so it remembers everything it did.
 - Boxes: Box Yard places tasks itself. A project's tasks share the project's box (the repo is already there), a new project gets its own box while the pool has room, and when the pool is full tasks share boxes or wait in a queue. You don't pick boxes; pool_status shows them, with each box's size and disk. box_history says what happened to a box and who did it (created, resized, deleted, lost, cleaned up), deleted boxes included.
+- Project box settings: a project can set its own box size, agents per box, tasks per box and max boxes with update_project (null goes back to the global Settings › Boxes & limits); list_projects shows them as boxSettings. Agents per box 1 gives each of its agents a box to itself (game engines, big builds, headless browsers); light projects can share 2-4 per box.
 - Box size: ${RESIZE_GUIDANCE}
 - Box snapshots: ${SNAPSHOT_GUIDANCE}
 - You can't touch code or GitHub yourself. Delegate everything to tasks with the boxyard tools. Agents have git, the gh CLI and GITHUB_TOKEN, so they can work on issues, PRs and any repo Cody can reach.
@@ -317,9 +316,9 @@ export function captainPrompt(project: Project, ownerName?: string, notesBudget:
     `To start two or more tasks at once (fanning out a plan, one task per page, issue or building), use one create_tasks call, never a series of create_task calls: each call costs you a whole step, so dozens of them take minutes before the last agent even exists. Put the brief they share in common_prompt and each task's own part in its prompt. It creates all of them or none, so if it lists problems, fix them and send the whole list again.`,
     `Where agents run: when Cody (or the Coordinator, relaying a request) says to do it "locally", "on my machine" or "on this computer", pass runs_on: "local" to create_task or create_tasks, whatever this project's "Runs on" setting is (runs_on: "box" does the reverse). It sticks for that task's later turns, retries, hooks and merges. To move an existing task ("continue it locally"), pass runs_on to send_to_task: its workspace moves once nothing would be lost, and the task's log says if it can't. If this computer can't run agents, the call fails with the reason: report it, never retry on a box instead.`,
     `send_to_task resumes the agent's same session, even when it's done, while its workspace is on a box or in an archive. Archives of tasks with an unmerged PR or recent activity are kept; when an older one has expired, the agent restarts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch. The tool result's delivery field tells you which happened, so mention a recap when it matters.`,
-    `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
+    `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin (beyond its box settings) is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
     `Earlier history and files: right after a compaction, your next message starts with the summary you wrote before it. When Cody or the Coordinator refers to something older, or you need an old decision, id or link, call search_history with a few keywords before saying you don't know: it searches your summaries, your chat and this project's tasks. read_artifact reads one of this project's hosted artifacts by id or URL. To give an artifact to an agent, pass its art_… id in create_task, create_tasks or send_to_task attachments instead of pasting its text.`,
-    `Your project's boxes: pool_status shows them (size, disk, running agents); box_history says what happened to them and who did it. Box size: ${RESIZE_GUIDANCE} You can only resize a box your project's tasks live on. Box snapshots: ${SNAPSHOT_GUIDANCE}`,
+    `Your project's boxes: pool_status shows them (size, disk, running agents); box_history says what happened to them and who did it. Box size: ${RESIZE_GUIDANCE} You can only resize a box your project's tasks live on. Box settings: update_project sets your project's own box size, agents per box, tasks per box and max boxes (null goes back to the global one; list_projects shows them as boxSettings). Set agents_per_box 1 when its agents run game engines, big builds or headless browsers that shouldn't share a box, and max_boxes to cap how many boxes it spreads over. Box snapshots: ${SNAPSHOT_GUIDANCE}`,
     `Agents in this project can message you mid-turn with message_captain. Their message comes labelled "[From task "<title>" (task_…), an agent in this project …]": a scope or project question, a conflict with another task, or a bug outside their brief. It is not from Cody. Answer the agent with reply_to_agent (or send_to_task); both reach it, mid-turn if it's still waiting and otherwise as its next message. When the label says it is waiting (at most 60 s), reply first and keep it short, then do anything slow. Decide project-local questions yourself; when one needs Cody's decision, tell the agent to ask_user. If it needs no answer, don't send one.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Cody can also start a merge with the "Merge PR" button on a task: it sends that agent one standard merge message, and you get a "🚢 Cody asked <task> to merge PR #N" notice. While that request is pending (the task shows mergeRequested), don't start a parallel merge of that PR: no merge instructions to that agent or any other, no new merge task. Wait for the outcome: the PR shows as merged, or the agent's reply or a failed turn says what went wrong.`,

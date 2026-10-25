@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
 import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Settings, ShieldAlert, Trash2, Webhook, X } from "lucide-react"
 import {
@@ -34,10 +34,10 @@ import { CaptainTab } from "./CaptainTab"
 import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
 import { ProjectSnapshotPanel } from "./ProjectSnapshot"
-import { BOX_SIZES, type Artifact, type BoxSize, type Project, type Task, type TaskStatus } from "../../../shared/types"
+import { useOpenSettings } from "./SettingsDialog"
+import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
-import { HEAVY_TASKS, HEAVY_TASKS_LABEL, type HeavyTasks } from "../../../shared/memory"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -363,6 +363,142 @@ function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
   )
 }
 
+/** "small 1 · medium 2 · large 4": a box limit that follows each box's size. */
+const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z][k]}`).join(" · ")
+
+/**
+ * Project › Settings › Boxes: the project's own box size, agents per box, tasks per box and max boxes. Each one left
+ * blank uses the global setting (Settings › Boxes & limits), which the field names ("Using global: …"); one that's
+ * set has a Use global button that clears it.
+ */
+function ProjectBoxSettings(p: {
+  info: SettingsInfo | undefined
+  local: boolean
+  boxSize: BoxSize | ""
+  setBoxSize: (v: BoxSize | "") => void
+  agentsPerBox: string
+  setAgentsPerBox: (v: string) => void
+  tasksPerBox: string
+  setTasksPerBox: (v: string) => void
+  maxBoxes: string
+  setMaxBoxes: (v: string) => void
+}) {
+  const openSettings = useOpenSettings()
+  const s = p.info?.settings
+  const followsSize = (k: "slotsPerBox" | "maxResidentPerBox") => !p.info || p.info.sources[k] === "default"
+  const perBox = (k: "slotsPerBox" | "maxResidentPerBox") => (followsSize(k) || !s ? { long: `each box's size default (${bySize(k)})`, short: "by box size" } : { long: String(s[k]), short: String(s[k]) })
+  const agents = perBox("slotsPerBox")
+  const folders = perBox("maxResidentPerBox")
+  const pool = s ? String(s.maxBoxes) : "the pool's"
+  return (
+    <section className="@container space-y-3 rounded-lg border border-zinc-800/80 p-3" aria-labelledby="project-boxes" data-testid="project-boxes">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3 id="project-boxes" className="text-sm font-medium text-zinc-200">
+          Boxes
+        </h3>
+        <button type="button" onClick={() => openSettings("limits")} className="inline-flex min-h-11 items-center text-xs text-sky-400 hover:underline sm:min-h-0">
+          Global: Settings › Boxes & limits
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500">
+        Leave one blank to use the global setting. Where projects share a box, the strictest limit wins.
+        {p.local && " This project runs on this computer: Agents per box also limits its agents here, and the rest apply when it runs on boxes."}
+      </p>
+      <OverrideField
+        id="project-box-size"
+        label="Box size"
+        global={`${s?.workerSize ?? "Settings"} (Worker size)`}
+        set={Boolean(p.boxSize)}
+        onClear={() => p.setBoxSize("")}
+        hint="New boxes made for this project are this size, and its tasks only run on boxes at least this big. Boxes it already has keep their size; resize them from the Boxes page."
+      >
+        <Select id="project-box-size" className="w-full min-w-0 sm:w-80" value={p.boxSize} onChange={(e) => p.setBoxSize(e.target.value as BoxSize | "")} data-testid="project-box-size">
+          <option value="">Global: {s?.workerSize ?? "Settings › Worker size"}</option>
+          {BOX_SIZES.map((size) => (
+            <option key={size} value={size}>
+              {BOX_SIZE_SPECS[size].label}: {sizeSpecLine(size)}
+            </option>
+          ))}
+        </Select>
+      </OverrideField>
+      <div className="grid gap-3 @4xl:grid-cols-3">
+        <OverrideField
+          id="project-agents-per-box"
+          label="Agents per box"
+          global={agents.long}
+          set={p.agentsPerBox.trim() !== ""}
+          onClear={() => p.setAgentsPerBox("")}
+          hint="Most agents running at once on a box while one of this project's runs there, other projects' included. 1: each agent has a box to itself (game engines, big builds, headless browsers)."
+        >
+          <LimitInput id="project-agents-per-box" range={PROJECT_BOX_LIMITS.agentsPerBox} value={p.agentsPerBox} onChange={p.setAgentsPerBox} placeholder={`Global: ${agents.short}`} />
+        </OverrideField>
+        <OverrideField
+          id="project-tasks-per-box"
+          label="Tasks per box"
+          global={folders.long}
+          set={p.tasksPerBox.trim() !== ""}
+          onClear={() => p.setTasksPerBox("")}
+          hint="Most task folders on a box that holds one of this project's; older archived ones are parked to make room. Fewer suits a big repo."
+        >
+          <LimitInput id="project-tasks-per-box" range={PROJECT_BOX_LIMITS.tasksPerBox} value={p.tasksPerBox} onChange={p.setTasksPerBox} placeholder={`Global: ${folders.short}`} />
+        </OverrideField>
+        <OverrideField
+          id="project-max-boxes"
+          label="Max boxes"
+          global={s ? `${s.maxBoxes} (the whole pool's Max boxes)` : "the pool's Max boxes"}
+          set={p.maxBoxes.trim() !== ""}
+          onClear={() => p.setMaxBoxes("")}
+          hint="Most boxes this project's tasks use at once (made for it, or holding its task folders), within the pool's Max boxes. The rest wait for a free slot."
+        >
+          <LimitInput id="project-max-boxes" range={PROJECT_BOX_LIMITS.maxBoxes} value={p.maxBoxes} onChange={p.setMaxBoxes} placeholder={`Global: ${pool}`} />
+        </OverrideField>
+      </div>
+    </section>
+  )
+}
+
+/** A project setting with a global fallback: its label, the control, "Using global: …" (or the global it overrides) and Use global. */
+function OverrideField({ id, label, global, set, onClear, hint, children }: { id: string; label: string; global: string; set: boolean; onClear: () => void; hint: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0 space-y-1.5">
+      <label htmlFor={id} className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">
+        {label}
+      </label>
+      <div className="flex flex-wrap items-center gap-2">
+        {children}
+        {set && (
+          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={onClear} title={`Clear this project's ${label.toLowerCase()}: the global one applies`} data-testid={`${id}-clear`}>
+            <X className="h-3.5 w-3.5" /> Use global
+          </Button>
+        )}
+      </div>
+      <p className="text-xs text-zinc-500">
+        <span className={set ? undefined : "text-zinc-300"} data-testid={`${id}-source`}>
+          {set ? `Overrides global: ${global}.` : `Using global: ${global}.`}
+        </span>{" "}
+        {hint}
+      </p>
+    </div>
+  )
+}
+
+function LimitInput({ id, range, value, onChange, placeholder }: { id: string; range: { min: number; max: number }; value: string; onChange: (v: string) => void; placeholder: string }) {
+  return (
+    <input
+      id={id}
+      type="number"
+      inputMode="numeric"
+      min={range.min}
+      max={range.max}
+      className={cx(inputClass, "max-w-40 min-w-0")}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      data-testid={id}
+    />
+  )
+}
+
 function ProjectSettings({ project, onDone }: { project: Project; onDone: () => void }) {
   const update = useUpdateProject()
   const remove = useDeleteProject()
@@ -378,7 +514,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
   const [depCache, setDepCache] = useState<"" | "on" | "off">(project.depCache === null || project.depCache === undefined ? "" : project.depCache ? "on" : "off")
-  const [heavyTasks, setHeavyTasks] = useState<HeavyTasks>(project.heavyTasks ?? "off")
+  const [agentsPerBox, setAgentsPerBox] = useState(project.agentsPerBox?.toString() ?? "")
+  const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
+  const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -415,7 +553,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
           depCache: depCache ? depCache === "on" : null,
-          heavyTasks,
+          agentsPerBox: optionalInt(agentsPerBox),
+          tasksPerBox: optionalInt(tasksPerBox),
+          maxBoxes: optionalInt(maxBoxes),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -466,16 +606,18 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           </div>
         )}
       </div>
-      <Field label="Preferred box size" hint="New boxes made for this project use it. Boxes it already has keep their size; resize them from the Boxes page.">
-        <Select className="w-full sm:w-80" value={boxSize} onChange={(e) => setBoxSize(e.target.value as BoxSize | "")} data-testid="project-box-size">
-          <option value="">Default ({settings.data?.settings.workerSize ?? "Settings"}: Settings → Worker size)</option>
-          {BOX_SIZES.map((size) => (
-            <option key={size} value={size}>
-              {BOX_SIZE_SPECS[size].label}: {sizeSpecLine(size)}
-            </option>
-          ))}
-        </Select>
-      </Field>
+      <ProjectBoxSettings
+        info={settings.data}
+        local={runner === "local"}
+        boxSize={boxSize}
+        setBoxSize={setBoxSize}
+        agentsPerBox={agentsPerBox}
+        setAgentsPerBox={setAgentsPerBox}
+        tasksPerBox={tasksPerBox}
+        setTasksPerBox={setTasksPerBox}
+        maxBoxes={maxBoxes}
+        setMaxBoxes={setMaxBoxes}
+      />
       <Field
         label="Partial clone mirror"
         hint="On: each box's mirror of the repo skips old file versions (blob:none) and fetches them from GitHub when git log -p, blame or a checkout needs them. Off: full mirror, for repos where agents dig through history a lot. Applies to mirrors made from now on; a mirror no task uses is re-made to match."
@@ -504,18 +646,6 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="">Default ({settings.data?.settings.depCacheEnabled ? "on" : "off"}: Settings → Dependency cache)</option>
           <option value="on">On: restore node_modules from the box cache</option>
           <option value="off">Off: agents install dependencies</option>
-        </Select>
-      </Field>
-      <Field
-        label="Heavy tasks"
-        hint="For projects whose agents run test suites, headless browsers or big builds that run a box out of memory when several go at once. One per box: at most one of its agents runs on each box; other projects may share it. Whole box: each of its agents has a box to itself while it runs. Either way Box Yard makes more boxes (within Max boxes) or queues the rest."
-      >
-        <Select className="w-full sm:w-80" value={heavyTasks} onChange={(e) => setHeavyTasks(e.target.value as HeavyTasks)} data-testid="project-heavy-tasks">
-          {HEAVY_TASKS.map((v) => (
-            <option key={v} value={v}>
-              {HEAVY_TASKS_LABEL[v]}
-            </option>
-          ))}
         </Select>
       </Field>
       <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { execFileSync } from "node:child_process"
 import { dfCommand, parseDf } from "../shared/disk.js"
-import { DEFAULT_MEMORY_POLICY, memCommand, memoryPressure, normalizeHeavyTasks, parseMemory } from "../shared/memory.js"
+import { DEFAULT_MEMORY_POLICY, memCommand, memoryPressure, parseMemory } from "../shared/memory.js"
 import { workerSystemPrompt } from "../server/prompts.js"
 import { memoryMeter } from "../web/src/lib/memoryMeter.js"
 import type { Project } from "../shared/types.js"
@@ -88,20 +88,15 @@ describe("memoryMeter", () => {
   })
 })
 
-describe("heavy tasks", () => {
-  it("reads unknown or missing values as off", () => {
-    expect(normalizeHeavyTasks(null)).toBe("off")
-    expect(normalizeHeavyTasks("bogus")).toBe("off")
-    expect(normalizeHeavyTasks("whole-box")).toBe("whole-box")
-  })
-
+describe("box prompt", () => {
   it("tells the agent about the box in a way that stays the same from turn to turn", () => {
-    const project = { id: "prj_a", name: "alpha", description: "", repo: null, baseBranch: "main", heavyTasks: "off" } as unknown as Project
+    const project = { id: "prj_a", name: "alpha", description: "", repo: null, baseBranch: "main", agentsPerBox: null } as unknown as Project
     const prompt = (box: Parameters<typeof workerSystemPrompt>[0]["box"], p = project) => workerSystemPrompt({ project: p, task: { id: "task_a", title: "t" }, branch: null, port: 4000, box })
-    expect(prompt({ memoryBytes: 4 * GB, slots: 2, heavyTasks: "off" })).toContain("This box has 4.0 GB of memory, shared with up to 1 other agents that may run at the same time.")
-    expect(prompt({ memoryBytes: 4 * GB, slots: 3, heavyTasks: "one-per-box" })).toContain("shared with up to 2 agents of other projects")
-    expect(prompt({ memoryBytes: 8 * GB, slots: 3, heavyTasks: "whole-box" })).toContain("This box has 8.0 GB of memory, and your project runs its agents alone on a box")
-    expect(prompt({ memoryBytes: null, slots: 1, heavyTasks: "off" })).toContain("This box's memory is limited. Run heavy jobs")
+    expect(prompt({ memoryBytes: 4 * GB, slots: 2 })).toContain("This box has 4.0 GB of memory, shared with up to 1 other agents that may run at the same time.")
+    expect(prompt({ memoryBytes: 4 * GB, slots: 3 })).toContain("shared with up to 2 other agents")
+    // Agents per box 1: the project's agents run alone.
+    expect(prompt({ memoryBytes: 8 * GB, slots: 1, alone: true })).toContain("This box has 8.0 GB of memory, and your project runs its agents alone on a box")
+    expect(prompt({ memoryBytes: null, slots: 1 })).toContain("This box's memory is limited. Run heavy jobs")
     expect(prompt(undefined)).not.toContain("Run heavy jobs")
   })
 })

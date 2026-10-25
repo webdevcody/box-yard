@@ -664,6 +664,19 @@ export const MIGRATIONS: string[] = [
   -- A task's own "Runs on" (shared/runner.ts): 'local' or 'box' wins over its project's runner for every turn. NULL: follow the project.
   ALTER TABLE tasks ADD COLUMN runs_on TEXT;
   `,
+  `
+  -- Per-project box settings, NULL to use the global one: agents_per_box (the most agents running at once on a box
+  -- while one of this project's agents runs there, every project counted: the stricter of the box's limit and each
+  -- running project's wins), tasks_per_box (the same for task folders on a box) and max_boxes (the most boxes its
+  -- tasks use). agents_per_box replaces heavy_tasks: 'one-per-box' and 'whole-box' both become 1. heavy_tasks keeps
+  -- its value (Store still reads it while agents_per_box is NULL) until the project's Agents per box is saved. Any
+  -- other value (NULL, 'off', or one the app never wrote) read as 'off' before and stays NULL, the global one. The
+  -- UPDATE only fills an unset agents_per_box, so running it again changes nothing.
+  ALTER TABLE projects ADD COLUMN agents_per_box INTEGER;
+  ALTER TABLE projects ADD COLUMN tasks_per_box INTEGER;
+  ALTER TABLE projects ADD COLUMN max_boxes INTEGER;
+  UPDATE projects SET agents_per_box = 1 WHERE heavy_tasks IN ('one-per-box', 'whole-box') AND agents_per_box IS NULL;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

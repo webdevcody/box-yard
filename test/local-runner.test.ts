@@ -200,7 +200,7 @@ describe("worker prompt on this computer", () => {
   const task = { id: "task_bench1", title: "Overnight bench" }
 
   it("says it is unsandboxed, on the owner's computer, with localhost previews and sleep", () => {
-    const prompt = workerSystemPrompt({ project, task, branch: "b", port: 4010, ownerName: "Sam", box: { memoryBytes: 32 * 1024 ** 3, slots: 2, heavyTasks: "off", local: true } })
+    const prompt = workerSystemPrompt({ project, task, branch: "b", port: 4010, ownerName: "Sam", box: { memoryBytes: 32 * 1024 ** 3, slots: 2, local: true } })
     expect(prompt).toContain("running directly on Sam's own computer (Box Yard's local runner), not in a sandbox")
     expect(prompt).not.toContain("isolated Upstash Box")
     expect(prompt).toContain("http://localhost:<port>")
@@ -212,7 +212,7 @@ describe("worker prompt on this computer", () => {
   })
 
   it("is unchanged on a box", () => {
-    const prompt = workerSystemPrompt({ project, task, branch: "b", port: 4010, box: { memoryBytes: 4 * 1024 ** 3, slots: 2, heavyTasks: "off" } })
+    const prompt = workerSystemPrompt({ project, task, branch: "b", port: 4010, box: { memoryBytes: 4 * 1024 ** 3, slots: 2 } })
     expect(prompt).toContain("running in an isolated Upstash Box")
     expect(prompt).toContain("bound to 0.0.0.0")
     expect(prompt).not.toContain("local runner")
