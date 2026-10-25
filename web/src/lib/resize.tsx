@@ -10,6 +10,8 @@ type Options = {
   max: number
   /** which edge of the panel the handle sits on: "right" grows the panel when dragged right */
   edge: "left" | "right"
+  /** a tighter max for now (the room left in the window); the saved width isn't clamped to it until a drag */
+  limit?: number
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n))
@@ -21,12 +23,15 @@ function load({ key, defaultWidth, min, max }: Options) {
 
 /** A panel width the user can drag, persisted in localStorage. Spread `handle` props onto <ResizeHandle>. */
 export function useResizable(opts: Options) {
-  const { key, defaultWidth, min, max, edge } = opts
+  const { key, defaultWidth, min, edge } = opts
+  const max = Math.max(min, Math.min(opts.max, opts.limit ?? opts.max))
   const [width, setWidth] = useState(() => load(opts))
   const [dragging, setDragging] = useState(false)
   const start = useRef({ x: 0, w: 0 })
   const latest = useRef(width)
   latest.current = width
+  const maxRef = useRef(max)
+  maxRef.current = max
 
   const save = (w: number) => {
     try {
@@ -46,7 +51,8 @@ export function useResizable(opts: Options) {
   const onPointerDown = useCallback((e: PointerEvent) => {
     if (e.button !== 0) return
     e.currentTarget.setPointerCapture(e.pointerId)
-    start.current = { x: e.clientX, w: latest.current }
+    // Start from the width on screen, which may be the saved one shrunk to fit.
+    start.current = { x: e.clientX, w: clamp(latest.current, min, maxRef.current) }
     setDragging(true)
   }, [])
 
