@@ -32,7 +32,7 @@ const SUGGESTIONS = [
 const NO_MESSAGES: ChatMessage[] = []
 
 /**
- * `onClose` adds a close button to the header, shown while the panel is a drawer (below xl). `zen` lays the same
+ * `onClose` adds a close button to the header; App passes it only while the panel is a drawer. `zen` lays the same
  * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css), and the
  * context meter moves into the header (ZenContext).
  */
@@ -112,9 +112,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header
         className={cx(
-          "flex min-h-14 items-center gap-2 pt-[env(safe-area-inset-top)]",
+          "flex items-center gap-2",
           // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
-          zen ? "zen-column border-b border-zinc-900 sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]" : "border-b border-zinc-900 pr-[max(0.5rem,env(safe-area-inset-right))] pl-4 xl:min-h-0 xl:py-3 xl:pt-3 xl:pr-4",
+          zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
+            : onClose ? "min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4"
+            // Docked beside the page: a compact header
+            : "border-b border-zinc-900 px-4 py-3",
         )}
       >
         <Bot className="h-4 w-4 shrink-0 text-yard-400" />
@@ -151,7 +154,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               onClick={onClose}
               title="Close"
               aria-label="Close the Coordinator"
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 xl:hidden"
+              className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
             >
               <X className="h-4 w-4" />
             </button>

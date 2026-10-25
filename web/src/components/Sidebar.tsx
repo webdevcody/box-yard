@@ -61,12 +61,12 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate, onOpenCha
           title={connection === "live" ? "Live updates on" : "Reconnecting…"}
           className={cx("ml-auto h-2 w-2 rounded-full", connection === "live" ? "bg-emerald-500" : "animate-pulse bg-amber-500")}
         />
-        {/* Between lg and xl the Coordinator is a drawer and there's no top bar, so it opens from here,
+        {/* App passes onOpenChat when the Coordinator is a drawer. From lg there's no top bar, so it opens from here,
             where it can't cover a composer's send button the way a floating button did. */}
         {onOpenChat && (
           <button
             onClick={onOpenChat}
-            className="-my-1 -mr-1.5 hidden h-8 w-8 place-items-center rounded-lg text-yard-400 hover:bg-zinc-800 hover:text-yard-300 lg:grid xl:hidden"
+            className="-my-1 -mr-1.5 hidden h-8 w-8 place-items-center rounded-lg text-yard-400 hover:bg-zinc-800 hover:text-yard-300 lg:grid"
             title="Open the Coordinator"
             aria-label="Open the Coordinator"
           >
