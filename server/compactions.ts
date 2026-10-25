@@ -2,6 +2,7 @@ import fs from "node:fs"
 import path from "node:path"
 import type { CompactionInfo, CompactionRecord, CompactionTaskSnapshot } from "../shared/types.js"
 import { mentionedTaskIds } from "./compactionTasks.js"
+import { withOwner } from "../shared/owner.js"
 
 /** `2026-10-22T18-40-05Z`: ISO time without colons or millis, so names sort chronologically on every filesystem. */
 export function compactionStamp(at: number): string {
@@ -22,7 +23,7 @@ It goes into a folder of files that is kept for months or years and may be read 
 Reply with the markdown only (no preamble, no tool calls), with exactly these sections, leaving a section's body as "- none" when it is empty:
 
 ## Decisions and preferences
-Decisions Cody made, their preferences and their standing instructions.
+Decisions Cody made, their preferences and their standing instructions, each still in force.
 
 ## Projects and repos
 Each project with its repo (owner/name) and what it is for.
@@ -34,6 +35,98 @@ Tasks and PRs, their state, and what is waiting on whom (with ids and links).
 Anything unresolved, promised or planned.
 
 Only the most important things: no chit-chat, no transcript dumps, no step-by-step history.`
+
+/** Each carried-forward section of the previous summary is cut to this many characters. */
+const CARRY_MAX_CHARS = 6000
+
+const isoSeconds = (at: number) => new Date(at).toISOString().replace(/\.\d+Z$/, "Z")
+
+/** A section's body (without its heading) from a summary, or "" when it has none. */
+export function summarySection(markdown: string, heading: string): string {
+  const lines = markdown.split("\n")
+  const start = lines.findIndex((l) => l.trim().toLowerCase() === `## ${heading}`.toLowerCase())
+  if (start < 0) return ""
+  const end = lines.findIndex((l, i) => i > start && /^##\s/.test(l))
+  return lines
+    .slice(start + 1, end < 0 ? undefined : end)
+    .join("\n")
+    .trim()
+}
+
+/** A log file's summary without its frontmatter and title. */
+export function summaryBody(markdown: string): string {
+  return markdown
+    .replace(/^---\n[\s\S]*?\n---\n/, "")
+    .replace(/^\s*# .*\n/, "")
+    .trim()
+}
+
+const capped = (text: string) => (text.length > CARRY_MAX_CHARS ? `${text.slice(0, CARRY_MAX_CHARS).trimEnd()}\n- …(cut)` : text)
+
+export interface SummaryInput {
+  /** The last summary: its decisions and open threads are carried forward. */
+  previous?: { at: number; markdown: string } | null
+  /** Box Yard's view of the tasks in play right now, one line each (see liveTaskLines). */
+  liveTasks?: string[]
+}
+
+/**
+ * The summary prompt with what the summarizer can't see in its context: the previous summary's decisions
+ * and open threads (compacted away with the rest), and the live state of the tasks it should mention, so a
+ * decision isn't dropped because it is old and a finished task isn't recorded as still running.
+ */
+export function summaryPrompt(base: string, input: SummaryInput = {}): string {
+  const parts = [base]
+  const prev = input.previous
+  const decisions = prev ? summarySection(prev.markdown, "Decisions and preferences") : ""
+  const threads = prev ? summarySection(prev.markdown, "Open threads and next steps") : ""
+  if (prev && (decisions || threads)) {
+    parts.push(
+      [
+        `Your previous summary (${isoSeconds(prev.at)}) recorded these. Carry each one forward into the same section unless it was replaced or withdrawn since (for a thread: resolved). Then add what's new.`,
+        ``,
+        `Decisions and preferences, previous summary:`,
+        capped(decisions || "- none"),
+        ``,
+        `Open threads and next steps, previous summary:`,
+        capped(threads || "- none"),
+      ].join("\n"),
+    )
+  }
+  if (input.liveTasks?.length) {
+    parts.push(
+      [
+        `Live task state from Box Yard, right now. Write "Ongoing work" from it, and close threads whose task is done: a state here beats what you remember.`,
+        ...input.liveTasks,
+      ].join("\n"),
+    )
+  }
+  return parts.join("\n\n")
+}
+
+/**
+ * What /compact is told. The summary Box Yard just saved is in the session as the last reply and comes back
+ * after the compaction (recapBlock), so the CLI's own summary covers what that one leaves out.
+ */
+const COMPACT_INSTRUCTIONS =
+  `Box Yard saved the summary in your last reply (from "## Decisions and preferences" on) and gives it back to you right after this compaction, with live task states. ` +
+  `Don't repeat what it says. Summarize what it leaves out: the latest exchanges and the work in progress right now, Cody's recent requests in their own words, ` +
+  `and the exact ids, paths, commands and errors needed to carry on. Keep it short.`
+
+export const compactCommand = (ownerName?: string) => `/compact ${withOwner(COMPACT_INSTRUCTIONS, ownerName)}`
+
+/**
+ * Box Yard's saved summary, for the first prompt after a compaction (or a lost session): it replaces what
+ * the CLI's /compact summary was told to leave out. `live` lists the current state of the tasks it names.
+ */
+export function recapBlock(file: string, markdown: string, live: string[], lead = "Your context was just compacted. This is the summary you wrote right before it"): string {
+  const at = /^timestamp: (.*)$/m.exec(markdown.slice(0, 600))?.[1]?.trim()
+  return [
+    `[Box Yard: ${lead} (${at ? `${at}, ` : ""}saved as ${file}). Task states under "Live now" are current and beat the summary. For anything older, use search_history.]`,
+    summaryBody(markdown),
+    ...(live.length ? [``, `Live now, tasks it names:`, ...live] : []),
+  ].join("\n")
+}
 
 export interface CompactionMeta {
   at: number
@@ -55,7 +148,7 @@ export interface CompactionFiles {
 const frontmatter = (m: CompactionMeta, after: number | null | "pending", tasks: CompactionTaskSnapshot[] = []) =>
   [
     "---",
-    `timestamp: ${new Date(m.at).toISOString().replace(/\.\d+Z$/, "Z")}`,
+    `timestamp: ${isoSeconds(m.at)}`,
     `session_id: ${m.sessionId}`,
     `model: ${m.model}`,
     `trigger: ${m.trigger}`,
@@ -87,7 +180,7 @@ const sidecar = (file: string) => file.replace(/\.md$/, ".json")
 function sidecarPayload(meta: CompactionMeta, after: number | null | "pending", markdownFile: string, summary: string, tasks: CompactionTaskSnapshot[]) {
   return {
     id: compactionIdFromMarkdown(markdownFile),
-    timestamp: new Date(meta.at).toISOString().replace(/\.\d+Z$/, "Z"),
+    timestamp: isoSeconds(meta.at),
     sessionId: meta.sessionId,
     model: meta.model,
     trigger: meta.trigger,
@@ -245,8 +338,8 @@ export function compactionsPrompt(dir: string): string {
   const recent = files.slice(-5).reverse()
   return [
     ``,
-    `Compaction history: whenever your context is compacted, Box Yard first saves a markdown summary of what mattered (Cody's decisions and preferences, projects and repos, ongoing work, open threads) as one file in ${dir}/`,
-    `File names are UTC timestamps, so they are in chronological order (oldest first). When you need history you no longer have in context (earlier decisions, who asked for what, how a project started), Read these files, newest first, with the Read tool and their full path. Don't read them otherwise.`,
+    `Compaction history: whenever your context is compacted, Box Yard first saves a markdown summary of what mattered (Cody's decisions and preferences, projects and repos, ongoing work, open threads) as one file in ${dir}/, and gives it back to you right after the compaction.`,
+    `File names are UTC timestamps, so they are in chronological order (oldest first). When you need history you no longer have in context (earlier decisions, who asked for what, how a project started), call search_history with a few keywords first: it searches these summaries and the chat transcripts. Then open a hit with read_compaction, or Read the files, newest first, by their full path. Don't read them otherwise.`,
     files.length
       ? `There ${files.length === 1 ? "is 1 file" : `are ${files.length} files`}. The newest: ${recent.map((f) => `${dir}/${f}`).join(", ")}.`
       : `There are none yet.`,

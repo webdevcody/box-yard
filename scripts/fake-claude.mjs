@@ -73,8 +73,11 @@ if (newId && fs.existsSync(sessionFile)) {
 
 const WINDOW = Number(process.env.FAKE_CLAUDE_WINDOW || 200_000)
 const PER_TURN = Number(process.env.FAKE_CLAUDE_TOKENS_PER_TURN || 3000)
+// The summary lists the live tasks Box Yard gave it, like a real one would.
+const liveTasks = (prompt) => /Live task state from Box Yard[^\n]*\n((?:- .*\n?)+)/.exec(prompt)?.[1]?.trim()
 const fmt = (n) => (n >= 1e6 ? `${n / 1e6}m` : n >= 1e3 ? `${Math.round(n / 100) / 10}k` : String(n))
 // Record how we were called, so tests can check flags (set FAKE_CLAUDE_LOG to a file).
+// FAKE_CLAUDE_LOG_FULL=1 logs the whole prompt instead of its first 120 characters.
 
 const session = resumeId ? JSON.parse(fs.readFileSync(sessionFile, "utf8")) : { id: sessionId, turns: [] }
 session.tokens ??= 0
@@ -341,7 +344,7 @@ process.stdin.on("end", async () => {
   }
   let result = ""
   let mcp = null
-  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: prompt.slice(0, 120) }) + "\n")
+  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")
   // The prompt and the reply grow the context.
   if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   try {
@@ -360,7 +363,7 @@ process.stdin.on("end", async () => {
     } else if (/Your (Captain )?context( for project "[^"]*")? is about to be compacted/.test(prompt)) {
       result = process.env.FAKE_CLAUDE_BAD_SUMMARY
         ? "ok"
-        : "## Decisions and preferences\n- Cody prefers short replies.\n\n## Projects and repos\n- demo (acme/demo): a demo project.\n\n## Ongoing work\n- none\n\n## Open threads and next steps\n- none"
+        : `## Decisions and preferences\n- Cody prefers short replies.\n\n## Projects and repos\n- demo (acme/demo): a demo project.\n\n## Ongoing work\n${liveTasks(prompt) || "- none"}\n\n## Open threads and next steps\n- none`
       await say(result)
     } else if (!mcp) {
       result = "(mock Claude) No MCP server configured."

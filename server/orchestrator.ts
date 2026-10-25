@@ -16,15 +16,19 @@ import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resul
 import {
   SUMMARY_PROMPT,
   cleanSummary,
+  compactCommand,
   compactionsDir,
   compactionsPrompt,
   finishCompaction,
   lastCompaction,
+  recapBlock,
+  summaryBody,
   summaryLooksValid,
+  summaryPrompt,
   writeCompaction,
 } from "./compactions.js"
 import { routingInstructions } from "./routing.js"
-import { compactionTaskSnapshots, mentionedTaskIds } from "./compactionTasks.js"
+import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -37,6 +41,8 @@ const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
 const USAGE_KEY = "orchestrator_usage"
+/** The summary file the next turn starts with: set by a compaction, cleared once a turn has seen it. */
+const RECAP_KEY = "orchestrator_recap"
 /** Never wait for more than this share of the window: the CLI's own last-resort compaction (no log) kicks in near 96%. */
 const MAX_THRESHOLD_SHARE = 0.95
 
@@ -114,6 +120,11 @@ export class Orchestrator {
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
   private compacting = false
+  /**
+   * The system prompt of the turn before a compaction, kept for its summary and /compact passes: writing the
+   * summary file changes the file list in it, which would cost /compact the prompt cache.
+   */
+  private compactionSystemPrompt: string | null = null
   private lastError: string | null = null
   private readonly workdir: string
   readonly compactionsDir: string
@@ -317,11 +328,51 @@ export class Orchestrator {
     }
   }
 
-  /** Tasks active or mentioned since the previous recorded compaction. */
+  /** Tasks updated or mentioned since the previous recorded compaction. */
   private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
-    const previous = this.store.listOrchestratorCompactions({ limit: 1 })[0]?.at ?? lastCompaction(this.compactionsDir)?.at ?? 0
+    const previous = this.previousCompactionAt()
     const mentioned = mentionedTaskIds(this.store.listChatSince(previous).flatMap((m) => [m.content, m.meta]))
     return compactionTaskSnapshots(this.store, this.store.listTasks(), previous, mentioned)
+  }
+
+  private previousCompactionAt(): number {
+    return this.store.listOrchestratorCompactions({ limit: 1 })[0]?.at ?? lastCompaction(this.compactionsDir)?.at ?? 0
+  }
+
+  /** The newest summary file, read back, or null when there is none (or it can't be read). */
+  private latestSummary(): { at: number; file: string; markdown: string } | null {
+    const last = lastCompaction(this.compactionsDir)
+    if (!last) return null
+    try {
+      return { at: last.at, file: last.file, markdown: fs.readFileSync(last.file, "utf8") }
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The summary prompt, with the previous summary to carry forward and the tasks in play as they are now: busy
+   * ones, and those updated or mentioned since the previous compaction (the rest are as that summary says).
+   */
+  private summaryPrompt(): string {
+    const previous = this.latestSummary()
+    const since = this.previousCompactionAt()
+    const ids = new Set([
+      ...this.store.listTasks().filter((t) => t.updatedAt > since).map((t) => t.id),
+      ...mentionedTaskIds(this.store.listChatSince(since).flatMap((m) => [m.content, m.meta])),
+    ])
+    return summaryPrompt(withOwner(SUMMARY_PROMPT, this.owner()), { previous, liveTasks: liveTaskLines(this.store, ids, { busy: true }) })
+  }
+
+  /** A saved summary as a prompt block, with the current state of every task it names. */
+  private recap(file: string, lead?: string): string | null {
+    let markdown: string
+    try {
+      markdown = fs.readFileSync(file, "utf8")
+    } catch {
+      return null
+    }
+    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)])), lead)
   }
 
   /**
@@ -339,7 +390,8 @@ export class Orchestrator {
       const s = this.session()
       const before = this.usage().tokens
       const model = this.settings.get().orchestratorModel
-      const summary = await this.run(withOwner(SUMMARY_PROMPT, this.owner()), s.id, true, "summary")
+      this.compactionSystemPrompt = this.systemPrompt()
+      const summary = await this.run(this.summaryPrompt(), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
@@ -359,7 +411,7 @@ export class Orchestrator {
         markdown: files.markdown,
         tasks: taskSnapshots,
       })
-      const compact = await this.run("/compact", s.id, true, "compact")
+      const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
       if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
       // /compact keeps the session id; if a CLI version ever changed it, follow it.
       let id = s.id
@@ -367,11 +419,14 @@ export class Orchestrator {
         id = compact.sessionId
         this.store.setKv(SESSION_KEY, id)
       }
+      this.compactionSystemPrompt = null
       const report = await this.run("/context", id, true, "context")
       const after = report.ok ? parseContextReport(report.raw) : null
       this.setUsage(after?.tokens ?? null, after?.window)
       finishCompaction(files.markdownFile, after?.tokens ?? null)
       this.store.finishOrchestratorCompaction(files.id, after?.tokens ?? null, fs.readFileSync(files.markdownFile, "utf8"))
+      // The /compact summary leaves out what this one says: the next turn starts with it.
+      this.store.setKv(RECAP_KEY, files.markdownFile)
       const note = this.store.addChat(
         "notice",
         `Context compacted${before ? ` from ${formatTokens(before)}` : ""}${after ? ` to ${formatTokens(after.tokens)} tokens` : ""} (${trigger === "auto" ? "automatic" : "button"}). Summary saved to ${files.markdownFile}.`,
@@ -386,6 +441,7 @@ export class Orchestrator {
       this.hub.broadcast({ type: "chat.message", message: m })
     } finally {
       this.compacting = false
+      this.compactionSystemPrompt = null
       this.publishState()
     }
   }
@@ -532,11 +588,13 @@ export class Orchestrator {
   }
 
   private async runPrompt(body: string): Promise<{ ok: boolean; error: string }> {
-    const prompt = `${this.yardNow()}\n\n${body}`
+    const recapFile = this.store.getKv(RECAP_KEY)
+    const compacted = recapFile ? this.recap(recapFile) : null
+    const prompt = [compacted, this.yardNow(), body].filter(Boolean).join("\n\n")
     const s = this.session()
     let result = await this.run(prompt, s.id, s.started)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
-      // Session file is gone (new machine, wiped data). Start over with a recap.
+      // Session file is gone (new machine, wiped data). Start over with the last summary and a recap.
       const fresh = randomUUID()
       this.store.setKv(SESSION_KEY, fresh)
       const recap = this.store
@@ -544,8 +602,11 @@ export class Orchestrator {
         .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
-      result = await this.run(`Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
+      const last = compacted ? null : this.latestSummary()
+      const saved = last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
     }
+    if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
     if (!result.ok) {
       const msg = this.store.addChat("error", `The orchestrator hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "chat.message", message: msg })
@@ -559,31 +620,36 @@ export class Orchestrator {
     const st = this.settings.get()
     const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
     const model = ["--model", st.orchestratorModel]
-    if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
-    // /context prints plain text.
-    if (kind === "context") return ["-p", ...session, ...model]
+    // Every kind of run sends the turn's tools, system prompt and effort, so the summary and /compact passes
+    // reuse the prompt cache of the turn before them instead of writing the whole context to it again.
     return [
       "-p",
-      "--output-format",
-      "stream-json",
-      "--verbose",
+      // /context prints plain text.
+      ...(kind === "context" ? [] : ["--output-format", "stream-json", "--verbose"]),
       ...(kind === "turn" ? ["--include-partial-messages"] : []),
       "--strict-mcp-config",
       "--mcp-config",
       this.mcpConfigPath,
-      // The summary turn must only write text; Read is for the compaction log (and only that folder).
-      ...(kind === "summary"
-        ? ["--tools", ""]
-        : ["--tools", "Read,WebSearch,WebFetch", "--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")]),
+      "--tools",
+      "Read,WebSearch,WebFetch",
+      // Only a turn may use them; Read is for the compaction log and uploads (and only those folders). With no
+      // allow rules, dontAsk denies every call, so the summary pass can only write text.
+      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")] : []),
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${withOwner(ORCHESTRATOR_PROMPT, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
+      (kind === "summary" || kind === "compact" ? this.compactionSystemPrompt : null) ?? this.systemPrompt(),
       ...session,
       ...model,
       "--effort",
       st.orchestratorEffort,
     ]
+  }
+
+  /** Box Yard's part of the system prompt. Settings are read here, so changes apply from the next run. */
+  private systemPrompt(): string {
+    const st = this.settings.get()
+    return `${withOwner(ORCHESTRATOR_PROMPT, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
   }
 
   /** Read access is limited to these folders (absolute paths use a `//` prefix in permission rules). */

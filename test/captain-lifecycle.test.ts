@@ -17,7 +17,7 @@ interface Running {
   dataDir: string
 }
 const running: Running[] = []
-const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_COMPACT_FAIL"]
+const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_LOG_FULL", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_COMPACT_FAIL"]
 
 async function start(): Promise<Running> {
   const port = await freePort()
@@ -141,6 +141,44 @@ describe("Captain compaction (#50)", () => {
     expect(fs.readdirSync(after.compactionsDir).some((f) => f.endsWith(".md"))).toBe(true)
     expect((await messages()).some((m) => m.role === "notice" && /Context compacted from .*\(button\)/.test(m.content))).toBe(true)
     expect(r.yard.store.peekUnseenCaptainNotices(p.id)).toEqual(["✅ **Haiku** is done: three lines"])
+  })
+
+  it("sends the summary and /compact passes with the turn's flags, and starts the next turn with the summary", async () => {
+    const lines = logFile()
+    process.env.FAKE_CLAUDE_LOG_FULL = "1"
+    const r = await start()
+    const { p, idle, say } = await captain(r)
+    const t = r.yard.store.createTask({ projectId: p.id, title: "Ship the widget", prompt: "ship it" })
+    r.yard.store.updateTask(t.id, { status: "needs_input", question: "Which colour?" })
+    await say("status")
+    await call(r, "POST", `/api/projects/${p.id}/captain/compact`)
+    const s = await waitFor(async () => {
+      const x = await idle()
+      return x?.lastCompaction?.tokensAfter ? x : null
+    }, "compaction")
+
+    const runs = lines()
+    const si = runs.findIndex((l) => /Your Captain context for project "demo" is about to be compacted/.test(l.prompt))
+    const ci = runs.findIndex((l) => l.prompt.startsWith("/compact "))
+    expect(si).toBeGreaterThan(0)
+    expect(ci).toBeGreaterThan(si)
+    // Box Yard gives the summarizer the live state of the project's busy task.
+    expect(runs[si]!.prompt).toContain(`- ${t.id} "Ship the widget" needs_input · asks: Which colour?`)
+    const turn = runs[si - 1]!.args
+    for (const pass of [runs[si]!.args, runs[ci]!.args]) {
+      for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turn, flag))
+      expect(pass).not.toContain("--allowedTools")
+    }
+    expect(runs[ci]!.prompt).toMatch(/Don't repeat what it says/)
+
+    await say("what now?")
+    const next = lines().filter((l) => l.args.includes("--mcp-config")).at(-1)!
+    expect(next.prompt).toMatch(/^\[Box Yard: Your context was just compacted\. This is the summary you wrote right before it/)
+    expect(next.prompt).toContain(s.lastCompaction!.file)
+    expect(next.prompt).toContain("## Decisions and preferences")
+    expect(next.prompt).toContain(`Live now, tasks it names:\n- ${t.id} "Ship the widget" needs_input`)
+    await say("and now?")
+    expect(lines().filter((l) => l.args.includes("--mcp-config")).at(-1)!.prompt).toMatch(/^\[Project now: demo\]/)
   })
 
   it("compacts automatically past the threshold", async () => {
