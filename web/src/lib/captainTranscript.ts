@@ -124,6 +124,54 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
   return { kind, title, summary: segments(text) }
 }
 
+export interface NoticeParts {
+  kind: NoticeKind
+  /** The task's title (the bold part), if the notice names one. */
+  title: string | null
+  /** The rest of the notice as markdown, minus the emoji and the title: "opened a pull request: https://…". */
+  event: string
+}
+
+/**
+ * Split a notice for a card: its kind, the task's title for the card's title row and the rest, still markdown
+ * (links, code), for the line under it. A merge request names the task mid-sentence ("Cody asked **Fix login** to
+ * merge PR #12"), so the title moves up and the sentence says "it". A notice without a bold title keeps all its text.
+ */
+export function splitNotice(content: string, meta: Record<string, unknown> | null = null): NoticeParts {
+  let rest = content
+  let kind: NoticeKind = "info"
+  const emoji = rest.match(LEADING_EMOJI)
+  if (emoji) {
+    kind = EMOJI_KIND[emoji[1]!] ?? "info"
+    rest = rest.slice(emoji[0].length)
+  }
+  if (meta?.kind === "compaction") {
+    kind = "compaction"
+    rest = rest.replace(/\s*Summary saved to \S+\s*$/, "")
+  }
+  if (kind === "merge") {
+    const m = rest.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
+    if (m) return { kind, title: plainText(m[2]!), event: shortPrLink(`${m[1]}it${m[3]}`.trim()) }
+  }
+  const bold = rest.match(/^\*\*(.+?)\*\*\s*/)
+  if (!bold) return { kind, title: null, event: rest.trim() }
+  const event = rest.slice(bold[0].length).trim()
+  return { kind, title: plainText(bold[1]!), event: kind === "pr" ? shortPrLink(event) : event }
+}
+
+/**
+ * A pull request's URL at the end of a PR or merge notice as a "PR #12" link, so a narrow card doesn't spend two
+ * lines on it: "opened a pull request: https://…/pull/16" → "opened [PR #16](…)", and "asked it to merge PR #12
+ * (Merge button): https://…/pull/12" → "asked it to merge [PR #12](…) (Merge button)". Anything else is unchanged.
+ */
+function shortPrLink(event: string): string {
+  const opened = event.match(/^opened a pull request:\s*(https?:\/\/\S+\/pull\/(\d+))$/)
+  if (opened) return `opened [PR #${opened[2]}](${opened[1]})`
+  const merge = event.match(/^(.*?)PR #(\d+)(.*?):\s*(https?:\/\/\S+\/pull\/(\d+))$/s)
+  if (merge && merge[2] === merge[5]) return `${merge[1]}[PR #${merge[2]}](${merge[4]})${merge[3]}`
+  return event
+}
+
 /** One entry of a run of notices: a notice, or one task's back-to-back published files (lib/publishedNotices.ts). */
 export type CaptainNoticeItem =
   | { type: "notice"; id: string; message: CaptainMessage }

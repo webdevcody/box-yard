@@ -7,21 +7,11 @@ import {
   AlertTriangle,
   Archive,
   Bot,
-  CheckCircle2,
   ChevronRight,
-  GitMerge,
-  GitPullRequest,
-  Info,
-  MessageCircleQuestion,
-  MessageSquare,
-  Minimize2,
   MoreHorizontal,
-  NotebookPen,
-  Paperclip,
   UserRound,
   Users,
   Webhook,
-  XCircle,
   type LucideIcon,
 } from "lucide-react"
 import {
@@ -36,7 +26,8 @@ import {
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
-import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow, type NoticeKind } from "../lib/captainTranscript"
+import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
+import { NOTICE_ICON } from "./noticeIcons"
 import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
 import { QueuedChatMessage } from "./QueuedMessages"
@@ -52,21 +43,6 @@ import { menuItem, usePopover } from "./TaskHeader"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
 const NO_MESSAGES: CaptainMessage[] = []
-
-const NOTICE_ICON: Record<NoticeKind, { icon: LucideIcon; className: string; label: string }> = {
-  done: { icon: CheckCircle2, className: "text-emerald-400", label: "Done" },
-  failed: { icon: XCircle, className: "text-red-400", label: "Failed" },
-  needs_input: { icon: MessageCircleQuestion, className: "text-amber-400", label: "Needs you" },
-  pr: { icon: GitPullRequest, className: "text-emerald-400", label: "Pull request" },
-  merge: { icon: GitMerge, className: "text-merged-fg", label: "Merge requested" },
-  hook: { icon: Webhook, className: "text-teal-300", label: "Hook fired" },
-  artifact: { icon: Paperclip, className: "text-zinc-400", label: "File published" },
-  message: { icon: MessageSquare, className: "text-sky-400", label: "Update" },
-  warning: { icon: AlertTriangle, className: "text-amber-400", label: "Warning" },
-  compaction: { icon: Minimize2, className: "text-zinc-500", label: "Compacted" },
-  notes: { icon: NotebookPen, className: "text-amber-300", label: "Project notes" },
-  info: { icon: Info, className: "text-zinc-500", label: "Notice" },
-}
 
 export function CaptainTab({ project }: { project: Project }) {
   const state = useCaptainState(project.id)
@@ -277,7 +253,11 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   )
 })
 
-/** One task notice on one line: status icon, linked task title, a plain summary and the time. Click to see all of it. */
+/**
+ * One task notice: status icon, linked task title, a plain summary and the time. Click to see all of it. A wide row is
+ * one line, title first; in a narrow one (its own `@container`, not the window) or once opened, the title gets its own
+ * row and the summary and time go under it.
+ */
 const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
   const [full, setFull] = useState(false)
   const n = useMemo(() => parseNotice(m.content, m.meta), [m.content, m.meta])
@@ -289,6 +269,9 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
     e.preventDefault()
     setFull((v) => !v)
   }
+  // One line (title · summary · time) only for a collapsed row with a title in a wide row.
+  const inline = Boolean(n.title) && !full
+  const text = full ? "whitespace-normal wrap-anywhere" : "truncate"
   return (
     <div
       id={`captain-${m.id}`}
@@ -304,29 +287,36 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       {...PREVIEW_GROUP}
     >
       <LineIcon icon={Icon} className={cx("h-3.5 w-3.5", className)} label={label} />
-      <div className={cx("min-w-0 flex-1", full ? "whitespace-normal wrap-anywhere" : "truncate")}>
-        {n.title &&
-          (taskId ? (
-            <AppLink href={`/tasks/${taskId}`} className="font-medium text-zinc-200 hover:underline">
-              {n.title}
-            </AppLink>
-          ) : (
-            <span className="font-medium text-zinc-200">{n.title}</span>
-          ))}
-        {n.title && n.summary.length > 0 && <span className="text-zinc-600"> · </span>}
-        {n.summary.map((s, i) =>
-          "href" in s ? (
-            <AppLink key={i} href={s.href} className="text-yard-400 hover:underline">
-              {s.label}
-            </AppLink>
-          ) : (
-            <span key={i}>{s.text}</span>
-          ),
-        )}
+      <div className="@container min-w-0 flex-1">
+        <div className={cx("grid grid-cols-[minmax(0,1fr)_auto] gap-x-2", inline && "@md:grid-cols-[minmax(0,max-content)_minmax(0,1fr)_auto]")}>
+          {n.title && (
+            <div data-testid="notice-title" className={cx("col-span-2", inline && "@md:col-span-1", text)}>
+              {taskId ? (
+                <AppLink href={`/tasks/${taskId}`} className="font-medium text-zinc-200 hover:underline">
+                  {n.title}
+                </AppLink>
+              ) : (
+                <span className="font-medium text-zinc-200">{n.title}</span>
+              )}
+            </div>
+          )}
+          <div data-testid="notice-meta" className={text}>
+            {inline && n.summary.length > 0 && <span className="text-zinc-600 @max-md:hidden">· </span>}
+            {n.summary.map((s, i) =>
+              "href" in s ? (
+                <AppLink key={i} href={s.href} className="text-yard-400 hover:underline">
+                  {s.label}
+                </AppLink>
+              ) : (
+                <span key={i}>{s.text}</span>
+              ),
+            )}
+          </div>
+          <span className="text-right text-[11px] text-zinc-600">
+            <TimeAgo ts={m.createdAt} />
+          </span>
+        </div>
       </div>
-      <span className="shrink-0 text-[11px] text-zinc-600">
-        <TimeAgo ts={m.createdAt} />
-      </span>
     </div>
   )
 })
