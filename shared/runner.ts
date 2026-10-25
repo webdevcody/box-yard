@@ -6,6 +6,9 @@ export type Runner = (typeof RUNNERS)[number]
 /** Anything unknown (NULL from older rows, a typo) is "box", so a project only runs locally when someone chose it. */
 export const normalizeRunner = (v: unknown): Runner => (v === "local" ? "local" : "box")
 
+/** A task's own runner (Task.runsOn), which wins over its project's in both directions; null follows the project. */
+export const parseRunsOn = (v: unknown): Runner | null => (v === "local" || v === "box" ? v : null)
+
 export const RUNNER_LABEL: Record<Runner, string> = { box: "Upstash box", local: "This computer" }
 
 /**

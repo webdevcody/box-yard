@@ -308,3 +308,50 @@ esac`)
     }
   })
 })
+
+describe("per-task runs_on when a runner can't run", () => {
+  it("fails clearly with the reason, creates nothing and never falls back to the other runner", async () => {
+    const pc = computer({ claude: false })
+    const { json } = await boot(firstRun({ port: await freePort() }), { setup: { localCheck: pc.localCheck } })
+    const project = (await json<Project>("POST", "/api/projects", { id: "prj_cloud01", name: "cloud", runner: "box" })).body
+    const before = yard!.store.listTasks().length
+
+    const local = await json<{ error: string }>("POST", "/api/tasks", { projectId: project.id, title: "Here", prompt: "x", runsOn: "local" })
+    expect(local.status).toBe(400)
+    expect(local.body.error).toMatch(/^Can't run it on this computer: Claude Code isn't installed on this computer/)
+    // No Upstash key: a box task can't run either, and it isn't sent to this computer instead.
+    const box = await json<{ error: string }>("POST", "/api/tasks", { projectId: project.id, title: "There", prompt: "x", runsOn: "box" })
+    expect(box.status).toBe(400)
+    expect(box.body.error).toBe("Can't run it on an Upstash box: Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials.")
+    expect(yard!.store.listTasks().length).toBe(before)
+
+    // An existing task asked to continue here: refused, and nothing is queued or pinned.
+    const t = yard!.tasks.createTask({ projectId: project.id, title: "Old", prompt: "x" })
+    const send = await json<{ error: string }>("POST", `/api/tasks/${t.id}/messages`, { content: "continue locally", runsOn: "local" })
+    expect(send.status).toBe(400)
+    expect(yard!.store.getTask(t.id)!.runsOn).toBeNull()
+    expect(yard!.store.getTask(t.id)!.pendingCount).toBe(0)
+  })
+
+  it("says when this computer's claude isn't signed in, and runs once it is", async () => {
+    let login: boolean | null = false
+    const pc = computer()
+    const localCheck = async () => {
+      const r = await pc.localCheck()
+      return { ...r, check: { ...r.check, claudeLogin: login } }
+    }
+    const { json } = await boot(firstRun({ port: await freePort(), boxProvider: "local" }), { setup: { localCheck } })
+    const project = (await json<Project>("POST", "/api/projects", { id: "prj_cloud02", name: "cloud", runner: "box" })).body
+    const no = await json<{ error: string }>("POST", "/api/tasks", { projectId: project.id, title: "Here", prompt: "x", runsOn: "local" })
+    expect(no.status).toBe(400)
+    expect(no.body.error).toContain("Claude Code on this computer isn't signed in")
+    // BOX_PROVIDER=local counts as boxes.
+    expect((await json<Task>("POST", "/api/tasks", { projectId: project.id, title: "There", prompt: "x", runsOn: "box" })).status).toBe(201)
+
+    login = true
+    await yard!.setup.refreshLocal(true)
+    const yes = await json<Task>("POST", "/api/tasks", { projectId: project.id, title: "Here", prompt: "x", runsOn: "local" })
+    expect(yes.status).toBe(201)
+    expect(yes.body.runsOn).toBe("local")
+  })
+})

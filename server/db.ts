@@ -660,6 +660,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN snapshot_bytes INTEGER;
   ALTER TABLE projects ADD COLUMN snapshot_at INTEGER;
   `,
+  `
+  -- A task's own "Runs on" (shared/runner.ts): 'local' or 'box' wins over its project's runner for every turn. NULL: follow the project.
+  ALTER TABLE tasks ADD COLUMN runs_on TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

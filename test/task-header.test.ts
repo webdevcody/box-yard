@@ -173,4 +173,30 @@ describe("TaskHeader", () => {
     )
     expect(document.querySelector('[data-testid="local-warning"]')).not.toBeNull()
   })
+
+  it("follows the task's own runs_on over its project's, both ways, and names it in the details", async () => {
+    const header = (t: Task, runner: "box" | "local") =>
+      act(() =>
+        root.render(
+          createElement(
+            QueryClientProvider,
+            { client: new QueryClient() },
+            createElement(TaskHeader, { task: t, project: { ...project, runner }, schedule: null, files: [], showTools: false, onShowTools: () => {} }),
+          ),
+        ),
+      )
+    const chip = () => document.querySelector('[data-testid="local-warning"]')
+    // Pinned here in a box project: the chip shows before it has a place.
+    render(task({ boxId: null, status: "queued", runsOn: "local" }))
+    expect(chip()).not.toBeNull()
+    // Pinned to a box in a local project: no chip.
+    header(task({ boxId: null, status: "queued", runsOn: "box" }), "local")
+    expect(chip()).toBeNull()
+    // The ⋯ details say it's this task's own choice. The chip keeps its slot: first, before the PR chip.
+    header(task({ boxId: "this-computer", runsOn: "local", prUrl: "https://github.com/o/r/pull/7" }), "box")
+    const chips = document.querySelector('[data-testid="task-chips"]')!
+    expect(chips.firstElementChild?.getAttribute("data-testid")).toBe("local-warning")
+    await act(async () => void document.querySelector<HTMLButtonElement>('button[aria-label="Task details and more actions"]')!.click())
+    expect(document.querySelector('[data-testid="task-runs-on"]')!.textContent).toBe("This computer · this task only")
+  })
 })

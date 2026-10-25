@@ -12,7 +12,7 @@ import type { Project, SettingsInfo } from "../shared/types"
 
 // The saved sidebar order (useProjects returns projects in it), not alphabetical.
 const PROJECTS = [
-  { id: "prj_zeta01", name: "zeta", repo: null, description: "", envKeys: [], notes: [] },
+  { id: "prj_zeta01", name: "zeta", repo: null, description: "", envKeys: [], notes: [], runner: "local" },
   { id: "prj_alpha1", name: "alpha", repo: null, description: "", envKeys: [], notes: [] },
 ] as unknown as Project[]
 
@@ -204,6 +204,31 @@ describe("New task popover", () => {
     expect((await sent())[0]).toMatchObject({ projectId: "prj_alpha1", title: "Fix the flaky test", prompt: "Fix the flaky test\nwith details", effort: "max", attachments: [] })
     expect(posted()[0].model).toBeUndefined()
     expect(loadDraft("prj_alpha1")).toBe("")
+  })
+
+  it("Run on this computer starts on the project's Runs on and pins the task to the other runner when flipped", async () => {
+    const start = async (projectId: string, flip: boolean) => {
+      render({ projectId })
+      open()
+      type(textarea(), `task in ${projectId}`)
+      click(button("More options"))
+      const toggle = popover()!.querySelector<HTMLInputElement>("[data-testid=new-task-local]")!
+      const was = toggle.checked
+      if (flip) click(toggle)
+      // Turned on, it shows the unsandboxed warning.
+      expect(Boolean(popover()!.textContent?.includes("Local agents are not sandboxed"))).toBe(toggle.checked)
+      click(button("Start agent"))
+      return was
+    }
+    // A box project: off; on sends runsOn "local".
+    expect(await start("prj_alpha1", true)).toBe(false)
+    expect((await sent(1))[0]).toMatchObject({ projectId: "prj_alpha1", runsOn: "local" })
+    // A local project: on; off sends runsOn "box".
+    expect(await start("prj_zeta01", true)).toBe(true)
+    expect((await sent(2))[1]).toMatchObject({ projectId: "prj_zeta01", runsOn: "box" })
+    // Untouched: no runsOn, so the task follows its project.
+    await start("prj_zeta01", false)
+    expect((await sent(3))[2].runsOn).toBeUndefined()
   })
 
   it("keeps edits made in the full dialog as the draft when it is cancelled", () => {
