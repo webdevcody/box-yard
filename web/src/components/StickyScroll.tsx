@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowDown } from "lucide-react"
 import { cx } from "./ui"
+import { takeSpot, watchScroll, type LiveSpot } from "../lib/scrollMemory"
 
 // "At the bottom" means within a pixel of it (fractional scroll positions on zoomed or high-DPI
 // screens), so even a 1px nudge up counts as leaving it.
@@ -8,6 +9,11 @@ const BOTTOM_SLOP_PX = 1
 
 // Start loading earlier items this far before the top is reached.
 const LOAD_EARLIER_MARGIN_PX = 800
+
+// After Back/Forward, hold the restored row in place this long while late layout (markdown, images) settles.
+const RESTORE_SETTLE_MS = 1000
+// Give up on a restore whose list never shows the row (or any content) within this long.
+const RESTORE_GIVE_UP_MS = 10_000
 
 // Keys that scroll a page up. Shift+Space too.
 const UP_KEYS = new Set(["PageUp", "ArrowUp", "Home"])
@@ -31,9 +37,12 @@ function innerCanScrollUp(target: EventTarget | null, root: HTMLElement) {
 // `count` is the number of items; `resetKey` changes when the content is swapped (e.g. another task).
 // With `hidden` > 0 (older items not rendered yet), scrolling near the top calls `onLoadEarlier`,
 // and the view stays on the same content while they are added above it.
+// With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
+// (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
 export function StickyScroll({
   count,
   resetKey,
+  restoreKey,
   hidden = 0,
   onLoadEarlier,
   className,
@@ -42,6 +51,7 @@ export function StickyScroll({
 }: {
   count: number
   resetKey?: string
+  restoreKey?: string
   hidden?: number
   onLoadEarlier?: () => void
   className?: string
@@ -64,6 +74,10 @@ export function StickyScroll({
   const sentinel = useRef<HTMLButtonElement>(null)
   // Scroll metrics captured just before older items are added above.
   const beforePrepend = useRef<{ height: number; top: number; hidden: number } | null>(null)
+  // A spot from Back/Forward being put back: `since` it started, `found` when its row (or content) first showed.
+  const restoring = useRef<{ spot: LiveSpot; since: number; found: number } | null>(null)
+  const latest = useRef({ hidden, onLoadEarlier })
+  latest.current = { hidden, onLoadEarlier }
 
   // Write scrollTop ourselves, remembering where it landed so the scroll event it fires is ignored.
   const setTop = (el: HTMLElement, top: number) => {
@@ -95,6 +109,70 @@ export function StickyScroll({
     anchor.current = { node, top: node.getBoundingClientRect().top - viewTop }
   }
 
+  // Where the list is now, to come back to: pinned, or the rows at the top of the view.
+  const capture = (): LiveSpot => {
+    const el = scroller.current
+    if (!el) return { bottom: true, fromBottom: 0 }
+    const fromBottom = el.scrollHeight - el.scrollTop
+    if (stuck.current) return { bottom: true, fromBottom }
+    markAnchor()
+    const a = anchor.current
+    if (!a) return { bottom: false, fromBottom }
+    const spot: LiveSpot = { bottom: false, fromBottom, node: a.node, nodeOffset: a.top }
+    // A row with an id (a message) finds the same place after a remount, when the element itself is gone.
+    const rows = [...content.current!.children]
+    const at = rows.indexOf(a.node)
+    const withId = rows.slice(at).find((r) => r.id) ?? rows.slice(0, at).reverse().find((r) => r.id)
+    if (withId) {
+      spot.id = withId.id
+      spot.offset = withId.getBoundingClientRect().top - el.getBoundingClientRect().top
+    }
+    return spot
+  }
+
+  const startRestore = (spot: LiveSpot) => {
+    restoring.current = { spot, since: performance.now(), found: 0 }
+    applyRestore()
+  }
+
+  // Put the restoring spot back. Runs again on every layout change until it has held for RESTORE_SETTLE_MS.
+  const applyRestore = () => {
+    const r = restoring.current
+    const el = scroller.current
+    const box = content.current
+    if (!r || !el || !box) return
+    const now = performance.now()
+    if (now - (r.found || r.since) > (r.found ? RESTORE_SETTLE_MS : RESTORE_GIVE_UP_MS)) return void (restoring.current = null)
+    const { spot } = r
+    if (spot.bottom) {
+      restoring.current = null
+      pin()
+      return toBottom()
+    }
+    const byId = spot.id ? document.getElementById(spot.id) : null
+    const row =
+      spot.node?.isConnected && box.contains(spot.node)
+        ? { node: spot.node, offset: spot.nodeOffset ?? 0 }
+        : byId && box.contains(byId)
+          ? { node: byId, offset: spot.offset ?? 0 }
+          : null
+    if (row) {
+      setTop(el, el.scrollTop + row.node.getBoundingClientRect().top - el.getBoundingClientRect().top - row.offset)
+    } else {
+      const { hidden, onLoadEarlier } = latest.current
+      // The row is in the older part that isn't rendered yet: render more (the prepend keeps the view), then retry.
+      if (spot.id && hidden > 0 && onLoadEarlier) return loadEarlier()
+      // Nothing to show yet (the messages are loading): wait for them.
+      if (el.scrollHeight - el.clientHeight < BOTTOM_SLOP_PX) return
+      setTop(el, el.scrollHeight - spot.fromBottom)
+    }
+    r.found ||= now
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLOP_PX) return
+    stuck.current = false
+    setAway(true)
+    markAnchor()
+  }
+
   const pin = () => {
     stuck.current = true
     anchor.current = null
@@ -121,6 +199,8 @@ export function StickyScroll({
     lastTop.current = top
     // Our own write (or nothing moved): it says nothing about what the user wants.
     if (moved === 0) return
+    // Mid-restore, a move the user didn't make (the browser clamping a list that got shorter) is put right.
+    if (restoring.current) return applyRestore()
     const atBottom = el.scrollHeight - top - el.clientHeight < BOTTOM_SLOP_PX
     // Back at the very bottom re-pins, and so does the browser pulling scrollTop down to a shorter
     // list's bottom. Any other move up is the user leaving it.
@@ -137,9 +217,11 @@ export function StickyScroll({
     const el = scroller.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      restoring.current = null
       if (e.deltaY < 0 && !e.ctrlKey && !innerCanScrollUp(e.target, el)) unpin()
     }
     const onTouchStart = (e: TouchEvent) => {
+      restoring.current = null
       const t = e.touches[0]
       touchStart.current = t ? { x: t.clientX, y: t.clientY } : null
     }
@@ -153,6 +235,7 @@ export function StickyScroll({
       if (dy > 0 && dy >= Math.abs(dx) && !innerCanScrollUp(e.target, el)) unpin()
     }
     const onPointerDown = () => {
+      restoring.current = null
       pointerInside.current = true
     }
     const onDocPointerDown = () => {
@@ -161,7 +244,10 @@ export function StickyScroll({
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(UP_KEYS.has(e.key) || (e.key === " " && e.shiftKey)) || isEditable(e.target)) return
       const t = e.target
-      if ((t instanceof Node && el.contains(t)) || ((t === document.body || t === document) && pointerInside.current)) unpin()
+      if ((t instanceof Node && el.contains(t)) || ((t === document.body || t === document) && pointerInside.current)) {
+        restoring.current = null
+        unpin()
+      }
     }
     const passive = { passive: true }
     el.addEventListener("wheel", onWheel, passive)
@@ -182,13 +268,39 @@ export function StickyScroll({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Opening or switching to another list starts at the bottom.
+  // Opening or switching to another list starts at the bottom, unless Back/Forward brought it back to a spot.
   useLayoutEffect(() => {
     lastCount.current = count
+    const spot = restoreKey ? takeSpot(restoreKey) : null
+    if (spot) return startRestore(spot)
+    if (restoring.current) return applyRestore()
     pin()
     toBottom()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey])
+
+  // Take this list's spot when the page changes, and go back to it on Back/Forward while mounted.
+  useEffect(() => {
+    if (!restoreKey) return
+    return watchScroll({
+      key: restoreKey,
+      capture: () => {
+        restoring.current = null
+        return capture()
+      },
+      // The page renders after this: its layout effects (or the next frame) put the spot back.
+      restore: (spot) => {
+        restoring.current = { spot, since: performance.now(), found: 0 }
+        requestAnimationFrame(applyRestore)
+      },
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restoreKey])
+
+  // Each render may be the restored page's new layout (Zen's wider column, the messages arriving).
+  useLayoutEffect(() => {
+    if (restoring.current) applyRestore()
+  })
 
   // Content grew (new items, streaming text, expanding output) or the viewport shrank (a growing
   // composer below it). Pinned: follow the bottom. Unpinned: hold the row being read where it is,
@@ -199,6 +311,7 @@ export function StickyScroll({
     const ro = new ResizeObserver(() => {
       const box = scroller.current
       if (!box) return
+      if (restoring.current) return applyRestore()
       if (stuck.current) return toBottom()
       const a = anchor.current
       if (!a || !a.node.isConnected) return markAnchor()
@@ -220,10 +333,11 @@ export function StickyScroll({
 
   const loadEarlier = useCallback(() => {
     const el = scroller.current
+    const { hidden, onLoadEarlier } = latest.current
     if (!el || !onLoadEarlier) return
     beforePrepend.current = { height: el.scrollHeight, top: el.scrollTop, hidden }
     onLoadEarlier()
-  }, [onLoadEarlier, hidden])
+  }, [])
 
   // Keep what's on screen in place when older items appear above it.
   useLayoutEffect(() => {

@@ -130,6 +130,7 @@ export function CaptainTab({ project }: { project: Project }) {
       <StickyScroll
         count={list.length}
         resetKey={project.id}
+        restoreKey="captain"
         hidden={tail.hidden}
         onLoadEarlier={tail.loadEarlier}
         className="px-3 py-4 sm:px-4"
