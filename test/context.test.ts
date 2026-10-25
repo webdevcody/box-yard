@@ -74,6 +74,19 @@ describe("settings", () => {
     expect(info.settings.agentRoutingConfig).toContain("fallback")
     expect(info.sources.agentRoutingConfig).toBe("ui")
   })
+  it("defaults the Coordinator's and Captains' auto-compact to 250k tokens, and keeps a saved threshold", () => {
+    const store = memStore()
+    const fresh = new SettingsStore(store, { orchestratorModel: "", workerModel: "" }).info()
+    expect(fresh.settings.orchestratorAutoCompact).toEqual({ enabled: true, unit: "tokens", value: 250_000 })
+    expect(fresh.sources.orchestratorAutoCompact).toBe("default")
+    expect(compactThreshold(fresh.settings.orchestratorAutoCompact, 1_000_000)).toBe(250_000)
+    // A threshold saved in Settings before the default changed still wins; saving another field keeps it.
+    store.setKv("settings", JSON.stringify({ orchestratorAutoCompact: { enabled: true, unit: "percent", value: 80 } }))
+    const settings = new SettingsStore(store, { orchestratorModel: "", workerModel: "" })
+    settings.update({ captainModel: "claude-sonnet-5-5" })
+    expect(settings.info().settings.orchestratorAutoCompact).toEqual({ enabled: true, unit: "percent", value: 80 })
+    expect(settings.info().sources.orchestratorAutoCompact).toBe("ui")
+  })
   it("rejects bad values", () => {
     const settings = new SettingsStore(memStore(), { orchestratorModel: "", workerModel: "" })
     expect(() => settings.update({ agentEffort: "turbo" })).toThrow()

@@ -20,7 +20,7 @@ interface Running {
   config: Config
 }
 const running: Running[] = []
-const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_WINDOW"]
+const ENV_KEYS = ["FAKE_CLAUDE_LOG", "FAKE_CLAUDE_TOKENS_PER_TURN", "FAKE_CLAUDE_BAD_SUMMARY", "FAKE_CLAUDE_WINDOW", "FAKE_CLAUDE_LOG_FULL"]
 
 async function start(overrides: Partial<Config> = {}, seed?: (yard: BoxYard) => void): Promise<Running> {
   const port = await freePort()
@@ -310,6 +310,7 @@ describe("orchestrator usage, compaction and the durable log", () => {
 
   it("writes the summary file first, then compacts, and records before/after", async () => {
     const lines = logFile()
+    process.env.FAKE_CLAUDE_LOG_FULL = "1"
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Linked context", prompt: "write a haiku" })
@@ -343,9 +344,17 @@ describe("orchestrator usage, compaction and the durable log", () => {
     expect(JSON.parse(read.content[0]!.text).markdown).toContain("## Open threads and next steps")
     const order = lines().map((l) => l.prompt)
     const si = order.findIndex((x) => x.includes("Your context is about to be compacted"))
-    const ci = order.findIndex((x) => x === "/compact")
+    const ci = order.findIndex((x) => x.startsWith("/compact "))
     expect(si).toBeGreaterThan(0)
     expect(ci).toBeGreaterThan(si)
+    // The summary and /compact passes send the turn's tools, system prompt and effort, so they hit its prompt
+    // cache; only a turn may use the tools (no allow rules: dontAsk denies every call).
+    const turnArgs = lines()[si - 1]!.args
+    for (const pass of [lines()[si]!.args, lines()[ci]!.args]) {
+      for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turnArgs, flag))
+      expect(pass).not.toContain("--allowedTools")
+    }
+    expect(argOf(turnArgs, "--tools")).toBe("Read,WebSearch,WebFetch")
     const state = await call<OrchestratorState>(r, "GET", "/api/orchestrator")
     expect(state.usage.tokens).toBe(2000)
     expect(state.lastCompaction).toMatchObject({ trigger: "button", tokensAfter: 2000 })
@@ -353,8 +362,17 @@ describe("orchestrator usage, compaction and the durable log", () => {
     expect((await chat(r)).some((m) => m.content.includes("Cody prefers short replies"))).toBe(false)
     await say(r, "status", 2)
     // and the system prompt now lists the file
-    const last = lines().filter((l) => l.args.includes("--mcp-config")).at(-1)!
+    // (The project's Captain logs its runs too.)
+    const coordinatorTurns = () => lines().filter((l) => l.args.includes("--mcp-config") && !argOf(l.args, "--mcp-config").includes(`${path.sep}captains${path.sep}`))
+    const last = coordinatorTurns().at(-1)!
     expect(argOf(last.args, "--append-system-prompt")).toContain(name!)
+    // The first turn after it starts with Box Yard's summary and the live state of the tasks it names; the
+    // one after that doesn't repeat it.
+    expect(last.prompt).toMatch(/^\[Box Yard: Your context was just compacted/)
+    expect(last.prompt).toContain("Live now, tasks it names:")
+    expect(last.prompt).toContain(`- ${t.id} "Linked context"`)
+    await say(r, "status", 3)
+    expect(coordinatorTurns().at(-1)!.prompt).toMatch(/^\[Yard now\]/)
   })
 
   it("compacts by itself between turns once usage passes the threshold, and only if enabled", async () => {

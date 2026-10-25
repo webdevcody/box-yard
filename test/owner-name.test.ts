@@ -139,7 +139,7 @@ describe("Box Yard MCP tools", () => {
     const tools = Object.values((buildMcpServer(deps) as unknown as { _registeredTools: Record<string, { description?: string; inputSchema?: { shape?: Record<string, { description?: string }> } }> })._registeredTools)
     const text = JSON.stringify(tools.map((t) => [t.description, Object.values(t.inputSchema?.shape ?? {}).map((v) => v.description)]))
     expect(text).toContain("when Ana explicitly asks")
-    expect(text).toContain("Files Ana attached")
+    expect(text).toContain("ones Ana attached in this chat")
     expect(text).not.toMatch(/\bCody\b/)
   })
 })

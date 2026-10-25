@@ -1258,27 +1258,30 @@ export class Store {
     this.db.prepare(`UPDATE orchestrator_compactions SET ${sets.join(", ")} WHERE id = ?`).run(...args)
   }
 
-  listOrchestratorCompactions(filter: { taskId?: string; limit?: number } = {}): OrchestratorCompactionRecord[] {
+  /** Newest first; `before` (ms) keeps those older than it, for paging. */
+  listOrchestratorCompactions(filter: { taskId?: string; limit?: number; before?: number } = {}): OrchestratorCompactionRecord[] {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200)
+    const before = filter.before ?? Number.MAX_SAFE_INTEGER
     const rows = filter.taskId
       ? (this.db
           .prepare(
             `SELECT c.*, (SELECT COUNT(*) FROM orchestrator_compaction_tasks ct WHERE ct.compaction_id = c.id) AS task_count
              FROM orchestrator_compactions c
              JOIN orchestrator_compaction_tasks ct ON ct.compaction_id = c.id
-             WHERE ct.task_id = ?
+             WHERE ct.task_id = ? AND c.at < ?
              ORDER BY c.at DESC
              LIMIT ?`,
           )
-          .all(filter.taskId, limit) as OrchestratorCompactionRow[])
+          .all(filter.taskId, before, limit) as OrchestratorCompactionRow[])
       : (this.db
           .prepare(
             `SELECT c.*, (SELECT COUNT(*) FROM orchestrator_compaction_tasks ct WHERE ct.compaction_id = c.id) AS task_count
              FROM orchestrator_compactions c
+             WHERE c.at < ?
              ORDER BY c.at DESC
              LIMIT ?`,
           )
-          .all(limit) as OrchestratorCompactionRow[])
+          .all(before, limit) as OrchestratorCompactionRow[])
     return rows.map((r) => this.orchestratorCompactionFromRow(r, false, true))
   }
 

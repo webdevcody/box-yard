@@ -339,7 +339,7 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes }, mcpToken))
+  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir }, mcpToken))
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {

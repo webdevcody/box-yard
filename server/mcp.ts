@@ -24,6 +24,10 @@ import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 import { HEAVY_TASKS, loadLine, memLine, type HeavyTasks } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
+import fs from "node:fs"
+import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
+import { compactionTime } from "./compactions.js"
+import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
   store: Store
@@ -40,15 +44,19 @@ export interface McpDeps {
   hooks?: HookEngine
   /** Every note change goes through it. Built from the other deps when a test leaves it out. */
   notes?: ProjectNotes
+  /** The Coordinator's compaction log folder, for search_history. Without it, the Coordinator's summaries aren't searched. */
+  coordinatorCompactionsDir?: string
 }
 
 /** Who is calling the MCP server. Captains only see and touch their own project. */
 export type McpCaller = { kind: "coordinator" } | { kind: "captain"; projectId: string }
 
-type ToolResult = { content: { type: "text"; text: string }[]; isError?: boolean }
+type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean }
 const ok = (value: unknown): ToolResult => ({
   content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }],
 })
+/** Unindented JSON, for the history tools whose lists can be long. */
+const okCompact = (value: unknown): ToolResult => ({ content: [{ type: "text", text: JSON.stringify(value) }] })
 const fail = (message: string): ToolResult => ({ content: [{ type: "text", text: message }], isError: true })
 
 /** Wrap a handler so thrown errors become tool errors the model can read. */
@@ -66,8 +74,20 @@ const attachmentsSchema = z
   .array(z.string())
   .optional()
   .describe(
-    "Files Cody attached in this chat, as the ids (up_…) or paths shown in their message. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots and other files.",
+    "Files for the agent: ones Cody attached in this chat, as the ids (up_…) or paths shown in their message, or hosted artifacts, as ids (art_…) or /artifacts/ URLs. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots, briefs and other files.",
   )
+
+/** An artifact id, alone or inside an /artifacts/ URL. */
+const ARTIFACT_REF = /\b(art_[a-f0-9]{12})\b/
+/** read_artifact returns at most this many characters of text per call. */
+const ARTIFACT_TEXT_MAX = 50_000
+const ARTIFACT_TEXT_DEFAULT = 20_000
+/** Images up to this size come back as an image the model can see. */
+const ARTIFACT_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+const TEXT_MIME = /^(text\/|application\/(json|xml|javascript|x-yaml|yaml)|image\/svg\+xml)/
+const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/
+/** A compaction digest lists at most this many of its linked tasks. */
+const DIGEST_TASKS = 10
 
 const effortSchema = z
   .enum(EFFORTS)
@@ -152,6 +172,25 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     }
     return s
   }
+  /** A hosted artifact by id or URL. A Captain only reaches its own project's (or its tasks'). */
+  const artifactRef = (ref: string): Artifact => {
+    const id = ARTIFACT_REF.exec(ref)?.[1] ?? ref.trim()
+    const a = store.getArtifact(id)
+    if (!a) throw new Error(`No artifact "${ref}". Use list_artifacts.`)
+    if (scopeId && a.projectId !== scopeId && (!a.taskId || store.getTask(a.taskId)?.projectId !== scopeId)) {
+      throw outOfScope(`artifact ${a.id} ("${a.title}") is not in this project`)
+    }
+    return a
+  }
+  /** Attachment refs as uploads: an artifact is copied into a new upload, so it is delivered like one. */
+  const attachmentsOf = (refs: string[] | undefined) =>
+    [...new Set(refs ?? [])].map((ref) => {
+      if (!ARTIFACT_REF.test(ref)) return uploads.resolve(ref)
+      const a = artifactRef(ref)
+      const file = store.artifactPath(a.id)
+      if (!file || !fs.existsSync(file)) throw new Error(`Artifact ${a.id} ("${a.title}") has no file on this server any more.`)
+      return uploads.save(a.filename, fs.readFileSync(file))
+    })
   /** Captains never see the Coordinator-only tools, so they can't call them either. */
   const coordinatorOnly = (tool: RegisteredTool) => {
     if (scopeId) tool.remove()
@@ -198,7 +237,14 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     lastActive: ago(t.updatedAt),
     summary: t.summary ? preview(t.summary, 300, "call get_task or wait_for_tasks for the full reply") : undefined,
   })
-  const compactionView = (c: ReturnType<Store["listOrchestratorCompactions"]>[number], full = false) => ({
+  const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
+  /** A task's status now, next to the one a snapshot recorded (undefined when unchanged or gone). */
+  const statusNow = (t: CompactionTaskSnapshot) => {
+    const now = store.getTask(t.taskId)?.status
+    return now && now !== t.status ? now : undefined
+  }
+  /** One compaction in full: its markdown and every linked task snapshot. */
+  const compactionView = (c: OrchestratorCompactionRecord) => ({
     id: c.id,
     at: new Date(c.at).toISOString(),
     trigger: c.trigger,
@@ -210,13 +256,28 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       id: t.taskId,
       title: t.title,
       status: t.status,
+      statusNow: statusNow(t),
       project: t.projectName,
       branch: t.branch ?? undefined,
       pr: t.prUrl ?? undefined,
       sessionId: t.sessionId,
-      summary: full ? t.summary : preview(t.summary, 500, "call read_compaction for full linked-task context"),
+      summary: t.summary,
     })),
-    ...(full ? { markdown: c.markdown ?? "" } : {}),
+    markdown: c.markdown ?? "",
+  })
+  /**
+   * A compaction in a list: when it was and which tasks it covers, not their snapshots (read_compaction has
+   * those). A list of full views once reached ~160k tokens in one call.
+   */
+  const compactionDigest = (c: OrchestratorCompactionRecord) => ({
+    id: c.id,
+    at: new Date(c.at).toISOString(),
+    trigger: c.trigger,
+    tokensBefore: c.tokensBefore,
+    tokensAfter: c.tokensAfter,
+    file: c.file,
+    tasks: c.tasks.slice(0, DIGEST_TASKS).map((t) => ({ id: t.taskId, title: clip(t.title, 70), status: t.status, now: statusNow(t) })),
+    moreTasks: c.tasks.length > DIGEST_TASKS ? c.tasks.length - DIGEST_TASKS : undefined,
   })
   /**
    * The agent's latest reply, to be sent once and in full (capped). `summary` is only
@@ -500,31 +561,41 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   )
 
   /** A project's Captain compactions live in files under the Captain's data dir; null when no Captains run here. */
-  const captainCompactions = (projectId: string, filter: { taskId?: string; limit?: number }) =>
-    deps.captains ? deps.captains.compactionRecords(projectId, filter).map((c) => ({ ...compactionView(c), captain: projectId })) : null
+  const captainCompactions = (projectId: string, filter: { taskId?: string; limit?: number; before?: number }) =>
+    deps.captains ? deps.captains.compactionRecords(projectId, filter).map((c) => ({ ...compactionDigest(c), captain: projectId })) : null
   const noCaptains = "Captains are not available in this Box Yard process."
+  const beforeOf = (ref?: string) => {
+    if (!ref) return undefined
+    const at = compactionTime(ref)
+    if (at === null) throw new Error(`"${ref}" is not a compaction id or an ISO time.`)
+    return at
+  }
 
   server.registerTool(
     "list_compactions",
     {
-      description: scopeId
-        ? "List your own Captain compaction records, newest first. Use this to recover prior context after you were compacted; pass task to filter to compactions that mentioned or snapshotted that task."
-        : "List compaction records, newest first: the Coordinator's own, or a project Captain's when you pass project. Use this to recover prior context after a compaction; pass task to filter to compactions that mentioned or snapshotted that task.",
+      description:
+        (scopeId
+          ? "List your own Captain compaction records, newest first: when, and which tasks each covers (with their status then and now)."
+          : "List compaction records, newest first: the Coordinator's own, or a project Captain's when you pass project. Each says when, and which tasks it covers (with their status then and now).") +
+        " Open one with read_compaction. To find something specific in them, search_history is faster. To page, pass before = the last id you got.",
       inputSchema: {
         task: z.string().optional().describe("Optional task id or title to filter linked compactions"),
         project: z
           .string()
           .optional()
           .describe(scopeId ? "Leave out: your own project." : "Project id or name: list that project's Captain compactions instead of the Coordinator's."),
-        limit: z.number().int().min(1).max(100).optional(),
+        before: z.string().optional().describe("Only compactions older than this one (an id from a previous page) or this ISO time"),
+        limit: z.number().int().min(1).max(50).optional().describe("Default 10"),
       },
     },
-    safe(async (a: { task?: string; project?: string; limit?: number }) => {
+    safe(async (a: { task?: string; project?: string; before?: string; limit?: number }) => {
       const taskId = a.task ? task(a.task).id : undefined
       const projectId = projectFilter(a.project)
-      if (!projectId) return ok(store.listOrchestratorCompactions({ taskId, limit: a.limit ?? 20 }).map((c) => compactionView(c)))
-      const list = captainCompactions(projectId, { taskId, limit: a.limit ?? 20 })
-      return list ? ok(list) : fail(noCaptains)
+      const filter = { taskId, limit: a.limit ?? 10, before: beforeOf(a.before) }
+      if (!projectId) return okCompact(store.listOrchestratorCompactions(filter).map(compactionDigest))
+      const list = captainCompactions(projectId, filter)
+      return list ? okCompact(list) : fail(noCaptains)
     }),
   )
 
@@ -532,8 +603,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "read_compaction",
     {
       description: scopeId
-        ? "Read one of your Captain compactions: its markdown summary and linked task snapshots."
-        : "Read one compaction's markdown summary and linked task snapshots: the Coordinator's, or a project Captain's when you pass project.",
+        ? "Read one of your Captain compactions: its markdown summary and linked task snapshots (statusNow says where a task's status has moved on since)."
+        : "Read one compaction's markdown summary and linked task snapshots (statusNow says where a task's status has moved on since): the Coordinator's, or a project Captain's when you pass project.",
       inputSchema: {
         compaction: z.string().describe("Compaction id, e.g. 2026-10-22T18-40-05Z"),
         project: z.string().optional().describe(scopeId ? "Leave out: your own project." : "Project id or name, for one of that project's Captain compactions."),
@@ -544,12 +615,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       if (!projectId) {
         const c = store.getOrchestratorCompaction(a.compaction, true)
         if (!c) throw new Error(`No Coordinator compaction "${a.compaction}". Use list_compactions, and pass project for a Captain compaction.`)
-        return ok(compactionView(c, true))
+        return ok(compactionView(c))
       }
       if (!deps.captains) return fail(noCaptains)
       const c = deps.captains.compactionRecord(projectId, a.compaction)
       if (!c) throw new Error(`No Captain compaction "${a.compaction}" in this project. Use list_compactions.`)
-      return ok({ ...compactionView(c, true), captain: projectId })
+      return ok({ ...compactionView(c), captain: projectId })
     }),
   )
 
@@ -559,18 +630,108 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description: scopeId
         ? "Find your Captain compactions linked to a task and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context."
         : "Find Coordinator compactions and the task's project Captain compactions linked to a task, and that task's own /compact summaries. Use this before resuming older work or writing a PR description that needs historical context.",
-      inputSchema: { task: z.string(), limit: z.number().int().min(1).max(100).optional() },
+      inputSchema: { task: z.string(), limit: z.number().int().min(1).max(50).optional().describe("Default 10 of each") },
     },
     safe(async (a: { task: string; limit?: number }) => {
       const t = task(a.task)
-      const limit = a.limit ?? 20
-      return ok({
+      const limit = a.limit ?? 10
+      return okCompact({
         task: brief(t),
         // Coordinator compactions span every project, so Captains only get their own and the task's.
-        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit }).map((c) => compactionView(c)),
+        orchestratorCompactions: scopeId ? undefined : store.listOrchestratorCompactions({ taskId: t.id, limit }).map(compactionDigest),
         // task() keeps a Captain inside its own project, so this is never another project's Captain.
         captainCompactions: captainCompactions(t.projectId, { taskId: t.id, limit }) ?? undefined,
-        taskCompactions: store.listTaskCompactions({ taskId: t.id, limit }),
+        taskCompactions: store
+          .listTaskCompactions({ taskId: t.id, limit })
+          .map((c) => ({ ...c, at: new Date(c.at).toISOString(), summary: preview(c.summary, 3000, "the task page has the full summary") })),
+      })
+    }),
+  )
+
+  const hitView = (h: HistoryHit) => {
+    const projectName = h.projectId ? (store.getProject(h.projectId)?.name ?? h.projectId) : undefined
+    const open =
+      h.kind === "coordinator_summary"
+        ? `read_compaction {"compaction":"${h.id}"}`
+        : h.kind === "captain_summary"
+          ? `read_compaction {"compaction":"${h.id}"${scopeId ? "" : `,"project":"${projectName}"`}}`
+          : h.kind === "coordinator_chat" || h.kind === "captain_chat"
+            ? `search_history {"around":"${h.id}"}`
+            : h.kind === "task_summary"
+              ? `find_compactions_by_task {"task":"${h.taskIds?.[0]}"}`
+              : `get_task {"task":"${h.taskIds?.[0] ?? h.id}"}`
+    return {
+      kind: h.kind,
+      at: new Date(h.at).toISOString(),
+      id: h.id,
+      project: scopeId ? undefined : projectName,
+      file: h.file,
+      where: h.where,
+      tasks: h.taskIds?.length ? h.taskIds : undefined,
+      snippet: h.snippet,
+      open,
+    }
+  }
+
+  server.registerTool(
+    "search_history",
+    {
+      description:
+        (scopeId
+          ? "Search your project's history by keywords: your compaction summaries, your chat with Cody, and the project's tasks (titles, prompts, replies, questions, errors, PRs, and their /compact summaries). "
+          : "Search Box Yard's history by keywords: your compaction summaries and every Captain's, your chat with Cody and the Captains' chats, and all tasks (titles, prompts, replies, questions, errors, PRs, and their /compact summaries). ") +
+        "Use it when Cody refers to something from before your last compaction, or you need an old decision, id or link. Returns short snippets, newest first, with dates, task ids, and how to open each hit. " +
+        "Every word must match (case-insensitive); quote a phrase to match it exactly. Pass around = a chat hit's id to read that message in full with the messages around it.",
+      inputSchema: {
+        query: z.string().max(300).optional().describe('Keywords, e.g. local runner brief, or "auto-merge" label'),
+        project: z
+          .string()
+          .optional()
+          .describe(scopeId ? "Leave out: your own project." : "Project id or name: only that project's Captain history and tasks (your own summaries and chat are left out)."),
+        sources: z
+          .array(z.enum(HISTORY_SOURCES))
+          .optional()
+          .describe(
+            `Where to look. Default: summaries, chat and tasks. transcripts adds agents' task transcripts (the newest ${TRANSCRIPT_SCAN_ROWS.toLocaleString("en-US")} lines; slower).`,
+          ),
+        since: z.string().optional().describe("ISO date or time: only history from then on"),
+        until: z.string().optional().describe("ISO date or time: only history up to then"),
+        limit: z.number().int().min(1).max(30).optional().describe("Default 10"),
+        around: z.string().optional().describe("A chat message id from a hit: returns it in full with up to 3 messages before and after, instead of searching"),
+      },
+    },
+    safe(async (a: { query?: string; project?: string; sources?: HistorySource[]; since?: string; until?: string; limit?: number; around?: string }) => {
+      const projectId = projectFilter(a.project)
+      const scope = { projectId, coordinator: !scopeId }
+      if (a.around) {
+        const thread = chatAround(store, a.around.trim(), scope)
+        if (!thread) throw new Error(`No chat message "${a.around}"${scopeId ? " in this project's Captain chat" : ""}. Pass the id of a chat hit.`)
+        return okCompact({ ...thread, projectId: undefined, project: thread.projectId && !scopeId ? store.getProject(thread.projectId)?.name : undefined, messages: thread.messages.map((m) => ({ ...m, at: new Date(m.at).toISOString() })) })
+      }
+      const terms = parseTerms(a.query ?? "")
+      if (!terms.length) throw new Error("Pass query (keywords), or around (a chat message id).")
+      const time = (v: string | undefined, name: string) => {
+        if (!v) return undefined
+        const t = Date.parse(v)
+        if (!Number.isFinite(t)) throw new Error(`${name} "${v}" is not an ISO date or time.`)
+        return t
+      }
+      const limit = a.limit ?? 10
+      const { hits, perSource } = searchHistory(
+        {
+          store,
+          coordinatorCompactionsDir: scopeId ? undefined : deps.coordinatorCompactionsDir,
+          captainCompactions: deps.captains ? (id) => deps.captains!.compactionRecords(id) : undefined,
+        },
+        scope,
+        { terms, sources: a.sources?.length ? a.sources : DEFAULT_HISTORY_SOURCES, since: time(a.since, "since"), until: time(a.until, "until"), limit },
+      )
+      const found = Object.values(perSource).reduce((n, x) => n + (x ?? 0), 0)
+      return okCompact({
+        terms,
+        hits: hits.map(hitView),
+        more: found > hits.length ? `At least ${found - hits.length} more matched (per source: ${JSON.stringify(perSource)}). Narrow with sources, since/until or more words.` : undefined,
+        none: hits.length ? undefined : "Nothing matched every word. Try fewer or different words, or sources including transcripts.",
       })
     }),
   )
@@ -637,7 +798,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         title: a.title,
         prompt,
         env: a.env,
-        attachments: uploads.resolveAll(a.attachments),
+        attachments: attachmentsOf(a.attachments),
         model: a.model ?? null,
         effort: a.effort ?? null,
         routingRule: a.routing_rule ?? null,
@@ -660,7 +821,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       const how = delivery(before)
-      const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, uploads.resolveAll(a.attachments), {
+      const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, attachmentsOf(a.attachments), {
         model: a.model,
         effort: a.effort,
         routingRule: a.routing_rule,
@@ -1011,6 +1172,52 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           .map((x) => ({ id: x.id, title: x.title, url: absolute(x.url), size: x.size, task: x.taskId })),
       ),
     ),
+  )
+
+  server.registerTool(
+    "read_artifact",
+    {
+      description:
+        "Read a hosted artifact (a report, brief, page or image an agent or you published) by id or URL. Text comes back in pages of up to 50k characters; small images come back as an image. " +
+        "To hand an artifact to an agent instead, pass its id in create_task or send_to_task attachments.",
+      inputSchema: {
+        artifact: z.string().describe("Artifact id (art_…) or its /artifacts/ URL"),
+        offset: z.number().int().min(0).optional().describe("Character offset to start from, for the next page of a long text"),
+        max_chars: z.number().int().min(1000).max(ARTIFACT_TEXT_MAX).optional().describe(`Default ${ARTIFACT_TEXT_DEFAULT}`),
+      },
+    },
+    safe(async (a: { artifact: string; offset?: number; max_chars?: number }) => {
+      const art = artifactRef(a.artifact)
+      const file = store.artifactPath(art.id)
+      if (!file || !fs.existsSync(file)) throw new Error(`Artifact ${art.id} ("${art.title}") has no file on this server any more.`)
+      const info = {
+        id: art.id,
+        title: art.title,
+        filename: art.filename,
+        mime: art.mime,
+        size: art.size,
+        project: art.projectId ? (store.getProject(art.projectId)?.name ?? art.projectId) : undefined,
+        task: art.taskId ?? undefined,
+        created: new Date(art.createdAt).toISOString(),
+        url: absolute(art.url),
+      }
+      const data = fs.readFileSync(file)
+      if (IMAGE_MIME.test(art.mime)) {
+        if (data.length > ARTIFACT_IMAGE_MAX_BYTES) return ok({ ...info, note: `The image is over ${ARTIFACT_IMAGE_MAX_BYTES / 1024 / 1024} MB, so it isn't returned. Attach it to a task to have an agent look at it.` })
+        return { content: [{ type: "text", text: JSON.stringify(info) }, { type: "image", data: data.toString("base64"), mimeType: art.mime }] }
+      }
+      // Text by type, or by content for an unknown type (no NUL bytes, valid UTF-8).
+      const head = data.subarray(0, 8192)
+      const looksText = TEXT_MIME.test(art.mime) || (art.mime === "application/octet-stream" && !head.includes(0) && !data.toString("utf8").includes("\uFFFD"))
+      if (!looksText) return ok({ ...info, note: "Not a text file, so its content isn't returned. Attach it to a task (attachments) to have an agent open it." })
+      const text = data.toString("utf8")
+      const offset = Math.min(a.offset ?? 0, text.length)
+      const max = a.max_chars ?? ARTIFACT_TEXT_DEFAULT
+      const end = Math.min(text.length, offset + max)
+      // The text goes in a block of its own, unescaped.
+      const meta = { ...info, totalChars: text.length, offset, more: end < text.length ? `${text.length - end} more chars: call again with offset ${end}` : undefined }
+      return { content: [{ type: "text", text: JSON.stringify(meta) }, { type: "text", text: text.slice(offset, end) }] }
+    }),
   )
 
   const when = (ts: number | null, tz: string) =>

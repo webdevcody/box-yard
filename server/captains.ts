@@ -22,6 +22,7 @@ import {
   SUMMARY_PROMPT,
   captainCompactionsDir,
   cleanSummary,
+  compactCommand,
   compactionsPrompt,
   findCompactionRecord,
   finishCompaction,
@@ -30,10 +31,13 @@ import {
   readCompactionFile,
   readCompactionInfo,
   readCompactionRecords,
+  recapBlock,
+  summaryBody,
   summaryLooksValid,
+  summaryPrompt,
   writeCompaction,
 } from "./compactions.js"
-import { compactionTaskSnapshots, mentionedTaskIds } from "./compactionTasks.js"
+import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -57,9 +61,14 @@ const startedKey = (projectId: string) => `captain_session_started:${projectId}`
 const usageKey = (projectId: string) => `captain_usage:${projectId}`
 /** A hash of the notes this Captain's session last saw, so an unchanged list isn't repeated every turn. */
 const notesSeenKey = (projectId: string) => `captain_notes_seen:${projectId}`
+/** The summary file this Captain's next turn starts with (see Orchestrator RECAP_KEY). */
+const recapKey = (projectId: string) => `captain_recap:${projectId}`
 
+/** The summary prompt for one project: its "Projects and repos" section is about that project only. */
 function captainSummaryPrompt(project: Project, ownerName?: string) {
-  return withOwner(SUMMARY_PROMPT, ownerName).replace("Your context", `Your Captain context for project "${project.name}"`).replace("# Orchestrator", "# Captain")
+  return withOwner(SUMMARY_PROMPT, ownerName)
+    .replace("Your context", `Your Captain context for project "${project.name}"`)
+    .replace("Each project with its repo (owner/name) and what it is for.", "This project: its repo (owner/name), what it is for, and how its work is split up.")
 }
 
 export interface CaptainSendOptions {
@@ -289,7 +298,7 @@ export class CaptainManager {
   }
 
   /** This project's compactions as records, newest first; `taskId` keeps those linked to that task. */
-  compactionRecords(projectId: string, filter: { taskId?: string; limit?: number } = {}): CompactionRecord[] {
+  compactionRecords(projectId: string, filter: { taskId?: string; limit?: number; before?: number } = {}): CompactionRecord[] {
     return readCompactionRecords(captainCompactionsDir(this.c.dataDir, projectId), filter)
   }
 
@@ -356,6 +365,11 @@ class Captain {
   private child: ChildProcess | null = null
   private compactWanted: "button" | "auto" | null = null
   private compacting = false
+  /**
+   * The system prompt of the turn before a compaction, kept for its summary and /compact passes: writing the
+   * summary file changes the file list in it, which would cost /compact the prompt cache.
+   */
+  private compactionSystemPrompt: string | null = null
   private lastError: string | null = null
   private readonly waiters = new Set<ReplyWaiter>()
   private readonly workdir: string
@@ -773,8 +787,10 @@ class Captain {
 
   private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string; text: string }> {
     let now = this.projectNow()
+    const recapFile = this.store.getKv(recapKey(this.project.id))
+    const compacted = recapFile ? this.recap(recapFile) : null
     const s = this.session()
-    let result = await this.run(`${now.text}\n\n${body}`, s.id, s.started)
+    let result = await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
       const fresh = randomUUID()
       this.store.setKv(sessionKey(this.project.id), fresh)
@@ -786,9 +802,12 @@ class Captain {
         .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
-      result = await this.run(`Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)
+      const last = lastCompaction(this.compactionsDir)
+      const saved = compacted ?? (last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)
     }
     if (result.ok) this.store.setKv(notesSeenKey(this.project.id), now.notesHash)
+    if (result.ok && recapFile) this.store.setKv(recapKey(this.project.id), null)
     if (!result.ok) {
       const msg = this.store.addCaptainMessage(this.project.id, "error", `The Captain hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "captain.message", message: msg })
@@ -811,12 +830,48 @@ class Captain {
     }
   }
 
-  /** This project's tasks active or mentioned since the previous compaction, so the tools can find it by task. */
+  /** This project's tasks updated or mentioned since the previous compaction, so the tools can find it by task. */
   private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
     const previous = lastCompaction(this.compactionsDir)?.at ?? 0
-    const messages = this.store.listCaptainMessages(this.project.id, 1000).filter((m) => m.createdAt > previous)
-    const mentioned = mentionedTaskIds(messages.flatMap((m) => [m.content, m.meta]))
-    return compactionTaskSnapshots(this.store, this.store.listTasks({ projectId: this.project.id }), previous, mentioned)
+    return compactionTaskSnapshots(this.store, this.store.listTasks({ projectId: this.project.id }), previous, this.mentionedSince(previous))
+  }
+
+  private mentionedSince(at: number): Set<string> {
+    const messages = this.store.listCaptainMessages(this.project.id, 1000).filter((m) => m.createdAt > at)
+    return mentionedTaskIds(messages.flatMap((m) => [m.content, m.meta]))
+  }
+
+  /**
+   * The summary prompt, with the previous summary to carry forward and the project's tasks in play as they are
+   * now: busy ones, and those updated or mentioned since the previous compaction.
+   */
+  private summaryPrompt(): string {
+    const last = lastCompaction(this.compactionsDir)
+    let previous: { at: number; markdown: string } | null = null
+    try {
+      if (last) previous = { at: last.at, markdown: readCompactionFile(last.file) }
+    } catch {}
+    const since = last?.at ?? 0
+    const ids = new Set([
+      ...this.store
+        .listTasks({ projectId: this.project.id })
+        .filter((t) => t.updatedAt > since)
+        .map((t) => t.id),
+      ...this.mentionedSince(since),
+    ])
+    const liveTasks = liveTaskLines(this.store, ids, { projectId: this.project.id, busy: true })
+    return summaryPrompt(captainSummaryPrompt(this.project, this.owner()), { previous, liveTasks })
+  }
+
+  /** A saved summary as a prompt block, with the current state of the project's tasks it names. */
+  private recap(file: string, lead?: string): string | null {
+    let markdown: string
+    try {
+      markdown = readCompactionFile(file)
+    } catch {
+      return null
+    }
+    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { projectId: this.project.id }), lead)
   }
 
   private async doCompact() {
@@ -829,26 +884,29 @@ class Captain {
       const s = this.session()
       const before = this.usage().tokens
       const model = this.settings.get().captainModel
-      const summary = await this.run(captainSummaryPrompt(this.project, this.owner()), s.id, true, "summary")
+      this.compactionSystemPrompt = this.systemPrompt()
+      const summary = await this.run(this.summaryPrompt(), s.id, true, "summary")
       const text = cleanSummary(summary.text)
       if (!summary.ok || !summaryLooksValid(text)) {
         throw new Error(`couldn't write the summary first (${summary.error || "empty or malformed reply"}), so the context was not compacted`)
       }
       const meta = { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before, heading: `Captain compaction summary: ${this.project.name}` }
       const { markdownFile: file } = writeCompaction(this.compactionsDir, meta, text, this.compactionTaskSnapshots())
-      const compact = await this.run("/compact", s.id, true, "compact")
+      const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
       if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
       let id = s.id
       if (compact.sessionId && compact.sessionId !== s.id) {
         id = compact.sessionId
         this.store.setKv(sessionKey(this.project.id), id)
       }
+      this.compactionSystemPrompt = null
       const report = await this.run("/context", id, true, "context")
       const after = report.ok ? parseContextReport(report.raw) : null
       this.setUsage(after?.tokens ?? null, after?.window)
       finishCompaction(file, after?.tokens ?? null)
-      // The summary may not carry every note: list them again on the next turn.
+      // The summary may not carry every note: list them again on the next turn, after the summary itself.
       this.store.setKv(notesSeenKey(this.project.id), null)
+      this.store.setKv(recapKey(this.project.id), file)
       const msg = this.store.addCaptainMessage(
         this.project.id,
         "notice",
@@ -864,6 +922,7 @@ class Captain {
       this.hub.broadcast({ type: "captain.message", message: m })
     } finally {
       this.compacting = false
+      this.compactionSystemPrompt = null
       this.publishState()
     }
   }
@@ -872,28 +931,33 @@ class Captain {
     const st = this.settings.get()
     const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
     const model = ["--model", st.captainModel]
-    if (kind === "compact") return ["-p", "--output-format", "stream-json", "--verbose", ...session, ...model]
-    if (kind === "context") return ["-p", ...session, ...model]
+    // Same tools, system prompt and effort on every kind of run, so the summary and /compact passes hit the
+    // turn's prompt cache (see Orchestrator.claudeArgs).
     return [
       "-p",
-      "--output-format",
-      "stream-json",
-      "--verbose",
+      ...(kind === "context" ? [] : ["--output-format", "stream-json", "--verbose"]),
       "--strict-mcp-config",
       "--mcp-config",
       this.mcpConfigPath,
-      ...(kind === "summary"
-        ? ["--tools", ""]
-        : ["--tools", "Read,WebSearch,WebFetch", "--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")]),
+      "--tools",
+      "Read,WebSearch,WebFetch",
+      // Only a turn may use them: with no allow rules, dontAsk denies every call.
+      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")] : []),
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
-      `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`,
+      (kind === "summary" || kind === "compact" ? this.compactionSystemPrompt : null) ?? this.systemPrompt(),
       ...session,
       ...model,
       "--effort",
       st.captainEffort,
     ]
+  }
+
+  /** Box Yard's part of the system prompt. Settings are read here, so changes apply from the next run. */
+  private systemPrompt(): string {
+    const st = this.settings.get()
+    return `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
   }
 
   private readRules(): string[] {
