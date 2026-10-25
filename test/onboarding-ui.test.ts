@@ -297,6 +297,106 @@ describe("first-run setup", () => {
   })
 })
 
+describe("first-run setup: This computer", () => {
+  const NODE = { key: "node", found: true, version: "v22.0.0" } as const
+  /** Setup once "This computer" is chosen: no Upstash key, this computer's tools and logins instead. */
+  function onComputer(o: { claudeLogin?: boolean; gh?: boolean; upstash?: boolean } = {}): SetupStatus {
+    const claude = o.claudeLogin ?? true
+    const base = setup({ ...(o.gh !== false && { githubToken: { state: "set", source: "gh" } }), ...(o.upstash && { upstashBoxApiKey: saved }) })
+    return {
+      ...base,
+      ready: claude,
+      missing: claude ? [] : ["Claude sign-in"],
+      boxes: { provider: "local", required: false },
+      claude: { ...base.claude, state: claude ? "set" : "unset" },
+      runner: { choice: "local", default: "local" },
+      upstash: { available: Boolean(o.upstash) },
+      local: {
+        tools: [NODE, { key: "claude", found: true, version: "2.1.0 (Claude Code)" }, { key: "gh", found: true, version: "gh version 2.60.0" }, { key: "chrome", found: false, version: null }],
+        claudeLogin: claude,
+        ghLogin: o.gh !== false,
+        checkedAt: now,
+      },
+    }
+  }
+  const FIRST = { ...setup(), runner: { choice: null, default: "box" }, missing: ["a choice of where agents run", "Claude sign-in"] } satisfies SetupStatus
+  const choiceButton = (runner: string) => document.querySelector<HTMLButtonElement>(`[data-runner-choice=${runner}]`)!
+
+  it("asks where agents run first, and picking This computer skips the Upstash key", async () => {
+    routes["PUT /api/setup/runner"] = () => onComputer({ claudeLogin: false })
+    render(ZEN_PATH, { status: FIRST })
+    expect(card()!.textContent).toContain("Where agents run")
+    expect(choiceButton("local").textContent).toContain("No account needed")
+    expect(choiceButton("box").textContent).toContain("Needs an Upstash Box API key")
+    // Nothing asks for the Upstash key before the choice.
+    expect(card()!.querySelector("[data-credential=upstashBoxApiKey]")).toBeNull()
+    act(() => choiceButton("local").click())
+    await settle()
+    expect(calls.find((c) => c.url === "/api/setup/runner")).toMatchObject({ method: "PUT", body: { runner: "local" } })
+    expect(choiceButton("local").getAttribute("aria-pressed")).toBe("true")
+    expect(card()!.querySelector("[data-testid=runner-choice-warning]")!.textContent).toContain("not sandboxed")
+    expect(card()!.querySelector("[data-credential=upstashBoxApiKey]")).toBeNull()
+    // This computer's prerequisites, each found or not; a missing optional one isn't a warning.
+    const rows = [...card()!.querySelectorAll<HTMLElement>("[data-local-tool]")]
+    expect(rows.map((r) => r.dataset.localTool)).toEqual(["node", "claude", "gh", "chrome"])
+    expect(rows[1]!.textContent).toContain("not signed in")
+    expect(rows[3]!.textContent).toContain("optional")
+    expect(rows[3]!.textContent).toContain("Get Chrome")
+    expect(rows[3]!.querySelector(".text-amber-300, .text-red-300")).toBeNull()
+    expect(card()!.textContent).toContain("no Upstash account to set up")
+    // gh's login stands in for the GitHub token.
+    expect(card()!.querySelector("[data-credential=githubToken]")!.textContent).toContain("gh auth")
+  })
+
+  it("with this computer's claude signed in, setup is complete and the chat shows", () => {
+    render(ZEN_PATH, { status: onComputer() })
+    expect(card()).toBeNull()
+    expect(document.querySelector("[data-testid=setup-reminder]")).toBeNull()
+  })
+
+  it("Settings › Credentials can switch later; the Upstash key is optional while agents run here", async () => {
+    render("/?settings=credentials", { status: onComputer() })
+    const dialog = document.querySelector<HTMLElement>("[role=dialog]")!
+    expect(dialog.querySelector<HTMLElement>("[data-runner-choice=local]")!.getAttribute("aria-pressed")).toBe("true")
+    expect(dialog.querySelector("[data-testid=local-prereqs]")).not.toBeNull()
+    expect(dialog.textContent).toContain("Optional while agents run on this computer")
+    expect(dialog.querySelector("[data-testid=upstash-ready]")).toBeNull()
+    routes["PUT /api/setup/runner"] = () => ({ ...setup(), runner: { choice: "box", default: "box" } })
+    act(() => dialog.querySelector<HTMLButtonElement>("[data-runner-choice=box]")!.click())
+    await settle()
+    expect(calls.find((c) => c.url === "/api/setup/runner")).toMatchObject({ method: "PUT", body: { runner: "box" } })
+    expect(dialog.querySelector("[data-testid=local-prereqs]")).toBeNull()
+  })
+
+  it("once a key is added, Settings says boxes are ready", () => {
+    render("/?settings=credentials", { status: onComputer({ upstash: true }) })
+    expect(document.querySelector("[data-testid=upstash-ready]")!.textContent).toContain("Upstash boxes are ready")
+  })
+
+  it("the Boxes page says agents run here instead of showing empty pool limits", () => {
+    render("/boxes", { status: onComputer() })
+    const main = document.querySelector("main")!
+    expect(main.querySelector("[data-testid=boxes-on-computer]")!.textContent).toContain("add an Upstash Box API key later in Settings")
+    expect(main.textContent).not.toContain("No boxes yet")
+    act(() => byText("Add Upstash in Settings", main)!.click())
+    expect(location.search).toBe("?settings=credentials")
+  })
+
+  it("the Boxes page is unchanged once Upstash is available", () => {
+    render("/boxes", { status: onComputer({ upstash: true }) })
+    expect(document.querySelector("[data-testid=boxes-on-computer]")).toBeNull()
+    expect(document.querySelector("main")!.textContent).toContain("No boxes yet")
+  })
+
+  it("a new project runs where setup chose; Upstash box waits for a key", () => {
+    render("/", { status: onComputer() })
+    act(() => document.querySelector<HTMLButtonElement>("button[aria-label='New project']")!.click())
+    const select = document.querySelector<HTMLSelectElement>("[data-testid=new-project-runner]")!
+    expect(select.value).toBe("local")
+    expect(select.querySelector<HTMLOptionElement>("option[value=box]")!.disabled).toBe(true)
+  })
+})
+
 describe("what to try first", () => {
   const READY = setup({ upstashBoxApiKey: saved, claudeOauthToken: saved })
   const WITH_GITHUB = setup({ upstashBoxApiKey: saved, claudeOauthToken: saved, githubToken: saved })
