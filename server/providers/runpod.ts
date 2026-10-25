@@ -86,6 +86,11 @@ export class RunPodProvider implements BoxProvider {
     return out
   }
 
+  /** The pod behind a box as this process last saw it (no API call), or null. */
+  cached(boxId: string): RunPodPod | null {
+    return this.states.get(boxId)?.pod ?? null
+  }
+
   /** The pod behind a box, or null. Asks RunPod when this process doesn't know it yet (after a restart). */
   private async state(boxId: string): Promise<RunPodPodState | null> {
     const known = this.states.get(boxId)

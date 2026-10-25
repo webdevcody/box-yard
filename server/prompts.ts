@@ -26,9 +26,12 @@ export function workerSystemPrompt(input: {
 }): string {
   const { project, task, branch, port } = input
   const local = Boolean(input.box?.local)
+  const gpu = Boolean(input.box?.gpu)
   const header = [
     local
       ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
+      : gpu
+      ? `You are a Box Yard agent: a headless Claude Code worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
@@ -44,6 +47,8 @@ export function workerSystemPrompt(input: {
     `  Only suggest environment or box gotchas, Cody's decisions and preferences, and project facts that aren't in the code. Run logs, merge reports and code tours go in the PR description instead.`,
     local
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
+      : gpu
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
       : `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
     `- publish_artifact: for any deliverable file (report, page, image, export) so Cody can open it.`,
     `- mark_done: when the task is finished and there is nothing left to do. A scheduled run that found nothing to do and changed nothing passes outcome "noop".`,
@@ -88,10 +93,20 @@ export interface BoxPromptInfo {
   alone?: boolean
   /** The local runner: the turn runs on the computer running Box Yard, unsandboxed (shared/runner.ts). */
   local?: boolean
+  /** A RunPod GPU pod of the project's own (shared/runpod.ts): its GPU, e.g. "RTX A5000". */
+  gpu?: { name: string }
 }
 
 /** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */
 function boxLines(b: BoxPromptInfo): string[] {
+  if (b.gpu) {
+    const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    return [
+      `Your pod has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
+      `The pod is stopped when your project has been idle a while and started again (a new pod) for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the pod's disk goes. /workspace/data is the project's network volume: put large downloads, datasets and model weights there to keep them across pods.`,
+      `Run heavy jobs one at a time and stop servers you no longer need.`,
+    ]
+  }
   if (b.local) {
     const mem = b.memoryBytes ? `This computer has ${formatBytes(b.memoryBytes)} of memory` : `This computer's memory is shared`
     const others = b.slots <= 1 ? `Cody's own apps` : `up to ${b.slots - 1} other local agents and Cody's own apps`
