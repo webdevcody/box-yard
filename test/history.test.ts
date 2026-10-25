@@ -16,7 +16,7 @@ import { parseTerms, snippetOf } from "../server/history.js"
 import type { CompactionTaskSnapshot, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir } from "./helpers.js"
 
-// #135: recalling what came before a compaction. The summary carries decisions forward and checks task
+// Recalling what came before a compaction. The summary carries decisions forward and checks task
 // state, the saved summary comes back after /compact, and search_history / read_artifact reach older
 // history and files, a Captain only its own project's.
 

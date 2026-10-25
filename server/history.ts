@@ -4,7 +4,7 @@ import { readCompactionRecords } from "./compactions.js"
 import type { Store } from "./store.js"
 
 /**
- * Keyword search over what the Coordinator and the Captains said and saved before (#135): compaction
+ * Keyword search over what the Coordinator and the Captains said and saved before: compaction
  * summaries, chat transcripts and tasks. It is a scan, not an index, so every SQL source walks its table
  * newest first and stops at the limit; task transcripts are opt-in and only their newest rows are read.
  */
