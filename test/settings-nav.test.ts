@@ -12,6 +12,7 @@ const base: Settings = {
   agentAutoCompact: { enabled: false, unit: "tokens", value: 800_000 },
   workerSize: "small",
   maxBoxes: 5,
+  boxCreateConcurrency: 10,
   slotsPerBox: 1,
   maxAgents: 0,
   costRates: {
@@ -55,9 +56,12 @@ describe("settings nav", () => {
   it("sends box limits only when they were edited", () => {
     const untouched = savePatch(base, base)
     expect(untouched).not.toHaveProperty("maxBoxes")
+    expect(untouched).not.toHaveProperty("boxCreateConcurrency")
     expect(untouched).not.toHaveProperty("workspaceRetentionDays")
     expect(untouched).toHaveProperty("orchestratorModel", "claude-opus-5-5")
     expect(savePatch({ ...base, slotsPerBox: 3 }, base)).toMatchObject({ slotsPerBox: 3 })
+    expect(savePatch({ ...base, boxCreateConcurrency: 20 }, base)).toMatchObject({ boxCreateConcurrency: 20 })
+    expect([...changedSections(changedKeys({ ...base, boxCreateConcurrency: 20 }, base))]).toEqual(["limits"])
   })
 
   it("sends a box limit typed over the size default even when the number matches it", () => {

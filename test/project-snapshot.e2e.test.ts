@@ -30,6 +30,9 @@ class SnapBoxes extends LocalProvider {
   deletedSnapshots: string[] = []
   /** Holds every snapshot until resolved. */
   snapshotGate: Promise<void> | null = null
+  /** Holds snapshots of a scratch box (one made from a snapshot) until resolved; `scratchHeld` says one is waiting. */
+  scratchGate: Promise<void> | null = null
+  scratchHeld = false
   /** Restores throw with this status code. */
   failRestore: number | null = null
 
@@ -45,6 +48,11 @@ class SnapBoxes extends LocalProvider {
   }
   override async snapshot(boxId: string, name: string): Promise<BoxSnapshotInfo> {
     if (this.snapshotGate) await this.snapshotGate
+    if (this.scratchGate && this.created.some((c) => c.id === boxId && c.snapshotId)) {
+      this.scratchHeld = true
+      await this.scratchGate
+      this.scratchHeld = false
+    }
     const info = await super.snapshot(boxId, name)
     this.snapshots.push(info.id)
     return info
@@ -427,6 +435,28 @@ describe("new boxes from a snapshot", () => {
     expect(gone.detail).toBe(`Started cold: restoring snapshot ${id} failed (snapshot ${id} not found); the provider no longer has it, so it was cleared from the project.`)
     expect(snapshotOf(r, p.id)).toBeNull()
     expect(warned()).toHaveLength(2)
+  })
+})
+
+describe("box creation during a snapshot", () => {
+  it("doesn't count the snapshot's scratch box against Boxes created at once", async () => {
+    const r = await start({ boxCreateConcurrency: 1 })
+    const alpha = await project(r, "alpha")
+    const t = await settled(r, (await task(r, alpha.id, "scaffold")).id)
+    // Held while the scratch box exists, which can take minutes on Upstash.
+    let release!: () => void
+    r.provider.scratchGate = new Promise((res) => (release = res))
+    expect((await takeSnapshot(r, alpha.id, t.boxId!)).status).toBe(202)
+    await waitFor(() => r.provider.scratchHeld, "the snapshot to hold its scratch box")
+
+    // Another project's task still gets its box, with only one create allowed at a time.
+    const beta = await project(r, "beta")
+    const b = await settled(r, (await task(r, beta.id, "docs")).id)
+    expect(b.boxId).not.toBe(t.boxId)
+    expect(r.yard.tasks.poolLimits().boxesCreating).toMatchObject({ now: 0, atOnce: 1 })
+    expect(r.yard.tasks.snapshotJob(alpha.id)?.status).toBe("running")
+    release()
+    expect((await finished(r, alpha.id)).status).toBe("done")
   })
 })
 

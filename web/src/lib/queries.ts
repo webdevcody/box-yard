@@ -310,6 +310,29 @@ export function useSaveCredentials() {
     },
   })
 }
+/** Where agents run (the setup choice): "local" needs no Upstash key. New projects follow it. */
+export function useSaveRunnerChoice() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runner: Runner) => api<SetupStatus>("/api/setup/runner", { method: "PUT", body: { runner } }),
+    onSuccess: (status) => {
+      qc.setQueryData(keys.setup, status)
+      void qc.invalidateQueries({ queryKey: keys.health })
+      void qc.invalidateQueries({ queryKey: keys.setupRepos })
+    },
+  })
+}
+/** Look at this computer's tools and logins again (Node, claude, gh, Chrome). */
+export function useCheckLocal() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<SetupStatus>("/api/setup/local/check", { method: "POST" }),
+    onSuccess: (status) => {
+      qc.setQueryData(keys.setup, status)
+      void qc.invalidateQueries({ queryKey: keys.health })
+    },
+  })
+}
 /** A live check of a credential: `value` when given (typed, not saved), else the one in effect. */
 export function useTestCredential() {
   return useMutation({
@@ -401,7 +424,7 @@ export function useToggleHook(scope: string) {
 export function useCreateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string> }) =>
+    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner }) =>
       api<Project>("/api/projects", { body: input }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -422,7 +445,8 @@ export function useCreateProject() {
           partialClone: null,
           pushAtTurnEnd: null,
           depCache: null,
-          runner: "box",
+          // Unless the form picked one, the server uses the setup choice.
+          runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
           heavyTasks: "off",
           snapshot: null,
           createdAt: now,

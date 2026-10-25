@@ -242,7 +242,7 @@ export function createBoxYard(
     /** Stand-ins for ElevenLabs' HTTP API and OpenAI's Realtime socket (tests). */
     tts?: Pick<TtsOptions, "fetch" | "WebSocket" | "timeoutMs" | "voicesTtlMs">
     /** Stand-ins for the services the setup Test buttons call (tests). GitHub's comes from `github.fetch`. */
-    setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs">
+    setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs" | "localCheck">
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -254,7 +254,7 @@ export function createBoxYard(
   const settings = new SettingsStore(store, c)
   // Every box provider gets the local runner beside it, for projects that run on this computer (shared/runner.ts).
   const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c))
-  const setup = new Setup({ c, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
+  const setup = new Setup({ c, store, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
     settings: ttsSettings,
@@ -339,7 +339,10 @@ export function createBoxYard(
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
-  app.all("/mcp", mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir }, mcpToken))
+  app.all(
+    "/mcp",
+    mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner() }, mcpToken),
+  )
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
   app.post("/qstash/schedules/:id", express.text({ type: () => true, limit: "1mb" }), (req, res) => {
@@ -383,7 +386,8 @@ export function createBoxYard(
 
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
-    const problems = configProblems({ ...c, ...settings.credentials.values() })
+    // A "This computer" setup may be signed in with the computer's own claude login instead of a token.
+    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true })
     if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
@@ -410,7 +414,8 @@ export function createBoxYard(
   api.post("/projects", (req, res) => {
     const body = parse(schemas.project, req.body)
     if (store.findProject(body.name)) throw new BadRequestError(`A project named "${body.name}" already exists.`)
-    const project = store.createProject(body)
+    // Unless it says otherwise, a new project runs where setup chose (This computer or Upstash boxes).
+    const project = store.createProject({ ...body, runner: body.runner ?? setup.defaultRunner() })
     hub.broadcast({ type: "project", project })
     res.status(201).json(project)
   })
@@ -635,8 +640,26 @@ export function createBoxYard(
   })
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.
-  api.get("/setup", (_req, res) => {
+  api.get("/setup", async (_req, res) => {
+    if (setup.runnerChoice() === "local") await setup.refreshLocal()
     res.json(setup.status())
+  })
+  /** The setup choice of where agents run: "local" (This computer, no Upstash key needed) or "box". New projects follow it. */
+  api.put("/setup/runner", async (req, res) => {
+    setup.setRunner(parse(z.object({ runner: z.enum(RUNNERS) }).strict(), req.body).runner)
+    if (setup.runnerChoice() === "local") await setup.refreshLocal()
+    const status = setup.status()
+    hub.broadcast({ type: "setup", status })
+    // A gh login may now stand in for the GitHub token, and /api/health's problems change.
+    applyPoolChange()
+    res.json(status)
+  })
+  /** Look at this computer's tools and logins again now (the "Check again" button). */
+  api.post("/setup/local/check", async (_req, res) => {
+    await setup.refreshLocal(true)
+    const status = setup.status()
+    hub.broadcast({ type: "setup", status })
+    res.json(status)
   })
   api.put("/setup/credentials", (req, res) => {
     settings.credentials.update(req.body)
@@ -997,6 +1020,8 @@ export function createBoxYard(
     notes,
     retro,
     async start() {
+      // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
+      if (setup.runnerChoice() === "local") await setup.refreshLocal()
       await tasks.start()
       scheduler.start()
       orchestrator.resumeScheduled()

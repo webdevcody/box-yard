@@ -36,3 +36,10 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message
   return String(err)
 }
+
+/** True when a provider refused for sending too much too fast: HTTP 429, or a "rate limit" / "too many requests" message. */
+export function isRateLimited(err: unknown): boolean {
+  const e = err as { statusCode?: number; status?: number; message?: string }
+  if ((e?.statusCode ?? e?.status) === 429) return true
+  return /rate.?limit|too many requests/i.test(String(e?.message ?? ""))
+}

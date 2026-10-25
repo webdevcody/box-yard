@@ -2,7 +2,7 @@ import path from "node:path"
 import fs from "node:fs"
 import os from "node:os"
 import { fileURLToPath } from "node:url"
-import { EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
+import { BOX_CREATE_CONCURRENCY, EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
 import { DEFAULT_NOTE_BUDGET } from "../shared/notes.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
@@ -97,6 +97,8 @@ export const config = {
 
   /** Max worker boxes alive at once (the free plan allows about 5). */
   maxBoxes: int("BOX_POOL_MAX", 5),
+  /** Worker boxes created at the same time when many tasks wait for one. */
+  boxCreateConcurrency: int("BOX_CREATE_CONCURRENCY", BOX_CREATE_CONCURRENCY.default),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
   maxAgents: int("BOX_MAX_AGENTS", 0),
   /** Local runner: most agents of "This computer" projects running at once on this machine (their own queue, apart from box slots). */
@@ -201,10 +203,11 @@ export function redisEnabled(c: Config = config) {
 }
 
 /** Problems that stop Box Yard from doing real work, shown in the UI. Pass the credentials in effect (env or saved). */
-export function configProblems(c: Config = config): string[] {
+/** `claudeLogin`: this computer's own `claude` is signed in, and agents run here, so no token is needed. */
+export function configProblems(c: Config = config, opts: { claudeLogin?: boolean } = {}): string[] {
   const problems: string[] = []
   if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
-  if (!c.claudeOauthToken && !c.anthropicApiKey) {
+  if (!c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
     problems.push("Claude isn't signed in: add a subscription token (`claude setup-token`) or an Anthropic API key in Settings › Credentials, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.")
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {

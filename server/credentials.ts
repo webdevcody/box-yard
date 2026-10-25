@@ -27,6 +27,8 @@ export const credentialsPatch = z
 export class CredentialStore {
   private cache: Partial<Record<CredentialKey, string>> | null = null
   private readonly listeners = new Set<() => void>()
+  /** The GitHub token of this computer's `gh auth` login, used only when nothing else is set (Setup decides when). */
+  private ghFallback: () => string = () => ""
 
   constructor(
     private readonly store: Store,
@@ -50,13 +52,22 @@ export class CredentialStore {
     return this.env[k]?.trim() ?? ""
   }
 
+  private fallback(k: CredentialKey): string {
+    return k === "githubToken" ? this.ghFallback().trim() : ""
+  }
+
+  /** Where a missing GitHub token comes from instead: `gh auth token` while agents run on this computer. */
+  setGhFallback(fn: () => string) {
+    this.ghFallback = fn
+  }
+
   /** The value to use (server-side only), or "" when none is set. */
   get(k: CredentialKey): string {
-    return this.envValue(k) || this.saved()[k] || ""
+    return this.envValue(k) || this.saved()[k] || this.fallback(k)
   }
 
   source(k: CredentialKey): CredentialSource | null {
-    return this.envValue(k) ? "env" : this.saved()[k] ? "saved" : null
+    return this.envValue(k) ? "env" : this.saved()[k] ? "saved" : this.fallback(k) ? "gh" : null
   }
 
   status(): Record<CredentialKey, CredentialStatus> {
@@ -85,7 +96,7 @@ export class CredentialStore {
 
   /** Every secret in effect, for redact(). */
   secrets(): string[] {
-    return CREDENTIAL_KEYS.flatMap((k) => [this.envValue(k), this.saved()[k] ?? ""]).filter(Boolean)
+    return CREDENTIAL_KEYS.flatMap((k) => [this.envValue(k), this.saved()[k] ?? "", this.fallback(k)]).filter(Boolean)
   }
 
   /** Save or forget values. A credential its env var sets can't be changed here: the env var would still win. */

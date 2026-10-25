@@ -75,6 +75,8 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
 
+**No Upstash account?** The first-run setup card (and Settings › Credentials) asks where agents run. Pick **This computer** and there's no Upstash key to set up: projects run on the local runner (below), with this computer's own `claude` login (or a token) and its `gh auth` login standing in for `GITHUB_TOKEN` (a token saved or in the env wins). The card lists what local agents use and whether it's there: Node, `claude` and its login, `gh` and its login, and Chrome (optional, for browser checks). New projects default to the choice. Add an Upstash key in Settings › Credentials any time to make **Upstash box** available per project; projects already on this computer stay there until you change them. Until then the Boxes page just says agents run here. Installs that already have an Upstash key don't see the question and keep using boxes.
+
 ## Deploy
 
 ```bash
@@ -102,6 +104,7 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 | Follow-up on work an agent did ("close those issues", "fix that PR") | The Coordinator routes to the project's Captain, which uses `send_to_task` on that agent. Its Claude session resumes with full context, restored from the archive if it was parked. |
 | Follow-up while that agent is mid-turn | Same call. The message is queued and goes out as soon as the turn ends, in the same session. |
 | New, independent work in a known project | The Captain uses `create_task`: a fresh session on the project's box. `related_tasks` passes along earlier outcomes. |
+| Many independent pieces at once (a plan, one task per page or issue) | The Captain uses `create_tasks`: up to 100 tasks in one call, with the brief they share written once in `common_prompt`. Every item is checked first; if any is bad, none is created and the error lists each problem by item number. |
 | A repo with no project yet | The Coordinator uses `create_project`, then routes the work to the new Captain. One project per repo. |
 | Several repos or independent pieces | The Coordinator fans out to multiple Captains; each Captain starts one or more tasks in its project. |
 
@@ -135,7 +138,7 @@ A task is not stuck on its first route. `send_to_task` accepts a new model and e
 | `done` | The agent or you marked it finished. |
 | `failed` | Something broke. Retry with a click. |
 
-**Box pool.** Box Yard runs a pool of worker boxes. `WORKER_SIZE` chooses the Upstash size for newly created boxes (`small`, `medium`, or `large`). `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` sets how many agents run at once in one box. When you have not overridden it, slots default by size: small 1, medium 2, large 4 (and resident task folders per box: small 3, medium 8, large 18). **Upgrading:** before size-based defaults every box ran 2 agents and kept 12 folders, so an install on the default `small` size now has less per-box capacity. Settings → Boxes & limits shows the effective values per size, and the Boxes page shows a one-time notice; set `BOX_SLOTS`/`BOX_MAX_RESIDENT` or pick a larger size to restore the old capacity. `BOX_MAX_AGENTS` optionally caps agents across all boxes. These are defaults: edit them live in Settings (or from the Boxes page). Lowering a limit never stops running work; it just holds back new work until usage drops. Placement keeps a project together:
+**Box pool.** Box Yard runs a pool of worker boxes. `WORKER_SIZE` chooses the Upstash size for newly created boxes (`small`, `medium`, or `large`). `BOX_POOL_MAX` (default 5) caps how many boxes exist, and `BOX_SLOTS` sets how many agents run at once in one box. When you have not overridden it, slots default by size: small 1, medium 2, large 4 (and resident task folders per box: small 3, medium 8, large 18). **Upgrading:** before size-based defaults every box ran 2 agents and kept 12 folders, so an install on the default `small` size now has less per-box capacity. Settings → Boxes & limits shows the effective values per size, and the Boxes page shows a one-time notice; set `BOX_SLOTS`/`BOX_MAX_RESIDENT` or pick a larger size to restore the old capacity. `BOX_MAX_AGENTS` optionally caps agents across all boxes. When many tasks wait for a box, Box Yard creates the boxes they need in parallel, up to `BOX_CREATE_CONCURRENCY` at once (default 10), and never more than the queue needs. A failed create backs off for a couple of seconds, doubling with each failure in a row, and a rate limit also lowers how many run at once until boxes come up again. These are defaults: edit them live in Settings (or from the Boxes page). Lowering a limit never stops running work; it just holds back new work until usage drops. Placement keeps a project together:
 
 1. A task goes to a box that already hosts its project (each box keeps a bare mirror of the project's repo, so later clones come from local disk).
 2. Otherwise an empty box.
@@ -152,7 +155,7 @@ A project whose box has all its slots busy gets a second box while there's room.
 - **Sleep.** While a turn runs, `caffeinate` keeps a Mac out of idle sleep (and out of system sleep on AC power), but a closed lid still sleeps. A turn that sleep cut off carries on once the Mac wakes instead of failing.
 - **Archives and folders.** Local tasks keep no archives: the push at turn end covers them. Their folders stay until the task is deleted, even after Close.
 - **Switching back.** Switching a project between boxes and this computer moves each task at its next turn, but only when its work is safe (pushed and archived first). Otherwise the task stays where it is and its log says why.
-- **Claude login.** Without a token in Settings › Credentials, local agents use the computer's own `claude` login. `CLAUDE_BIN` picks the binary.
+- **Claude login.** Without a token in Settings › Credentials, local agents use the computer's own `claude` login. `CLAUDE_BIN` picks the binary. When setup chose This computer, that login also counts as the Claude sign-in setup asks for, and `gh auth token` stands in for a missing GitHub token (read on the server, never sent to the browser).
 
 **Nothing gets lost.**
 - Every transcript line, question, PR, preview, note and artifact is stored in SQLite.
