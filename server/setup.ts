@@ -13,7 +13,7 @@ import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
-import { RUNNERS, type Runner } from "../shared/runner.js"
+import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
@@ -58,7 +58,7 @@ export class Setup {
   /** Where the owner chose to run agents, or null before they chose (and on installs from before the choice). */
   runnerChoice(): Runner | null {
     const v = this.d.store.getKv(RUNNER_KV)
-    return (RUNNERS as readonly string[]).includes(v ?? "") ? (v as Runner) : null
+    return (SETUP_RUNNERS as readonly string[]).includes(v ?? "") ? (v as Runner) : null
   }
 
   /** What new projects run on: the setup choice, else Upstash boxes, as before the choice existed. */
@@ -68,7 +68,7 @@ export class Setup {
 
   /** Save the choice. Projects that exist keep running where they do; only new ones follow it. */
   setRunner(runner: unknown) {
-    if (!(RUNNERS as readonly unknown[]).includes(runner)) throw new BadRequestError(`runner must be ${RUNNERS.join(" or ")}`)
+    if (!(SETUP_RUNNERS as readonly unknown[]).includes(runner)) throw new BadRequestError(`runner must be ${SETUP_RUNNERS.join(" or ")}`)
     this.d.store.setKv(RUNNER_KV, runner as Runner)
   }
 
@@ -106,6 +106,9 @@ export class Setup {
     const { c, credentials } = this.d
     if (c.mock) return null
     const creds = credentials.status()
+    if (runner === "gpu") {
+      return creds.runpodApiKey.state === "set" ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
+    }
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
     }
@@ -205,6 +208,7 @@ export class Setup {
     if (key === "upstashBoxApiKey") return this.checkBoxes(value)
     if (key === "anthropicApiKey") return this.checkAnthropic(value)
     if (key === "claudeOauthToken") return this.checkClaude({ CLAUDE_CODE_OAUTH_TOKEN: value })
+    if (key === "runpodApiKey") return this.checkRunPod(value)
     return this.checkGitHub(value)
   }
 
@@ -232,6 +236,14 @@ export class Setup {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /** List the account's network volumes: free, and it needs the same read access starting pods does. */
+  private async checkRunPod(apiKey: string): Promise<string> {
+    const res = await this.request(this.d.fetch, "https://api.runpod.io/v2/network-volumes", { headers: { Authorization: `Bearer ${apiKey}` } }, "RunPod")
+    const body = await res.text().catch(() => "")
+    if (!res.ok) throw new Error(`RunPod ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
+    return "Works: RunPod accepted the key."
   }
 
   /** GET /v1/models: free, and it fails the same way a real call would with a bad key. */

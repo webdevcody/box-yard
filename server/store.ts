@@ -822,7 +822,8 @@ export class Store {
   /** undefined leaves it as it is; "box" is stored as NULL, like a project from before the setting. */
   private setRunner(id: string, v: Runner | undefined) {
     if (v === undefined) return
-    this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(normalizeRunner(v) === "local" ? "local" : null, id)
+    const runner = normalizeRunner(v)
+    this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(runner === "box" ? null : runner, id)
   }
 
   /**

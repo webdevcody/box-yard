@@ -10,6 +10,7 @@ import type { SnapshotJob } from "../../../shared/snapshots"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
+import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
 import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -79,6 +80,8 @@ export const keys = {
   agentSettings: ["agent-settings"] as const,
   tts: ["tts-settings"] as const,
   setup: ["setup"] as const,
+  runpod: ["runpod"] as const,
+  runpodGpus: ["runpod-gpus"] as const,
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
@@ -374,6 +377,27 @@ export const useChatBusy = () =>
 // ------------------------------------------------------------------ mutations
 
 const fail = (title: string) => (err: Error) => toast.error(title, err.message)
+
+// ------------------------------------------------------------------ RunPod GPU (Settings › RunPod GPU)
+
+/** Settings, pods, volumes, Docker and the image build. Polled while open: pods change at RunPod, not here. */
+export const useRunPod = (o: { enabled?: boolean; poll?: boolean } = {}) =>
+  useQuery({ queryKey: keys.runpod, queryFn: () => api<RunPodStatus>("/api/runpod"), enabled: o.enabled, refetchInterval: o.poll ? 15_000 : false, staleTime: 5_000 })
+/** GPU types RunPod offers on Secure Cloud, cheapest first. */
+export const useRunPodGpus = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.runpodGpus, queryFn: () => api<RunPodGpuOption[]>("/api/runpod/gpus"), enabled: o.enabled, staleTime: 5 * 60_000 })
+/** A RunPod action: save settings, build the image, stop a pod, keep it warm, delete a volume. */
+export function useRunPodAction<T>(title: string, call: (input: T) => Promise<RunPodStatus | RunPodImageBuild>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => {
+      if ("settings" in r) qc.setQueryData(keys.runpod, r)
+      else void qc.invalidateQueries({ queryKey: keys.runpod })
+    },
+    onError: fail(title),
+  })
+}
 
 // ------------------------------------------------------------------ hooks (automations on task events)
 

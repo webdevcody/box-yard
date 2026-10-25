@@ -125,7 +125,7 @@ const runsOnSchema = z
   .enum(RUNNERS)
   .optional()
   .describe(
-    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer". If the runner can\'t run (e.g. claude missing or signed out on this computer), the call fails with the reason; it never falls back to the other runner.',
+    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod (billed per hour; needs a RunPod key). Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer". If the runner can\'t run (e.g. claude missing or signed out on this computer), the call fails with the reason; it never falls back to the other runner.',
   )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
@@ -902,7 +902,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     attachments: z.array(z.string()).optional().describe("Files for this task only, added to the shared attachments (up_… or art_… ids or paths, as in create_task)"),
     related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
     env: envSchema,
-    runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer) or "box" (an Upstash box), over the shared runs_on and the project\'s "Runs on"'),
+    runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box) or "gpu" (the project\'s RunPod GPU pod), over the shared runs_on and the project\'s "Runs on"'),
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -927,7 +927,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema.describe("Earlier tasks whose outcome every new agent should know about (their summary, branch and PR are added to each prompt)"),
         env: envSchema.describe("Env vars for every task, as NAME: value; an item's own env wins for the same name"),
         runs_on: runsOnSchema.describe(
-          'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
+          'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
         ),
         model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
         effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),

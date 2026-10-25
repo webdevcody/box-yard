@@ -374,6 +374,7 @@ const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) 
 function ProjectBoxSettings(p: {
   info: SettingsInfo | undefined
   local: boolean
+  gpu: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
   agentsPerBox: string
@@ -403,6 +404,7 @@ function ProjectBoxSettings(p: {
       <p className="text-xs text-zinc-500">
         Leave one blank to use the global setting. Where projects share a box, the strictest limit wins.
         {p.local && " This project runs on this computer: Agents per box also limits its agents here, and the rest apply when it runs on boxes."}
+        {p.gpu && " This project runs on a RunPod GPU pod: Agents per box sets its agents per pod (blank: Settings › RunPod GPU), and the rest apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -524,6 +526,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const setup = useSetup()
   // Without an Upstash key there's nowhere to make a box: "Upstash box" waits until one is added (unless it's already set).
   const noUpstash = setup.data?.upstash.available === false
+  // RunPod GPU waits for a RunPod key (Settings › RunPod GPU).
+  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
+  const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
 
   return (
@@ -583,13 +588,19 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). RunPod GPU: the project gets a GPU pod of its own at RunPod, started when a task needs it and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
-              <option key={r} value={r} disabled={r === "box" && noUpstash && project.runner === "local"}>
+              <option key={r} value={r} disabled={(r === "box" && noUpstash && project.runner === "local") || (r === "gpu" && noRunPod && project.runner !== "gpu")}>
                 {RUNNER_LABEL[r]}
-                {r === "local" ? " (not sandboxed)" : r === "box" && noUpstash && project.runner === "local" ? " (add an Upstash key in Settings first)" : ""}
+                {r === "local"
+                  ? " (not sandboxed)"
+                  : r === "box" && noUpstash && project.runner === "local"
+                    ? " (add an Upstash key in Settings first)"
+                    : r === "gpu" && noRunPod && project.runner !== "gpu"
+                      ? " (add a RunPod key in Settings first)"
+                      : ""}
               </option>
             ))}
           </Select>
@@ -597,6 +608,16 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         {noUpstash && project.runner === "local" && (
           <p className="text-xs text-zinc-500" data-testid="runner-upstash-later">
             To run this project in isolated Upstash boxes, add an Upstash Box API key in Settings › Credentials.
+          </p>
+        )}
+        {(runner === "gpu" || noRunPod) && (
+          <p className="text-xs text-zinc-500" data-testid="runner-gpu-note">
+            {runner === "gpu"
+              ? "Billed by RunPod per hour while the pod runs, within the caps in Settings › RunPod GPU. Pods stop when idle; the project's network volume keeps caches between them."
+              : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
+            <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
+              Settings › RunPod GPU
+            </button>
           </p>
         )}
         {runner === "local" && (
@@ -609,6 +630,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <ProjectBoxSettings
         info={settings.data}
         local={runner === "local"}
+        gpu={runner === "gpu"}
         boxSize={boxSize}
         setBoxSize={setBoxSize}
         agentsPerBox={agentsPerBox}
