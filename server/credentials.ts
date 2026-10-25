@@ -127,6 +127,7 @@ const SECRET_PATTERNS = [
   /sk-ant-[A-Za-z0-9_-]{8,}/g,
   /\bgh[opsu]_[A-Za-z0-9]{16,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{16,}/g,
+  /\brpa_[A-Za-z0-9]{16,}/g,
   /\b(Bearer|token)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
 ]
 

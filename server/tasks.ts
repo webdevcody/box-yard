@@ -48,7 +48,7 @@ import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
-import { LOCAL_BOX_ID, isLocalRunnerBox, type Runner } from "../shared/runner.js"
+import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
@@ -579,7 +579,7 @@ export class TaskManager {
   async requireRunner(runner: Runner | null | undefined): Promise<void> {
     if (!runner || !this.runnerProblem) return
     const problem = await this.runnerProblem(runner)
-    if (problem) throw new BadRequestError(`Can't run it on ${runner === "local" ? "this computer" : "an Upstash box"}: ${problem}.`)
+    if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
   /**
@@ -591,7 +591,7 @@ export class TaskManager {
     const row = this.requireRow(taskId)
     if (row.runs_on === runner) return
     this.store.updateTask(row.id, { runsOn: runner })
-    this.addEvent(row.id, `Runs on ${runner === "local" ? "this computer" : "an Upstash box"} from its next turn on (this task only, over its project's "Runs on").`)
+    this.addEvent(row.id, `Runs on ${RUNNER_PHRASE[runner]} from its next turn on (this task only, over its project's "Runs on").`)
     this.emitTask(row.id)
   }
 

@@ -1,15 +1,22 @@
-// Where a project's agents run: in Upstash boxes (the default), or on the computer that runs Box Yard (the local runner).
+// Where a project's agents run: in Upstash boxes (the default), on the computer that runs Box Yard (the local runner),
+// or on a RunPod GPU pod of the project's own (shared/runpod.ts, docs/runpod.md).
 
-export const RUNNERS = ["box", "local"] as const
+export const RUNNERS = ["box", "local", "gpu"] as const
 export type Runner = (typeof RUNNERS)[number]
 
 /** Anything unknown (NULL from older rows, a typo) is "box", so a project only runs locally when someone chose it. */
-export const normalizeRunner = (v: unknown): Runner => (v === "local" ? "local" : "box")
+export const normalizeRunner = (v: unknown): Runner => (v === "local" || v === "gpu" ? v : "box")
 
 /** A task's own runner (Task.runsOn), which wins over its project's in both directions; null follows the project. */
-export const parseRunsOn = (v: unknown): Runner | null => (v === "local" || v === "box" ? v : null)
+export const parseRunsOn = (v: unknown): Runner | null => (v === "local" || v === "box" || v === "gpu" ? v : null)
 
-export const RUNNER_LABEL: Record<Runner, string> = { box: "Upstash box", local: "This computer" }
+export const RUNNER_LABEL: Record<Runner, string> = { box: "Upstash box", local: "This computer", gpu: "RunPod GPU" }
+
+/** "an Upstash box", "this computer", "a RunPod GPU pod": for sentences. */
+export const RUNNER_PHRASE: Record<Runner, string> = { box: "an Upstash box", local: "this computer", gpu: "a RunPod GPU pod" }
+
+/** The runners the onboarding choice (the default for new projects) offers. RunPod GPU is picked per project. */
+export const SETUP_RUNNERS = ["box", "local"] as const
 
 /**
  * The one virtual box every local-runner task lives on. It is never a `boxes` row, so box reconcile, the pool

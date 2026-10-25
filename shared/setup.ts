@@ -3,7 +3,7 @@
 import type { SettingSource } from "./types.js"
 import type { Runner } from "./runner.js"
 
-export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "githubToken"] as const
+export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "githubToken", "runpodApiKey"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
 /**
@@ -153,6 +153,13 @@ export const CREDENTIAL_INFO: Record<
       href: "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token",
       label: "Create a fine-grained token",
     },
+  },
+  runpodApiKey: {
+    label: "RunPod API key",
+    env: "RUNPOD_API_KEY",
+    placeholder: "rpa_…",
+    help: "Optional: lets projects run on RunPod GPU pods (Settings › RunPod GPU).",
+    link: { href: "https://www.runpod.io/console/user/settings", label: "Create one in RunPod's settings" },
   },
 }
 

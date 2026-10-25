@@ -4,6 +4,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import type { WorkerSize } from "../../shared/types.js"
 import { LOCAL_BOX_ID } from "../../shared/runner.js"
+import { isGpuBox } from "../../shared/runpod.js"
 import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
 
 /**
@@ -256,6 +257,8 @@ export class LocalRunnerRouter implements BoxProvider {
   constructor(
     readonly base: BoxProvider,
     readonly local: BoxProvider,
+    /** RunPod GPU pods (`runpod-<projectId>`, shared/runpod.ts), when set up. */
+    readonly gpu: BoxProvider | null = null,
   ) {
     if (base.resize) this.resize = (boxId, size) => this.of(boxId).resize!(boxId, size)
     // Snapshots are the box provider's; the local runner's computer is never snapshotted (LocalRunnerProvider).
@@ -267,7 +270,12 @@ export class LocalRunnerRouter implements BoxProvider {
   }
 
   of(boxId: string): BoxProvider {
-    return boxId === LOCAL_BOX_ID ? this.local : (this.base.of?.(boxId) ?? this.base)
+    if (boxId === LOCAL_BOX_ID) return this.local
+    if (isGpuBox(boxId)) {
+      if (!this.gpu) throw new Error("RunPod GPU isn't set up: add RUNPOD_API_KEY in Settings › Credentials")
+      return this.gpu
+    }
+    return this.base.of?.(boxId) ?? this.base
   }
 
   get name() {

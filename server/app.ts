@@ -38,7 +38,7 @@ import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { RUNNERS } from "../shared/runner.js"
+import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -659,7 +659,7 @@ export function createBoxYard(
   })
   /** The setup choice of where agents run: "local" (This computer, no Upstash key needed) or "box". New projects follow it. */
   api.put("/setup/runner", async (req, res) => {
-    setup.setRunner(parse(z.object({ runner: z.enum(RUNNERS) }).strict(), req.body).runner)
+    setup.setRunner(parse(z.object({ runner: z.enum(SETUP_RUNNERS) }).strict(), req.body).runner)
     if (setup.runnerChoice() === "local") await setup.refreshLocal()
     const status = setup.status()
     hub.broadcast({ type: "setup", status })
