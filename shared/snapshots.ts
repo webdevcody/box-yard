@@ -64,7 +64,7 @@ export const SNAPSHOT_STEP_LABELS: Record<SnapshotStep["key"], string> = {
  * onto a box of its own size or bigger (Box.fromSnapshot takes the size); a smaller box might not fit its disk.
  */
 export function snapshotSkipReason(snap: Pick<ProjectSnapshot, "id" | "provider" | "size">, size: Size, provider: string): string | null {
-  if (snap.provider !== provider) return `snapshot ${snap.id} is a ${snap.provider} snapshot and new boxes come from ${provider}`
+  if (snap.provider !== provider) return `snapshot ${snap.id} is from ${snap.provider} and new boxes come from ${provider}`
   if (BOX_SIZE_ORDER.indexOf(size) < BOX_SIZE_ORDER.indexOf(snap.size)) {
     return `snapshot ${snap.id} was taken on a ${snap.size} box and might not fit a ${size} one (replace it from a ${size} box to use it there)`
   }

@@ -106,7 +106,8 @@ export function stripScript(s: StripSpec): string {
     `c=0; ${rmEach(`"$byroot"/.boxyard/tmp/* "$byroot"/.boxyard/tmp/.[!.]* "$byroot"/.boxyard/restore-*`)}; ${cat("boxyard-tmp")}`,
     `c=0; ${rmEach(inHome(STRIP_CREDENTIALS))}; ${cat("credentials")}`,
     // npm tokens in ~/.npmrc: the lines go, the rest of the file (registry settings) stays.
-    `if [ -f "$byhome/.npmrc" ] && grep -qE '_authToken|_auth|_password' "$byhome/.npmrc"; then sed -i -E '/_authToken|_auth|_password/d' "$byhome/.npmrc"; c=$((c+1)); echo "${STRIP_MARK}npmrc 1"; fi`,
+    // (No `sed -i`: BSD sed reads it differently, and local boxes run on macOS.)
+    `if [ -f "$byhome/.npmrc" ] && grep -qE '_authToken|_auth|_password' "$byhome/.npmrc"; then grep -vE '_authToken|_auth|_password' "$byhome/.npmrc" > "$byhome/.npmrc.boxyard-strip"; cat "$byhome/.npmrc.boxyard-strip" > "$byhome/.npmrc"; rm -f "$byhome/.npmrc.boxyard-strip"; echo "${STRIP_MARK}npmrc 1"; fi`,
     `c=0; ${rmEach(inHome(STRIP_LOGS))}; ${cat("logs")}`,
     // The box user's own temp entries; the npm cache stays (agent shells on Upstash use /tmp/.npm-cache), minus its logs.
     `c=0; for f in "$bytmp"/* "$bytmp"/.[!.]*; do { [ -e "$f" ] || [ -L "$f" ]; } || continue; [ "$(basename "$f")" = .npm-cache ] && continue; [ -O "$f" ] || continue; rm -rf "$f" 2>/dev/null || { chmod -R u+w "$f" 2>/dev/null; rm -rf "$f" 2>/dev/null; }; { [ -e "$f" ] || [ -L "$f" ]; } || c=$((c+1)); done; rm -rf "$bytmp"/.npm-cache/_logs 2>/dev/null; ${cat("tmp")}`,
