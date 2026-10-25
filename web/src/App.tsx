@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useState } from "react"
-import { PAGE_PADDING } from "./lib/layout"
+import { memo, useCallback, useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react"
+import { CHAT_MAX, CHAT_MIN, PAGE_PADDING, coordinatorDock } from "./lib/layout"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
 import { navigate } from "wouter/use-browser-location"
@@ -37,9 +37,13 @@ export function App() {
   const [navOpen, setNavOpen] = useState(false)
   const [chatOpen, setChatOpen] = useState(false)
   const sidebarSize = useResizable({ key: "box-yard:sidebar-width", defaultWidth: 256, min: 200, max: 360, edge: "right" })
-  const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
+  const viewport = useViewportWidth()
+  const chatLimit = coordinatorDock(viewport, sidebarSize.width, CHAT_MAX).max
+  const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: CHAT_MIN, max: CHAT_MAX, limit: chatLimit, edge: "left" })
+  const dock = coordinatorDock(viewport, sidebarSize.width, chatSize.width)
   const closeNav = useCallback(() => setNavOpen(false), [])
   const closeChat = useCallback(() => setChatOpen(false), [])
+  const openChat = useCallback(() => setChatOpen(true), [])
   const zen = useZen()
   useZenHotkeys(zen)
   const agentSettings = useAgentSettings({ enabled: authed })
@@ -73,7 +77,7 @@ export function App() {
         <div className={cx("fixed inset-y-0 left-0 z-40 w-[min(20rem,calc(100vw-2rem))] transition-transform lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
           style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
         >
-          <Sidebar connection={connection} onNavigate={closeNav} />
+          <Sidebar connection={connection} onNavigate={closeNav} onOpenChat={dock.docked ? undefined : openChat} />
           <ResizeHandle {...sidebarSize.handle} className="lg:block" />
         </div>
       )}
@@ -87,7 +91,7 @@ export function App() {
               <Menu className="h-5 w-5" />
             </button>
             <BrandLogo markClassName="h-6 w-6" textClassName="font-semibold text-zinc-100" />
-            <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 xl:hidden" aria-label="Open orchestrator">
+            <button onClick={() => setChatOpen(true)} className="ml-auto grid h-11 w-11 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800" aria-label="Open orchestrator">
               <MessageSquare className="h-5 w-5" />
             </button>
           </div>
@@ -96,34 +100,27 @@ export function App() {
               <Routes />
             </div>
           </div>
-          {/* Clear of the floating orchestrator button, which shows between lg and xl */}
-          <Toasts className={chatOpen ? undefined : "lg:bottom-20 xl:bottom-4"} />
+          <Toasts />
         </main>
       )}
 
-      {/* The global orchestrator chat: always visible on wide screens, the whole window in Zen */}
+      {/* The global orchestrator chat: docked beside the page when there's room for both, else a drawer;
+          the whole window in Zen */}
       <div
         data-zen={zen || undefined}
+        data-docked={(!zen && dock.docked) || undefined}
         className={cx(
           zen
             ? "relative min-w-0 flex-1"
-            : "fixed inset-y-0 right-0 z-40 w-full max-w-none border-l border-zinc-900 transition-transform sm:max-w-md xl:relative xl:w-[var(--panel-w)] xl:max-w-none xl:translate-x-0",
-          !zen && (chatOpen ? "translate-x-0" : "translate-x-full"),
+            : dock.docked
+              ? "relative shrink-0 border-l border-zinc-900"
+              : cx("fixed inset-y-0 right-0 z-40 w-full border-l border-zinc-900 transition-transform sm:max-w-md", chatOpen ? "translate-x-0" : "translate-x-full"),
         )}
-        style={zen ? undefined : ({ "--panel-w": `${chatSize.width}px` } as CSSProperties)}
+        style={!zen && dock.docked ? { width: dock.width } : undefined}
       >
-        {!zen && <ResizeHandle {...chatSize.handle} className="xl:block" />}
-        <ChatPanel onClose={closeChat} zen={zen} />
+        {!zen && dock.docked && <ResizeHandle {...chatSize.handle} className="block!" />}
+        <ChatPanel onClose={dock.docked ? undefined : closeChat} zen={zen} />
       </div>
-      {!zen && !chatOpen && (
-        <button
-          onClick={() => setChatOpen(true)}
-          className="fixed right-4 bottom-4 z-30 hidden rounded-full bg-yard-500 p-3 text-zinc-950 shadow-lg hover:bg-yard-400 lg:block xl:hidden"
-          title="Open the Coordinator"
-        >
-          <MessageSquare className="h-5 w-5" />
-        </button>
-      )}
       {zen && <Toasts quiet />}
       <CommandPalette />
       <SettingsHost />
@@ -159,4 +156,13 @@ const Routes = memo(function Routes() {
 function SettingsLink({ section }: { section?: string }) {
   useLayoutEffect(() => navigate(`/?${SETTINGS_PARAM}=${parseSection(section)}`, { replace: true }), [section])
   return null
+}
+
+const subscribeResize = (cb: () => void) => {
+  window.addEventListener("resize", cb)
+  return () => window.removeEventListener("resize", cb)
+}
+/** The window's width in CSS px (it shrinks as the browser zooms in), kept current. */
+function useViewportWidth() {
+  return useSyncExternalStore(subscribeResize, () => window.innerWidth)
 }
