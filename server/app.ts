@@ -131,8 +131,10 @@ const schemas = {
     model: z.string().trim().max(100).nullish(),
     effort: z.enum(EFFORTS).nullish(),
     attachments: attachmentIds,
+    /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
+    runsOn: z.enum(RUNNERS).nullish(),
   }),
-  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds, runsOn: z.enum(RUNNERS).optional() }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   login: z.object({ password: z.string() }),
@@ -271,6 +273,7 @@ export function createBoxYard(
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github })
+  tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
@@ -546,8 +549,10 @@ export function createBoxYard(
     const projectId = typeof req.query.projectId === "string" ? req.query.projectId : undefined
     res.json(store.listTasks({ projectId }))
   })
-  api.post("/tasks", (req, res) => {
+  api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
+    // A runner that can't run fails here with the reason; it never falls back to the other one.
+    await tasks.requireRunner(body.runsOn)
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -558,9 +563,11 @@ export function createBoxYard(
   api.get("/tasks/:id/messages", (req, res) => {
     res.json(store.listTaskMessages(req.params.id!, 1000))
   })
-  api.post("/tasks/:id/messages", (req, res) => {
+  api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
+    await tasks.requireRunner(body.runsOn)
     const files = withAttachments(body.content, body.attachments)
+    if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
     res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.

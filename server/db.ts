@@ -661,6 +661,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN snapshot_at INTEGER;
   `,
   `
+  -- A task's own "Runs on" (shared/runner.ts): 'local' or 'box' wins over its project's runner for every turn. NULL: follow the project.
+  ALTER TABLE tasks ADD COLUMN runs_on TEXT;
+  `,
+  `
   -- Per-project box settings, NULL to use the global one: agents_per_box (the most agents running at once on a box
   -- while one of this project's agents runs there, every project counted: the stricter of the box's limit and each
   -- running project's wins), tasks_per_box (the same for task folders on a box) and max_boxes (the most boxes its

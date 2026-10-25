@@ -25,7 +25,7 @@ import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../share
 import { loadLine, memLine } from "../shared/memory.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
-import type { Runner } from "../shared/runner.js"
+import { RUNNERS, type Runner } from "../shared/runner.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
@@ -121,6 +121,12 @@ const relatedTasksSchema = z
   .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)")
 /** The most tasks one create_tasks call starts. */
 export const MAX_TASK_BATCH = 100
+const runsOnSchema = z
+  .enum(RUNNERS)
+  .optional()
+  .describe(
+    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer". If the runner can\'t run (e.g. claude missing or signed out on this computer), the call fails with the reason; it never falls back to the other runner.',
+  )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /**
@@ -269,6 +275,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
+    runsOn: t.runsOn ?? undefined,
     turns: t.turnCount,
     model: t.model ?? undefined,
     effort: t.effort ?? undefined,
@@ -864,13 +871,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         env: envSchema,
         related_tasks: relatedTasksSchema,
         attachments: attachmentsSchema,
+        runs_on: runsOnSchema,
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks)}` : a.prompt
+      const projectId = project(a.project).id
+      await tasks.requireRunner(a.runs_on)
       const t = tasks.createTask({
-        projectId: project(a.project).id,
+        projectId,
         title: a.title,
         prompt,
         env: a.env,
@@ -880,6 +890,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingRule: a.routing_rule ?? null,
         routingReason: a.routing_reason ?? null,
         source: inputSource,
+        runsOn: a.runs_on ?? null,
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -891,6 +902,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     attachments: z.array(z.string()).optional().describe("Files for this task only, added to the shared attachments (up_… or art_… ids or paths, as in create_task)"),
     related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
     env: envSchema,
+    runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer) or "box" (an Upstash box), over the shared runs_on and the project\'s "Runs on"'),
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -901,8 +913,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh Claude Code session exactly like create_task. ` +
         "Use it instead of a series of create_task calls whenever you start two or more independent tasks at once: every create_task call costs you a whole step, so dozens of them take minutes before the last task even exists, while create_tasks queues them all at once and Box Yard creates the boxes they need in parallel. " +
-        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own model, effort and routing_* win. " +
-        "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
+        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, model, effort and routing_* win. " +
+        "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids, and that a runs_on runner can run). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
         "Returns the new tasks' ids in the order given.",
       inputSchema: {
         project: z.string().describe("Project id or name. Every task in the call goes there."),
@@ -914,6 +926,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         attachments: attachmentsSchema.describe("Files every task gets: ids (up_…) or paths of files Cody attached in this chat, or artifact ids (art_…) or /artifacts/ URLs. Each is copied into every agent's task folder under attachments/."),
         related_tasks: relatedTasksSchema.describe("Earlier tasks whose outcome every new agent should know about (their summary, branch and PR are added to each prompt)"),
         env: envSchema.describe("Env vars for every task, as NAME: value; an item's own env wins for the same name"),
+        runs_on: runsOnSchema.describe(
+          'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
+        ),
         model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
         effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
         routing_rule: routingRuleSchema,
@@ -928,6 +943,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         attachments?: string[]
         related_tasks?: string[]
         env?: Record<string, string>
+        runs_on?: Runner
         model?: string
         effort?: Effort
         routing_rule?: string
@@ -957,6 +973,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           for (const ref of new Set(item.attachments ?? [])) if (!a.attachments?.includes(ref)) check(`${where} attachments "${ref}"`, () => attachmentSource(ref))
           for (const ref of new Set(item.related_tasks ?? [])) if (!a.related_tasks?.includes(ref)) check(`${where} related_tasks "${ref}"`, () => task(ref))
         })
+        // Each runner asked for is checked once; every item that wants one that can't run is listed.
+        const runners = new Map<Runner, string | null>()
+        for (const r of new Set(a.tasks.map((item) => item.runs_on ?? a.runs_on).filter((r): r is Runner => Boolean(r)))) {
+          runners.set(r, await tasks.requireRunner(r).then(() => null, (err: unknown) => errorMessage(err)))
+        }
+        a.tasks.forEach((item, i) => {
+          const why = runners.get((item.runs_on ?? a.runs_on)!)
+          if (why) problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": runs_on "${item.runs_on ?? a.runs_on}": ${why}`)
+        })
         if (problems.length) {
           const shown = problems.slice(0, 25)
           throw new Error(
@@ -983,6 +1008,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             routingRule: item.routing_rule ?? a.routing_rule ?? null,
             routingReason: item.routing_reason ?? a.routing_reason ?? null,
             source: inputSource,
+            runsOn: item.runs_on ?? a.runs_on ?? null,
           }
         })
         const created = tasks.createTasks(inputs)
@@ -1002,11 +1028,23 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
         "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments.",
-      inputSchema: { task: z.string(), message: z.string().min(1), attachments: attachmentsSchema, ...routeParams },
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments. " +
+        'To continue an existing task somewhere else (Cody: "continue it locally", "on my machine"), pass runs_on: it pins the task to that runner from its next turn on. Before its next turn (after any running turn ends) its workspace moves there when nothing would be lost: its turn-end archive and push hold all the work. If it can\'t move safely (no fresh archive, the archive is too big, or the push failed), it keeps running where its workspace is and the task\'s log says why. A runner that can\'t run fails the call with the reason, and nothing is sent.',
+      inputSchema: {
+        task: z.string(),
+        message: z.string().min(1),
+        attachments: attachmentsSchema,
+        runs_on: z
+          .enum(RUNNERS)
+          .optional()
+          .describe('Pin the task to "local" (this computer) or "box" (an Upstash box) from its next turn on, over the project\'s "Runs on". Omit it to leave it where it runs.'),
+        ...routeParams,
+      },
     },
-    safe(async (a: { task: string; message: string; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
+      await tasks.requireRunner(a.runs_on)
+      if (a.runs_on) tasks.setRunsOn(before.id, a.runs_on)
       const how = delivery(before)
       const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, attachmentsOf(a.attachments), {
         model: a.model,

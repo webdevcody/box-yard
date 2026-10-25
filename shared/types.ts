@@ -177,6 +177,11 @@ export interface Task {
   routingRule: string | null
   /** Short explanation of why that route was picked. */
   routingReason: string | null
+  /**
+   * The task's own "Runs on" (shared/runner.ts): "local" (this computer) or "box", set when it was created or by a
+   * later message. It wins over the project's setting for every turn; null follows the project.
+   */
+  runsOn: Runner | null
   /** Cody pressed "Merge PR" and the agent hasn't finished that turn yet (null otherwise). */
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */

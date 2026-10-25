@@ -31,7 +31,7 @@ import { badgeStatus } from "../lib/prState"
 import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
-import { LOCAL_UNSANDBOXED, isLocalRunnerBox } from "../../../shared/runner"
+import { LOCAL_UNSANDBOXED, RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
@@ -142,9 +142,12 @@ export function TaskMetaRow({ task, files, local = false }: { task: Task; files:
   )
 }
 
-/** Its agent runs on this computer (the local runner): on it now, or there next turn because its project runs locally. */
+/**
+ * Its agent runs on this computer (the local runner): on it now, or there next turn because the task was asked to
+ * run here (its own runs_on) or, without one, its project runs locally.
+ */
 export function runsLocally(task: Task, project: Project | undefined): boolean {
-  return isLocalRunnerBox(task.boxId) || (project?.runner === "local" && !task.boxId)
+  return isLocalRunnerBox(task.boxId) || (!task.boxId && (task.runsOn ?? project?.runner) === "local")
 }
 
 /** The unsandboxed warning on a local task's header; a tap shows it in full under the row (phones have no hover title). */
@@ -360,6 +363,13 @@ function TaskMenu({
                   <span>{task.lastArchivedAt ? "archived" : "no box yet"}</span>
                 )}
               </Detail>
+              {task.runsOn && (
+                <Detail label="Runs on">
+                  <span className={cx("min-w-0 truncate", task.runsOn === "local" ? "text-amber-200" : "text-zinc-300")} data-testid="task-runs-on">
+                    {RUNNER_LABEL[task.runsOn]} · this task only
+                  </span>
+                </Detail>
+              )}
               {task.pushState && <PushDetail push={task.pushState} />}
               {(task.model || task.effort) && (
                 <Detail label="Model">

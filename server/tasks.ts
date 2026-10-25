@@ -48,7 +48,7 @@ import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
-import { LOCAL_BOX_ID, isLocalRunnerBox } from "../shared/runner.js"
+import { LOCAL_BOX_ID, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
@@ -188,6 +188,8 @@ export interface NewTask {
   attachments?: StoredUpload[]
   /** Who the attached files are from (a Captain labels them as its own). */
   source?: InputSource
+  /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
+  runsOn?: Runner | null
 }
 
 /**
@@ -397,6 +399,8 @@ export class TaskManager {
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
   /** Hands an agent's message_captain to its project's Captain (CaptainManager.fromAgent); null when there are no Captains. */
   onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
+  /** Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can. */
+  runnerProblem: ((runner: Runner) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** The task event bus hooks listen on (see subscribe). */
@@ -569,6 +573,29 @@ export class TaskManager {
   }
 
   /**
+   * Throws a clear 400 when a task asked to run on `runner` (its runs_on) can't: this computer lacks claude or its
+   * sign-in, or there are no Upstash boxes. Nothing falls back to the other runner. No runner asked for: no check.
+   */
+  async requireRunner(runner: Runner | null | undefined): Promise<void> {
+    if (!runner || !this.runnerProblem) return
+    const problem = await this.runnerProblem(runner)
+    if (problem) throw new BadRequestError(`Can't run it on ${runner === "local" ? "this computer" : "an Upstash box"}: ${problem}.`)
+  }
+
+  /**
+   * Pin a task to a runner from its next turn on (send_to_task runs_on). Placement moves its workspace there when
+   * nothing would be lost (toLocal / fromLocal), else it stays where it is and its log says why. Check with
+   * requireRunner first.
+   */
+  setRunsOn(taskId: string, runner: Runner) {
+    const row = this.requireRow(taskId)
+    if (row.runs_on === runner) return
+    this.store.updateTask(row.id, { runsOn: runner })
+    this.addEvent(row.id, `Runs on ${runner === "local" ? "this computer" : "an Upstash box"} from its next turn on (this task only, over its project's "Runs on").`)
+    this.emitTask(row.id)
+  }
+
+  /**
    * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
    * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
    * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
@@ -592,6 +619,7 @@ export class TaskManager {
           effort: route.effort,
           routingRule: route.routingRule,
           routingReason: route.routingReason,
+          runsOn: input.runsOn ?? null,
           branch: projects[i]!.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
         })
         const files = input.attachments ?? []
@@ -2096,10 +2124,10 @@ export class TaskManager {
     const live = new Set(this.store.listTaskRows().map((r) => r.current_turn_id).filter(Boolean))
     for (const id of this.claimedSlots.keys()) if (!live.has(id)) this.claimedSlots.delete(id)
     for (const listed of waiting) {
-      // Over the total agent cap: wait without growing the pool. Running work is never stopped. Projects that run
-      // on this computer only count against Settings › Local agents (place).
+      // Over the total agent cap: wait without growing the pool. Running work is never stopped. Tasks that run on
+      // this computer (their own runs_on, else their project's) only count against Settings › Local agents (place).
       const cap = this.limits().maxAgents
-      const local = this.store.projectRunner(listed.project_id) === "local"
+      const local = this.store.taskRunner(listed) === "local"
       const boxId = !local && cap > 0 && this.runningTotal() >= cap ? null : await this.place(listed)
       // Placement awaits: the task may have moved on meanwhile (its last queued message cancelled, stopped, started).
       const row = this.store.getTaskRow(listed.id)
@@ -2228,8 +2256,8 @@ export class TaskManager {
       this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : op === "snapshot" ? "snapshotted" : "deleted"}`)
       return null
     }
-    // A project's "Runs on" setting: its tasks move to (or off) this computer when nothing would be lost.
-    if (this.store.projectRunner(row.project_id) === "local") {
+    // The task's runs_on, else its project's "Runs on": it moves to (or off) this computer when nothing would be lost.
+    if (this.store.taskRunner(row) === "local") {
       const here = await this.toLocal(row)
       if (here !== "stay") return here
     } else if (isLocalRunnerBox(row.box_id)) {
@@ -2357,13 +2385,13 @@ export class TaskManager {
         if (this.archiving.has(row.id)) return null
         const block = row.session_started ? this.moveBlock(row, Infinity) : null
         if (block) {
-          this.noteOnce(row.id, `${row.id}:${box.id}:local`, `Its project runs on this computer now, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
+          this.noteOnce(row.id, `${row.id}:${box.id}:local`, `${row.runs_on ? "It was asked to run on this computer" : "Its project runs on this computer now"}, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
           return "stay"
         }
         if (!this.localRoom(row)) return null
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
         void this.removeTaskDir(box.id, row.id).catch(() => {})
-        this.addEvent(row.id, `Moved from box ${box.id} to this computer: its project runs its agents here now.`)
+        this.addEvent(row.id, `Moved from box ${box.id} to this computer: ${row.runs_on ? "it was asked to run here" : "its project runs its agents here now"}.`)
         return this.assign(row.id, LOCAL_BOX_ID)
       }
       // Box is gone or lost; the workspace comes back from the archive, here.
@@ -2386,14 +2414,14 @@ export class TaskManager {
       return null
     }
     if (block) {
-      this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:box`, `Its project runs on Upstash boxes now, but its workspace stays on this computer: it can't move safely (${block}).`)
+      this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:box`, `${row.runs_on ? "It was asked to run on an Upstash box" : "Its project runs on Upstash boxes now"}, but its workspace stays on this computer: it can't move safely (${block}).`)
       return "stay"
     }
     const other = await this.pickBox(row.id)
     if (!other) return null
     this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     void this.removeTaskDir(LOCAL_BOX_ID, row.id).catch(() => {})
-    this.addEvent(row.id, `Moved from this computer to box ${other}: its project runs on Upstash boxes again.`)
+    this.addEvent(row.id, `Moved from this computer to box ${other}: ${row.runs_on ? "it was asked to run on an Upstash box" : "its project runs on Upstash boxes again"}.`)
     return this.assign(row.id, other)
   }
 

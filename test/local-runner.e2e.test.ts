@@ -391,3 +391,83 @@ describe("git and archives", () => {
     await waitFor(() => !fs.existsSync(localDir(r, t.id)), "the local folder to go")
   })
 })
+
+describe("per-task runs_on", () => {
+  const create = (r: Running, projectId: string, title: string, runsOn: "local" | "box", prompt = "write a haiku") =>
+    call<Task>(r, "POST", "/api/tasks", { id: `task_${title.replace(/\W/g, "")}${Date.now().toString(36)}`, projectId, title, prompt, runsOn })
+
+  it("wins over the project's Runs on both ways, and every later turn stays on it", async () => {
+    const r = await start()
+    const mac = await project(r, "mac", "local")
+    const cloud = await project(r, "cloud", "box")
+    // A box task in a local project, and a local task in a box project.
+    const onBox = await create(r, mac.id, "on box", "box")
+    const onMac = await create(r, cloud.id, "on mac", "local")
+    expect(onBox.runsOn).toBe("box")
+    expect(onMac.runsOn).toBe("local")
+    const b1 = await status(r, onBox.id, (t) => t.status === "done" && Boolean(t.lastArchivedAt), "the box task to finish and archive")
+    const m1 = await done(r, onMac.id)
+    expect(b1.boxId).toMatch(/^local-/)
+    expect(fs.existsSync(localDir(r, onBox.id))).toBe(false)
+    expect(m1.boxId).toBe(LOCAL_BOX_ID)
+    expect(fs.existsSync(path.join(localDir(r, onMac.id), "work", "box-yard-demo.md"))).toBe(true)
+    expect(r.boxes.created).toBe(1)
+
+    // A follow-up and a hook's message stay where they ran.
+    await call(r, "POST", `/api/tasks/${onBox.id}/messages`, { content: "one more" })
+    r.yard.tasks.sendInput(onMac.id, "a hook says hi", "hook:hook_test01", [], null, { prefix: "", meta: { hook: "test" } })
+    expect((await done(r, onBox.id, 2)).boxId).toBe(b1.boxId)
+    expect((await done(r, onMac.id, 2)).boxId).toBe(LOCAL_BOX_ID)
+
+    // Flipping the projects' Runs on doesn't move a pinned task: it was asked to run where it does.
+    await call(r, "PATCH", `/api/projects/${mac.id}`, { runner: "box" })
+    await call(r, "PATCH", `/api/projects/${cloud.id}`, { runner: "local" })
+    await call(r, "PATCH", `/api/projects/${mac.id}`, { runner: "local" })
+    await call(r, "PATCH", `/api/projects/${cloud.id}`, { runner: "box" })
+    await call(r, "POST", `/api/tasks/${onBox.id}/messages`, { content: "and again" })
+    await call(r, "POST", `/api/tasks/${onMac.id}/messages`, { content: "and again" })
+    expect((await done(r, onBox.id, 3)).boxId).toBe(b1.boxId)
+    expect((await done(r, onMac.id, 3)).boxId).toBe(LOCAL_BOX_ID)
+    expect(getTask(r, onBox.id).runsOn).toBe("box")
+    expect(getTask(r, onMac.id).runsOn).toBe("local")
+    expect(r.boxes.created).toBe(1)
+  })
+
+  it("a retry of a failed local task runs on this computer again, under Local agents", async () => {
+    const r = await start()
+    await call(r, "PUT", "/api/agent-settings", { localAgents: 1 })
+    const cloud = await project(r, "cloud", "box")
+    const t = await create(r, cloud.id, "flaky", "local", "try this [fail]")
+    const failed = await status(r, t.id, (x) => x.status === "failed" && !x.currentTurnId, "the local task to fail")
+    expect(failed.boxId).toBe(LOCAL_BOX_ID)
+    // Another local task holds the only Local agents slot: the retry waits for it, not for a box.
+    const hog = await create(r, cloud.id, "hog", "local", HANG)
+    await working(r, hog.id)
+    await call(r, "POST", `/api/tasks/${t.id}/retry`)
+    await status(r, t.id, (x) => x.status === "queued" && x.waitReason === LOCAL_SLOT_WAIT, "the retry to wait for a local slot")
+    await r.yard.tasks.stopTask(hog.id)
+    const again = await status(r, t.id, (x) => x.turnCount >= 2 && !x.currentTurnId && x.status !== "queued", "the retry to run")
+    expect(again.boxId).toBe(LOCAL_BOX_ID)
+    expect(r.boxes.created).toBe(0)
+  })
+
+  it("send with runs_on local continues a box task on this computer, moving its workspace", async () => {
+    const r = await start()
+    const cloud = await project(r, "cloud", "box")
+    const t = newTask(r, cloud.id, "bench")
+    const first = await status(r, t.id, (x) => x.status === "done" && Boolean(x.lastArchivedAt), "the box turn to archive")
+    const box = first.boxId!
+    expect(first.runsOn).toBeNull()
+    fs.writeFileSync(path.join(r.yard.tasks.taskDir(box, t.id), "work", "notes.md"), "made on the box\n")
+    await r.yard.tasks.archive(t.id)
+
+    await call(r, "POST", `/api/tasks/${t.id}/messages`, { content: "carry on locally", runsOn: "local" })
+    const here = await done(r, t.id, 2)
+    expect(here.boxId).toBe(LOCAL_BOX_ID)
+    expect(here.runsOn).toBe("local")
+    expect(fs.readFileSync(path.join(localDir(r, t.id), "work", "notes.md"), "utf8")).toBe("made on the box\n")
+    expect(events(r, t.id)).toContain(`Runs on this computer from its next turn on (this task only, over its project's "Runs on").`)
+    expect(events(r, t.id)).toContain(`Moved from box ${box} to this computer: it was asked to run here.`)
+    expect(getTask(r, t.id).runsOn).toBe("local")
+  })
+})

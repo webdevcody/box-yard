@@ -642,6 +642,8 @@ export function useCreateTask() {
       effort?: Effort
       /** Upload ids. */
       attachments?: string[]
+      /** Run on this computer (or a box) over the project's "Runs on". */
+      runsOn?: Runner
     }) =>
       api<Task>("/api/tasks", { body: input }),
     onMutate: async (input) => {
@@ -683,6 +685,7 @@ export function useCreateTask() {
           claudeTokens: 0,
           routingRule: null,
           routingReason: null,
+          runsOn: input.runsOn ?? null,
           createdAt: now,
           updatedAt: now,
         }),

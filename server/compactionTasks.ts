@@ -32,7 +32,7 @@ function latestTaskContext(messages: TaskMessage[]): string {
 function taskSnapshotSummary(store: Store, task: Task, since: number): string {
   const messages = store.listTaskMessages(task.id, 80)
   const recent = messages
-    .filter((m) => m.createdAt > since && (m.role === "assistant" || m.role === "event" || m.role === "agent"))
+    .filter((m) => m.createdAt >= since && (m.role === "assistant" || m.role === "event" || m.role === "agent"))
     .slice(-4)
     .map((m) => `[${m.role}] ${m.content.replace(/\s+/g, " ").trim()}`)
     .filter(Boolean)
@@ -48,11 +48,12 @@ function taskSnapshotSummary(store: Store, task: Task, since: number): string {
 
 /**
  * Snapshots of the tasks updated or mentioned since the previous compaction, newest first. A task that
- * hasn't changed since is in an earlier compaction already, so it isn't copied into every one.
+ * hasn't changed since is in an earlier compaction already, so it isn't copied into every one. `since` is
+ * inclusive: a task that moved in the same millisecond as the previous compaction is in both, never in neither.
  */
 export function compactionTaskSnapshots(store: Store, tasks: Task[], since: number, mentioned: Set<string>): CompactionTaskSnapshot[] {
   return tasks
-    .filter((t) => t.updatedAt > since || mentioned.has(t.id))
+    .filter((t) => t.updatedAt >= since || mentioned.has(t.id))
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .map((t) => ({
       taskId: t.id,
