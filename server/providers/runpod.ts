@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { WorkerSize } from "../../shared/types.js"
-import { RUNPOD_STOCK_IMAGE, cloudLabel, gpuBoxIndex, gpuBoxProject, isGpuBox, type ProjectGpuMachine, type RunPodCloud } from "../../shared/runpod.js"
+import { RUNPOD_STOCK_IMAGE, cloudLabel, shortGpu, gpuBoxIndex, gpuBoxProject, isGpuBox, type ProjectGpuMachine, type RunPodCloud } from "../../shared/runpod.js"
 import type { RunPodSettings } from "../../shared/runpod.js"
 import { RunPodError, rankDataCenters, type CatalogGpu, type RunPodApi, type RunPodPod, type RunPodVolume } from "../runpod/api.js"
 import type { SshPool, SshTarget } from "../runpod/ssh.js"
@@ -517,5 +517,4 @@ function targetOf(pod: RunPodPod): SshTarget | null {
   return d?.host && d.port ? { podId: pod.id, host: d.host, port: d.port } : null
 }
 
-/** "NVIDIA RTX A5000" → "RTX A5000". */
-export const shortGpu = (id: string) => id.replace(/^NVIDIA (GeForce )?/, "")
+export { shortGpu }

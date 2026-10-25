@@ -43,6 +43,9 @@ export const RUNPOD_GPU_GUIDE: Record<string, { vramGb: number; usd: string; use
   "NVIDIA RTX A6000": { vramGb: 48, usd: "~$0.33–0.59/hr", use: "big models and datasets" },
 }
 
+/** "NVIDIA RTX A5000" → "RTX A5000". */
+export const shortGpu = (id: string) => id.replace(/^NVIDIA (GeForce )?/, "")
+
 /** "16 GB, ~$0.17–0.25/hr, browser and WebGL game testing", or null for a type with no guide entry. */
 export const gpuHint = (id: string) => {
   const g = RUNPOD_GPU_GUIDE[id]
@@ -178,8 +181,8 @@ export interface RunPodGpuOption {
   /** $/hr on Community Cloud, or null when it isn't offered there. */
   communityPrice: number | null
   availability: string
-  /** gpuHint: VRAM, rough price and what it's good for, or null. */
-  hint: string | null
+  /** What it's good for (RUNPOD_GPU_GUIDE), or null. */
+  use: string | null
 }
 
 /** A GPU type's list price on a cloud, or null when it isn't offered there. */

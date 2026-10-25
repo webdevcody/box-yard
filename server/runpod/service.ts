@@ -8,7 +8,7 @@ import { RunPodApi } from "./api.js"
 import { SshPool } from "./ssh.js"
 import { RunPodSettingsStore } from "./settings.js"
 import { ImageBuilder, checkDocker, imageTag, runpodDir } from "./image.js"
-import { gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuHint, isGpuBox, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
+import { gpuBoxId, gpuBoxIndex, gpuBoxProject, isGpuBox, RUNPOD_GPU_GUIDE, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
 
 const MAX_KEEP_WARM_MINUTES = 24 * 60
 
@@ -95,7 +95,7 @@ export class RunPodService implements GpuRunner {
         securePrice: catalogPrice(g, "SECURE"),
         communityPrice: catalogPrice(g, "COMMUNITY"),
         availability: g.availability ?? "NONE",
-        hint: gpuHint(g.id),
+        use: RUNPOD_GPU_GUIDE[g.id]?.use ?? null,
       }))
       .filter((g) => g.securePrice !== null || g.communityPrice !== null)
       .sort((a, b) => cheapest(a) - cheapest(b))
