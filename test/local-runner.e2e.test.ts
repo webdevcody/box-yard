@@ -247,13 +247,18 @@ describe("local runner", () => {
     expect(getTask(r, d.id).status).toBe("queued")
   })
 
-  it("respects the project's heavy-tasks setting on this computer", async () => {
+  it("respects the project's Agents per box on this computer", async () => {
     const r = await start({ localAgents: 3 })
-    const mac = await call<Project>(r, "POST", "/api/projects", { name: "gpu", runner: "local", heavyTasks: "whole-box" })
+    const mac = await call<Project>(r, "POST", "/api/projects", { name: "gpu", runner: "local", agentsPerBox: 1 })
+    const other = await call<Project>(r, "POST", "/api/projects", { name: "notes", runner: "local" })
     const a = newTask(r, mac.id, "a", HANG)
     await working(r, a.id)
     const b = newTask(r, mac.id, "b", HANG)
-    await status(r, b.id, (t) => t.status === "queued" && /this computer has an agent running/.test(t.waitReason ?? ""), "the heavy task to wait")
+    await status(r, b.id, (t) => t.status === "queued" && t.waitReason === "Waiting: gpu runs each of its agents alone on a box, and this computer has an agent running", "the task to wait")
+    // Nor does another project's agent join it, though Local agents has room.
+    const c = newTask(r, other.id, "c", HANG)
+    await status(r, c.id, (t) => t.status === "queued" && t.waitReason === "Waiting: this computer is running an agent of gpu, which runs its agents alone on a box", "the other project's task to wait")
+    expect(r.yard.store.slotsInUse(LOCAL_BOX_ID)).toBe(1)
   })
 })
 

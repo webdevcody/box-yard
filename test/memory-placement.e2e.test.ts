@@ -5,11 +5,10 @@ import type { Config } from "../server/config.js"
 import type { ExecResult } from "../server/providers/types.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { BoxInfo, Project, Task } from "../shared/types.js"
-import type { HeavyTasks } from "../shared/memory.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
-// Memory-aware placement: a box short on memory (or over its load limit) takes no new agent while agents run on it,
-// and a project's "heavy tasks" setting keeps its agents one per box, or alone on a box.
+// Memory-aware placement: a box short on memory (or over its load limit) takes no new agent while agents run on it.
+// A project's own Agents per box (which replaced its "heavy tasks" setting) is in project-box-settings.e2e.test.ts.
 
 const MB = 1024 * 1024
 const GB = 1024 * MB
@@ -87,14 +86,10 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
   return data as T
 }
 
-const project = async (r: Running, name: string, heavyTasks?: HeavyTasks) => {
-  const p = await call<Project>(r, "POST", "/api/projects", { name })
-  return heavyTasks ? call<Project>(r, "PATCH", `/api/projects/${p.id}`, { heavyTasks }) : p
-}
+const project = (r: Running, name: string) => call<Project>(r, "POST", "/api/projects", { name })
 const task = (r: Running, projectId: string, title: string, prompt = "write a haiku") => call<Task>(r, "POST", "/api/tasks", { projectId, title, prompt })
 const getTask = (r: Running, id: string) => call<Task>(r, "GET", `/api/tasks/${id}`)
 const boxes = (r: Running) => call<BoxInfo[]>(r, "GET", "/api/boxes")
-const stop = (r: Running, id: string) => call<Task>(r, "POST", `/api/tasks/${id}/stop`)
 const until = (r: Running, id: string, ok: (t: Task) => boolean, what: string) =>
   waitFor(async () => {
     const t = await getTask(r, id)
@@ -109,7 +104,6 @@ const events = (r: Running, id: string) =>
     .map((m) => m.content)
 /** A long-running agent ([hang] keeps the fake turn going until it's stopped). */
 const hang = async (r: Running, projectId: string, title: string) => working(r, (await task(r, projectId, title, "keep going [hang]")).id)
-const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms))
 
 describe("memory-aware placement", () => {
   it("sends a new agent to another box while its project's box is short on memory", async () => {
@@ -172,72 +166,5 @@ describe("memory-aware placement", () => {
     const turn = JSON.parse(fs.readFileSync(`${r.yard.tasks.taskDir(second.boxId!, second.id)}/turn.json`, "utf8")) as { systemPrompt: string }
     expect(turn.systemPrompt).toContain("This box has 4.0 GB of memory, shared with up to 1 other agents that may run at the same time.")
     expect(turn.systemPrompt).toContain("Run heavy jobs (full test suites, headless browsers, big builds) one at a time")
-  })
-})
-
-describe("heavy tasks", () => {
-  it("is off by default, and the API takes only its three options", async () => {
-    const r = await start()
-    const p = await project(r, "alpha")
-    expect(p.heavyTasks).toBe("off")
-    expect((await call<Project>(r, "PATCH", `/api/projects/${p.id}`, { heavyTasks: "whole-box" })).heavyTasks).toBe("whole-box")
-    expect((await call<Project>(r, "PATCH", `/api/projects/${p.id}`, { name: "alpha 2" })).heavyTasks).toBe("whole-box")
-    expect((await call<Project>(r, "PATCH", `/api/projects/${p.id}`, { heavyTasks: "off" })).heavyTasks).toBe("off")
-    await expect(call(r, "PATCH", `/api/projects/${p.id}`, { heavyTasks: "two-per-box" })).rejects.toThrow(/400/)
-  })
-
-  it("one per box: a project's agents spread over boxes, other projects still share them", async () => {
-    const r = await start({ maxBoxes: 2, slotsPerBox: 3 })
-    const heavy = await project(r, "heavy", "one-per-box")
-    const light = await project(r, "light")
-    const h1 = await hang(r, heavy.id, "h1")
-    const h2 = await hang(r, heavy.id, "h2")
-    expect(h2.boxId).not.toBe(h1.boxId)
-
-    // Both boxes run one of heavy's agents and the pool is full: a third waits, with the reason.
-    const h3 = await task(r, heavy.id, "h3")
-    const waiting = await until(r, h3.id, (t) => Boolean(t.waitReason), "to say why it waits")
-    expect(waiting.status).toBe("queued")
-    expect(waiting.waitReason).toMatch(/^Waiting: heavy runs heavy tasks one per box, and another of its agents runs on box /)
-
-    // Another project still uses the free slots.
-    const l1 = await done(r, (await task(r, light.id, "l1")).id)
-    expect([h1.boxId, h2.boxId]).toContain(l1.boxId)
-    await sleep(300)
-    expect((await getTask(r, h3.id)).status).toBe("queued")
-
-    await stop(r, h1.id)
-    const ran = await done(r, h3.id)
-    expect(ran.boxId).toBe(h1.boxId)
-  })
-
-  it("whole box: its agent runs alone, and nothing joins its box meanwhile", async () => {
-    const r = await start({ maxBoxes: 2, slotsPerBox: 3 })
-    const heavy = await project(r, "heavy", "whole-box")
-    const light = await project(r, "light")
-    const h1 = await hang(r, heavy.id, "h1")
-
-    // Another project's agent doesn't join the heavy box, though it has free slots.
-    const l1 = await hang(r, light.id, "l1")
-    expect(l1.boxId).not.toBe(h1.boxId)
-
-    // A second heavy agent: one box runs h1, the other l1, and the pool is full.
-    const h2 = await task(r, heavy.id, "h2")
-    const waiting = await until(r, h2.id, (t) => Boolean(t.waitReason), "to say why it waits")
-    expect(waiting.status).toBe("queued")
-    expect(waiting.waitReason).toMatch(/^Waiting: heavy runs heavy tasks on a whole box, and box \S+ has an agent running$/)
-
-    // Once the light box is free, h2 has it to itself.
-    await stop(r, l1.id)
-    const ran = await done(r, h2.id)
-    expect(ran.boxId).toBe(l1.boxId)
-  })
-
-  it("asks for a box per waiting heavy agent", async () => {
-    const r = await start({ maxBoxes: 3, slotsPerBox: 3 })
-    const heavy = await project(r, "heavy", "one-per-box")
-    const ids = await Promise.all(["h1", "h2", "h3"].map(async (t) => (await task(r, heavy.id, t, "keep going [hang]")).id))
-    const all = await Promise.all(ids.map((id) => working(r, id)))
-    expect(new Set(all.map((t) => t.boxId)).size).toBe(3)
   })
 })
