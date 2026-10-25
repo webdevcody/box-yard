@@ -18,6 +18,7 @@ import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS } from "../shared/runpod.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
@@ -154,6 +155,10 @@ interface BoxSettingsArgs {
   tasks_per_box?: number | null
   max_boxes?: number | null
   gpu_max_hourly_usd?: number | null
+  gpu_types?: string[] | null
+  gpu_cloud?: "SECURE" | "COMMUNITY" | null
+  gpu_min_ram_gb?: number | null
+  gpu_min_vcpus?: number | null
 }
 
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
@@ -439,8 +444,47 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .describe(
         "RunPod GPU only: the most this project's pods may cost together, $/hr. A task that would need a pod over it waits and says so. 0: no cap of its own (the total cap in Settings › RunPod GPU still applies). null: Settings › RunPod GPU › Max per project.",
       ),
+    gpu_types: z
+      .array(z.string().trim().min(1).max(100))
+      .min(1)
+      .max(10)
+      .nullable()
+      .optional()
+      .describe(
+        `RunPod GPU only: GPU types its new pods try, in order, as RunPod gpuTypeIds. Cheap ones for browser/WebGL game testing: ${Object.entries(RUNPOD_GPU_GUIDE)
+          .map(([id, g]) => `"${id}" (${g.vramGb} GB, ${g.usd})`)
+          .join(", ")}. null: Settings › RunPod GPU › GPU types.`,
+      ),
+    gpu_cloud: z
+      .enum(["SECURE", "COMMUNITY"])
+      .nullable()
+      .optional()
+      .describe("RunPod GPU only: where its new pods run. COMMUNITY is cheaper and has more GPU types (RTX 3070) but no network volume, so caches start cold. null: Settings › RunPod GPU › Cloud."),
+    gpu_min_ram_gb: z
+      .number()
+      .int()
+      .min(RUNPOD_MACHINE_LIMITS.minRamGb.min)
+      .max(RUNPOD_MACHINE_LIMITS.minRamGb.max)
+      .nullable()
+      .optional()
+      .describe("RunPod GPU only: its new pods only go to hosts with at least this much RAM, GB (a game's browser needs ~12). null: Settings › RunPod GPU › Min RAM."),
+    gpu_min_vcpus: z
+      .number()
+      .int()
+      .min(RUNPOD_MACHINE_LIMITS.minVcpus.min)
+      .max(RUNPOD_MACHINE_LIMITS.minVcpus.max)
+      .nullable()
+      .optional()
+      .describe("RunPod GPU only: …and at least this many vCPUs. null: Settings › RunPod GPU › Min vCPUs."),
   }
-  const boxSettingsPatch = (a: BoxSettingsArgs) => ({ boxSize: a.box_size, agentsPerBox: a.agents_per_box, tasksPerBox: a.tasks_per_box, maxBoxes: a.max_boxes, gpuMaxHourlyUsd: a.gpu_max_hourly_usd })
+  const boxSettingsPatch = (a: BoxSettingsArgs) => ({
+    boxSize: a.box_size,
+    agentsPerBox: a.agents_per_box,
+    tasksPerBox: a.tasks_per_box,
+    maxBoxes: a.max_boxes,
+    gpuMaxHourlyUsd: a.gpu_max_hourly_usd,
+    gpuMachine: { gpuTypes: a.gpu_types, cloud: a.gpu_cloud, minRamGb: a.gpu_min_ram_gb, minVcpus: a.gpu_min_vcpus },
+  })
   const projectView = async (p: Project) => ({
     id: p.id,
     name: p.name,
@@ -552,8 +596,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "update_project",
     {
       description: scopeId
-        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running agents are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, tasks_per_box, max_boxes, and gpu_max_hourly_usd on RunPod GPU: null clears one so the global setting applies) or its own notes budget.",
+        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running agents are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, tasks_per_box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {

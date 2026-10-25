@@ -474,6 +474,7 @@ export function useCreateProject() {
           tasksPerBox: null,
           maxBoxes: null,
           gpuMaxHourlyUsd: null,
+          gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
           snapshot: null,
           createdAt: now,
           updatedAt: now,

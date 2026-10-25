@@ -38,6 +38,9 @@ import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { useOpenSettings } from "./SettingsDialog"
 import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
+import { RUNPOD_CLOUDS, RUNPOD_MACHINE_LIMITS, shortGpu, type ProjectGpuMachine, type RunPodCloud } from "../../../shared/runpod"
+import { GpuTypePicker } from "./GpuTypePicker"
+import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 import { confirmDialog } from "../lib/confirm"
@@ -151,6 +154,10 @@ export function ProjectView({ id }: { id: string }) {
     </div>
   )
 }
+
+/** A GPU project's own machine as the form edits it: "" for a field that uses Settings › RunPod GPU's. */
+type MachineDraft = { gpuTypes: string[] | null; cloud: RunPodCloud | ""; minRamGb: string; minVcpus: string }
+const machineDraft = (m: ProjectGpuMachine): MachineDraft => ({ gpuTypes: m.gpuTypes, cloud: m.cloud ?? "", minRamGb: m.minRamGb?.toString() ?? "", minVcpus: m.minVcpus?.toString() ?? "" })
 
 /** A number field's value, or null when it's blank (use the default). */
 function optionalInt(text: string): number | null {
@@ -391,10 +398,16 @@ function ProjectBoxSettings(p: {
   setMaxBoxes: (v: string) => void
   gpuMaxHourlyUsd: string
   setGpuMaxHourlyUsd: (v: string) => void
+  machine: MachineDraft
+  setMachine: (v: MachineDraft) => void
 }) {
   const openSettings = useOpenSettings()
   const runpod = useRunPod({ enabled: p.gpu })
   const gpuCap = runpod.data ? `$${runpod.data.settings.maxHourlyUsd}/hr (Settings › RunPod GPU › Max per project)` : "Settings › RunPod GPU › Max per project"
+  const rp = runpod.data?.settings
+  const m = p.machine
+  const setM = (patch: Partial<MachineDraft>) => p.setMachine({ ...m, ...patch })
+  const cloud = m.cloud || rp?.cloud || "SECURE"
   const s = p.info?.settings
   const followsSize = (k: "slotsPerBox" | "maxResidentPerBox") => !p.info || p.info.sources[k] === "default"
   const perBox = (k: "slotsPerBox" | "maxResidentPerBox") => (followsSize(k) || !s ? { long: `each box's size default (${bySize(k)})`, short: "by box size" } : { long: String(s[k]), short: String(s[k]) })
@@ -485,6 +498,58 @@ function ProjectBoxSettings(p: {
           />
         </OverrideField>
       )}
+      {p.gpu && (
+        <div className="space-y-3" data-testid="project-gpu-machine">
+          <OverrideField
+            id="project-gpu-types"
+            label="GPU types"
+            global={rp ? `${rp.gpuTypes.map(shortGpu).join(", ")} (Settings › RunPod GPU)` : "Settings › RunPod GPU › GPU types"}
+            set={m.gpuTypes !== null}
+            onClear={() => setM({ gpuTypes: null })}
+            hint="Its new pods try these in order; the first in stock within the caps wins. For browser and WebGL game testing an RTX A4000, RTX 4000 Ada or (Community) RTX 3070 is plenty."
+          >
+            {m.gpuTypes ? (
+              <GpuTypePicker id="project-gpu-types" value={m.gpuTypes} onChange={(gpuTypes) => setM({ gpuTypes })} cloud={cloud} enabled={Boolean(runpod.data?.apiKey)} />
+            ) : (
+              <Button type="button" size="sm" variant="ghost" onClick={() => setM({ gpuTypes: [...(rp?.gpuTypes ?? [])] })} data-testid="project-gpu-types-own" disabled={!rp}>
+                Pick this project's own
+              </Button>
+            )}
+          </OverrideField>
+          <OverrideField id="project-gpu-cloud" label="Cloud" global={rp ? CLOUD_OPTION[rp.cloud].split(":")[0]! : "Settings › RunPod GPU › Cloud"} set={Boolean(m.cloud)} onClear={() => setM({ cloud: "" })} hint={CLOUD_HELP}>
+            <Select id="project-gpu-cloud" className="w-full min-w-0 sm:w-80" value={m.cloud} onChange={(e) => setM({ cloud: e.target.value as RunPodCloud | "" })} data-testid="project-gpu-cloud">
+              <option value="">Global: {rp ? CLOUD_OPTION[rp.cloud].split(":")[0] : "Settings › RunPod GPU"}</option>
+              {RUNPOD_CLOUDS.map((c) => (
+                <option key={c} value={c}>
+                  {CLOUD_OPTION[c]}
+                </option>
+              ))}
+            </Select>
+          </OverrideField>
+          <div className="grid gap-3 @4xl:grid-cols-2">
+            <OverrideField
+              id="project-gpu-min-ram"
+              label="Min RAM (GB)"
+              global={rp ? `${rp.minRamGb} GB (Settings › RunPod GPU)` : "Settings › RunPod GPU › Min RAM"}
+              set={m.minRamGb.trim() !== ""}
+              onClear={() => setM({ minRamGb: "" })}
+              hint="Its new pods only go to hosts with at least this much RAM. A game's browser needs about 12 GB; cheap Community hosts can have less."
+            >
+              <LimitInput id="project-gpu-min-ram" range={RUNPOD_MACHINE_LIMITS.minRamGb} value={m.minRamGb} onChange={(minRamGb) => setM({ minRamGb })} placeholder={rp ? `Global: ${rp.minRamGb}` : "Global"} />
+            </OverrideField>
+            <OverrideField
+              id="project-gpu-min-vcpus"
+              label="Min vCPUs"
+              global={rp ? `${rp.minVcpus} (Settings › RunPod GPU)` : "Settings › RunPod GPU › Min vCPUs"}
+              set={m.minVcpus.trim() !== ""}
+              onClear={() => setM({ minVcpus: "" })}
+              hint="…and at least this many vCPUs. Running pods keep what they have; these apply to new ones."
+            >
+              <LimitInput id="project-gpu-min-vcpus" range={RUNPOD_MACHINE_LIMITS.minVcpus} value={m.minVcpus} onChange={(minVcpus) => setM({ minVcpus })} placeholder={rp ? `Global: ${rp.minVcpus}` : "Global"} />
+            </OverrideField>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -566,6 +631,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
   const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
   const [gpuMaxHourlyUsd, setGpuMaxHourlyUsd] = useState(project.gpuMaxHourlyUsd?.toString() ?? "")
+  const [machine, setMachine] = useState<MachineDraft>(() => machineDraft(project.gpuMachine))
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -609,6 +675,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           tasksPerBox: optionalInt(tasksPerBox),
           maxBoxes: optionalInt(maxBoxes),
           ...(runner === "gpu" || project.gpuMaxHourlyUsd !== null ? { gpuMaxHourlyUsd: optionalNumber(gpuMaxHourlyUsd) } : {}),
+          ...(runner === "gpu" ? { gpuMachine: { gpuTypes: machine.gpuTypes, cloud: machine.cloud || null, minRamGb: optionalInt(machine.minRamGb), minVcpus: optionalInt(machine.minVcpus) } } : {}),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -689,6 +756,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         setMaxBoxes={setMaxBoxes}
         gpuMaxHourlyUsd={gpuMaxHourlyUsd}
         setGpuMaxHourlyUsd={setGpuMaxHourlyUsd}
+        machine={machine}
+        setMachine={setMachine}
       />
       <Field
         label="Partial clone mirror"

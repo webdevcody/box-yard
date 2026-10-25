@@ -1,7 +1,8 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { WorkerSize } from "../../shared/types.js"
-import { RUNPOD_STOCK_IMAGE, gpuBoxIndex, gpuBoxProject, isGpuBox, type RunPodSettings } from "../../shared/runpod.js"
+import { RUNPOD_STOCK_IMAGE, cloudLabel, shortGpu, gpuBoxIndex, gpuBoxProject, isGpuBox, type ProjectGpuMachine, type RunPodCloud } from "../../shared/runpod.js"
+import type { RunPodSettings } from "../../shared/runpod.js"
 import { RunPodError, rankDataCenters, type CatalogGpu, type RunPodApi, type RunPodPod, type RunPodVolume } from "../runpod/api.js"
 import type { SshPool, SshTarget } from "../runpod/ssh.js"
 import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
@@ -40,6 +41,23 @@ export interface RunPodProviderDeps {
   onProgress?: (boxId: string, message: string) => void
   /** A project's own $/hr cap for its pods (Project.gpuMaxHourlyUsd), or null for Settings › RunPod GPU's. */
   projectCap?: (projectId: string) => number | null
+  /** A project's own GPU types, cloud and least host RAM/vCPUs (Project.gpuMachine); null fields use the settings'. */
+  projectMachine?: (projectId: string) => ProjectGpuMachine
+}
+
+/** What a project's next pod asks RunPod for. */
+export interface PodMachine {
+  gpuTypes: string[]
+  cloud: RunPodCloud
+  minRamGb: number
+  minVcpus: number
+}
+
+/** A GPU type's list price on a cloud, or null when RunPod doesn't offer it there. */
+export function catalogPrice(g: CatalogGpu, cloud: RunPodCloud): number | null {
+  const offered = cloud === "COMMUNITY" ? (g.community ?? g.price.community > 0) : g.secure
+  const usd = cloud === "COMMUNITY" ? g.price.community : g.price.secure
+  return offered && usd > 0 ? usd : null
 }
 
 /**
@@ -209,11 +227,14 @@ export class RunPodProvider implements BoxProvider {
   async ensureVolume(boxId: string, gpus?: CatalogGpu[]): Promise<RunPodVolume | null> {
     if (gpuBoxIndex(boxId) > 1) return null
     const s = this.d.settings()
+    const machine = this.machineOf(gpuBoxProject(boxId))
+    // Network volumes are Secure Cloud only: a Community pod keeps its caches on its container disk.
+    if (machine.cloud !== "SECURE") return null
     const name = this.volumeName(boxId)
     const mine = (await this.d.api.listVolumes()).find((v) => v.name === name)
     if (mine || s.volumeGb <= 0) return mine ?? null
     const dcs = await this.d.api.dataCenters()
-    const wanted = this.affordable(s, gpus ?? (await this.gpuCatalog()), this.capOf(gpuBoxProject(boxId))).map((g) => g.id)
+    const wanted = this.affordable(machine, gpus ?? (await this.gpuCatalog()), this.capOf(gpuBoxProject(boxId))).map((c) => c.gpu.id)
     const ranked = rankDataCenters(dcs, wanted)
     const pick = s.dataCenter ? dcs.find((dc) => dc.id === s.dataCenter) : null
     const dc = pick
@@ -241,20 +262,42 @@ export class RunPodProvider implements BoxProvider {
     return this.catalog.gpus
   }
 
-  /** GPU types in priority order whose list price is within the project's cap (no one pod may cost more). */
-  private affordable(s: RunPodSettings, gpus: CatalogGpu[], cap: number): CatalogGpu[] {
-    const byId = new Map(gpus.map((g) => [g.id, g]))
-    return s.gpuTypes.map((id) => byId.get(id)).filter((g): g is CatalogGpu => Boolean(g && g.secure && (!cap || g.price.secure <= cap)))
+  /** The machine a project's next pod asks for: its own GPU types, cloud and minimums, else Settings › RunPod GPU's. */
+  machineOf(projectId: string): PodMachine {
+    const s = this.d.settings()
+    const own = this.d.projectMachine?.(projectId)
+    return {
+      gpuTypes: own?.gpuTypes?.length ? own.gpuTypes : s.gpuTypes,
+      cloud: own?.cloud ?? s.cloud,
+      minRamGb: own?.minRamGb ?? s.minRamGb,
+      minVcpus: own?.minVcpus ?? s.minVcpus,
+    }
   }
 
   /**
-   * What the project's next pod would likely cost: the list price of the first GPU type in Settings › RunPod GPU
-   * that fits its cap (the type a pod tries first). Null when none fits. Placement checks the caps with it before
-   * it counts on a new pod.
+   * The machine's GPU types in priority order that its cloud offers, each at its list price there, within the
+   * project's cap (no one pod may cost more).
+   */
+  private affordable(m: PodMachine, gpus: CatalogGpu[], cap: number): { gpu: CatalogGpu; usd: number }[] {
+    const byId = new Map(gpus.map((g) => [g.id, g]))
+    const out: { gpu: CatalogGpu; usd: number }[] = []
+    for (const id of m.gpuTypes) {
+      const gpu = byId.get(id)
+      const usd = gpu ? catalogPrice(gpu, m.cloud) : null
+      if (gpu && usd !== null && (!cap || usd <= cap)) out.push({ gpu, usd })
+    }
+    return out
+  }
+
+  /**
+   * What the project's next pod would likely cost: the list price, on the project's cloud, of the first of its GPU
+   * types that fits its cap (the type a pod tries first). Null when none fits. Placement checks the caps with it
+   * before it counts on a new pod.
    */
   async nextPodPrice(projectId: string): Promise<{ gpu: string; usd: number } | null> {
-    const first = this.affordable(this.d.settings(), await this.gpuCatalog(), this.capOf(projectId))[0]
-    return first ? { gpu: shortGpu(first.id), usd: first.price.secure } : null
+    const m = this.machineOf(projectId)
+    const first = this.affordable(m, await this.gpuCatalog(), this.capOf(projectId))[0]
+    return first ? { gpu: `${shortGpu(first.gpu.id)}${m.cloud === "COMMUNITY" ? " (Community)" : ""}`, usd: first.usd } : null
   }
 
   private startPod(boxId: string): Promise<RunPodPod> {
@@ -267,39 +310,45 @@ export class RunPodProvider implements BoxProvider {
     const s = this.d.settings()
     const projectId = gpuBoxProject(boxId)
     const cap = this.capOf(projectId)
+    const m = this.machineOf(projectId)
     const gpus = await this.gpuCatalog(true)
-    const candidates = this.affordable(s, gpus, cap)
+    const candidates = this.affordable(m, gpus, cap)
     if (!candidates.length) {
-      throw new Error(`None of the GPU types in Settings › RunPod GPU (${s.gpuTypes.map(shortGpu).join(", ")}) is offered on Secure Cloud within the $${cap}/hr cap`)
+      throw new Error(`None of the project's GPU types (${m.gpuTypes.map(shortGpu).join(", ")}) is offered on ${cloudLabel(m.cloud)} within the $${cap}/hr cap`)
     }
     // The caps count every pod this install has running, and the project's own.
     const others = (await this.listPods(true)).filter((p) => p.boxId !== boxId)
     const spend = others.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0)
     const projectSpend = others.filter((p) => gpuBoxProject(p.boxId) === projectId).reduce((sum, p) => sum + (p.pod.cost ?? 0), 0)
     const volume = await this.ensureVolume(boxId, gpus)
-    const dcs = volume ? null : await this.d.api.dataCenters()
+    // Community hosts aren't in RunPod's datacenter list: RunPod places those pods itself.
+    const secure = m.cloud === "SECURE"
+    const dcs = volume || !secure ? null : await this.d.api.dataCenters()
     const misses: string[] = []
-    for (const gpu of candidates) {
-      if (s.totalMaxHourlyUsd && spend + gpu.price.secure > s.totalMaxHourlyUsd) {
-        misses.push(`${shortGpu(gpu.id)} would take GPU spend to $${(spend + gpu.price.secure).toFixed(2)}/hr, over the $${s.totalMaxHourlyUsd}/hr total cap`)
+    for (const { gpu, usd } of candidates) {
+      if (s.totalMaxHourlyUsd && spend + usd > s.totalMaxHourlyUsd) {
+        misses.push(`${shortGpu(gpu.id)} would take GPU spend to $${(spend + usd).toFixed(2)}/hr, over the $${s.totalMaxHourlyUsd}/hr total cap`)
         continue
       }
-      if (cap && projectSpend + gpu.price.secure > cap) {
-        misses.push(`${shortGpu(gpu.id)} would take the project's pods to $${(projectSpend + gpu.price.secure).toFixed(2)}/hr, over its $${cap}/hr cap`)
+      if (cap && projectSpend + usd > cap) {
+        misses.push(`${shortGpu(gpu.id)} would take the project's pods to $${(projectSpend + usd).toFixed(2)}/hr, over its $${cap}/hr cap`)
         continue
       }
-      const dc = volume?.dataCenter ?? s.dataCenter ?? rankDataCenters(dcs ?? [], [gpu.id])[0]?.id
-      if (!dc) {
+      const dc = secure ? (volume?.dataCenter ?? s.dataCenter ?? rankDataCenters(dcs ?? [], [gpu.id])[0]?.id ?? null) : null
+      if (secure && !dc) {
         misses.push(`no ${shortGpu(gpu.id)} in stock`)
         continue
       }
-      this.progress(boxId, `Starting a RunPod ${shortGpu(gpu.id)} in ${dc}`)
+      this.progress(boxId, `Starting a RunPod ${shortGpu(gpu.id)} ${dc ? `in ${dc}` : "on Community Cloud"} (${m.minRamGb} GB RAM, ${m.minVcpus} vCPUs or more)`)
       try {
         const pod = await this.d.api.createPod({
           name: this.resourceName(boxId),
           image: s.image || RUNPOD_STOCK_IMAGE,
           gpuId: gpu.id,
+          cloud: m.cloud,
           dataCenterId: dc,
+          minRamGb: m.minRamGb,
+          minVcpus: m.minVcpus,
           volumeId: volume?.id ?? null,
           containerDiskGb: s.containerDiskGb,
           ports: ["22/tcp", ...POD_HTTP_PORTS.map((p) => `${p}/http`)],
@@ -318,11 +367,11 @@ export class RunPodProvider implements BoxProvider {
           continue
         }
         this.listed = null
-        this.d.onEvent?.({ boxId, kind: "started", pod, detail: `${shortGpu(gpu.id)} in ${dc} at $${pod.cost ?? gpu.price.secure}/hr${volume ? `, volume ${volume.id}` : ""}` })
+        this.d.onEvent?.({ boxId, kind: "started", pod, detail: `${shortGpu(gpu.id)} ${dc ? `in ${dc}` : "on Community Cloud"} at $${pod.cost ?? usd}/hr${volume ? `, volume ${volume.id}` : ""}` })
         return pod
       } catch (err) {
         if (err instanceof RunPodError && (err.capacity || err.status === 500)) {
-          misses.push(`no ${shortGpu(gpu.id)} free in ${dc}`)
+          misses.push(`no ${shortGpu(gpu.id)} free ${dc ? `in ${dc}` : "on Community Cloud"} with ${m.minRamGb} GB RAM and ${m.minVcpus} vCPUs`)
           continue
         }
         throw err
@@ -468,5 +517,4 @@ function targetOf(pod: RunPodPod): SshTarget | null {
   return d?.host && d.port ? { podId: pod.id, host: d.host, port: d.port } : null
 }
 
-/** "NVIDIA RTX A5000" → "RTX A5000". */
-export const shortGpu = (id: string) => id.replace(/^NVIDIA (GeForce )?/, "")
+export { shortGpu }

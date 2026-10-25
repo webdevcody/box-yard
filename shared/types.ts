@@ -8,7 +8,7 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
-import type { RunPodImageBuild } from "./runpod.js"
+import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -75,6 +75,8 @@ export interface Project {
    * applies). null uses Settings › RunPod GPU › Per-project cap.
    */
   gpuMaxHourlyUsd: number | null
+  /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
+  gpuMachine: ProjectGpuMachine
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number

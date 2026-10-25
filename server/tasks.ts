@@ -1098,14 +1098,20 @@ export class TaskManager {
    * A project's RunPod GPU pods and caps as they apply now (list_projects, pool_status), from the pods as last listed
    * (`fresh` lists them again). Null when this Box Yard has no GPU runner.
    */
-  async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes">, fresh = false) {
+  async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes" | "gpuMachine">, fresh = false) {
     if (!this.gpu) return null
     if (fresh && this.gpu.enabled()) await this.gpuPods()
     const s = this.gpu.settings()
     const usd = (n: number) => `$${Math.round(n * 100) / 100}/hr`
     const pods = this.gpuSeen.filter((x) => gpuBoxProject(x.boxId) === p.id).sort((a, b) => gpuBoxIndex(a.boxId) - gpuBoxIndex(b.boxId))
     const own = p.gpuMaxHourlyUsd
+    const m = p.gpuMachine
+    const from = (mine: unknown, global: string) => (mine !== null ? "this project" : `global: Settings › RunPod GPU › ${global}`)
     return {
+      gpuTypes: `${(m.gpuTypes ?? s.gpuTypes).map(shortGpu).join(", ")} (${from(m.gpuTypes, "GPU types")})`,
+      cloud: `${m.cloud ?? s.cloud} (${from(m.cloud, "Cloud")})`,
+      minRamGb: `${m.minRamGb ?? s.minRamGb} (${from(m.minRamGb, "Min RAM")})`,
+      minVcpus: `${m.minVcpus ?? s.minVcpus} (${from(m.minVcpus, "Min vCPUs")})`,
       maxHourlyUsd: own !== null ? `${own ? usd(own) : "none"} (this project)` : `global: ${usd(s.maxHourlyUsd)} (Settings › RunPod GPU › Max per project)`,
       totalMaxHourlyUsd: `${usd(s.totalMaxHourlyUsd)} for every project's pods together (Settings › RunPod GPU › Max for all pods)`,
       maxPods: p.maxBoxes !== null ? `${Math.min(p.maxBoxes, MAX_GPU_PODS)} (its Max boxes)` : `${MAX_GPU_PODS} (no Max boxes set; the $/hr caps bound it)`,

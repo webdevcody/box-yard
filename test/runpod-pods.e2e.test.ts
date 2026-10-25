@@ -231,6 +231,19 @@ describe("RunPod GPU: pods per project", () => {
     expect(boxOf(r, fourth)).toBe(gpuBoxId(p.id, 4))
   })
 
+  it("lets a Captain pick its project's GPU types, cloud and minimums, and list_projects says whose they are", async () => {
+    const r = await start()
+    const p = await gpuProject(r, "game", {})
+    const captain = await mcpAs(r, { kind: "captain", projectId: p.id })
+    const [before] = await captain("list_projects")
+    expect(before.gpu).toMatchObject({ gpuTypes: "RTX A5000, A40 (global: Settings › RunPod GPU › GPU types)", cloud: "SECURE (global: Settings › RunPod GPU › Cloud)", minRamGb: "24 (global: Settings › RunPod GPU › Min RAM)", minVcpus: "8 (global: Settings › RunPod GPU › Min vCPUs)" })
+    const updated = await captain("update_project", { gpu_types: ["NVIDIA RTX A4000", "NVIDIA GeForce RTX 3070"], gpu_cloud: "COMMUNITY", gpu_min_ram_gb: 32 })
+    expect(updated.gpu).toMatchObject({ gpuTypes: "RTX A4000, RTX 3070 (this project)", cloud: "COMMUNITY (this project)", minRamGb: "32 (this project)", minVcpus: "8 (global: Settings › RunPod GPU › Min vCPUs)" })
+    expect(r.yard.store.getProject(p.id)?.gpuMachine).toEqual({ gpuTypes: ["NVIDIA RTX A4000", "NVIDIA GeForce RTX 3070"], cloud: "COMMUNITY", minRamGb: 32, minVcpus: null })
+    await captain("update_project", { gpu_cloud: null, gpu_types: null })
+    expect(r.yard.store.getProject(p.id)?.gpuMachine).toEqual({ gpuTypes: null, cloud: null, minRamGb: 32, minVcpus: null })
+  })
+
   it("holds a task back at the total cap across projects", async () => {
     const r = await start({ totalMaxHourlyUsd: 0.6 })
     const a = await gpuProject(r, "alpha", { agentsPerBox: 1 })

@@ -168,7 +168,7 @@ describe("project box settings: API", () => {
     const captain = await mcpAs(r, { kind: "captain", projectId: a.id })
     const tools = (await captain.client.listTools()).tools
     const schema = tools.find((t) => t.name === "update_project")!.inputSchema.properties!
-    expect(Object.keys(schema).sort()).toEqual(["agents_per_box", "box_size", "gpu_max_hourly_usd", "max_boxes", "project", "tasks_per_box"])
+    expect(Object.keys(schema).sort()).toEqual(["agents_per_box", "box_size", "gpu_cloud", "gpu_max_hourly_usd", "gpu_min_ram_gb", "gpu_min_vcpus", "gpu_types", "max_boxes", "project", "tasks_per_box"])
     expect((await captain.tool("update_project", { agents_per_box: 3, max_boxes: null })).isError).not.toBe(true)
     expect(r.yard.store.getProject(a.id)).toMatchObject({ name: "alpha", agentsPerBox: 3, tasksPerBox: 5, maxBoxes: null })
     await captain.tool("update_project", { project: "alpha", name: "renamed", description: "x", tasks_per_box: 6 })

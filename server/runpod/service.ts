@@ -2,13 +2,13 @@ import path from "node:path"
 import type { Store } from "../store.js"
 import { BadRequestError, NotFoundError } from "../store.js"
 import type { CredentialStore } from "../credentials.js"
-import { RunPodProvider, shortGpu } from "../providers/runpod.js"
+import { RunPodProvider, catalogPrice, shortGpu } from "../providers/runpod.js"
 import type { GpuRunner } from "../tasks.js"
 import { RunPodApi } from "./api.js"
 import { SshPool } from "./ssh.js"
 import { RunPodSettingsStore } from "./settings.js"
 import { ImageBuilder, checkDocker, imageTag, runpodDir } from "./image.js"
-import { gpuBoxId, gpuBoxIndex, gpuBoxProject, isGpuBox, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
+import { gpuBoxId, gpuBoxIndex, gpuBoxProject, isGpuBox, RUNPOD_GPU_GUIDE, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
 
 const MAX_KEEP_WARM_MINUTES = 24 * 60
 
@@ -51,6 +51,7 @@ export class RunPodService implements GpuRunner {
       onEvent: (e) => this.onPodEvent?.({ boxId: e.boxId, kind: e.kind, detail: e.detail }),
       onProgress: (boxId, message) => this.onProgress?.(boxId, message),
       projectCap: (projectId) => d.store.projectGpuCap(projectId),
+      projectMachine: (projectId) => d.store.projectGpuMachine(projectId),
     })
     this.images = new ImageBuilder({
       secrets: () => d.credentials.secrets(),
@@ -81,13 +82,23 @@ export class RunPodService implements GpuRunner {
     return until
   }
 
-  /** GPU types RunPod offers on Secure Cloud, cheapest first, for the settings picker. */
+  /** GPU types RunPod offers on Secure or Community Cloud, with both prices and a hint, cheapest first, for the pickers. */
   async gpuOptions(): Promise<RunPodGpuOption[]> {
     const gpus = await this.api.gpus()
+    const cheapest = (g: RunPodGpuOption) => Math.min(g.securePrice ?? Infinity, g.communityPrice ?? Infinity)
     return gpus
-      .filter((g) => g.secure && g.price?.secure > 0)
-      .map((g) => ({ id: g.id, name: shortGpu(g.id), memoryGb: g.memory, securePrice: g.price.secure, availability: g.availability ?? "NONE" }))
-      .sort((a, b) => a.securePrice - b.securePrice)
+      .filter((g) => g.price)
+      .map((g) => ({
+        id: g.id,
+        name: shortGpu(g.id),
+        memoryGb: g.memory,
+        securePrice: catalogPrice(g, "SECURE"),
+        communityPrice: catalogPrice(g, "COMMUNITY"),
+        availability: g.availability ?? "NONE",
+        use: RUNPOD_GPU_GUIDE[g.id]?.use ?? null,
+      }))
+      .filter((g) => g.securePrice !== null || g.communityPrice !== null)
+      .sort((a, b) => cheapest(a) - cheapest(b))
   }
 
   /** Everything Settings › RunPod GPU shows. RunPod errors land in `error`, never thrown. */

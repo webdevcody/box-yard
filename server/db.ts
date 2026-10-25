@@ -682,6 +682,14 @@ export const MIGRATIONS: string[] = [
   -- per-project cap. 0: no per-project cap (the total cap still applies).
   ALTER TABLE projects ADD COLUMN gpu_max_hourly_usd REAL;
   `,
+  `
+  -- A GPU project's own machine for its new pods (docs/runpod.md): the GPU types to try in order (JSON array), the
+  -- cloud ('SECURE' or 'COMMUNITY') and the least host RAM (GB) and vCPUs. NULL: Settings › RunPod GPU's.
+  ALTER TABLE projects ADD COLUMN gpu_types_json TEXT;
+  ALTER TABLE projects ADD COLUMN gpu_cloud TEXT;
+  ALTER TABLE projects ADD COLUMN gpu_min_ram_gb INTEGER;
+  ALTER TABLE projects ADD COLUMN gpu_min_vcpus INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
