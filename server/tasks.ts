@@ -52,6 +52,8 @@ import { LOCAL_BOX_ID, isLocalRunnerBox } from "../shared/runner.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
+import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
+import { SCRATCH_MARKER, depsSaveScript, depsSaveSummary, stripCounts, stripScript, stripSummary } from "./boxSnapshot.js"
 import {
   compareSizes,
   initiatorLabel,
@@ -67,15 +69,17 @@ import {
   type ResizeStep,
 } from "../shared/boxSizes.js"
 
-type BoxOp = "clear" | "delete" | "resize"
+type BoxOp = "clear" | "delete" | "resize" | "snapshot"
 
 function busyMessage(boxId: string, op: BoxOperation) {
-  const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing" }[op]
+  const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing", snapshot: "a project snapshot" }[op]
   return `Box ${boxId} is busy: ${what} is in progress.`
 }
 
 /** The box history actor for whoever asked for a resize (Cody from the UI, the Coordinator or a Captain). */
 const resizeActor = (by: ResizeInitiator): BoxActor => (by.kind === "cody" ? { kind: "owner" } : by)
+/** The box history actor for whoever asked for a project snapshot. */
+const snapshotActor = (by: SnapshotInitiator): BoxActor => (by.kind === "cody" ? { kind: "owner" } : by)
 
 /** Task ids a cleanup took off its box ("task_x (archived)" and the like in its steps' removed lists). */
 const cleanupTaskIds = (report: BoxCleanup) => [
@@ -245,6 +249,10 @@ const AUTO_RESIZE_RETRY_MS = 15 * 60_000
 
 /** The running or last resize of a box (old and new box both point at it). */
 const resizeKey = (boxId: string) => `box_resize:${boxId}`
+/** A project's running or last snapshot job (shared/snapshots.ts). */
+const snapshotJobKey = (projectId: string) => `snapshot_job:${projectId}`
+/** Snapshot ids Box Yard made and must delete (a job's first snapshot, a replaced one), kept until the provider confirms. */
+const PENDING_SNAPSHOTS_KEY = "snapshots_to_delete"
 /** A box row's last memory and load reading, or null before the first. */
 const boxMemory = (b: BoxRow): BoxMemory | null =>
   b.mem_used_bytes != null && b.mem_total_bytes != null ? { usedBytes: b.mem_used_bytes, totalBytes: b.mem_total_bytes, load1: b.load_avg ?? 0, cpus: b.cpu_count ?? 1 } : null
@@ -366,6 +374,11 @@ export class TaskManager {
   private boxOps = new Map<string, BoxOp>()
   /** Resizes in progress, by box (the old box and, once made, the new one). */
   private resizes = new Map<string, BoxResize>()
+  /** Project snapshot jobs running now, by project. */
+  private snapshotJobs = new Map<string, SnapshotJob>()
+  /** "<projectId>:<why>" for a snapshot new boxes couldn't use that the Captain was already told about. */
+  private snapshotNoted = new Set<string>()
+  private lastSnapshotRetryAt = 0
   /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive), and noteOnce keys. */
   private smallBoxNoted = new Set<string>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
@@ -473,6 +486,15 @@ export class TaskManager {
       if (made && !this.store.listTaskRows({ boxId: made.id }).length)
         void this.dropBox(made.id, r, `Box Yard restarted during the resize of ${r.boxId}, so nothing moved to it.`).then((note) => this.noteResizeCleanup(r, note))
     }
+    // A project snapshot can't pick up either. Its scratch box carries this install's label, so the orphan sweep
+    // deletes it; its snapshots are on the to-delete list.
+    for (const p of this.store.listProjects()) {
+      const job = this.snapshotJob(p.id)
+      if (job?.status !== "running") continue
+      job.error = "Box Yard restarted while the snapshot was being taken; try again."
+      this.finishSnapshot(job, "failed", "")
+    }
+    void this.retryPendingSnapshots(true)
     // No turn is starting yet: messages a launch had claimed are queued (and editable) again.
     this.store.releaseInputs()
     for (const row of this.store.listTaskRows({ status: ["starting"] })) {
@@ -1019,6 +1041,7 @@ export class TaskManager {
         limitLoweredFrom: this.limitLoweredFrom(b.id, residents),
         residentTasks: residents.map((r) => r.id),
         projects: [...new Set(residents.map((r) => this.store.getProject(r.project_id)?.name ?? r.project_id))],
+        projectIds: this.projectsOnBox(b.id),
         activeMs: b.active_ms ?? 0,
         uptimeMs,
         diskBytes: b.disk_bytes ?? null,
@@ -1364,8 +1387,10 @@ export class TaskManager {
         // Counted like a pool box being created, so the orphan sweep leaves it alone until it's in the database.
         this.creatingBoxes++
         let id: string
+        let made: Awaited<ReturnType<TaskManager["createFor"]>>
         try {
-          id = await this.provider.create({ labels: this.boxLabels(owner), size: r.to })
+          made = await this.createFor(owner, this.boxLabels(owner), r.to)
+          id = made.id
           this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size: r.to, keep_alive: old.keep_alive, usage_source: "estimated" })
         } catch (err) {
           throw new Error(`Couldn't create a ${r.to} box: ${errorMessage(err)}`)
@@ -1380,9 +1405,11 @@ export class TaskManager {
           reason: `Target of the resize of ${r.boxId} ${r.from} → ${r.to}, asked by ${initiatorLabel(r.by, this.initiatorProjectName(r.by))}${r.reason ? `: ${r.reason}` : "."}`,
           relatedBoxId: r.boxId,
           resizeId: r.id,
+          detail: createdDetail(made, owner ? this.store.getProject(owner)?.name : undefined),
           projects: this.projectsOnBox(r.boxId).map((p) => ({ id: p, name: this.store.getProject(p)?.name ?? p })),
           taskIds: this.store.listTaskRows({ boxId: r.boxId }).map((row) => row.id),
         })
+        this.afterCreateFor(id, owner, made, { kind: "resize" })
         // Nothing lands on it until the move is done.
         this.boxOps.set(id, "resize")
         r.newBoxId = id
@@ -1616,6 +1643,397 @@ export class TaskManager {
     })
   }
 
+  // ------------------------------------------------------------------ project snapshots
+
+  /** A project's running snapshot job, or its last one (shared/snapshots.ts). */
+  snapshotJob(projectId: string): SnapshotJob | null {
+    const live = this.snapshotJobs.get(projectId)
+    if (live) return structuredClone(live)
+    const raw = this.store.getKv(snapshotJobKey(projectId))
+    if (!raw) return null
+    try {
+      return JSON.parse(raw) as SnapshotJob
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Take a snapshot of a box for a project, for its new boxes to start from. The box itself is never changed: it's
+   * snapshotted as it is (nothing is placed on it meanwhile), that snapshot is restored on a scratch box, the scratch
+   * box is stripped of every workspace, login, temp file and log (server/boxSnapshot.ts) and snapshotted again, and
+   * the scratch box and the first snapshot are deleted. Refuses while agents run on the box, for a project that runs
+   * on this computer, and for a box that doesn't hold the project's work. Answers right away with the running job;
+   * progress goes out as SSE `project.snapshot`. A snapshot the project had is deleted once the new one is saved.
+   */
+  async snapshotBox(boxId: string, projectId: string, opts: { by?: SnapshotInitiator; reason?: string | null } = {}): Promise<SnapshotJob> {
+    const project = this.store.getProject(projectId)
+    if (!project) throw new NotFoundError(`Project ${projectId} not found`)
+    if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
+    if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
+    const box = this.store.getBox(boxId)
+    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be snapshotted.`)
+    const own = providerOf(this.provider, boxId)
+    if (!own.snapshot || !own.deleteSnapshot) throw new BadRequestError(`${own.name} boxes can't be snapshotted.`)
+    if (!this.projectsOnBox(boxId).includes(projectId)) {
+      throw new BadRequestError(`Box ${boxId} doesn't hold ${project.name}'s work: snapshot a box its tasks ran on, so its repo and dependencies are there.`)
+    }
+    if (this.snapshotJobs.has(projectId)) throw new ConflictError(`A snapshot for ${project.name} is already being taken.`)
+    this.claimBox(boxId, "snapshot", false)
+    const step = (key: SnapshotStep["key"]): SnapshotStep => ({ key, label: SNAPSHOT_STEP_LABELS[key], status: "pending", detail: null })
+    const job: SnapshotJob = {
+      id: `snp_${randomUUID().slice(0, 12)}`,
+      projectId,
+      boxId,
+      size: normalizeBoxSize(box.size),
+      status: "running",
+      steps: (["snapshot", "restore", "strip", "save", "cleanup"] as const).map(step),
+      by: opts.by ?? { kind: "cody" },
+      reason: opts.reason?.trim() || null,
+      scratchBoxId: null,
+      snapshotId: null,
+      error: null,
+      startedAt: Date.now(),
+      finishedAt: null,
+    }
+    this.snapshotJobs.set(projectId, job)
+    this.publishSnapshot(job)
+    console.log(`[box-yard] snapshotting box ${boxId} for project ${project.name}`)
+    void this.runSnapshot(job)
+    return structuredClone(job)
+  }
+
+  /** Forget a project's snapshot and delete it at the provider; its new boxes start cold again. */
+  async clearProjectSnapshot(projectId: string): Promise<Project> {
+    const project = this.store.getProject(projectId)
+    if (!project) throw new NotFoundError(`Project ${projectId} not found`)
+    if (this.snapshotJobs.has(projectId)) throw new ConflictError(`A snapshot for ${project.name} is being taken; clear it once that's done.`)
+    const snap = project.snapshot
+    if (!snap) return project
+    const updated = this.store.setProjectSnapshot(projectId, null)!
+    this.hub.broadcast({ type: "project", project: updated })
+    await this.dropSnapshot(snap.id)
+    console.log(`[box-yard] cleared project ${project.name}'s snapshot ${snap.id}`)
+    return updated
+  }
+
+  /** A project being deleted: its snapshot goes too. A job still running for it drops its own when it sees the project gone. */
+  async projectDeleted(projectId: string) {
+    const snap = this.store.getProject(projectId)?.snapshot
+    if (!snap) return
+    this.store.setProjectSnapshot(projectId, null)
+    await this.dropSnapshot(snap.id)
+  }
+
+  private async runSnapshot(job: SnapshotJob) {
+    const own = providerOf(this.provider, job.boxId)
+    const project = this.store.getProject(job.projectId)!
+    const base = `boxyard-${this.installLabel().slice(3)}-${slugify(project.name).slice(0, 24) || "project"}-${job.id.slice(4)}`
+    let raw: string | null = null
+    let scratch: string | null = null
+    let saved: { id: string; bytes: number | null } | null = null
+    let stripped = ""
+    // The scratch box is at the provider but never in the database: counted as a box being created, so the orphan
+    // sweep leaves it alone. It carries this install's label, so after a crash the sweep deletes it.
+    let holdingScratch = false
+    try {
+      await this.snapshotStep(job, "snapshot", async () => {
+        try {
+          // A cleanup may be removing files right now; let it finish first.
+          while (this.janitor.isRunning(job.boxId)) await new Promise((r) => setTimeout(r, 200))
+          await own.wake(job.boxId).catch(() => {})
+          const info = await own.snapshot!(job.boxId, `${base}-raw`)
+          raw = info.id
+          this.addPendingSnapshot(raw)
+          return `${raw}${info.bytes ? ` (${formatBytes(info.bytes)})` : ""}`
+        } finally {
+          // The rest happens on a copy: the box takes work again.
+          if (this.boxOps.get(job.boxId) === "snapshot") this.boxOps.delete(job.boxId)
+          this.emitBoxes()
+          this.schedule()
+        }
+      })
+      await this.snapshotStep(job, "restore", async () => {
+        this.creatingBoxes++
+        holdingScratch = true
+        const id = await own.create({ labels: [...this.boxLabels(job.projectId), "snapshot-scratch"], size: job.size, snapshotId: raw! })
+        if (id === job.boxId || this.store.getBox(id)) throw new Error(`the provider answered with a box Box Yard already uses (${id})`)
+        scratch = id
+        job.scratchBoxId = id
+        this.recordBoxEvent({
+          boxId: id,
+          type: "created",
+          actor: { kind: "snapshot" },
+          reason: `Scratch copy of ${job.boxId} for ${project.name}'s snapshot; it's stripped, snapshotted and deleted.`,
+          size: job.size,
+          relatedBoxId: job.boxId,
+          projects: [{ id: project.id, name: project.name }],
+          taskIds: [],
+        })
+        const root = own.root(id)
+        const mark = await own.exec(id, `mkdir -p ${q(`${root}/.boxyard`)} && printf '%s' ${q(job.id)} > ${q(`${root}/${SCRATCH_MARKER}`)}`)
+        if (mark.exitCode !== 0) throw new Error(`couldn't mark the scratch box: ${(mark.stderr || mark.stdout).trim().slice(-300)}`)
+        return id
+      })
+      await this.snapshotStep(job, "strip", async () => {
+        const id = scratch!
+        const root = own.root(id)
+        const tasks = own.tasksRoot?.(id) ?? `${root}/tasks`
+        const notes: string[] = []
+        const current = this.store.getProject(job.projectId) ?? project
+        const works = this.store
+          .listTaskRows({ boxId: job.boxId })
+          .filter((r) => r.project_id === job.projectId)
+          .map((r) => `${tasks}/${r.id}/work`)
+        if (works.length && this.depCache(current)) {
+          const runner = `${root}/.boxyard/box-runner.mjs`
+          await own.writeFile(id, runner, this.runnerSource())
+          const deps = await own.exec(id, depsSaveScript({ root, nodeBin: own.nodeBin, runner, works, maxMb: this.settings.get().depCacheMaxMb }))
+          const line = depsSaveSummary(deps.stdout)
+          if (line) notes.push(line)
+        }
+        const keepMirror = this.repoMirrorName(current.repo)
+        const res = await own.exec(id, stripScript({ root, tasks, ...(own.snapshotDirs?.(id) ?? { home: "$HOME", tmp: "/tmp" }), keepMirror, jobId: job.id }))
+        if (res.exitCode !== 0) throw new Error((res.stderr || res.stdout).trim().slice(-500) || `the strip script exited ${res.exitCode}`)
+        stripped = stripSummary(stripCounts(res.stdout), keepMirror)
+        return [stripped, ...notes].join(". ")
+      })
+      await this.snapshotStep(job, "save", async () => {
+        const info = await own.snapshot!(scratch!, base)
+        saved = info
+        this.addPendingSnapshot(info.id)
+        const snap: ProjectSnapshot = { id: info.id, provider: own.name, size: job.size, boxId: job.boxId, bytes: info.bytes, takenAt: Date.now() }
+        const old = this.store.getProject(job.projectId)?.snapshot ?? null
+        const updated = this.store.setProjectSnapshot(job.projectId, snap)
+        if (!updated) throw new Error(`project ${project.name} was deleted meanwhile`)
+        this.removePendingSnapshot(info.id)
+        job.snapshotId = info.id
+        for (const k of this.snapshotNoted) if (k.startsWith(`${job.projectId}:`)) this.snapshotNoted.delete(k)
+        this.hub.broadcast({ type: "project", project: updated })
+        // Replace: the snapshot it had goes once the new one is the project's.
+        if (old && old.id !== info.id) await this.dropSnapshot(old.id)
+        return `${info.id}${info.bytes ? ` (${formatBytes(info.bytes)})` : ""}${old && old.id !== info.id ? `; deleted the previous snapshot ${old.id}` : ""}`
+      })
+    } catch (err) {
+      job.error = `${SNAPSHOT_STEP_LABELS[job.steps.find((s) => s.status === "failed")?.key ?? "snapshot"]}: ${errorMessage(err)}`
+    }
+    // Always: the scratch box and the first snapshot go, and so does a final one the project didn't keep.
+    const failedEarly = job.error !== null
+    await this.snapshotStep(job, "cleanup", async () => {
+      const done: string[] = []
+      const left: string[] = []
+      if (scratch) {
+        const id: string = scratch
+        const err = await own.destroy(id).then(
+          () => null,
+          (e: unknown) => errorMessage(e),
+        )
+        this.recordBoxEvent({
+          boxId: id,
+          type: "deleted",
+          actor: { kind: "snapshot" },
+          reason: `Scratch copy of ${job.boxId} for ${project.name}'s snapshot, no longer needed.`,
+          detail: err ? `The delete failed (${err}); the orphan sweep removes it.` : null,
+          size: job.size,
+          relatedBoxId: job.boxId,
+          projects: [{ id: project.id, name: project.name }],
+          taskIds: [],
+        })
+        if (err) left.push(`scratch box ${id} (${err})`)
+        else done.push(`scratch box ${id}`)
+      }
+      const unwanted: string[] = [...(raw ? [raw] : []), ...(saved && job.snapshotId !== (saved as { id: string }).id ? [(saved as { id: string }).id] : [])]
+      for (const id of unwanted) {
+        const err = await own.deleteSnapshot!(id).then(
+          () => null,
+          (e: unknown) => errorMessage(e),
+        )
+        if (err) left.push(`snapshot ${id} (${err})`)
+        else {
+          this.removePendingSnapshot(id)
+          done.push(`snapshot ${id}`)
+        }
+      }
+      if (left.length) throw new Error(`couldn't delete ${left.join(", ")}; Box Yard retries the snapshots`)
+      return done.length ? `deleted ${done.join(" and ")}` : null
+    }).catch((err) => {
+      if (!failedEarly) console.warn(`[box-yard] snapshot ${job.id} cleanup: ${errorMessage(err)}`)
+    })
+    if (holdingScratch) this.creatingBoxes--
+    this.finishSnapshot(job, failedEarly ? "failed" : "done", stripped)
+  }
+
+  private async snapshotStep(job: SnapshotJob, key: SnapshotStep["key"], fn: () => Promise<string | null>) {
+    const s = job.steps.find((x) => x.key === key)!
+    s.status = "running"
+    this.publishSnapshot(job)
+    try {
+      s.detail = await fn()
+      s.status = "done"
+    } catch (err) {
+      s.status = "failed"
+      s.detail = errorMessage(err)
+      throw err
+    } finally {
+      this.publishSnapshot(job)
+    }
+  }
+
+  private publishSnapshot(job: SnapshotJob) {
+    const copy = structuredClone(job)
+    this.store.setKv(snapshotJobKey(job.projectId), JSON.stringify(copy))
+    this.hub.broadcast({ type: "project.snapshot", job: copy })
+    this.emitBoxes()
+  }
+
+  private finishSnapshot(job: SnapshotJob, status: "done" | "failed", stripped: string) {
+    job.status = status
+    job.finishedAt = Date.now()
+    for (const s of job.steps) if (s.status === "pending" || s.status === "running") s.status = s.status === "running" ? "failed" : "skipped"
+    this.snapshotJobs.delete(job.projectId)
+    if (this.boxOps.get(job.boxId) === "snapshot") this.boxOps.delete(job.boxId)
+    this.publishSnapshot(job)
+    const project = this.store.getProject(job.projectId)
+    const name = project?.name ?? job.projectId
+    this.recordBoxEvent({
+      boxId: job.boxId,
+      type: status === "done" ? "snapshot" : "snapshot_failed",
+      actor: snapshotActor(job.by),
+      reason: job.reason,
+      size: job.size,
+      relatedBoxId: job.scratchBoxId,
+      projects: [{ id: job.projectId, name }],
+      detail:
+        status === "done"
+          ? `Saved as ${name}'s snapshot ${job.snapshotId}: new boxes for it start from it. ${stripped}.`
+          : `${job.error ?? "failed"}. The box itself wasn't changed.`,
+    })
+    console.log(`[box-yard] snapshot of ${job.boxId} for ${name} ${status}${job.error ? `: ${job.error}` : ""}`)
+    if (project) this.announceSnapshot(job, project)
+    this.schedule()
+  }
+
+  /** A notice for the project's Captain and the Coordinator (waking the Captain that asked), and a notification for Cody. */
+  private announceSnapshot(job: SnapshotJob, project: Project) {
+    const who = job.by.kind === "cody" ? withOwner("Cody", this.owner()) : job.by.kind === "coordinator" ? "The Coordinator" : `The ${project.name} Captain`
+    const why = job.reason ? ` Reason: ${job.reason}` : ""
+    const content =
+      job.status === "done"
+        ? `📦 **${project.name}** snapshot saved: ${who} snapshotted box ${job.boxId} (${job.size}). New ${project.name} boxes of ${job.size} or bigger now start from snapshot ${job.snapshotId}, with its repo, dependencies and tools.${why}`
+        : `⚠️ **${project.name}** snapshot failed: ${who} tried to snapshot box ${job.boxId}. ${job.error ?? "It failed"}${/[.!?]$/.test(job.error ?? "") ? "" : "."} Box ${job.boxId} wasn't changed.${why}`
+    this.notice(content, { boxId: job.boxId, snapshotJobId: job.id, projectIds: [project.id], ...(job.by.kind === "captain" ? { captainProjectId: job.by.projectId } : {}) })
+    this.store.addBoxNotification({
+      boxId: job.boxId,
+      title: job.status === "done" ? `Snapshot saved for ${project.name}` : `Snapshot for ${project.name} failed`,
+      summary: `${who}${job.reason ? `: ${job.reason}` : ""}${job.status === "failed" ? ` (${job.error ?? "failed"})` : ""}`,
+      status: job.status === "done" ? "done" : "failed",
+      projectId: project.id,
+      projectName: project.name,
+      href: `/projects/${project.id}?tab=settings`,
+    })
+  }
+
+  /** Delete a snapshot, or keep it on the list to retry (maintain) when the provider can't right now. */
+  private async dropSnapshot(snapshotId: string) {
+    this.addPendingSnapshot(snapshotId)
+    await this.retryPendingSnapshots(true)
+  }
+
+  private pendingSnapshots(): string[] {
+    try {
+      const ids = JSON.parse(this.store.getKv(PENDING_SNAPSHOTS_KEY) ?? "[]") as unknown
+      return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.trim() !== "") : []
+    } catch {
+      return []
+    }
+  }
+
+  private addPendingSnapshot(id: string) {
+    const ids = this.pendingSnapshots()
+    if (!ids.includes(id)) this.store.setKv(PENDING_SNAPSHOTS_KEY, JSON.stringify([...ids, id]))
+  }
+
+  private removePendingSnapshot(id: string) {
+    const ids = this.pendingSnapshots().filter((x) => x !== id)
+    this.store.setKv(PENDING_SNAPSHOTS_KEY, ids.length ? JSON.stringify(ids) : null)
+  }
+
+  /**
+   * Delete the snapshots Box Yard made and no longer wants (a job's first snapshot, a replaced or cleared one, one a
+   * restart left behind). Never one a project still uses, and never more than the ids on the list.
+   */
+  private async retryPendingSnapshots(force = false) {
+    const ids = this.pendingSnapshots()
+    if (!ids.length || (!force && Date.now() - this.lastSnapshotRetryAt < 10 * 60_000)) return
+    this.lastSnapshotRetryAt = Date.now()
+    const inUse = new Set(this.store.listProjects().flatMap((p) => (p.snapshot ? [p.snapshot.id] : [])))
+    const running = new Set([...this.snapshotJobs.values()].flatMap((j) => (j.snapshotId ? [j.snapshotId] : [])))
+    for (const id of ids) {
+      if (inUse.has(id)) {
+        this.removePendingSnapshot(id)
+        continue
+      }
+      if (running.has(id) || !this.provider.deleteSnapshot) continue
+      try {
+        await this.provider.deleteSnapshot(id)
+        this.removePendingSnapshot(id)
+      } catch (err) {
+        console.warn(`[box-yard] couldn't delete snapshot ${id} yet: ${errorMessage(err)}`)
+      }
+    }
+  }
+
+  /**
+   * Make a box for a project: from its snapshot when the project has one a box of this size and provider can use,
+   * else cold. A restore that fails makes the box cold instead, says so in the box history and warns the project's
+   * Captain; a snapshot the provider no longer has is cleared. Throws only when the cold create fails too.
+   */
+  private async createFor(projectId: string | null | undefined, labels: string[], size: BoxSize): Promise<{ id: string; from: ProjectSnapshot | null; cold: string | null }> {
+    const project = projectId ? this.store.getProject(projectId) : null
+    const snap = project && project.runner !== "local" ? project.snapshot : null
+    if (!project || !snap) return { id: await this.provider.create({ labels, size }), from: null, cold: null }
+    const skip = snapshotSkipReason(snap, size, this.provider.name)
+    if (skip) return { id: await this.provider.create({ labels, size }), from: null, cold: skip }
+    try {
+      return { id: await this.provider.create({ labels, size, snapshotId: snap.id }), from: snap, cold: null }
+    } catch (err) {
+      const code = (err as { statusCode?: unknown } | null)?.statusCode
+      const gone = code === 404 || code === 410
+      console.warn(`[box-yard] couldn't start a box for ${project.name} from snapshot ${snap.id}: ${errorMessage(err)}`)
+      const id = await this.provider.create({ labels, size })
+      if (gone && this.store.getProject(project.id)?.snapshot?.id === snap.id) {
+        const updated = this.store.setProjectSnapshot(project.id, null)
+        if (updated) this.hub.broadcast({ type: "project", project: updated })
+      }
+      return { id, from: null, cold: `restoring snapshot ${snap.id} failed (${errorMessage(err)})${gone ? "; the provider no longer has it, so it was cleared from the project" : ""}` }
+    }
+  }
+
+  /**
+   * After a box is made for a project: the history and the Captain hear how it started. From the snapshot, its repo
+   * mirror is fetched so the first clone there is quick. Cold despite a snapshot: a "Snapshot not used" event, and a
+   * warning for the Captain (once per snapshot for one that doesn't fit; every time a restore fails).
+   */
+  private afterCreateFor(boxId: string, projectId: string | null | undefined, made: { from: ProjectSnapshot | null; cold: string | null }, actor: BoxActor) {
+    const project = projectId ? this.store.getProject(projectId) : null
+    if (!project) return
+    if (made.from && project.repo) {
+      const m = this.mirrorSpec(boxId, project)
+      void this.provider
+        .exec(boxId, `${m.env} && ${withMirrorLock(m.spec.mirror, syncMirrorScript(m.spec))}`)
+        .then((res) => res.exitCode === 0 || console.warn(`[box-yard] mirror refresh on ${boxId}: ${(res.stderr || res.stdout).slice(-300)}`))
+        .catch((err) => console.warn(`[box-yard] mirror refresh on ${boxId}: ${errorMessage(err)}`))
+    }
+    if (!made.cold) return
+    const failed = made.cold.startsWith("restoring")
+    this.recordBoxEvent({ boxId, type: "snapshot_fallback", actor, reason: `New box for ${project.name}, which has a snapshot.`, detail: `Started cold: ${made.cold}.` })
+    const key = `${project.id}:${made.cold}`
+    if (!failed && this.snapshotNoted.has(key)) return
+    this.snapshotNoted.add(key)
+    this.notice(`⚠️ **${project.name}** snapshot not used: box ${boxId} started cold because ${made.cold}.`, { boxId, projectIds: [project.id] })
+  }
+
   // ------------------------------------------------------------------ scheduler
 
   /** Ask the scheduler to run. Calls collapse while a pass is in progress. */
@@ -1779,7 +2197,7 @@ export class TaskManager {
     const op = row.box_id ? this.boxOps.get(row.box_id) : undefined
     if (op) {
       // Its workspace is being archived off the box; it moves to another box once that's done.
-      this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : "deleted"}`)
+      this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : op === "snapshot" ? "snapshotted" : "deleted"}`)
       return null
     }
     // A project's "Runs on" setting: its tasks move to (or off) this computer when nothing would be lost.
@@ -2512,7 +2930,8 @@ export class TaskManager {
     const waiting = [...this.wantsBox].filter((id) => !projectId || this.store.getTaskRow(id)?.project_id === projectId)
     try {
       const labels = this.boxLabels(projectId)
-      const id = await this.provider.create({ labels, size })
+      const made = await this.createFor(projectId, labels, size)
+      const id = made.id
       this.store.removeBox(placeholder)
       this.store.upsertBox({ id, provider: providerOf(this.provider, id).name, status: "ready", created_at: Date.now(), last_used_at: Date.now(), size, keep_alive: 0, usage_source: "estimated" })
       // The new box belongs to the project that asked for it, so its tasks land there.
@@ -2525,8 +2944,10 @@ export class TaskManager {
         type: "created",
         actor: { kind: "scheduler" },
         reason: project ? `Project ${project.name} needed a box for its tasks.` : "Tasks were waiting and the pool had room.",
+        detail: createdDetail(made, project?.name),
         taskIds: waiting,
       })
+      this.afterCreateFor(id, projectId, made, { kind: "scheduler" })
       void this.refreshBoxUsage(id, true).finally(() => {
         this.emitBoxes()
         this.schedule()
@@ -4360,6 +4781,7 @@ export class TaskManager {
       await this.maintainRestingStorage(now)
     }
     await this.reclaimUnusedBoxes(now)
+    await this.retryPendingSnapshots()
     // Boxes at the provider that Box Yard has no row for (a delete that failed before rows waited for it). Not while
     // a box is being created: it's at the provider before it's in the database.
     if (now - this.lastOrphanSweepAt > 60 * 60_000 && !this.creatingBoxes) {
@@ -4706,6 +5128,12 @@ export class TaskManager {
 function goneCleanup(boxId: string, reason: BoxCleanup["reason"]): BoxCleanup {
   const now = Date.now()
   return { boxId, reason, status: "done", startedAt: now, finishedAt: now, targetFreeBytes: null, freeBefore: null, freeAfter: null, totalBytes: null, freedBytes: 0, steps: [], enough: true, error: null }
+}
+
+/** The created event's detail for a project's new box: from its snapshot, or cold despite one. */
+function createdDetail(made: { from: ProjectSnapshot | null; cold: string | null }, projectName?: string): string | null {
+  if (made.from) return `From ${projectName ?? "the project"}'s snapshot ${made.from.id}, taken from box ${made.from.boxId} (${made.from.size}).`
+  return made.cold ? `Started cold: ${made.cold}.` : null
 }
 
 /** The turn this launch was for is no longer the task's (its start timed out, or it was reset): leave the task alone. */

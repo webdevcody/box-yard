@@ -4,7 +4,7 @@ import path from "node:path"
 import { randomUUID } from "node:crypto"
 import type { WorkerSize } from "../../shared/types.js"
 import { LOCAL_BOX_ID } from "../../shared/runner.js"
-import type { BoxHealth, BoxProvider, BoxUsageProbe, ExecResult } from "./types.js"
+import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
 
 /**
  * "Boxes" that are folders on this machine. Good for trying Box Yard with no
@@ -26,8 +26,19 @@ export class LocalProvider implements BoxProvider {
     return path.join(this.baseDir, boxId)
   }
 
-  async create(): Promise<string> {
+  /** A local snapshot: a copy of a box's folder in `<baseDir>/.snapshots/<id>`. */
+  private snapshotDir(snapshotId: string) {
+    if (!/^local-snap-[\w-]+$/.test(snapshotId)) throw new Error(`Not a local snapshot id: ${snapshotId}`)
+    return path.join(this.baseDir, ".snapshots", snapshotId)
+  }
+
+  async create(opts?: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string> {
     const id = `local-${randomUUID().slice(0, 8)}`
+    if (opts?.snapshotId) {
+      const from = this.snapshotDir(opts.snapshotId)
+      if (!fs.existsSync(from)) throw Object.assign(new Error(`snapshot ${opts.snapshotId} not found`), { statusCode: 404 })
+      fs.cpSync(from, this.root(id), { recursive: true, verbatimSymlinks: true })
+    }
     fs.mkdirSync(path.join(this.root(id), ".boxyard"), { recursive: true })
     fs.mkdirSync(path.join(this.root(id), "tasks"), { recursive: true })
     return id
@@ -35,6 +46,21 @@ export class LocalProvider implements BoxProvider {
 
   async health(boxId: string): Promise<BoxHealth> {
     return fs.existsSync(this.root(boxId)) ? "running" : "gone"
+  }
+
+  async snapshot(boxId: string, _name: string): Promise<BoxSnapshotInfo> {
+    const id = `local-snap-${randomUUID().slice(0, 8)}`
+    fs.cpSync(this.root(boxId), this.snapshotDir(id), { recursive: true, verbatimSymlinks: true })
+    return { id, bytes: null }
+  }
+
+  async deleteSnapshot(snapshotId: string): Promise<void> {
+    fs.rmSync(this.snapshotDir(snapshotId), { recursive: true, force: true })
+  }
+
+  /** Folders inside the box's own folder: stripping a local box's copy never touches this machine's home or /tmp. */
+  snapshotDirs(boxId: string) {
+    return { home: path.join(this.root(boxId), "home"), tmp: path.join(this.root(boxId), "tmp") }
   }
 
   async wake() {}
@@ -190,6 +216,11 @@ export class LocalRunnerProvider extends LocalProvider {
     throw new Error("The local runner has one box, this computer; it never makes another")
   }
 
+  /** This computer holds Cody's own folders and logins: it's never snapshotted. */
+  override async snapshot(): Promise<BoxSnapshotInfo> {
+    throw new Error("Projects that run on this computer have no box to snapshot")
+  }
+
   /** This computer is always there; a folder someone removed is made again. */
   override async health(): Promise<BoxHealth> {
     fs.mkdirSync(path.join(this.dir, ".boxyard"), { recursive: true })
@@ -218,12 +249,19 @@ export class LocalRunnerRouter implements BoxProvider {
   readonly resize?: (boxId: string, size: WorkerSize) => Promise<void>
   readonly listIds?: (label: string) => Promise<string[]>
   readonly liveIds?: () => Promise<string[]>
+  readonly snapshot?: (boxId: string, name: string) => Promise<BoxSnapshotInfo>
+  readonly deleteSnapshot?: (snapshotId: string) => Promise<void>
+  readonly snapshotDirs?: (boxId: string) => { home: string; tmp: string }
 
   constructor(
     readonly base: BoxProvider,
     readonly local: BoxProvider,
   ) {
     if (base.resize) this.resize = (boxId, size) => this.of(boxId).resize!(boxId, size)
+    // Snapshots are the box provider's; the local runner's computer is never snapshotted (LocalRunnerProvider).
+    if (base.snapshot) this.snapshot = (boxId, name) => (boxId === LOCAL_BOX_ID ? this.local : base).snapshot!(boxId, name)
+    if (base.deleteSnapshot) this.deleteSnapshot = (snapshotId) => base.deleteSnapshot!(snapshotId)
+    if (base.snapshotDirs) this.snapshotDirs = (boxId) => base.snapshotDirs!(boxId)
     if (base.listIds) this.listIds = (label) => base.listIds!(label)
     if (base.liveIds) this.liveIds = () => base.liveIds!()
   }
@@ -252,7 +290,7 @@ export class LocalRunnerRouter implements BoxProvider {
     const p = this.of(boxId)
     return p.tasksRoot?.(boxId) ?? `${p.root(boxId)}/tasks`
   }
-  create(opts: { labels: string[]; size?: WorkerSize }) {
+  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }) {
     return this.base.create(opts)
   }
   health(boxId: string): Promise<BoxHealth> {
