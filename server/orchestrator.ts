@@ -97,7 +97,7 @@ type RunKind = "turn" | "summary" | "compact" | "context"
 export function attachmentNote(files: unknown, ownerName?: string): string {
   if (!Array.isArray(files) || !files.length) return ""
   const lines = (files as Attachment[]).map((f) => `- ${f.name} (${f.mime}, ${f.size} bytes) id=${f.id} path=${f.path}`)
-  return `\n\n[${withOwner("Cody", ownerName)} attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task or send_to_task.]\n${lines.join("\n")}`
+  return `\n\n[${withOwner("Cody", ownerName)} attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task, create_tasks or send_to_task.]\n${lines.join("\n")}`
 }
 
 /**
