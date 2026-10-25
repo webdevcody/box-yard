@@ -1779,7 +1779,7 @@ export class TaskManager {
     if (!project) throw new NotFoundError(`Project ${projectId} not found`)
     if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
-    if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on a RunPod GPU pod: its network volume keeps caches between pods, so it has no box snapshot.`)
+    if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be snapshotted.`)

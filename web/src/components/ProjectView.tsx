@@ -661,7 +661,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         {(runner === "gpu" || noRunPod) && (
           <p className="text-xs text-zinc-500" data-testid="runner-gpu-note">
             {runner === "gpu"
-              ? "Billed by RunPod per hour while the pod runs, within the caps in Settings › RunPod GPU. Pods stop when idle; the project's network volume keeps caches between them."
+              ? "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."
               : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
             <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
               Settings › RunPod GPU
