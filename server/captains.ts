@@ -837,7 +837,7 @@ class Captain {
   }
 
   private mentionedSince(at: number): Set<string> {
-    const messages = this.store.listCaptainMessages(this.project.id, 1000).filter((m) => m.createdAt > at)
+    const messages = this.store.listCaptainMessages(this.project.id, 1000).filter((m) => m.createdAt >= at)
     return mentionedTaskIds(messages.flatMap((m) => [m.content, m.meta]))
   }
 
@@ -855,7 +855,7 @@ class Captain {
     const ids = new Set([
       ...this.store
         .listTasks({ projectId: this.project.id })
-        .filter((t) => t.updatedAt > since)
+        .filter((t) => t.updatedAt >= since)
         .map((t) => t.id),
       ...this.mentionedSince(since),
     ])

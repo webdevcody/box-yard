@@ -77,7 +77,7 @@ describe("compaction summaries carry forward", () => {
     const files = writeCompaction(tmpDir(), meta(Date.parse("2026-10-20T10:00:00Z")), SUMMARY)
     const block = recapBlock(files.markdownFile, files.markdown, ['- task_aaaaaaaaaaaa "Runner" [demo] done'])
     expect(block.split("\n")[0]).toBe(
-      `[Box Yard: Your context was just compacted. This is the summary you wrote right before it (2026-10-20T10:00:00Z, saved as ${files.markdownFile}). Task states under "Live now" are current and beat the summary. For anything older, use search_history.]`,
+      `[Box Yard: Your context was just compacted. This is the summary you wrote right before it (2026-10-20T10:00:00.000Z, saved as ${files.markdownFile}). Task states under "Live now" are current and beat the summary. For anything older, use search_history.]`,
     )
     expect(block).toContain("## Open threads and next steps\n- Ask Cody about the local runner brief.")
     expect(block).not.toContain("tokens_before")
@@ -270,12 +270,12 @@ describe("search_history", () => {
     expect(JSON.stringify(res)).not.toContain("tool output")
     expect(JSON.stringify(res)).not.toContain("watchdog")
     const summary = res.hits.find((h: { kind: string }) => h.kind === "coordinator_summary")
-    expect(summary).toMatchObject({ id: "2026-09-01T10-00-00Z", at: "2026-09-01T10:00:00.000Z", where: "Decisions and preferences", tasks: [ta.id] })
-    expect(summary.file).toBe(path.join(r.yard.orchestrator.compactionsDir, "2026-09-01T10-00-00Z.md"))
+    expect(summary).toMatchObject({ id: "2026-09-01T10-00-00.000Z", at: "2026-09-01T10:00:00.000Z", where: "Decisions and preferences", tasks: [ta.id] })
+    expect(summary.file).toBe(path.join(r.yard.orchestrator.compactionsDir, "2026-09-01T10-00-00.000Z.md"))
     expect(summary.snippet).toContain("the local runner ships behind a flag")
-    expect(summary.open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00Z"}')
+    expect(summary.open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00.000Z"}')
     const captainSummary = res.hits.find((h: { kind: string; project?: string }) => h.kind === "captain_summary" && h.project === "alpha")
-    expect(captainSummary.open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00Z","project":"alpha"}')
+    expect(captainSummary.open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00.000Z","project":"alpha"}')
     // Newest first.
     const times = res.hits.map((h: { at: string }) => h.at)
     expect([...times].sort().reverse()).toEqual(times)
@@ -329,7 +329,7 @@ describe("search_history", () => {
     for (const other of ["Beta", "beta", tb.id, "Coordinator chat", "ships behind a flag"]) expect(text).not.toContain(other)
     // Hits name no project and open without one.
     expect(res.hits.every((h: { project?: string }) => h.project === undefined)).toBe(true)
-    expect(res.hits.find((h: { kind: string }) => h.kind === "captain_summary").open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00Z"}')
+    expect(res.hits.find((h: { kind: string }) => h.kind === "captain_summary").open).toBe('read_compaction {"compaction":"2026-09-01T10-00-00.000Z"}')
     expect(await captain.error("search_history", { query: "runner", project: "beta" })).toMatch(/^Out of scope: project "beta" belongs to another Captain/)
     // The Coordinator's chat and another project's Captain chat can't be opened.
     expect(await captain.error("search_history", { around: c1.id })).toMatch(/No chat message/)
@@ -432,11 +432,11 @@ describe("compaction lists stay small", () => {
     const coordinator = await mcpAs(r, { kind: "coordinator" })
     const res = await coordinator.raw("list_compactions")
     const list = JSON.parse(coordinator.text(res))
-    expect(list.map((c: { id: string }) => c.id)).toEqual(["2026-10-03T10-00-00Z", "2026-10-02T10-00-00Z", "2026-10-01T10-00-00Z"])
+    expect(list.map((c: { id: string }) => c.id)).toEqual(["2026-10-03T10-00-00.000Z", "2026-10-02T10-00-00.000Z", "2026-10-01T10-00-00.000Z"])
     expect(list[0].tasks).toHaveLength(10)
     expect(list[0].moreTasks).toBe(4)
     const listed = (await coordinator.json("list_compactions", { limit: 1 }))[0].tasks.concat()
-    const full0 = await coordinator.json("read_compaction", { compaction: "2026-10-03T10-00-00Z" })
+    const full0 = await coordinator.json("read_compaction", { compaction: "2026-10-03T10-00-00.000Z" })
     expect(full0.tasks).toHaveLength(14)
     const done = full0.tasks.find((t: { id: string }) => t.id === tasks[0]!.id)
     expect(done).toMatchObject({ status: "working", statusNow: "done" })
@@ -444,11 +444,13 @@ describe("compaction lists stay small", () => {
     expect(listed.find((t: { id: string }) => t.id !== tasks[0]!.id)).toMatchObject({ status: "working", title: expect.stringMatching(/^Task \d+$/) })
     // No snapshot summaries in a list: three compactions of 14 tasks with 4k-char snapshots stay small.
     expect(coordinator.text(res).length).toBeLessThan(6000)
-    expect((await coordinator.json("list_compactions", { before: "2026-10-02T10-00-00Z" })).map((c: { id: string }) => c.id)).toEqual(["2026-10-01T10-00-00Z"])
-    expect((await coordinator.json("list_compactions", { limit: 1 })).map((c: { id: string }) => c.id)).toEqual(["2026-10-03T10-00-00Z"])
+    // A cursor in the old second-precision form still pages.
+    expect((await coordinator.json("list_compactions", { before: "2026-10-02T10-00-00.000Z" })).map((c: { id: string }) => c.id)).toEqual(["2026-10-01T10-00-00.000Z"])
+    expect((await coordinator.json("list_compactions", { before: "2026-10-02T10-00-00Z" })).map((c: { id: string }) => c.id)).toEqual(["2026-10-01T10-00-00.000Z"])
+    expect((await coordinator.json("list_compactions", { limit: 1 })).map((c: { id: string }) => c.id)).toEqual(["2026-10-03T10-00-00.000Z"])
     expect(await coordinator.error("list_compactions", { before: "later" })).toMatch(/not a compaction id/)
     // read_compaction has the full snapshots, with the status now.
-    const full = await coordinator.json("read_compaction", { compaction: "2026-10-01T10-00-00Z" })
+    const full = await coordinator.json("read_compaction", { compaction: "2026-10-01T10-00-00.000Z" })
     const doneThen = full.tasks.find((t: { id: string }) => t.id === tasks[0]!.id)
     expect(doneThen).toMatchObject({ status: "working", statusNow: "done" })
     expect(doneThen.summary).toHaveLength(4000)
