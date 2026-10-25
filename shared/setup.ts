@@ -1,12 +1,16 @@
 // First-run setup and Settings › Credentials: the keys Box Yard needs to do real work. The browser only ever
 // sees whether each one is set and where it comes from, never a value.
 import type { SettingSource } from "./types.js"
+import type { Runner } from "./runner.js"
 
 export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "githubToken"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
-/** An env var on the server (it wins, and can't be changed here) or a value saved in the app. */
-export type CredentialSource = "env" | "saved"
+/**
+ * An env var on the server (it wins, and can't be changed here), a value saved in the app, or (GitHub only, once
+ * agents run on this computer) the computer's own `gh auth` login.
+ */
+export type CredentialSource = "env" | "saved" | "gh"
 
 export interface CredentialStatus {
   state: "set" | "unset"
@@ -36,8 +40,67 @@ export interface SetupStatus {
   }
   github: { state: "set" | "unset" }
   owner: { name: string; source: SettingSource }
+  runner: {
+    /** Where the owner chose to run agents during setup, or null before they chose. */
+    choice: Runner | null
+    /** What new projects start with: the choice, else "box" (installs from before the choice existed). */
+    default: Runner
+  }
+  /** Projects can pick "Upstash box": an Upstash key is set (or boxes are local folders: mock, BOX_PROVIDER=local). */
+  upstash: { available: boolean }
+  /** What this computer has for local agents. Null until "This computer" is chosen. */
+  local: LocalCheck | null
   /** What a saved value can't change until the server restarts, in plain words. Empty when everything is live. */
   restart: string[]
+}
+
+/** One thing local agents use on this computer. */
+export interface LocalTool {
+  key: LocalToolKey
+  found: boolean
+  /** `--version`'s first line, when it ran. */
+  version: string | null
+}
+
+export const LOCAL_TOOL_KEYS = ["node", "claude", "gh", "chrome"] as const
+export type LocalToolKey = (typeof LOCAL_TOOL_KEYS)[number]
+
+/** The local runner's prerequisites (#120), as the setup card and Settings › Credentials list them. */
+export const LOCAL_TOOL_INFO: Record<LocalToolKey, { label: string; required: boolean; help: string; link: { href: string; label: string } }> = {
+  node: { label: "Node.js", required: true, help: "Runs Box Yard's runner beside each agent.", link: { href: "https://nodejs.org/en/download", label: "Download Node.js" } },
+  claude: {
+    label: "Claude Code",
+    required: true,
+    help: "The agents themselves.",
+    link: { href: "https://code.claude.com/docs/en/setup", label: "Install Claude Code" },
+  },
+  gh: {
+    label: "GitHub CLI",
+    required: false,
+    help: "Agents use it to open PRs. Signed in with `gh auth login`, it can stand in for a GitHub token.",
+    link: { href: "https://cli.github.com", label: "Install gh" },
+  },
+  chrome: {
+    label: "Chrome",
+    required: false,
+    help: "For agents that check their work in a real browser.",
+    link: { href: "https://www.google.com/chrome", label: "Get Chrome" },
+  },
+}
+
+/** GET /api/setup's `local`: found tools and logins on the computer running Box Yard. Never holds a secret. */
+export interface LocalCheck {
+  tools: LocalTool[]
+  /** `claude auth status` says this computer's claude is signed in; null when it couldn't tell (older CLI, mock). */
+  claudeLogin: boolean | null
+  /** `gh auth status` succeeded. */
+  ghLogin: boolean
+  checkedAt: number
+}
+
+/** PUT /api/setup/runner. */
+export interface RunnerChoice {
+  runner: Runner
 }
 
 /** PUT /api/setup/credentials: a new value, or null to forget the saved one. */
@@ -64,7 +127,7 @@ export const CREDENTIAL_INFO: Record<
     label: "Upstash Box API key",
     env: "UPSTASH_BOX_API_KEY",
     placeholder: "Paste your Box API key",
-    help: "The cloud boxes your agents work in.",
+    help: "The isolated cloud boxes your agents work in.",
     link: { href: "https://console.upstash.com", label: "Create one in the Upstash console" },
   },
   claudeOauthToken: {
