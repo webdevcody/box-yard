@@ -18,18 +18,34 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
    | Setting | Default | What it does |
    | --- | --- | --- |
    | Idle stop | 10 min | Time with no task working before a pod is stopped |
-   | Agents per pod | 3 | Agents that share one pod |
-   | Per-project cap | $1/hr | Most a project's pod may cost |
-   | Total cap | $3/hr | Most all of this install's pods may cost together |
-   | Network volume | 30 GB | Size of each project's volume |
+   | Agents per pod | 3 | Agents that share one pod, unless the project sets Agents per box |
+   | Max per project | $1/hr | Most one project's pods may cost together, unless the project sets its own GPU cap |
+   | Max for all pods | $3/hr | Most all of this install's pods may cost together |
+   | Network volume | 30 GB | Size of each project's volume (pod #1 only) |
    | Watchdog | 30 min | How long a pod waits with no contact from Box Yard before stopping itself |
 
 ## How it works
 
-- **One pod per project.** Each GPU project has one virtual box, `runpod-<projectId>`, with at most one pod behind it. The pod and its network volume are named `boxyard-<install id>-<projectId>`, so two Box Yards on one RunPod account never touch each other's.
+- **Pods per project.** Each of a GPU project's pods is a virtual box with at most one pod behind it.
+  - Pod #1 is `runpod-<projectId>`, the one pod a project had before projects could have several. Pod #n is `runpod-<projectId>-<n>`.
+  - Pods are named `boxyard-<install id>-<projectId>[-<n>]` and the volume `boxyard-<install id>-<projectId>`, so two Box Yards on one RunPod account never touch each other's.
+  - A task takes the first of these that fits:
+    1. its own pod while that's up, since its workspace is there;
+    2. a free slot on another of its project's pods;
+    3. a new pod, while the project has fewer than its **Max boxes** (20 when unset) and one more fits under the caps.
+  - Slots per pod are the project's **Agents per box**, else Agents per pod. With Agents per box 1 and Max boxes 4, four queued tasks get four pods.
+- **Spending caps.** Before it counts on a new pod, Box Yard adds the pods' RunPod prices to the list price of the first GPU type that fits. A pod still starting counts at that list price.
+  - If that would go over the project's cap (Project › Settings › Boxes › GPU cap, `update_project gpu_max_hourly_usd`, else Max per project), the task waits. Its reason says so, e.g. `Waiting: RunPod cap $1/hr reached: game's 3 pods cost $0.81/hr and another RTX A5000 is $0.27/hr`.
+  - The same happens at the total cap.
+  - The reason shows on the task and in `pool_status`, and the project's Captain gets one notice.
+  - `list_projects` and `pool_status` (`gpu_projects`) show each GPU project's pods, spend and caps. The pod start checks both caps again, one create at a time.
 - **Starts on demand.** A task starts the pod. Box Yard picks a Secure Cloud data center that has stock of your GPU types and supports volumes. It makes the volume there once and connects over SSH with its own key, kept in `<data dir>/runpod`.
-- **Work survives a stop.** Task folders are archived after each turn, as on boxes, and restored when a new pod starts. `/workspace` is the project's network volume, which also outlives the pod, so `/workspace/data` is a good place for caches.
-- **Stops when idle.** A pod is terminated, not paused, so idle pods cost nothing. This happens when no task has worked for the idle-stop time and nothing is keeping it warm.
+- **Work survives a stop.** Task folders are archived after each turn, as on boxes, and restored when a new pod starts. Task folders live on each pod's container disk (`/box/tasks/<task>`), never on a shared working tree.
+- **Only pod #1 mounts the volume.** `/workspace` on pod #1 is the project's network volume, which outlives the pod, so `/workspace/data` is a good place for caches. Pods #2 and up have no volume and keep their caches on their container disk.
+  - RunPod's docs say a volume can be used by only one running pod at a time, to prevent data corruption, and warn that concurrent writes can corrupt data.
+  - Box Yard's caches on the volume (npm, pip, uv, Hugging Face, Playwright, the dependency cache) aren't made for writers on several machines over NFS.
+  - Without a volume, an extra pod can also start in any data center with stock, not only the volume's.
+- **Stops when idle.** A pod is terminated, not paused, so idle pods cost nothing. Each pod stops on its own when no task on it has worked for the idle-stop time, none of its own tasks waits, and nothing is keeping it warm. A project task waiting for any pod keeps a pod with a free slot up.
   - **Keep warm** (1h/4h in Settings › RunPod GPU) keeps a pod up for follow-up prompts.
   - **Stop** ends a pod right away.
   - **Dead-man switch.** If the computer running Box Yard sleeps or quits, the pod's own watchdog (`runpod/watchdog.sh`) terminates it after the watchdog time with no contact. It uses the pod-scoped key RunPod gives each pod.
@@ -50,5 +66,5 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
 | `server/runpod/image.ts` | Image tag, key scan, Docker build and push, anonymous-pull check |
 | `server/runpod/service.ts` | Settings, status, keep warm, volumes: what `/api/runpod` serves |
 | `server/providers/runpod.ts` | The `BoxProvider` behind `runpod-*` boxes |
-| `server/tasks.ts` | Placing tasks on their project's pod (`toGpu`), the idle sweep (`sweepGpuPods`) |
+| `server/tasks.ts` | Placing tasks on their project's pods (`toGpu`, `gpuTarget`, `gpuCapBlock`), the idle sweep (`sweepGpuPods`) |
 | `web/src/components/RunPodSettings.tsx` | Settings › RunPod GPU |

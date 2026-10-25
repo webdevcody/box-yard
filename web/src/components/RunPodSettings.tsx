@@ -19,8 +19,14 @@ type Numeric = "idleMinutes" | "agentsPerPod" | "containerDiskGb" | "volumeGb" |
 const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit: string }[] = [
   { key: "idleMinutes", label: "Stop when idle", unit: "min", help: "A pod with no agent running or waiting is stopped after this long. Its network volume stays; the next task starts a new pod." },
   { key: "agentsPerPod", label: "Agents per pod", unit: "agents", help: "Agents of one project that may run on its pod at once, unless the project sets its own Agents per box." },
-  { key: "maxHourlyUsd", label: "Max per pod", unit: "$/hr", step: 0.05, help: "GPU types listed above this are skipped, and a pod that comes back pricier is terminated at once." },
-  { key: "totalMaxHourlyUsd", label: "Max for all pods", unit: "$/hr", step: 0.05, help: "No new pod starts when it would take the GPU spend of every running pod over this." },
+  {
+    key: "maxHourlyUsd",
+    label: "Max per project",
+    unit: "$/hr",
+    step: 0.05,
+    help: "The most one project's pods may cost together; a project can set its own (Project › Settings › Boxes). Its next pod waits when it would go over, and GPU types priced above this are skipped.",
+  },
+  { key: "totalMaxHourlyUsd", label: "Max for all pods", unit: "$/hr", step: 0.05, help: "No new pod starts when it would take the GPU spend of every running pod over this; its task waits and says so." },
   { key: "volumeGb", label: "Network volume", unit: "GB", help: "Each GPU project gets a volume this size at /workspace for caches, datasets and model weights, kept across pods (about $0.07/GB/month). 0: none, and pods start in any datacenter." },
   { key: "containerDiskGb", label: "Pod disk", unit: "GB", help: "The pod's own disk, where task folders live while it runs. It goes with the pod." },
   { key: "watchdogMinutes", label: "Watchdog", unit: "min", help: "Each pod terminates itself when this Box Yard hasn't been in touch for this long (this computer slept or went offline), so a pod never runs up a bill on its own." },
@@ -240,7 +246,7 @@ function PodsRow({ status }: { status: RunPodStatus }) {
   return (
     <Row
       label="Pods"
-      help={`Running now, at ${usd(total)}/hr together. A pod stops after ${status.settings.idleMinutes} idle minutes; Keep warm holds it up between follow-ups. Stopping archives every workspace first and never stops a running agent.`}
+      help={`Running now, at ${usd(total)}/hr together. A project gets up to its Max boxes pods, within the caps; only its pod #1 mounts its network volume. Each pod stops after ${status.settings.idleMinutes} idle minutes; Keep warm holds it up between follow-ups. Stopping archives every workspace first and never stops a running agent.`}
     >
       {!status.pods.length ? (
         <p className="text-xs text-zinc-500">No pods running.</p>
@@ -249,7 +255,9 @@ function PodsRow({ status }: { status: RunPodStatus }) {
           {status.pods.map((p) => (
             <li key={p.boxId} className="space-y-1 rounded-lg bg-zinc-900 px-2.5 py-2 text-xs" data-pod={p.podId}>
               <div className="flex items-center gap-2">
-                <span className="flex-1 font-medium text-zinc-200">{p.projectName ?? p.projectId}</span>
+                <span className="flex-1 font-medium text-zinc-200">
+                  {p.projectName ?? p.projectId} <span className="font-normal text-zinc-500">· pod #{p.index}</span>
+                </span>
                 <span className="text-zinc-400">{p.status.toLowerCase()}</span>
               </div>
               <p className="text-zinc-500">
@@ -285,8 +293,8 @@ function PodsRow({ status }: { status: RunPodStatus }) {
                   loading={stop.isPending && stop.variables === p.boxId}
                   onClick={async () => {
                     const ok = await confirmDialog({
-                      title: `Stop ${p.projectName ?? p.projectId}'s GPU pod?`,
-                      body: "Its workspaces are archived first, and its network volume stays. The next task starts a new pod.",
+                      title: `Stop ${p.projectName ?? p.projectId}'s GPU pod #${p.index}?`,
+                      body: `Its workspaces are archived first${p.index === 1 ? ", and the project's network volume stays" : ""}. The next task that needs it starts a new pod.`,
                       confirmLabel: "Stop pod",
                       danger: true,
                     })

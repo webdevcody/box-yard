@@ -32,7 +32,7 @@ import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { LOCAL_UNSANDBOXED, RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
-import { isGpuBox } from "../../../shared/runpod"
+import { gpuBoxIndex, isGpuBox } from "../../../shared/runpod"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
@@ -357,7 +357,7 @@ function TaskMenu({
                 {isLocalRunnerBox(task.boxId) ? (
                   <span className="min-w-0 truncate text-amber-200">This computer (unsandboxed)</span>
                 ) : isGpuBox(task.boxId) ? (
-                  <span className="min-w-0 truncate text-zinc-300">Its project's RunPod GPU pod</span>
+                  <span className="min-w-0 truncate text-zinc-300">Its project's RunPod GPU pod #{gpuBoxIndex(task.boxId)}</span>
                 ) : task.boxId ? (
                   <Link href={`/boxes#${encodeURIComponent(task.boxId)}`} className="min-w-0 truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
                     {task.boxId}
