@@ -677,6 +677,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN max_boxes INTEGER;
   UPDATE projects SET agents_per_box = 1 WHERE heavy_tasks IN ('one-per-box', 'whole-box') AND agents_per_box IS NULL;
   `,
+  `
+  -- A GPU project's own cap on its RunPod pods together, $/hr (docs/runpod.md). NULL: Settings › RunPod GPU's
+  -- per-project cap. 0: no per-project cap (the total cap still applies).
+  ALTER TABLE projects ADD COLUMN gpu_max_hourly_usd REAL;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

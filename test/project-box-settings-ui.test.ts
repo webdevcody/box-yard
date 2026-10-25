@@ -34,6 +34,7 @@ const project = (over: Partial<Project> = {}) =>
     agentsPerBox: null,
     tasksPerBox: null,
     maxBoxes: null,
+    gpuMaxHourlyUsd: null,
     partialClone: null,
     pushAtTurnEnd: null,
     depCache: null,

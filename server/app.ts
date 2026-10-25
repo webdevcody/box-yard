@@ -10,7 +10,7 @@ import { Store, BadRequestError, NotFoundError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
-import { TaskManager, type TaskManagerDeps } from "./tasks.js"
+import { TaskManager, type GpuRunner, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
@@ -58,6 +58,7 @@ const projectBoxLimits = {
   agentsPerBox: z.number().int().min(PROJECT_BOX_LIMITS.agentsPerBox.min).max(PROJECT_BOX_LIMITS.agentsPerBox.max).nullable().optional(),
   tasksPerBox: z.number().int().min(PROJECT_BOX_LIMITS.tasksPerBox.min).max(PROJECT_BOX_LIMITS.tasksPerBox.max).nullable().optional(),
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
+  gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
 }
 
 const projectNotesBudget = {
@@ -244,6 +245,8 @@ export function createBoxYard(
     provider?: BoxProvider
     /** Stands in for the local runner (tests); it is always routed LOCAL_BOX_ID. */
     localRunner?: BoxProvider
+    /** Stands in for RunPod GPU pods (tests): `runpod-*` boxes route to its provider, and placement asks it. */
+    gpu?: GpuRunner
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -274,7 +277,8 @@ export function createBoxYard(
     git: { name: c.gitUserName, email: c.gitUserEmail },
   })
   // Every box provider gets the local runner and the GPU pods beside it (shared/runner.ts).
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), runpod.provider)
+  const gpu = opts.gpu ?? runpod
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider)
   const setup = new Setup({ c, store, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
@@ -285,7 +289,7 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu: runpod })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu })
   tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.gpuProgress(boxId, message)
@@ -458,7 +462,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd].some((v) => v !== undefined)) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
