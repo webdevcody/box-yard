@@ -1,11 +1,23 @@
-// RunPod GPU pods as a runner ("Runs on: RunPod GPU", shared/runner.ts). Each GPU project gets one pod at a time,
-// on a network volume of its own; the pod comes and goes, the volume stays (docs/runpod.md).
+// RunPod GPU pods as a runner ("Runs on: RunPod GPU", shared/runner.ts). A GPU project gets up to its Max boxes
+// pods at a time, within the $/hr caps; pod #1 mounts the project's network volume. Pods come and go, the volume
+// stays (docs/runpod.md).
 
-/** Every GPU project's virtual box: `runpod-<projectId>`. It's never a `boxes` row (like the local runner's box). */
+/**
+ * A GPU project's virtual boxes, one per pod: `runpod-<projectId>` is pod #1 (the only one before projects could
+ * have several), `runpod-<projectId>-<n>` pod #n. They're never `boxes` rows (like the local runner's box).
+ * Project ids never end in `-<digits>` (`newId` makes `prj_<hex>`), so the suffix is unambiguous.
+ */
 export const GPU_BOX_PREFIX = "runpod-"
-export const gpuBoxId = (projectId: string) => `${GPU_BOX_PREFIX}${projectId}`
+const POD_SUFFIX = /-(\d+)$/
+export const gpuBoxId = (projectId: string, n = 1) => `${GPU_BOX_PREFIX}${projectId}${n > 1 ? `-${n}` : ""}`
 export const isGpuBox = (id: string | null | undefined): id is string => Boolean(id?.startsWith(GPU_BOX_PREFIX))
-export const gpuBoxProject = (id: string) => id.slice(GPU_BOX_PREFIX.length)
+export const gpuBoxProject = (id: string) => id.slice(GPU_BOX_PREFIX.length).replace(POD_SUFFIX, "")
+/** Which of its project's pods a GPU box is: 1 for `runpod-<projectId>`. */
+export const gpuBoxIndex = (id: string) => Number(POD_SUFFIX.exec(id.slice(GPU_BOX_PREFIX.length))?.[1] ?? 1)
+/** "GPU pod #2 · survive-the-night". */
+export const gpuPodLabel = (id: string, projectName: string | null) => `GPU pod #${gpuBoxIndex(id)} · ${projectName ?? gpuBoxProject(id)}`
+/** The most pods one project may have: its Max boxes when lower, and the bound when it sets none (the $/hr caps apply too). */
+export const MAX_GPU_PODS = 20
 
 /** Pods start from this public image when no custom image is built: slower (tools install at boot), no Docker needed. */
 export const RUNPOD_STOCK_IMAGE = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
@@ -25,11 +37,14 @@ export interface RunPodSettings {
   /** Agents that may run on one pod at once, unless the project sets its own Agents per box. */
   agentsPerPod: number
   containerDiskGb: number
-  /** Size of a project's network volume (caches, data). 0: no volume. */
+  /** Size of a project's network volume (caches, data), which only its pod #1 mounts. 0: no volume. */
   volumeGb: number
-  /** The most a pod may cost, $/hr: one that comes back pricier is terminated. */
+  /**
+   * The most one project's pods may cost together, $/hr, unless the project sets its own (Project.gpuMaxHourlyUsd).
+   * A pod that would go over waits; one that comes back pricier than its GPU's list price allows is terminated.
+   */
   maxHourlyUsd: number
-  /** The most all GPU pods together may cost, $/hr. */
+  /** The most all of this install's GPU pods together may cost, $/hr. */
   totalMaxHourlyUsd: number
   /** The pod's own watchdog terminates it this long after Box Yard stops being in touch (the computer slept). */
   watchdogMinutes: number
@@ -51,6 +66,8 @@ export const DEFAULT_RUNPOD_SETTINGS: RunPodSettings = {
 
 export interface RunPodPodInfo {
   boxId: string
+  /** Which of its project's pods (gpuBoxIndex). */
+  index: number
   projectId: string
   projectName: string | null
   podId: string

@@ -257,6 +257,7 @@ interface ProjectRow {
   agents_per_box?: number | null
   tasks_per_box?: number | null
   max_boxes?: number | null
+  gpu_max_hourly_usd?: number | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -643,6 +644,7 @@ export class Store {
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
       tasksPerBox: row.tasks_per_box ?? null,
       maxBoxes: row.max_boxes ?? null,
+      gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -682,6 +684,12 @@ export class Store {
     return { agentsPerBox: row?.agents ?? null, tasksPerBox: row?.tasks ?? null, maxBoxes: row?.boxes ?? null }
   }
 
+  /** A GPU project's own $/hr cap on its pods together, or null for Settings › RunPod GPU's (Project.gpuMaxHourlyUsd). */
+  projectGpuCap(id: string): number | null {
+    const row = this.db.prepare("SELECT gpu_max_hourly_usd AS usd FROM projects WHERE id = ?").get(id) as { usd: number | null } | undefined
+    return row?.usd ?? null
+  }
+
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
   /** Where a task's turns run: its own runs_on when set, else its project's "Runs on". */
   taskRunner(row: Pick<TaskRow, "project_id" | "runs_on">): Runner {
@@ -719,6 +727,7 @@ export class Store {
     agentsPerBox?: number | null
     tasksPerBox?: number | null
     maxBoxes?: number | null
+    gpuMaxHourlyUsd?: number | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -774,6 +783,8 @@ export class Store {
       tasksPerBox?: number | null
       /** null clears it (only Settings › Max boxes applies). */
       maxBoxes?: number | null
+      /** null clears it (Settings › RunPod GPU's per-project cap applies). */
+      gpuMaxHourlyUsd?: number | null
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -830,10 +841,11 @@ export class Store {
    * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
    * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
    */
-  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits>) {
+  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null }) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
     if (b.maxBoxes !== undefined) this.db.prepare("UPDATE projects SET max_boxes = ? WHERE id = ?").run(b.maxBoxes, id)
+    if (b.gpuMaxHourlyUsd !== undefined) this.db.prepare("UPDATE projects SET gpu_max_hourly_usd = ? WHERE id = ?").run(b.gpuMaxHourlyUsd, id)
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
@@ -1220,6 +1232,14 @@ export class Store {
    * Agent slots in use on a box: turns that hold a turn id, plus any task starting or working there (a turn
    * id that isn't written yet, or a launch that outlived it, still runs an agent). `except` leaves one task out.
    */
+  /** GPU pods' boxes (`runpod-…`) with a turn on them: pods that are up or starting. */
+  gpuBoxesInUse(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE box_id LIKE 'runpod-%' AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .all() as { box_id: string }[]
+    return rows.map((r) => r.box_id)
+  }
+
   slotsInUse(boxId: string, except?: string): number {
     const row = this.db
       .prepare(`SELECT COUNT(*) AS n FROM tasks WHERE box_id = ? AND id != ? AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)

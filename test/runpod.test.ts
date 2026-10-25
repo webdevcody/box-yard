@@ -8,7 +8,7 @@ import { RunPodSettingsStore } from "../server/runpod/settings.js"
 import { IMAGE_FILES, anonymousPullable, imageTag, parseRepo, runpodDir, scanForKeys } from "../server/runpod/image.js"
 import { POD_HTTP_PORTS, RunPodProvider, shortGpu } from "../server/providers/runpod.js"
 import { SshPool } from "../server/runpod/ssh.js"
-import { DEFAULT_RUNPOD_SETTINGS, gpuBoxId, gpuBoxProject, isGpuBox } from "../shared/runpod.js"
+import { DEFAULT_RUNPOD_SETTINGS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { RUNNERS, SETUP_RUNNERS, normalizeRunner, parseRunsOn } from "../shared/runner.js"
 import { tmpDir } from "./helpers.js"
 
@@ -49,6 +49,18 @@ describe("the gpu runner value", () => {
     expect(isGpuBox("this-computer")).toBe(false)
     expect(isGpuBox(null)).toBe(false)
     expect(gpuBoxProject("runpod-proj_1")).toBe("proj_1")
+  })
+
+  it("numbers a project's pods: its first keeps the box id a project's one pod always had", () => {
+    expect(gpuBoxId("prj_c8ae398599c6", 1)).toBe("runpod-prj_c8ae398599c6")
+    expect(gpuBoxId("prj_c8ae398599c6", 3)).toBe("runpod-prj_c8ae398599c6-3")
+    expect(gpuBoxProject("runpod-prj_c8ae398599c6-3")).toBe("prj_c8ae398599c6")
+    expect(gpuBoxIndex("runpod-prj_c8ae398599c6-3")).toBe(3)
+    expect(gpuBoxIndex("runpod-prj_c8ae398599c6")).toBe(1)
+    // Hyphens inside a project id (mock data) aren't pod numbers.
+    expect(gpuBoxProject("runpod-prj_heavy-survive-2")).toBe("prj_heavy-survive")
+    expect(gpuBoxIndex("runpod-prj_heavy-survive")).toBe(1)
+    expect(gpuPodLabel("runpod-prj_a-2", "game")).toBe("GPU pod #2 · game")
   })
 })
 
@@ -185,17 +197,61 @@ describe("the pod image", () => {
 })
 
 describe("RunPodProvider", () => {
-  function provider(pods: RunPodPod[]) {
-    const f = fakeFetch({ "GET https://api.runpod.io/v2/pods": () => ({ body: { pods } }) })
-    return new RunPodProvider({
+  const gpu = (id: string, price: number) => ({ id, name: id, memory: 24, secure: true, price: { secure: price, community: price }, availability: "HIGH" })
+  function provider(pods: RunPodPod[], o: { settings?: Partial<RunPodSettings>; projectCap?: (id: string) => number | null; volumes?: unknown[] } = {}) {
+    const f = fakeFetch({
+      "GET https://api.runpod.io/v2/pods": () => ({ body: { pods } }),
+      "GET https://api.runpod.io/v2/catalog/gpus": () => ({ body: { gpus: [gpu("NVIDIA RTX A5000", 0.27), gpu("NVIDIA A40", 0.4)] } }),
+      "GET https://api.runpod.io/v2/catalog/datacenters": () => ({
+        body: { dataCenters: [{ id: "CA-MTL-1", name: "CA-MTL-1", networkVolumeTypes: ["STANDARD"], gpuAvailability: [{ id: "NVIDIA RTX A5000", name: "A5000", availability: "HIGH" }] }] },
+      }),
+      "GET https://api.runpod.io/v2/network-volumes": () => ({ body: { networkVolumes: o.volumes ?? [] } }),
+      "POST https://api.runpod.io/v2/pods": () => ({ status: 500, body: { detail: "no pod in this test" } }),
+    })
+    const p = new RunPodProvider({
       api: new RunPodApi(() => "k", f.impl),
       ssh: new SshPool(tmpDir()),
-      settings: () => DEFAULT_RUNPOD_SETTINGS,
+      settings: () => ({ ...DEFAULT_RUNPOD_SETTINGS, ...o.settings }),
       install: () => "inst1",
       scriptsDir: runpodDir(),
       git: { name: "Box Yard", email: "boxyard@example.com" },
+      projectCap: o.projectCap,
     })
+    return Object.assign(p, { calls: f.calls })
   }
+
+  it("names pod #n after its box and keeps one volume per project, which only pod #1 mounts", async () => {
+    const p = provider([
+      { id: "p1", name: "boxyard-inst1-prj_a", status: "RUNNING" },
+      { id: "p2", name: "boxyard-inst1-prj_a-2", status: "RUNNING" },
+    ])
+    expect((await p.listPods(true)).map((x) => x.boxId)).toEqual(["runpod-prj_a", "runpod-prj_a-2"])
+    expect(p.resourceName("runpod-prj_a")).toBe("boxyard-inst1-prj_a")
+    expect(p.resourceName("runpod-prj_a-2")).toBe("boxyard-inst1-prj_a-2")
+    expect(p.volumeName("runpod-prj_a-2")).toBe("boxyard-inst1-prj_a")
+    expect(await p.ensureVolume("runpod-prj_a-2")).toBeNull()
+    expect(p.calls.some((c) => c.url.includes("network-volumes"))).toBe(false)
+  })
+
+  it("prices the next pod at the first GPU type under the project's cap, its own or the global one", async () => {
+    const p = provider([], { projectCap: (id) => (id === "prj_cheap" ? 0.3 : id === "prj_tiny" ? 0.1 : null) })
+    expect(await p.nextPodPrice("prj_a")).toEqual({ gpu: "RTX A5000", usd: 0.27 })
+    expect(p.capOf("prj_a")).toBe(1)
+    expect(p.capOf("prj_cheap")).toBe(0.3)
+    expect(await p.nextPodPrice("prj_tiny")).toBeNull()
+    const a40 = provider([], { settings: { gpuTypes: ["NVIDIA A40", "NVIDIA RTX A5000"] }, projectCap: () => 0.3 })
+    expect(await a40.nextPodPrice("prj_a")).toEqual({ gpu: "RTX A5000", usd: 0.27 })
+  })
+
+  it("won't start a pod that takes the project's pods over its cap", async () => {
+    const pods: RunPodPod[] = [
+      { id: "p1", name: "boxyard-inst1-prj_a", status: "RUNNING", cost: 0.4 },
+      { id: "p2", name: "boxyard-inst1-prj_a-2", status: "RUNNING", cost: 0.4 },
+    ]
+    const p = provider(pods)
+    await expect(p.wake("runpod-prj_a-3")).rejects.toThrow(/RTX A5000 would take the project's pods to \$1\.07\/hr, over its \$1\/hr cap/)
+    expect(p.calls.some((c) => c.method === "POST")).toBe(false)
+  })
 
   it("sees only this install's live pods, by box id", async () => {
     const p = provider([
@@ -217,7 +273,7 @@ describe("RunPodProvider", () => {
   })
 
   it("can't make boxes through the pool", async () => {
-    await expect(provider([]).create({ labels: [] })).rejects.toThrow(/runpod-<projectId>/)
+    await expect(provider([]).create({ labels: [] })).rejects.toThrow(/runpod-<projectId>\[-<n>\]/)
   })
 
   it("shortens GPU names for labels", () => {

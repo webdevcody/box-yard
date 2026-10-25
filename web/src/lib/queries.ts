@@ -473,6 +473,7 @@ export function useCreateProject() {
           agentsPerBox: null,
           tasksPerBox: null,
           maxBoxes: null,
+          gpuMaxHourlyUsd: null,
           snapshot: null,
           createdAt: now,
           updatedAt: now,

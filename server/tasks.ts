@@ -49,7 +49,7 @@ import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
-import { gpuBoxId, gpuBoxProject, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
+import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
@@ -119,7 +119,9 @@ const SLEEP_WAKE_GRACE_MS = 15 * 60_000
 const RUNNER_SLEEP_MIN_MS = 20_000
 /** A local task waits with this while every Settings › Local agents slot is taken. */
 const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
-const GPU_SLOT_WAIT = "Waiting for a free agent slot on the project's GPU pod (Agents per box, or Settings › RunPod GPU › Agents per pod)"
+const GPU_SLOT_WAIT = "Waiting for a free agent slot on its project's GPU pod (Agents per box, or Settings › RunPod GPU › Agents per pod)"
+/** Where a GPU project's $/hr cap is raised, for the wait reason. */
+const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
@@ -162,8 +164,12 @@ export interface TaskManagerDeps {
 }
 
 /** What TaskManager needs of the RunPod GPU runner (server/runpod/service.ts). */
+/** What TaskManager uses of the GPU pods' provider: RunPodProvider, or a stand-in in tests. */
+export type GpuPodProvider = BoxProvider & Pick<RunPodProvider, "listPods" | "cached" | "nextPodPrice" | "capOf">
+type GpuPods = Awaited<ReturnType<GpuPodProvider["listPods"]>>
+
 export interface GpuRunner {
-  provider: RunPodProvider
+  provider: GpuPodProvider
   settings(): RunPodSettings
   /** A RunPod API key is set. */
   enabled(): boolean
@@ -179,7 +185,7 @@ interface PreparedWorkspace {
 }
 
 /** "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. */
-const onBox = (boxId: string) => (isLocalRunnerBox(boxId) ? "on this computer" : isGpuBox(boxId) ? "on its project's GPU pod" : `on box ${boxId}`)
+const onBox = (boxId: string) => (isLocalRunnerBox(boxId) ? "on this computer" : isGpuBox(boxId) ? `on its project's GPU pod #${gpuBoxIndex(boxId)}` : `on box ${boxId}`)
 
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
@@ -425,6 +431,10 @@ export class TaskManager {
   /** When each GPU pod's heartbeat was last touched by the idle sweep, and when the sweep last ran. */
   private gpuTouchedAt = new Map<string, number>()
   private lastGpuSweepAt = 0
+  /** The pods as placement or the sweep last listed them, for list_projects (which doesn't call RunPod). */
+  private gpuSeen: GpuPods = []
+  /** Tasks whose Captain heard why they wait for a GPU pod (a $/hr cap), by the kind of wait: a notice once. */
+  private gpuWaitNoticed = new Map<string, string>()
   /** The task event bus hooks listen on (see subscribe). */
   private readonly listeners = new Set<TaskEventListener>()
 
@@ -1081,6 +1091,27 @@ export class TaskManager {
       agentsPerBox: p.agentsPerBox !== null ? own(p.agentsPerBox === 1 ? "1: each agent alone on a box" : p.agentsPerBox) : global("slotsPerBox", "Agents per box"),
       tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Resident tasks per box"),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
+    }
+  }
+
+  /**
+   * A project's RunPod GPU pods and caps as they apply now (list_projects, pool_status), from the pods as last listed
+   * (`fresh` lists them again). Null when this Box Yard has no GPU runner.
+   */
+  async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes">, fresh = false) {
+    if (!this.gpu) return null
+    if (fresh && this.gpu.enabled()) await this.gpuPods()
+    const s = this.gpu.settings()
+    const usd = (n: number) => `$${Math.round(n * 100) / 100}/hr`
+    const pods = this.gpuSeen.filter((x) => gpuBoxProject(x.boxId) === p.id).sort((a, b) => gpuBoxIndex(a.boxId) - gpuBoxIndex(b.boxId))
+    const own = p.gpuMaxHourlyUsd
+    return {
+      maxHourlyUsd: own !== null ? `${own ? usd(own) : "none"} (this project)` : `global: ${usd(s.maxHourlyUsd)} (Settings › RunPod GPU › Max per project)`,
+      totalMaxHourlyUsd: `${usd(s.totalMaxHourlyUsd)} for every project's pods together (Settings › RunPod GPU › Max for all pods)`,
+      maxPods: p.maxBoxes !== null ? `${Math.min(p.maxBoxes, MAX_GPU_PODS)} (its Max boxes)` : `${MAX_GPU_PODS} (no Max boxes set; the $/hr caps bound it)`,
+      agentsPerPod: this.slotsFor(gpuBoxId(p.id)),
+      pods: pods.map(({ boxId, pod }) => `#${gpuBoxIndex(boxId)} ${boxId}: ${pod.status.toLowerCase()}${pod.gpu?.id ? ` ${shortGpu(pod.gpu.id)}` : ""}${pod.cost ? ` ${usd(pod.cost)}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} agents`),
+      spend: usd(pods.reduce((sum, x) => sum + (x.pod.cost ?? 0), 0)),
     }
   }
 
@@ -1748,7 +1779,7 @@ export class TaskManager {
     if (!project) throw new NotFoundError(`Project ${projectId} not found`)
     if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
-    if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on a RunPod GPU pod: its network volume keeps caches between pods, so it has no box snapshot.`)
+    if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be snapshotted.`)
@@ -2285,7 +2316,7 @@ export class TaskManager {
     // The task's runs_on, else its project's "Runs on": it moves to (or off) this computer or its GPU pod when nothing
     // would be lost.
     const runner = this.store.taskRunner(row)
-    if (isGpuBox(row.box_id) && !(runner === "gpu" && row.box_id === gpuBoxId(row.project_id))) {
+    if (isGpuBox(row.box_id) && !(runner === "gpu" && gpuBoxProject(row.box_id) === row.project_id)) {
       const moved = await this.fromGpu(row, runner)
       return moved === "stay" ? this.gpuSlot(row) : moved
     }
@@ -2478,14 +2509,14 @@ export class TaskManager {
   }
 
   /**
-   * A task of a project that runs on RunPod GPU (shared/runpod.ts): its turns run on the project's one pod,
-   * `runpod-<projectId>`, which launch starts when it isn't up. A workspace still on a box or on this computer moves
-   * to the pod when nothing would be lost (`moveBlock`, no upload limit: a restore over SSH has none); otherwise it
-   * stays where it is ("stay" for a box; on this computer it keeps running there) and its log says why.
+   * A task of a project that runs on RunPod GPU (shared/runpod.ts): its turns run on one of the project's pods,
+   * `runpod-<projectId>[-<n>]`, which `gpuTarget` picks and launch starts when it isn't up. A workspace still on a
+   * box or on this computer moves to a pod when nothing would be lost (`moveBlock`, no upload limit: a restore over
+   * SSH has none); otherwise it stays where it is ("stay" for a box; on this computer it keeps running there) and
+   * its log says why.
    */
   private async toGpu(row: TaskRow): Promise<string | null | "stay"> {
-    const target = gpuBoxId(row.project_id)
-    if (row.box_id === target) return this.gpuSlot(row)
+    if (isGpuBox(row.box_id)) return this.gpuSlot(row)
     const why = row.runs_on ? "it was asked to run on a RunPod GPU pod" : "its project runs on a RunPod GPU pod now"
     if (isLocalRunnerBox(row.box_id)) {
       if (this.archiving.has(row.id)) return null
@@ -2514,11 +2545,12 @@ export class TaskManager {
           this.noteOnce(row.id, `${row.id}:${box.id}:gpu`, `${row.runs_on ? "It was asked to run on a RunPod GPU pod" : "Its project runs on a RunPod GPU pod now"}, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
           return "stay"
         }
-        if (!this.gpuRoom(row, target)) return null
+        const target = await this.gpuTarget(row)
+        if (!target) return null
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
         void this.removeTaskDir(box.id, row.id).catch(() => {})
-        this.addEvent(row.id, `Moved from box ${box.id} to its project's GPU pod: ${why}.`)
-        return this.gpuSlot(row)
+        this.addEvent(row.id, `Moved from box ${box.id} to its project's GPU pod #${gpuBoxIndex(target)}: ${why}.`)
+        return this.gpuAssign(row, target)
       }
       // Box is gone or lost; the workspace comes back from the archive, on the pod.
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
@@ -2549,7 +2581,8 @@ export class TaskManager {
       if (!this.localRoom(row)) return null
       to = LOCAL_BOX_ID
     } else if (runner === "gpu") {
-      to = gpuBoxId(row.project_id)
+      to = await this.gpuTarget(row)
+      if (!to) return null
     } else {
       to = await this.pickBox(row.id)
       if (!to) return null
@@ -2557,12 +2590,24 @@ export class TaskManager {
     this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     void this.removeTaskDir(from, row.id).catch(() => {})
     this.addEvent(row.id, `Moved from its project's GPU pod to ${runner === "box" ? `box ${to}` : RUNNER_PHRASE[runner]}.`)
-    return runner === "gpu" ? this.gpuSlot(row) : this.assign(row.id, to)
+    return runner === "gpu" ? this.gpuAssign(row, to) : this.assign(row.id, to)
   }
 
-  /** The project's GPU pod for a task's next turn, or null (with the reason) while its slots are taken. */
-  private gpuSlot(row: TaskRow): string | null {
-    const target = isGpuBox(row.box_id) ? row.box_id : gpuBoxId(row.project_id)
+  /** One of the project's GPU pods for a task's next turn, or null (with the reason) while it must wait. */
+  private async gpuSlot(row: TaskRow): Promise<string | null> {
+    const target = await this.gpuTarget(row)
+    return target ? this.gpuAssign(row, target) : null
+  }
+
+  /**
+   * Which of its project's pods a GPU task's next turn takes, or null with the reason:
+   * 1. its own pod while that's up: its workspace is there (it moves only when nothing would be lost, `canMove`),
+   * 2. another of the project's pods that is up (or starting) and has a free slot,
+   * 3. a new pod, while the project has fewer than its Max boxes (MAX_GPU_PODS when unset) and one more fits under
+   *    the per-project and total $/hr caps (`gpuCapBlock`). Pods are `runpod-<projectId>` (#1), then `-2`, `-3`, …
+   * Slots per pod are its project's Agents per box, else Settings › RunPod GPU › Agents per pod (`slotsFor`).
+   */
+  private async gpuTarget(row: TaskRow): Promise<string | null> {
     if (!this.gpu) {
       this.setWaitReason(row.id, "Waiting: RunPod GPU isn't available on this Box Yard")
       return null
@@ -2571,9 +2616,49 @@ export class TaskManager {
       this.setWaitReason(row.id, "Waiting: RunPod GPU isn't set up (add a RunPod API key in Settings › RunPod GPU)")
       return null
     }
-    if (!this.gpuRoom(row, target)) return null
-    const current = this.store.getTaskRow(row.id)
-    if (current?.box_id === target) return target
+    const pods = await this.gpuPods(row.id)
+    if (!pods) return null
+    const projectId = row.project_id
+    const live = new Set(pods.map((p) => p.boxId))
+    const own = isGpuBox(row.box_id) && gpuBoxProject(row.box_id) === projectId ? row.box_id : null
+    const onPod = own && live.has(own) ? own : null
+    if (onPod) {
+      if (this.gpuRoom(row, onPod)) return onPod
+      if (!this.canMove(row)) return null
+    }
+    const up = this.gpuBoxesUp(projectId, live)
+    const free = up.find((id) => id !== onPod && this.runningOn(id) < this.slotsFor(id) && !this.limitBlock(row, id))
+    if (free) return free
+    const max = this.gpuMaxPods(projectId)
+    if (up.length >= max) {
+      const set = this.store.projectBoxLimits(projectId).maxBoxes !== null
+      this.setWaitReason(
+        row.id,
+        `Waiting for a free agent slot on its project's ${up.length === 1 ? "GPU pod" : `${up.length} GPU pods`} (${set ? `its Max boxes is ${max}` : `at most ${max} pods`}; Agents per box, or Settings › RunPod GPU › Agents per pod)`,
+      )
+      return null
+    }
+    const block = await this.gpuCapBlock(projectId, pods, up)
+    if (block) {
+      this.gpuWait(row, block.kind, block.reason)
+      return null
+    }
+    // A new pod: the task's old one when it's in range (its number stays), else the first unused number.
+    if (own && !up.includes(own) && gpuBoxIndex(own) <= max) return own
+    for (let n = 1; n <= max; n++) if (!up.includes(gpuBoxId(projectId, n))) return gpuBoxId(projectId, n)
+    return null
+  }
+
+  /** Put a task on the GPU pod `gpuTarget` picked. One moving between its project's pods restores there from its archive. */
+  private gpuAssign(row: TaskRow, target: string): string {
+    this.gpuWaitNoticed.delete(row.id)
+    const from = this.store.getTaskRow(row.id)?.box_id ?? null
+    if (from === target) return target
+    if (isGpuBox(from)) {
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+      if (this.gpuSeen.some((p) => p.boxId === from)) void this.removeTaskDir(from, row.id).catch(() => {})
+      if (row.session_started) this.addEvent(row.id, `Moved from GPU pod #${gpuBoxIndex(from)} to #${gpuBoxIndex(target)} of its project.`)
+    }
     // The pod exposes one preview port per task folder (POD_HTTP_PORTS): park an archived, resting one for room.
     if (this.store.listTaskRows({ boxId: target }).length >= POD_HTTP_PORTS.length) this.evictOne(target, row.id)
     return this.assign(row.id, target)
@@ -2589,6 +2674,72 @@ export class TaskManager {
     return !limit
   }
 
+  /** This install's GPU pods (cached for a few seconds by the provider), or null with the reason when RunPod can't say. */
+  private async gpuPods(taskId?: string): Promise<GpuPods | null> {
+    try {
+      this.gpuSeen = await this.gpu!.provider.listPods()
+      return this.gpuSeen
+    } catch (err) {
+      if (taskId) this.setWaitReason(taskId, `Waiting: couldn't list the RunPod pods (${errorMessage(err)})`)
+      return null
+    }
+  }
+
+  /** The project's pods that are up or on their way (a turn holds a slot on it), by number. */
+  private gpuBoxesUp(projectId: string, live: Set<string>): string[] {
+    const ids = new Set([...live].filter((id) => gpuBoxProject(id) === projectId))
+    for (const id of this.store.gpuBoxesInUse()) if (gpuBoxProject(id) === projectId) ids.add(id)
+    return [...ids].sort((a, b) => gpuBoxIndex(a) - gpuBoxIndex(b))
+  }
+
+  /** The most pods a GPU project may have up at once: its Max boxes, else MAX_GPU_PODS (the $/hr caps bound it too). */
+  private gpuMaxPods(projectId: string): number {
+    return Math.min(MAX_GPU_PODS, this.store.projectBoxLimits(projectId).maxBoxes ?? MAX_GPU_PODS)
+  }
+
+  /**
+   * Why the project can't have another pod now: it would take its pods over their $/hr cap (its own, else Settings ›
+   * RunPod GPU › Max per project), or every pod of this install over the total cap. A pod counts at its RunPod price,
+   * one still starting at the next pod's list price. Null when it fits, or when RunPod's prices can't be read (the
+   * pod start checks the caps again).
+   */
+  private async gpuCapBlock(projectId: string, pods: GpuPods, up: string[]): Promise<{ kind: string; reason: string } | null> {
+    const gpu = this.gpu!
+    let next: Awaited<ReturnType<GpuPodProvider["nextPodPrice"]>>
+    try {
+      next = await gpu.provider.nextPodPrice(projectId)
+    } catch {
+      return null
+    }
+    const cap = gpu.provider.capOf(projectId)
+    const name = this.store.getProjectName(projectId) ?? projectId
+    if (!next) {
+      return { kind: "cap", reason: `RunPod cap $${cap}/hr is below the price of every GPU type in Settings › RunPod GPU (${GPU_CAP_HOW})` }
+    }
+    const cost = (id: string) => pods.find((p) => p.boxId === id)?.pod.cost ?? next.usd
+    const usd = (n: number) => `$${Math.round(n * 100) / 100}/hr`
+    const mine = up.reduce((sum, id) => sum + cost(id), 0)
+    const pods_ = (n: number) => (n === 1 ? "pod costs" : `${n} pods cost`)
+    if (cap && mine + next.usd > cap + 1e-9) {
+      return { kind: "cap", reason: `RunPod cap $${cap}/hr reached: ${name}'s ${pods_(up.length)} ${usd(mine)} and another ${next.gpu} is ${usd(next.usd)} (${GPU_CAP_HOW})` }
+    }
+    const total = gpu.settings().totalMaxHourlyUsd
+    const all = new Set([...pods.map((p) => p.boxId), ...this.store.gpuBoxesInUse()])
+    const spend = [...all].reduce((sum, id) => sum + cost(id), 0)
+    if (total && spend + next.usd > total + 1e-9) {
+      return { kind: "total", reason: `RunPod total cap $${total}/hr reached: this Box Yard's ${pods_(all.size)} ${usd(spend)} and another ${next.gpu} is ${usd(next.usd)} (Settings › RunPod GPU › Max for all pods)` }
+    }
+    return null
+  }
+
+  /** A GPU task waits for a pod a cap rules out: the reason on the task, and its Captain hears it once. */
+  private gpuWait(row: TaskRow, kind: string, reason: string) {
+    this.setWaitReason(row.id, `Waiting: ${reason}`)
+    if (this.gpuWaitNoticed.get(row.id) === kind) return
+    this.gpuWaitNoticed.set(row.id, kind)
+    this.notice(`⚠️ **${row.title}** waits: ${reason}.`, { taskId: row.id, projectIds: [row.project_id] })
+  }
+
   /** Progress while a GPU pod starts: one line in the log of each task starting on it. */
   gpuProgress(boxId: string, message: string) {
     for (const row of this.store.listTaskRows({ boxId })) {
@@ -2600,7 +2751,7 @@ export class TaskManager {
   gpuPodEvent(e: { boxId: string; kind: "started" | "terminated"; detail: string; actor?: BoxActor; reason?: string }) {
     this.recordBoxEvent({
       boxId: e.boxId,
-      boxName: `GPU pod · ${this.store.getProjectName(gpuBoxProject(e.boxId)) ?? gpuBoxProject(e.boxId)}`,
+      boxName: gpuPodLabel(e.boxId, this.store.getProjectName(gpuBoxProject(e.boxId))),
       type: e.kind === "started" ? "created" : "deleted",
       actor: e.actor ?? { kind: e.kind === "started" ? "scheduler" : "provider" },
       reason: e.reason ?? (e.kind === "started" ? "A task of a RunPod GPU project needed its pod." : "The pod was terminated."),
@@ -2641,11 +2792,21 @@ export class TaskManager {
       console.warn(`[box-yard] RunPod pods: ${errorMessage(err)}`)
       return
     }
+    this.gpuSeen = pods
+    const live = new Set(pods.map((p) => p.boxId))
     for (const { boxId, pod } of pods) {
       if (pod.status !== "RUNNING") continue
       const residents = this.store.listTaskRows({ boxId })
       const busy = residents.some((r) => r.current_turn_id || r.status === "starting")
-      const waiting = this.store.listTaskRows({ projectId: gpuBoxProject(boxId) }).some((r) => this.wantsTurn(r) && this.store.taskRunner(r) === "gpu")
+      // Each pod stops on its own: it stays for a task of its own that waits, or for one of its project's that waits
+      // for any pod (not one whose workspace is on another pod) while it has a free slot.
+      const room = this.runningOn(boxId) < this.slotsFor(boxId)
+      const waiting =
+        residents.some((r) => this.wantsTurn(r)) ||
+        (room &&
+          this.store
+            .listTaskRows({ projectId: gpuBoxProject(boxId) })
+            .some((r) => this.wantsTurn(r) && this.store.taskRunner(r) === "gpu" && !(isGpuBox(r.box_id) && r.box_id !== boxId && live.has(r.box_id))))
       const started = pod.startedAt ? Date.parse(pod.startedAt) : now
       const lastUse = Math.max(started || 0, ...residents.map((r) => r.last_active_at))
       const warm = this.gpu.keepWarmUntil(boxId) ?? 0
@@ -2938,7 +3099,7 @@ export class TaskManager {
     const running = this.store.listTaskRows({ boxId }).filter((r) => holdsSlot(r) && r.id !== row.id)
     if (!running.length) return null
     const name = (projectId: string) => this.store.getProjectName(projectId) ?? projectId
-    const where = isLocalRunnerBox(boxId) ? "this computer" : isGpuBox(boxId) ? "the project's GPU pod" : `box ${boxId}`
+    const where = isLocalRunnerBox(boxId) ? "this computer" : isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : `box ${boxId}`
     const mine = this.store.projectBoxLimits(row.project_id).agentsPerBox
     if (mine !== null && running.length >= mine) {
       const rule = mine === 1 ? "runs each of its agents alone on a box" : `runs at most ${mine} agents on a box`

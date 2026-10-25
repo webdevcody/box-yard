@@ -8,6 +8,7 @@ import {
   useDeleteProject,
   useHooks,
   useProjects,
+  useRunPod,
   useSchedules,
   useSettings,
   useSetup,
@@ -153,8 +154,13 @@ export function ProjectView({ id }: { id: string }) {
 
 /** A number field's value, or null when it's blank (use the default). */
 function optionalInt(text: string): number | null {
+  const n = optionalNumber(text)
+  return n === null ? null : Math.round(n)
+}
+
+function optionalNumber(text: string): number | null {
   const n = Number(text.trim())
-  return text.trim() && Number.isFinite(n) ? Math.round(n) : null
+  return text.trim() && Number.isFinite(n) ? n : null
 }
 
 function repoUrl(repo: string) {
@@ -383,8 +389,12 @@ function ProjectBoxSettings(p: {
   setTasksPerBox: (v: string) => void
   maxBoxes: string
   setMaxBoxes: (v: string) => void
+  gpuMaxHourlyUsd: string
+  setGpuMaxHourlyUsd: (v: string) => void
 }) {
   const openSettings = useOpenSettings()
+  const runpod = useRunPod({ enabled: p.gpu })
+  const gpuCap = runpod.data ? `$${runpod.data.settings.maxHourlyUsd}/hr (Settings › RunPod GPU › Max per project)` : "Settings › RunPod GPU › Max per project"
   const s = p.info?.settings
   const followsSize = (k: "slotsPerBox" | "maxResidentPerBox") => !p.info || p.info.sources[k] === "default"
   const perBox = (k: "slotsPerBox" | "maxResidentPerBox") => (followsSize(k) || !s ? { long: `each box's size default (${bySize(k)})`, short: "by box size" } : { long: String(s[k]), short: String(s[k]) })
@@ -404,7 +414,8 @@ function ProjectBoxSettings(p: {
       <p className="text-xs text-zinc-500">
         Leave one blank to use the global setting. Where projects share a box, the strictest limit wins.
         {p.local && " This project runs on this computer: Agents per box also limits its agents here, and the rest apply when it runs on boxes."}
-        {p.gpu && " This project runs on a RunPod GPU pod: Agents per box sets its agents per pod (blank: Settings › RunPod GPU), and the rest apply when it runs on boxes."}
+        {p.gpu &&
+          " This project runs on RunPod GPU pods: Agents per box sets its agents per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Tasks per box and Box size apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -455,6 +466,25 @@ function ProjectBoxSettings(p: {
           <LimitInput id="project-max-boxes" range={PROJECT_BOX_LIMITS.maxBoxes} value={p.maxBoxes} onChange={p.setMaxBoxes} placeholder={`Global: ${pool}`} />
         </OverrideField>
       </div>
+      {p.gpu && (
+        <OverrideField
+          id="project-gpu-cap"
+          label="GPU cap ($/hr)"
+          global={gpuCap}
+          set={p.gpuMaxHourlyUsd.trim() !== ""}
+          onClear={() => p.setGpuMaxHourlyUsd("")}
+          hint="Most this project's RunPod pods may cost together. A task that needs another pod over it waits and says so. 0: no cap of its own; Settings › RunPod GPU › Max for all pods still applies."
+        >
+          <LimitInput
+            id="project-gpu-cap"
+            range={PROJECT_BOX_LIMITS.gpuMaxHourlyUsd}
+            step={0.05}
+            value={p.gpuMaxHourlyUsd}
+            onChange={p.setGpuMaxHourlyUsd}
+            placeholder={runpod.data ? `Global: $${runpod.data.settings.maxHourlyUsd}` : "Global"}
+          />
+        </OverrideField>
+      )}
     </section>
   )
 }
@@ -484,14 +514,30 @@ function OverrideField({ id, label, global, set, onClear, hint, children }: { id
   )
 }
 
-function LimitInput({ id, range, value, onChange, placeholder }: { id: string; range: { min: number; max: number }; value: string; onChange: (v: string) => void; placeholder: string }) {
+function LimitInput({
+  id,
+  range,
+  step,
+  value,
+  onChange,
+  placeholder,
+}: {
+  id: string
+  range: { min: number; max: number }
+  /** Below 1 for a price; whole numbers otherwise. */
+  step?: number
+  value: string
+  onChange: (v: string) => void
+  placeholder: string
+}) {
   return (
     <input
       id={id}
       type="number"
-      inputMode="numeric"
+      inputMode={step && step < 1 ? "decimal" : "numeric"}
       min={range.min}
       max={range.max}
+      step={step}
       className={cx(inputClass, "max-w-40 min-w-0")}
       value={value}
       onChange={(e) => onChange(e.target.value)}
@@ -519,6 +565,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [agentsPerBox, setAgentsPerBox] = useState(project.agentsPerBox?.toString() ?? "")
   const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
   const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
+  const [gpuMaxHourlyUsd, setGpuMaxHourlyUsd] = useState(project.gpuMaxHourlyUsd?.toString() ?? "")
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -561,6 +608,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           agentsPerBox: optionalInt(agentsPerBox),
           tasksPerBox: optionalInt(tasksPerBox),
           maxBoxes: optionalInt(maxBoxes),
+          ...(runner === "gpu" || project.gpuMaxHourlyUsd !== null ? { gpuMaxHourlyUsd: optionalNumber(gpuMaxHourlyUsd) } : {}),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -588,7 +636,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). RunPod GPU: the project gets a GPU pod of its own at RunPod, started when a task needs it and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
@@ -613,7 +661,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         {(runner === "gpu" || noRunPod) && (
           <p className="text-xs text-zinc-500" data-testid="runner-gpu-note">
             {runner === "gpu"
-              ? "Billed by RunPod per hour while the pod runs, within the caps in Settings › RunPod GPU. Pods stop when idle; the project's network volume keeps caches between them."
+              ? "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."
               : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
             <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
               Settings › RunPod GPU
@@ -639,6 +687,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         setTasksPerBox={setTasksPerBox}
         maxBoxes={maxBoxes}
         setMaxBoxes={setMaxBoxes}
+        gpuMaxHourlyUsd={gpuMaxHourlyUsd}
+        setGpuMaxHourlyUsd={setGpuMaxHourlyUsd}
       />
       <Field
         label="Partial clone mirror"

@@ -257,7 +257,7 @@ export class LocalRunnerRouter implements BoxProvider {
   constructor(
     readonly base: BoxProvider,
     readonly local: BoxProvider,
-    /** RunPod GPU pods (`runpod-<projectId>`, shared/runpod.ts), when set up. */
+    /** RunPod GPU pods (`runpod-<projectId>[-<n>]`, shared/runpod.ts), when set up. */
     readonly gpu: BoxProvider | null = null,
   ) {
     if (base.resize) this.resize = (boxId, size) => this.of(boxId).resize!(boxId, size)

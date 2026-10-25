@@ -153,6 +153,7 @@ interface BoxSettingsArgs {
   agents_per_box?: number | null
   tasks_per_box?: number | null
   max_boxes?: number | null
+  gpu_max_hourly_usd?: number | null
 }
 
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
@@ -426,10 +427,21 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .max(PROJECT_BOX_LIMITS.maxBoxes.max)
       .nullable()
       .optional()
-      .describe("Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes."),
+      .describe(
+        "Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes. On RunPod GPU it's the most pods the project has at once (each runs agents_per_box agents).",
+      ),
+    gpu_max_hourly_usd: z
+      .number()
+      .min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min)
+      .max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max)
+      .nullable()
+      .optional()
+      .describe(
+        "RunPod GPU only: the most this project's pods may cost together, $/hr. A task that would need a pod over it waits and says so. 0: no cap of its own (the total cap in Settings › RunPod GPU still applies). null: Settings › RunPod GPU › Max per project.",
+      ),
   }
-  const boxSettingsPatch = (a: BoxSettingsArgs) => ({ boxSize: a.box_size, agentsPerBox: a.agents_per_box, tasksPerBox: a.tasks_per_box, maxBoxes: a.max_boxes })
-  const projectView = (p: Project) => ({
+  const boxSettingsPatch = (a: BoxSettingsArgs) => ({ boxSize: a.box_size, agentsPerBox: a.agents_per_box, tasksPerBox: a.tasks_per_box, maxBoxes: a.max_boxes, gpuMaxHourlyUsd: a.gpu_max_hourly_usd })
+  const projectView = async (p: Project) => ({
     id: p.id,
     name: p.name,
     description: p.description,
@@ -437,6 +449,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
     boxSettings: tasks.projectBoxSettings(p),
+    // Its RunPod pods and $/hr caps, when it runs on RunPod GPU.
+    ...(p.runner === "gpu" && tasks ? { gpu: await tasks.projectGpuSettings(p, true) } : {}),
     ...(p.snapshot
       ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
       : {}),
@@ -506,7 +520,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   server.registerTool(
     "list_projects",
     { description: owner("List all projects, in the order Cody keeps them in the sidebar, with their repo, env var names, notes and tasks.") },
-    safe(async () => ok(scopeId ? [projectView(ownProject())] : store.listProjects().map(projectView))),
+    safe(async () => ok(scopeId ? [await projectView(ownProject())] : await Promise.all(store.listProjects().map(projectView)))),
   )
 
   coordinatorOnly(
@@ -528,7 +542,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
         const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), ...boxSettingsPatch(a) })
         hub.broadcast({ type: "project", project: p })
-        return ok(projectView(p))
+        return ok(await projectView(p))
       }),
     ),
   )
@@ -538,8 +552,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "update_project",
     {
       description: scopeId
-        ? "Change your project's box settings. Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits applies again. list_projects shows them (boxSettings). Running agents are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, tasks_per_box, max_boxes: null clears one so the global setting applies) or its own notes budget.",
+        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running agents are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, tasks_per_box, max_boxes, and gpu_max_hourly_usd on RunPod GPU: null clears one so the global setting applies) or its own notes budget.",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -606,7 +620,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         notes.checkBudget(p.id)
         // Waiting tasks may fit under the new limits.
         if (Object.values(box).some((v) => v !== undefined)) tasks.schedule()
-        return ok(projectView(p))
+        return ok(await projectView(p))
       },
     ),
   )
@@ -1617,11 +1631,18 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     ),
   )
 
+  const gpuPools = async () => {
+    const gpu = (scopeId ? [ownProject()] : store.listProjects()).filter((p) => p.runner === "gpu")
+    if (!gpu.length) return {}
+    const views = await Promise.all(gpu.map(async (p) => [p.name, await tasks.projectGpuSettings(p, true)] as const))
+    return { gpu_projects: Object.fromEntries(views.filter(([, v]) => v)) }
+  }
+
   server.registerTool(
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (a box running one of their agents takes at most their agents per box: limit). Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (a box running one of their agents takes at most their agents per box: limit). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1661,6 +1682,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           ),
         },
         resize_box: resizeGuard(),
+        // RunPod GPU projects: their pods (each a box of its own, runpod-<project>[-<n>]), spend and $/hr caps.
+        ...(await gpuPools()),
         queued: store.listTasks({ projectId: scopeId ?? undefined, status: ["queued"] }).map((t) => `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason})` : ""}`),
       })
     }),

@@ -28,7 +28,7 @@ export function ProjectSnapshotPanel({ project }: { project: Project }) {
         <h3 className="text-xs font-medium tracking-wide text-zinc-400 uppercase">Box snapshot</h3>
         <p className="text-sm text-zinc-400">
           {project.runner === "gpu"
-            ? "This project runs on a RunPod GPU pod, so it doesn't use box snapshots: its network volume keeps caches between pods."
+            ? "This project runs on RunPod GPU pods, so it doesn't use box snapshots: pod #1's network volume keeps caches between its runs."
             : "This project runs on this computer, so it doesn't use box snapshots."}
         </p>
       </section>

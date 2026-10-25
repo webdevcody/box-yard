@@ -8,13 +8,13 @@ import { RunPodApi } from "./api.js"
 import { SshPool } from "./ssh.js"
 import { RunPodSettingsStore } from "./settings.js"
 import { ImageBuilder, checkDocker, imageTag, runpodDir } from "./image.js"
-import { gpuBoxProject, isGpuBox, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
+import { gpuBoxId, gpuBoxIndex, gpuBoxProject, isGpuBox, VOLUME_GB_MONTH_USD, type RunPodGpuOption, type RunPodPodInfo, type RunPodStatus, type RunPodVolumeInfo } from "../../shared/runpod.js"
 
 const MAX_KEEP_WARM_MINUTES = 24 * 60
 
 /**
  * Settings › RunPod GPU and the GPU runner behind "Runs on: RunPod GPU": the API client, Box Yard's SSH key for
- * pods, the provider every `runpod-<projectId>` box routes to, the image builder and keep-warm.
+ * pods, the provider every `runpod-<projectId>[-<n>]` box routes to, the image builder and keep-warm.
  * Everything RunPod-side carries this install's id, so two Box Yards on one RunPod account leave each other alone.
  */
 export class RunPodService implements GpuRunner {
@@ -50,6 +50,7 @@ export class RunPodService implements GpuRunner {
       git: d.git,
       onEvent: (e) => this.onPodEvent?.({ boxId: e.boxId, kind: e.kind, detail: e.detail }),
       onProgress: (boxId, message) => this.onProgress?.(boxId, message),
+      projectCap: (projectId) => d.store.projectGpuCap(projectId),
     })
     this.images = new ImageBuilder({
       secrets: () => d.credentials.secrets(),
@@ -108,10 +109,12 @@ export class RunPodService implements GpuRunner {
     const prefix = `boxyard-${this.d.install()}-`
     try {
       const [pods, volumes] = await Promise.all([this.provider.listPods(true), this.api.listVolumes()])
-      out.pods = pods.map(({ boxId, pod }): RunPodPodInfo => {
+      const order = (id: string) => `${projects.name(gpuBoxProject(id)) ?? gpuBoxProject(id)}\u0000${String(gpuBoxIndex(id)).padStart(3, "0")}`
+      out.pods = [...pods].sort((a, b) => order(a.boxId).localeCompare(order(b.boxId))).map(({ boxId, pod }): RunPodPodInfo => {
         const projectId = gpuBoxProject(boxId)
         return {
           boxId,
+          index: gpuBoxIndex(boxId),
           projectId,
           projectName: projects.name(projectId),
           podId: pod.id,
@@ -145,13 +148,13 @@ export class RunPodService implements GpuRunner {
     return out
   }
 
-  /** Delete one of this install's volumes. Never one a pod is using, never another install's. */
+  /** Delete one of this install's volumes. Never one a pod is using (only a project's pod #1 mounts it), never another install's. */
   async deleteVolume(id: string) {
     const prefix = `boxyard-${this.d.install()}-`
     const v = (await this.api.listVolumes()).find((x) => x.id === id)
     if (!v || !v.name.startsWith(prefix)) throw new NotFoundError(`Volume ${id} isn't one of this Box Yard's`)
-    const boxId = `runpod-${v.name.slice(prefix.length)}`
-    if ((await this.provider.listPods(true)).some((p) => p.boxId === boxId)) throw new BadRequestError("Its project's pod is running; stop it first")
+    const boxId = gpuBoxId(v.name.slice(prefix.length))
+    if ((await this.provider.listPods(true)).some((p) => p.boxId === boxId)) throw new BadRequestError("Its project's pod #1 is running; stop it first")
     await this.api.deleteVolume(id)
   }
 }

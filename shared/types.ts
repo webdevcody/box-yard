@@ -70,6 +70,11 @@ export interface Project {
   tasksPerBox: number | null
   /** Most boxes its tasks use at once (boxes made for it or holding its task folders); null: only Settings › Max boxes. */
   maxBoxes: number | null
+  /**
+   * When it runs on RunPod GPU: the most its pods may cost together, $/hr (0: no cap of its own, the total cap still
+   * applies). null uses Settings › RunPod GPU › Per-project cap.
+   */
+  gpuMaxHourlyUsd: number | null
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number
@@ -687,6 +692,8 @@ export const PROJECT_BOX_LIMITS = {
   agentsPerBox: { min: 1, max: 20 },
   tasksPerBox: { min: 1, max: 200 },
   maxBoxes: { min: 1, max: 100 },
+  /** $/hr, the range of Settings › RunPod GPU › Max per project. */
+  gpuMaxHourlyUsd: { min: 0, max: 100 },
 } as const
 
 /** Settings › Boxes created at once: its default and range. */
