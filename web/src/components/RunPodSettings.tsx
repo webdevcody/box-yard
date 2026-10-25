@@ -2,12 +2,13 @@
 // own registry, or RunPod's stock image), which GPUs to try, idle stop and spending caps, and the pods and network
 // volumes this Box Yard has at RunPod right now. docs/runpod.md explains the runner.
 import { useEffect, useState } from "react"
-import { ArrowUp, Flame, Hammer, Power, Trash2, X } from "lucide-react"
+import { Flame, Hammer, Power, Trash2 } from "lucide-react"
 import { api } from "../lib/api"
 import { confirmDialog } from "../lib/confirm"
-import { useRunPod, useRunPodAction, useRunPodGpus, useSetup } from "../lib/queries"
+import { useRunPod, useRunPodAction, useSetup } from "../lib/queries"
 import { CREDENTIAL_INFO } from "../../../shared/setup"
-import { RUNPOD_STOCK_IMAGE, type RunPodImageBuild, type RunPodSettings, type RunPodStatus } from "../../../shared/runpod"
+import { RUNPOD_CLOUDS, RUNPOD_STOCK_IMAGE, type RunPodCloud, type RunPodImageBuild, type RunPodSettings, type RunPodStatus } from "../../../shared/runpod"
+import { GpuTypePicker } from "./GpuTypePicker"
 import { CredentialField } from "./Setup"
 import { Panel, Row } from "./SettingsDialog"
 import { Button, NewTabLink, Select, TimeAgo, cx, inputClass } from "./ui"
@@ -15,8 +16,23 @@ import { Button, NewTabLink, Select, TimeAgo, cx, inputClass } from "./ui"
 const linkClass = "text-yard-300 underline-offset-2 hover:underline"
 const usd = (n: number | null | undefined) => (n === null || n === undefined ? "—" : `$${n.toFixed(2)}`)
 
-type Numeric = "idleMinutes" | "agentsPerPod" | "containerDiskGb" | "volumeGb" | "maxHourlyUsd" | "totalMaxHourlyUsd" | "watchdogMinutes"
+/** The cloud picker's options and help, here and in Project › Settings › Boxes. */
+export const CLOUD_OPTION: Record<RunPodCloud, string> = {
+  SECURE: "Secure Cloud: RunPod's datacenters, network volume",
+  COMMUNITY: "Community Cloud: cheaper, more GPU types, no volume",
+}
+export const CLOUD_HELP =
+  "Where new pods run. Secure Cloud is RunPod's own datacenters, the only place a project's network volume works. Community Cloud is hosts other people run: cheaper, with GPUs Secure lacks (an RTX 3070), but no network volume, so every pod's caches start cold. The caps use each GPU's price on this cloud. Running pods keep theirs."
+
+type Numeric = "minRamGb" | "minVcpus" | "idleMinutes" | "agentsPerPod" | "containerDiskGb" | "volumeGb" | "maxHourlyUsd" | "totalMaxHourlyUsd" | "watchdogMinutes"
 const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit: string }[] = [
+  {
+    key: "minRamGb",
+    label: "Min RAM",
+    unit: "GB",
+    help: "RunPod only places a new pod on a host with at least this much RAM. Cheap Community hosts can come with little; a game's browser needs about 12 GB. A project can set its own.",
+  },
+  { key: "minVcpus", label: "Min vCPUs", unit: "vCPUs", help: "…and at least this many vCPUs. Fewer hosts qualify the higher these are, so a pod may wait longer for one." },
   { key: "idleMinutes", label: "Stop when idle", unit: "min", help: "A pod with no agent running or waiting is stopped after this long. Its network volume stays; the next task starts a new pod." },
   { key: "agentsPerPod", label: "Agents per pod", unit: "agents", help: "Agents of one project that may run on its pod at once, unless the project sets its own Agents per box." },
   {
@@ -131,73 +147,38 @@ function useSaveRunPod() {
   return useRunPodAction<Partial<RunPodSettings>>("Couldn't save the RunPod settings", (patch) => api<RunPodStatus>("/api/runpod/settings", { method: "PUT", body: patch }))
 }
 
-/** GPU types to try, in order: the first one in stock (and under the caps) wins. */
+/** GPU types to try, in order (the first one in stock and under the caps wins), and the cloud they run on. */
 function GpuRow({ fid, status }: { fid: (k: string) => string; status: RunPodStatus }) {
   const { settings } = status
-  const gpus = useRunPodGpus({ enabled: status.apiKey })
   const save = useSaveRunPod()
   const [dc, setDc] = useState(settings.dataCenter ?? "")
   useEffect(() => setDc(settings.dataCenter ?? ""), [settings.dataCenter])
-  const options = (gpus.data ?? []).filter((g) => !settings.gpuTypes.includes(g.id))
-  const info = (id: string) => gpus.data?.find((g) => g.id === id)
-  const setTypes = (gpuTypes: string[]) => save.mutate({ gpuTypes })
   return (
-    <Row
-      id={fid("runpod-gpus")}
-      label="GPU types"
-      help="Tried in this order when a pod starts; the first one in stock within the caps wins. Pods run on Secure Cloud. The datacenter is picked for the best stock of these, unless you name one (a project's volume pins its pods to the volume's datacenter)."
-    >
-      <ol className="space-y-1">
-        {settings.gpuTypes.map((id, i) => {
-          const g = info(id)
-          return (
-            <li key={id} className="flex items-center gap-2 rounded-lg bg-zinc-900 px-2 py-1 text-xs">
-              <span className="flex-1 text-zinc-200">
-                {id.replace(/^NVIDIA (GeForce )?/, "")}
-                {g && (
-                  <span className="ml-1 text-zinc-500">
-                    {g.memoryGb} GB · {usd(g.securePrice)}/hr · {g.availability.toLowerCase()} stock
-                  </span>
-                )}
-              </span>
-              {i > 0 && (
-                <button type="button" title="Try it earlier" className="text-zinc-500 hover:text-zinc-200" onClick={() => setTypes([id, ...settings.gpuTypes.filter((x) => x !== id)])}>
-                  <ArrowUp className="h-3.5 w-3.5" />
-                </button>
-              )}
-              {settings.gpuTypes.length > 1 && (
-                <button type="button" title="Remove" className="text-zinc-500 hover:text-red-300" onClick={() => setTypes(settings.gpuTypes.filter((x) => x !== id))}>
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </li>
-          )
-        })}
-      </ol>
-      {status.apiKey && (
-        <Select
-          id={fid("runpod-gpus")}
-          size="sm"
-          className="w-full"
-          value=""
-          onChange={(e) => e.target.value && setTypes([...settings.gpuTypes, e.target.value])}
-        >
-          <option value="">{gpus.isLoading ? "Loading GPU types…" : "Add a GPU type…"}</option>
-          {options.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name} · {g.memoryGb} GB · {usd(g.securePrice)}/hr · {g.availability.toLowerCase()}
+    <>
+      <Row
+        id={fid("runpod-gpus")}
+        label="GPU types"
+        help="Tried in this order when a pod starts; the first one in stock within the caps wins. A project can pick its own (Project › Settings › Boxes). For browser and WebGL game testing an RTX A4000, RTX 4000 Ada or (Community) RTX 3070 is plenty. The datacenter is picked for the best stock of these, unless you name one (a project's volume pins its pod #1 to the volume's datacenter)."
+      >
+        <GpuTypePicker id={fid("runpod-gpus")} value={settings.gpuTypes} onChange={(gpuTypes) => save.mutate({ gpuTypes })} cloud={settings.cloud} enabled={status.apiKey} />
+        <input
+          className={cx(inputClass, "font-mono text-xs")}
+          placeholder="Datacenter: best stock (e.g. CA-MTL-1)"
+          value={dc}
+          onChange={(e) => setDc(e.target.value)}
+          onBlur={() => dc.trim() !== (settings.dataCenter ?? "") && save.mutate({ dataCenter: dc.trim() || null })}
+        />
+      </Row>
+      <Row id={fid("runpod-cloud")} label="Cloud" help={CLOUD_HELP}>
+        <Select id={fid("runpod-cloud")} className="w-full sm:w-80" value={settings.cloud} onChange={(e) => save.mutate({ cloud: e.target.value as RunPodCloud })}>
+          {RUNPOD_CLOUDS.map((c) => (
+            <option key={c} value={c}>
+              {CLOUD_OPTION[c]}
             </option>
           ))}
         </Select>
-      )}
-      <input
-        className={cx(inputClass, "font-mono text-xs")}
-        placeholder="Datacenter: best stock (e.g. CA-MTL-1)"
-        value={dc}
-        onChange={(e) => setDc(e.target.value)}
-        onBlur={() => dc.trim() !== (settings.dataCenter ?? "") && save.mutate({ dataCenter: dc.trim() || null })}
-      />
-    </Row>
+      </Row>
+    </>
   )
 }
 
