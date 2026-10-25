@@ -263,6 +263,16 @@ describe("Boxes overview", () => {
     )
   })
 
+  it("says when a project's Agents per box holds a box below its slots", () => {
+    const shared = box("shared-box", { slots: 4, runningTurns: 1, projects: ["survive-the-night"], projectLimit: { slots: 1, project: "survive-the-night" } })
+    render("/boxes", [...BOXES, shared])
+    expect(row("shared-box").querySelector("[title*='agent slots busy']")!.getAttribute("title")).toBe("1 of 4 agent slots busy; survive-the-night runs its agents alone")
+    click(row("shared-box"))
+    act(() => void window.dispatchEvent(new HashChangeEvent("hashchange")))
+    expect(dialog()!.querySelector("[data-testid=box-project-limit]")!.textContent).toBe("survive-the-night runs its agents alone")
+    expect(row("idle-box").querySelector("[title*='agent slots busy']")!.getAttribute("title")).toBe("0 of 2 agent slots busy")
+  })
+
   it("doesn't show a box that stopped answering as green, or its old numbers as fresh", () => {
     const stats = { memUsedBytes: 0.3 * GB, memTotalBytes: 4 * GB, loadAvg: 0.1, cpuCount: 2 }
     const gone = box("moved-possum-73248", { ...stats, diskCheckedAt: now - 9 * 60_000, unreachableSince: now - 4 * 60_000 })

@@ -270,6 +270,9 @@ function FilterTabs({ boxes, selected }: { boxes: BoxInfo[]; selected: BoxFilter
   )
 }
 
+/** A project's Agents per box holding a box below its slots while one of its agents runs there. */
+const projectLimitLine = (l: NonNullable<BoxInfo["projectLimit"]>) => (l.slots === 1 ? `${l.project} runs its agents alone` : `${l.project} allows ${l.slots} agents while it runs here`)
+
 /** A thin bar; segmented when there are few enough slots to count at a glance. */
 function Meter({ used, total, className, tone, label }: { used: number; total: number; className?: string; tone?: keyof typeof TONE_BAR; label?: string }) {
   const cells = Math.max(total, used)
@@ -405,7 +408,7 @@ function BoxRow({
       </div>
 
       <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-3 @2xl:contents">
-        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={`${box.runningTurns} of ${box.slots} agent slots busy`}>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={`${box.runningTurns} of ${box.slots} agent slots busy${box.projectLimit ? `; ${projectLimitLine(box.projectLimit)}` : ""}`}>
           <span className={cx("tabular-nums", over ? "font-medium text-amber-300" : box.runningTurns ? "text-zinc-200" : "text-zinc-500")}>
             {box.runningTurns}/{box.slots}
             <span className="@2xl:hidden"> agents</span>
@@ -655,6 +658,11 @@ function BoxDetails({
             {box.runningTurns} of {box.slots}
           </span>
           <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="mt-1.5" />
+          {box.projectLimit && (
+            <p className="mt-1 text-[11px] text-zinc-500" data-testid="box-project-limit">
+              {projectLimitLine(box.projectLimit)}
+            </p>
+          )}
         </Fact>
         <Fact label="Disk">
           <DiskSummary box={box} />
