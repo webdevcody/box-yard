@@ -7,7 +7,7 @@ import type { Store } from "./store.js"
 import type { TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
-import type { Uploads } from "./uploads.js"
+import type { StoredUpload, Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
@@ -111,6 +111,12 @@ const modelSchema = z
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
+const relatedTasksSchema = z
+  .array(z.string())
+  .optional()
+  .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)")
+/** The most tasks one create_tasks call starts. */
+export const MAX_TASK_BATCH = 100
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
 /**
@@ -182,15 +188,36 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     }
     return a
   }
-  /** Attachment refs as uploads: an artifact is copied into a new upload, so it is delivered like one. */
-  const attachmentsOf = (refs: string[] | undefined) =>
+  /** An attachment ref, checked (an upload, or an artifact in scope that still has its file) but not copied yet. */
+  const attachmentSource = (ref: string): { upload: StoredUpload } | { artifact: Artifact; file: string } => {
+    if (!ARTIFACT_REF.test(ref)) return { upload: uploads.resolve(ref) }
+    const a = artifactRef(ref)
+    const file = store.artifactPath(a.id)
+    if (!file || !fs.existsSync(file)) throw new Error(`Artifact ${a.id} ("${a.title}") has no file on this server any more.`)
+    return { artifact: a, file }
+  }
+  /**
+   * Attachment refs as uploads: an artifact is copied into a new upload, so it is delivered like one. `copies`
+   * shares one copy of each artifact across the tasks of a batch.
+   */
+  const attachmentsOf = (refs: string[] | undefined, copies = new Map<string, StoredUpload>()) =>
     [...new Set(refs ?? [])].map((ref) => {
-      if (!ARTIFACT_REF.test(ref)) return uploads.resolve(ref)
-      const a = artifactRef(ref)
-      const file = store.artifactPath(a.id)
-      if (!file || !fs.existsSync(file)) throw new Error(`Artifact ${a.id} ("${a.title}") has no file on this server any more.`)
-      return uploads.save(a.filename, fs.readFileSync(file))
+      const src = attachmentSource(ref)
+      if ("upload" in src) return src.upload
+      const copy = copies.get(src.artifact.id) ?? uploads.save(src.artifact.filename, fs.readFileSync(src.file))
+      copies.set(src.artifact.id, copy)
+      return copy
     })
+  /** The "Related earlier work" section create_task adds to a prompt. */
+  const relatedWork = (refs: string[]) =>
+    `## Related earlier work\n${refs
+      .map((ref) => {
+        const r = task(ref)
+        return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${preview(r.summary, 1200, "call get_task for the full reply")}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
+          .filter(Boolean)
+          .join("\n")
+      })
+      .join("\n")}`
   /** Captains never see the Coordinator-only tools, so they can't call them either. */
   const coordinatorOnly = (tool: RegisteredTool) => {
     if (scopeId) tool.remove()
@@ -774,25 +801,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         title: z.string().min(1).max(120),
         prompt: z.string().min(1),
         env: envSchema,
-        related_tasks: z
-          .array(z.string())
-          .optional()
-          .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)"),
+        related_tasks: relatedTasksSchema,
         attachments: attachmentsSchema,
         ...routeParams,
       },
     },
     safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
-      let prompt = a.prompt
-      if (a.related_tasks?.length) {
-        const context = a.related_tasks.map((ref) => {
-          const r = task(ref)
-          return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${preview(r.summary, 1200, "call get_task for the full reply")}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
-            .filter(Boolean)
-            .join("\n")
-        })
-        prompt = `${prompt}\n\n## Related earlier work\n${context.join("\n")}`
-      }
+      const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks)}` : a.prompt
       const t = tasks.createTask({
         projectId: project(a.project).id,
         title: a.title,
@@ -807,6 +822,117 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
+  )
+
+  const batchItem = z.object({
+    title: z.string().min(1).max(120),
+    prompt: z.string().min(1).describe("This task's own instructions. common_prompt, when given, goes before it."),
+    attachments: z.array(z.string()).optional().describe("Files for this task only, added to the shared attachments (up_… or art_… ids or paths, as in create_task)"),
+    related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
+    env: envSchema,
+    ...routeParams,
+  })
+  type BatchItem = z.infer<typeof batchItem>
+
+  server.registerTool(
+    "create_tasks",
+    {
+      description:
+        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh Claude Code session exactly like create_task. ` +
+        "Use it instead of a series of create_task calls whenever you start two or more independent tasks at once: every create_task call costs you a whole step, so dozens of them take minutes before the last task even exists, while create_tasks queues them all at once and Box Yard creates the boxes they need in parallel. " +
+        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own model, effort and routing_* win. " +
+        "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
+        "Returns the new tasks' ids in the order given.",
+      inputSchema: {
+        project: z.string().describe("Project id or name. Every task in the call goes there."),
+        tasks: z.array(batchItem).min(1).max(MAX_TASK_BATCH).describe(`The tasks to start, 1 to ${MAX_TASK_BATCH}, each with its own title and prompt`),
+        common_prompt: z
+          .string()
+          .optional()
+          .describe("The brief every task shares (goal, constraints, what done means, what to report back). It goes before each task's own prompt, so you write it once."),
+        attachments: attachmentsSchema.describe("Files every task gets: ids (up_…) or paths of files Cody attached in this chat, or artifact ids (art_…) or /artifacts/ URLs. Each is copied into every agent's task folder under attachments/."),
+        related_tasks: relatedTasksSchema.describe("Earlier tasks whose outcome every new agent should know about (their summary, branch and PR are added to each prompt)"),
+        env: envSchema.describe("Env vars for every task, as NAME: value; an item's own env wins for the same name"),
+        model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
+        effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
+        routing_rule: routingRuleSchema,
+        routing_reason: routingReasonSchema,
+      },
+    },
+    safe(
+      async (a: {
+        project: string
+        tasks: BatchItem[]
+        common_prompt?: string
+        attachments?: string[]
+        related_tasks?: string[]
+        env?: Record<string, string>
+        model?: string
+        effort?: Effort
+        routing_rule?: string
+        routing_reason?: string
+      }) => {
+        const p = project(a.project)
+        // Check everything before creating anything, and report every problem at once.
+        const problems: string[] = []
+        const check = (where: string, fn: () => unknown) => {
+          try {
+            fn()
+          } catch (err) {
+            problems.push(`${where}: ${errorMessage(err)}`)
+          }
+        }
+        for (const ref of new Set(a.attachments ?? [])) check(`attachments "${ref}"`, () => attachmentSource(ref))
+        for (const ref of new Set(a.related_tasks ?? [])) check(`related_tasks "${ref}"`, () => task(ref))
+        const titles = new Map<string, number>()
+        a.tasks.forEach((item, i) => {
+          const where = `#${i + 1} "${clip(item.title.trim(), 60)}"`
+          if (!item.title.trim()) problems.push(`#${i + 1}: title is empty`)
+          if (!item.prompt.trim()) problems.push(`${where}: prompt is empty`)
+          const key = item.title.trim().toLowerCase()
+          const first = titles.get(key)
+          if (key && first !== undefined) problems.push(`${where}: same title as #${first + 1}; titles must be unique within the call`)
+          else titles.set(key, i)
+          for (const ref of new Set(item.attachments ?? [])) if (!a.attachments?.includes(ref)) check(`${where} attachments "${ref}"`, () => attachmentSource(ref))
+          for (const ref of new Set(item.related_tasks ?? [])) if (!a.related_tasks?.includes(ref)) check(`${where} related_tasks "${ref}"`, () => task(ref))
+        })
+        if (problems.length) {
+          const shown = problems.slice(0, 25)
+          throw new Error(
+            `No task was created: ${problems.length === 1 ? "one problem" : `${problems.length} problems`}. Fix ${problems.length === 1 ? "it" : "them"} and call create_tasks again with the whole list.\n` +
+              shown.map((x) => `- ${x}`).join("\n") +
+              (problems.length > shown.length ? `\n- …and ${problems.length - shown.length} more` : ""),
+          )
+        }
+        const common = a.common_prompt?.trim()
+        const copies = new Map<string, StoredUpload>()
+        // Files first (an artifact is copied once for the whole batch): if one can't be copied, no task exists yet.
+        const inputs = a.tasks.map((item) => {
+          const related = [...new Set([...(a.related_tasks ?? []), ...(item.related_tasks ?? [])])]
+          const prompt = [common, item.prompt, related.length ? relatedWork(related) : ""].filter(Boolean).join("\n\n")
+          const env = a.env || item.env ? { ...a.env, ...item.env } : undefined
+          return {
+            projectId: p.id,
+            title: item.title,
+            prompt,
+            env,
+            attachments: attachmentsOf([...(a.attachments ?? []), ...(item.attachments ?? [])], copies),
+            model: item.model ?? a.model ?? null,
+            effort: item.effort ?? a.effort ?? null,
+            routingRule: item.routing_rule ?? a.routing_rule ?? null,
+            routingReason: item.routing_reason ?? a.routing_reason ?? null,
+            source: inputSource,
+          }
+        })
+        const created = tasks.createTasks(inputs)
+        return okCompact({
+          project: p.name,
+          created: created.length,
+          tasks: created.map((t) => ({ id: t.id, title: t.title, status: t.status })),
+          next: "Every task is queued. Each agent starts as soon as a box slot is free, and Box Yard creates the boxes they need in parallel. Follow them with list_tasks, or wait_for_tasks when the work is quick.",
+        })
+      },
+    ),
   )
 
   server.registerTool(
