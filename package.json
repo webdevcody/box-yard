@@ -2,6 +2,7 @@
   "name": "box-yard",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "One chat to run a yard of Claude Code agents inside Upstash Boxes.",
   "type": "module",
   "engines": {
