@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import type { WorkerSize } from "../../shared/types.js"
-import { RUNPOD_STOCK_IMAGE, gpuBoxProject, isGpuBox, type RunPodSettings } from "../../shared/runpod.js"
+import { RUNPOD_STOCK_IMAGE, gpuBoxIndex, gpuBoxProject, isGpuBox, type RunPodSettings } from "../../shared/runpod.js"
 import { RunPodError, rankDataCenters, type CatalogGpu, type RunPodApi, type RunPodPod, type RunPodVolume } from "../runpod/api.js"
 import type { SshPool, SshTarget } from "../runpod/ssh.js"
 import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
@@ -15,6 +15,8 @@ const START_TIMEOUT_MS = 15 * 60_000
 const SSH_TIMEOUT_MS = 3 * 60_000
 const BOOTSTRAP_TIMEOUT_MS = 20 * 60_000
 const LIST_TTL_MS = 10_000
+/** GPU list prices change rarely; placement asks for the next pod's price on every pass. */
+const CATALOG_TTL_MS = 5 * 60_000
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 export interface RunPodPodState {
@@ -36,13 +38,17 @@ export interface RunPodProviderDeps {
   onEvent?: (e: { boxId: string; kind: "started" | "terminated"; pod: RunPodPod; detail: string }) => void
   /** Progress while a pod starts, for the task's wait reason. */
   onProgress?: (boxId: string, message: string) => void
+  /** A project's own $/hr cap for its pods (Project.gpuMaxHourlyUsd), or null for Settings › RunPod GPU's. */
+  projectCap?: (projectId: string) => number | null
 }
 
 /**
- * RunPod GPU pods as Box Yard boxes. A GPU project has one virtual box, `runpod-<projectId>` (shared/runpod.ts),
- * and at most one pod behind it at a time. `wake` starts the pod (on the project's network volume when there is
- * one) and `pause`/`destroy` terminate it; the volume stays. Commands, files and uploads go over SSH to the pod's
- * public TCP port. Nothing here ever starts a pod except `wake`, so polling a stopped box costs nothing.
+ * RunPod GPU pods as Box Yard boxes. Each of a GPU project's pods is a virtual box, `runpod-<projectId>` for pod #1
+ * and `runpod-<projectId>-<n>` for pod #n (shared/runpod.ts), with at most one pod behind it at a time. TaskManager
+ * decides how many a project gets. `wake` starts the pod (pod #1 on the project's network volume when there is one,
+ * the others on their container disk) and `pause`/`destroy` terminate it; the volume stays. Commands, files and
+ * uploads go over SSH to the pod's public TCP port. Nothing here ever starts a pod except `wake`, so polling a
+ * stopped box costs nothing.
  */
 export class RunPodProvider implements BoxProvider {
   readonly name = "runpod"
@@ -51,6 +57,9 @@ export class RunPodProvider implements BoxProvider {
   private readonly states = new Map<string, RunPodPodState>()
   private readonly waking = new Map<string, Promise<void>>()
   private listed: { at: number; pods: RunPodPod[] } | null = null
+  private catalog: { at: number; gpus: CatalogGpu[] } | null = null
+  /** Pod creates one at a time, so two pods starting together can't both fit under a cap only one fits under. */
+  private creating: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly d: RunPodProviderDeps) {}
 
@@ -58,8 +67,13 @@ export class RunPodProvider implements BoxProvider {
     return ROOT
   }
 
-  /** Pod and volume names: `boxyard-<install>-<projectId>`. */
+  /** Pod names: `boxyard-<install>-<projectId>` for pod #1, `boxyard-<install>-<projectId>-<n>` for pod #n. */
   resourceName(boxId: string) {
+    return `boxyard-${this.d.install()}-${boxId.slice("runpod-".length)}`
+  }
+
+  /** The project's network volume: `boxyard-<install>-<projectId>`, the name pod #1 has always had. */
+  volumeName(boxId: string) {
     return `boxyard-${this.d.install()}-${gpuBoxProject(boxId)}`
   }
 
@@ -69,7 +83,7 @@ export class RunPodProvider implements BoxProvider {
   }
 
   async create(_opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string> {
-    throw new Error("RunPod boxes aren't made through the box pool: each GPU project has one, runpod-<projectId>")
+    throw new Error("RunPod boxes aren't made through the box pool: a GPU project's pods are runpod-<projectId>[-<n>]")
   }
 
   /** This install's live pods (not terminated), by box id. */
@@ -186,14 +200,19 @@ export class RunPodProvider implements BoxProvider {
     })
   }
 
-  /** The project's network volume: found by name, else made in the datacenter with the best stock. Null when off. */
+  /**
+   * The project's network volume for its pod #1: found by name, else made in the datacenter with the best stock.
+   * Null when off, and always for pods #2 and up: RunPod lets only one running pod use a volume safely, so the
+   * others keep their caches on their container disk (docs/runpod.md).
+   */
   async ensureVolume(boxId: string, gpus?: CatalogGpu[]): Promise<RunPodVolume | null> {
+    if (gpuBoxIndex(boxId) > 1) return null
     const s = this.d.settings()
-    const name = this.resourceName(boxId)
+    const name = this.volumeName(boxId)
     const mine = (await this.d.api.listVolumes()).find((v) => v.name === name)
     if (mine || s.volumeGb <= 0) return mine ?? null
     const dcs = await this.d.api.dataCenters()
-    const wanted = this.affordable(s, gpus ?? (await this.d.api.gpus())).map((g) => g.id)
+    const wanted = this.affordable(s, gpus ?? (await this.gpuCatalog()), this.capOf(gpuBoxProject(boxId))).map((g) => g.id)
     const ranked = rankDataCenters(dcs, wanted)
     const pick = s.dataCenter ? dcs.find((dc) => dc.id === s.dataCenter) : null
     const dc = pick
@@ -210,27 +229,62 @@ export class RunPodProvider implements BoxProvider {
     return this.d.api.createVolume({ name, sizeGb: s.volumeGb, dataCenter: dc.id, type: dc.volumeType })
   }
 
-  /** GPU types in priority order whose list price is within the per-pod cap. */
-  private affordable(s: RunPodSettings, gpus: CatalogGpu[]): CatalogGpu[] {
-    const byId = new Map(gpus.map((g) => [g.id, g]))
-    return s.gpuTypes.map((id) => byId.get(id)).filter((g): g is CatalogGpu => Boolean(g && g.secure && (!s.maxHourlyUsd || g.price.secure <= s.maxHourlyUsd)))
+  /** The $/hr cap on a project's pods together: its own, else Settings › RunPod GPU's. 0: none. */
+  capOf(projectId: string): number {
+    return this.d.projectCap?.(projectId) ?? this.d.settings().maxHourlyUsd
   }
 
-  private async startPod(boxId: string): Promise<RunPodPod> {
+  /** RunPod's GPU catalog with list prices, cached for a few minutes. */
+  private async gpuCatalog(fresh = false): Promise<CatalogGpu[]> {
+    if (fresh || !this.catalog || Date.now() - this.catalog.at > CATALOG_TTL_MS) this.catalog = { at: Date.now(), gpus: await this.d.api.gpus() }
+    return this.catalog.gpus
+  }
+
+  /** GPU types in priority order whose list price is within the project's cap (no one pod may cost more). */
+  private affordable(s: RunPodSettings, gpus: CatalogGpu[], cap: number): CatalogGpu[] {
+    const byId = new Map(gpus.map((g) => [g.id, g]))
+    return s.gpuTypes.map((id) => byId.get(id)).filter((g): g is CatalogGpu => Boolean(g && g.secure && (!cap || g.price.secure <= cap)))
+  }
+
+  /**
+   * What the project's next pod would likely cost: the list price of the first GPU type in Settings › RunPod GPU
+   * that fits its cap (the type a pod tries first). Null when none fits. Placement checks the caps with it before
+   * it counts on a new pod.
+   */
+  async nextPodPrice(projectId: string): Promise<{ gpu: string; usd: number } | null> {
+    const first = this.affordable(this.d.settings(), await this.gpuCatalog(), this.capOf(projectId))[0]
+    return first ? { gpu: shortGpu(first.id), usd: first.price.secure } : null
+  }
+
+  private startPod(boxId: string): Promise<RunPodPod> {
+    const p = this.creating.then(() => this.createPod(boxId))
+    this.creating = p.catch(() => {})
+    return p
+  }
+
+  private async createPod(boxId: string): Promise<RunPodPod> {
     const s = this.d.settings()
-    const gpus = await this.d.api.gpus()
-    const candidates = this.affordable(s, gpus)
+    const projectId = gpuBoxProject(boxId)
+    const cap = this.capOf(projectId)
+    const gpus = await this.gpuCatalog(true)
+    const candidates = this.affordable(s, gpus, cap)
     if (!candidates.length) {
-      throw new Error(`None of the GPU types in Settings › RunPod GPU (${s.gpuTypes.map(shortGpu).join(", ")}) is offered on Secure Cloud within the $${s.maxHourlyUsd}/hr cap`)
+      throw new Error(`None of the GPU types in Settings › RunPod GPU (${s.gpuTypes.map(shortGpu).join(", ")}) is offered on Secure Cloud within the $${cap}/hr cap`)
     }
-    // The total cap counts every pod this install has running.
-    const spend = (await this.listPods(true)).filter((p) => p.boxId !== boxId).reduce((sum, p) => sum + (p.pod.cost ?? 0), 0)
+    // The caps count every pod this install has running, and the project's own.
+    const others = (await this.listPods(true)).filter((p) => p.boxId !== boxId)
+    const spend = others.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0)
+    const projectSpend = others.filter((p) => gpuBoxProject(p.boxId) === projectId).reduce((sum, p) => sum + (p.pod.cost ?? 0), 0)
     const volume = await this.ensureVolume(boxId, gpus)
     const dcs = volume ? null : await this.d.api.dataCenters()
     const misses: string[] = []
     for (const gpu of candidates) {
       if (s.totalMaxHourlyUsd && spend + gpu.price.secure > s.totalMaxHourlyUsd) {
         misses.push(`${shortGpu(gpu.id)} would take GPU spend to $${(spend + gpu.price.secure).toFixed(2)}/hr, over the $${s.totalMaxHourlyUsd}/hr total cap`)
+        continue
+      }
+      if (cap && projectSpend + gpu.price.secure > cap) {
+        misses.push(`${shortGpu(gpu.id)} would take the project's pods to $${(projectSpend + gpu.price.secure).toFixed(2)}/hr, over its $${cap}/hr cap`)
         continue
       }
       const dc = volume?.dataCenter ?? s.dataCenter ?? rankDataCenters(dcs ?? [], [gpu.id])[0]?.id
@@ -257,9 +311,9 @@ export class RunPodProvider implements BoxProvider {
             DISABLE_AUTOUPDATER: "1",
           },
         })
-        if (s.maxHourlyUsd && (pod.cost ?? 0) > s.maxHourlyUsd) {
+        if (cap && projectSpend + (pod.cost ?? 0) > cap) {
           await this.d.api.terminatePod(pod.id).catch(() => {})
-          misses.push(`${shortGpu(gpu.id)} came back at $${pod.cost}/hr, over the $${s.maxHourlyUsd}/hr cap`)
+          misses.push(`${shortGpu(gpu.id)} came back at $${pod.cost}/hr, over the project's $${cap}/hr cap`)
           continue
         }
         this.listed = null
