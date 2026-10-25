@@ -298,7 +298,7 @@ export class CaptainManager {
   }
 
   /** This project's compactions as records, newest first; `taskId` keeps those linked to that task. */
-  compactionRecords(projectId: string, filter: { taskId?: string; limit?: number } = {}): CompactionRecord[] {
+  compactionRecords(projectId: string, filter: { taskId?: string; limit?: number; before?: number } = {}): CompactionRecord[] {
     return readCompactionRecords(captainCompactionsDir(this.c.dataDir, projectId), filter)
   }
 

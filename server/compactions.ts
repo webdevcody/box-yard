@@ -311,15 +311,22 @@ export function readCompactionRecord(file: string): CompactionRecord | null {
   }
 }
 
-/** Every compaction in `dir`, newest first, optionally only those linked to `taskId`. */
-export function readCompactionRecords(dir: string, filter: { taskId?: string; limit?: number } = {}): CompactionRecord[] {
+/** Every compaction in `dir`, newest first, optionally only those linked to `taskId` or older than `before` (ms). */
+export function readCompactionRecords(dir: string, filter: { taskId?: string; limit?: number; before?: number } = {}): CompactionRecord[] {
   const out: CompactionRecord[] = []
   for (const name of listCompactions(dir).reverse()) {
     if (filter.limit !== undefined && out.length >= filter.limit) break
     const r = readCompactionRecord(path.join(dir, name))
-    if (r && (!filter.taskId || r.taskIds.includes(filter.taskId))) out.push(r)
+    if (r && (!filter.taskId || r.taskIds.includes(filter.taskId)) && (filter.before === undefined || r.at < filter.before)) out.push(r)
   }
   return out
+}
+
+/** A compaction id (2026-10-22T18-40-05Z, maybe with a -2 suffix) or an ISO time, as ms; null when it is neither. */
+export function compactionTime(ref: string): number | null {
+  const m = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z/.exec(ref.trim())
+  const t = m ? Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}Z`) : Date.parse(ref.trim())
+  return Number.isFinite(t) ? t : null
 }
 
 /** One compaction by id; only names actually in `dir` are read, so an id can't point outside it. */
