@@ -18,6 +18,7 @@
     "deploy:box": "tsx scripts/deploy-box.ts",
     "deploy:vps": "bash scripts/deploy-vps.sh",
     "worker-snapshot": "tsx scripts/make-worker-snapshot.ts",
+    "smoke:runpod": "tsx scripts/smoke-runpod.ts",
     "demo": "./yard demo"
   },
   "dependencies": {

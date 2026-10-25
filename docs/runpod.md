@@ -36,6 +36,10 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
 - **Previews.** An agent's `$PORT` is reachable at `https://<podId>-<port>.proxy.runpod.net`.
 - **Costs.** Pods bill by the second while they run. Volumes bill monthly whether or not a pod is up (about $0.07/GB a month). Delete a volume you no longer need in Settings › RunPod GPU › Volumes.
 
+## Checking it works
+
+`npm run smoke:runpod` (with `RUNPOD_API_KEY` set) starts one pod with the default settings and checks SSH, the tools, `nvidia-smi`, WebGL in headless Chrome on the NVIDIA GPU, files, and the proxy URL. Then it terminates the pod and deletes its volume. It takes about three minutes and costs about two cents. `--keep` leaves the pod up; `SMOKE_IMAGE=<your image>` tries a built image.
+
 ## Files
 
 | Path | What |
