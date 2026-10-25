@@ -4,16 +4,17 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react"
 import { createPortal } from "react-dom"
 import { useLocation } from "wouter"
-import { AlertTriangle, FileText, Loader2, Paperclip, Plus, SlidersHorizontal, X } from "lucide-react"
+import { AlertTriangle, FileText, Laptop, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, X } from "lucide-react"
 import { newClientId, useAgentSettings, useCreateTask, useProjects, useSettings } from "../lib/queries"
 import { draftScope, loadDraft, saveDraft } from "../lib/newTask"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
 import { EFFORTS, type Attachment, type Effort, type Project } from "../../../shared/types"
+import { LOCAL_UNSANDBOXED, type Runner } from "../../../shared/runner"
 import { Modal, focusables } from "./Modal"
 import { formatSize } from "./Attachments"
-import { Button, Field, Select, cx, inputClass, parseEnv } from "./ui"
+import { Button, Field, LineIcon, Select, cx, inputClass, parseEnv } from "./ui"
 
 /** Below Tailwind's `sm`: the popover is a bottom sheet. */
 const NARROW = "(max-width: 639.98px)"
@@ -347,7 +348,7 @@ let nextKey = 0
 
 /**
  * The full New task form: an optional title (made from the prompt when blank), the prompt, and the options the
- * popover leaves out: model, effort, files and env vars. `onCancel` gets the prompt so the popover's draft keeps it.
+ * popover leaves out: model, effort, "Run on this computer", files and env vars. `onCancel` gets the prompt so the popover's draft keeps it.
  */
 export function NewTaskDialog({
   projectId,
@@ -372,6 +373,10 @@ export function NewTaskDialog({
   const [files, setFiles] = useState<Pending[]>([])
   const [env, setEnv] = useState("")
   const [showEnv, setShowEnv] = useState(false)
+  // Starts on the project's "Runs on"; flipping it pins this task to the other runner (Task.runsOn).
+  const projectRunner: Runner = project?.runner ?? "box"
+  const [runner, setRunner] = useState<Runner | null>(null)
+  const runsOn = runner ?? projectRunner
   const picker = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
@@ -423,6 +428,7 @@ export function NewTaskDialog({
           env: parseEnv(env),
           ...(model && { model }),
           ...(effort && { effort }),
+          ...(runsOn !== projectRunner && { runsOn }),
           attachments: files.flatMap((f) => (f.attachment ? [f.attachment.id] : [])),
         })
         onDone()
@@ -467,6 +473,7 @@ export function NewTaskDialog({
           </Select>
         </Field>
       </div>
+      <RunHereToggle on={runsOn === "local"} projectLocal={projectRunner === "local"} onChange={(on) => setRunner(on ? "local" : "box")} />
       <div role="group" aria-label="Files" className="space-y-2">
         {files.length > 0 && (
           <ul className="flex flex-wrap gap-2">
@@ -528,5 +535,35 @@ export function NewTaskDialog({
         </Field>
       )}
     </Modal>
+  )
+}
+
+/** "Run on this computer": this task only, over its project's "Runs on", in either direction. */
+function RunHereToggle({ on, projectLocal, onChange }: { on: boolean; projectLocal: boolean; onChange: (on: boolean) => void }) {
+  const hint = projectLocal
+    ? on
+      ? "Its project runs on this computer. Turn it off to run this task in an Upstash box."
+      : "This task only runs in an Upstash box, though its project runs on this computer."
+    : on
+      ? "This task only runs on this computer, though its project runs in Upstash boxes."
+      : "Its project runs in Upstash boxes. Turn it on to run this task here."
+  return (
+    <div className="space-y-2">
+      <label className="flex min-h-11 cursor-pointer items-start gap-2.5 text-sm text-zinc-300">
+        <input type="checkbox" className="mt-1 shrink-0" checked={on} onChange={(e) => onChange(e.target.checked)} data-testid="new-task-local" />
+        <span className="min-w-0">
+          <span className="inline-flex items-center gap-1.5 text-zinc-200">
+            <Laptop className="h-3.5 w-3.5 text-zinc-400" /> Run on this computer
+          </span>
+          <span className="block text-xs text-zinc-500">{hint}</span>
+        </span>
+      </label>
+      {on && (
+        <p className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+          <span>{LOCAL_UNSANDBOXED}</span>
+        </p>
+      )}
+    </div>
   )
 }
