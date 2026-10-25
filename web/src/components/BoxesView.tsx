@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { AlertTriangle, Boxes, Camera, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
@@ -15,6 +15,7 @@ import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
 import { BoxResizeDialog } from "./BoxResizeDialog"
+import { SnapshotDialog } from "./ProjectSnapshot"
 import { BoxHistory } from "./BoxHistory"
 import { resizeLine } from "../lib/boxResize"
 import { badgeStatus } from "../lib/prState"
@@ -23,7 +24,11 @@ import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../.
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
-type BoxAction = ConfirmAction | "resize"
+type BoxAction = ConfirmAction | "resize" | "snapshot"
+
+/** A box new boxes for one of its projects can start from (shared/snapshots.ts). */
+const snapshottable = (box: BoxInfo) => box.status === "ready" && (box.projectIds?.length ?? 0) > 0
+const SNAPSHOT_TITLE = "Save a stripped copy of this box as a project's snapshot, so new boxes for it start from it. This box isn't changed."
 
 const BOX_STATUS: Record<BoxInfo["status"], { label: string; chip: string; dot: string }> = {
   creating: { label: "Starting", chip: "bg-sky-500/10 text-sky-300", dot: "bg-sky-400 animate-pulse" },
@@ -146,7 +151,8 @@ export function BoxesView() {
 
       {selected && <BoxDetails key={selected.id} box={selected} tasks={tasksOn(selected.id)} projectName={projectName} onClose={closeBox} onAction={onAction} />}
       {action?.kind === "resize" && actionBox && <BoxResizeDialog key={`${action.boxId}-resize`} box={actionBox} onClose={() => setAction(null)} />}
-      {action && action.kind !== "resize" && actionBox && (
+      {action?.kind === "snapshot" && actionBox && <SnapshotDialog key={`${action.boxId}-snapshot`} box={actionBox} onClose={() => setAction(null)} />}
+      {action && action.kind !== "resize" && action.kind !== "snapshot" && actionBox && (
         <BoxActionDialog
           key={`${action.boxId}-${action.kind}`}
           box={actionBox}
@@ -508,6 +514,11 @@ function BoxMenu({ box, tasks, onOpen, onAction }: { box: BoxInfo; tasks: Task[]
               <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? `Move this ${box.size} box to another size, up or down`} onClick={() => act("resize")}>
                 <Maximize2 className="h-4 w-4 text-zinc-500" /> Resize…
               </button>
+              {snapshottable(box) && (
+                <button role="menuitem" className={cx(menuItem, "disabled:opacity-50")} disabled={Boolean(busy)} title={busy ?? SNAPSHOT_TITLE} onClick={() => act("snapshot")}>
+                  <Camera className="h-4 w-4 text-zinc-500" /> Snapshot for project…
+                </button>
+              )}
             </>
           )}
           <button
@@ -594,6 +605,11 @@ function BoxDetails({
               <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? `Move this ${box.size} box to another size, up or down`} onClick={() => onAction(box.id, "resize")}>
                 <Maximize2 className="h-4 w-4" /> Resize…
               </Button>
+              {snapshottable(box) && (
+                <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? SNAPSHOT_TITLE} onClick={() => onAction(box.id, "snapshot")}>
+                  <Camera className="h-4 w-4" /> Snapshot…
+                </Button>
+              )}
               <Button type="button" variant="ghost" disabled={Boolean(busy)} title={busy ?? "Archive every workspace and remove it from the box; the box stays"} onClick={() => onAction(box.id, "clear")}>
                 <Eraser className="h-4 w-4" /> Clear box…
               </Button>
