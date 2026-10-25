@@ -420,6 +420,7 @@ export function useCreateProject() {
           depCache: null,
           runner: "box",
           heavyTasks: "off",
+          snapshot: null,
           createdAt: now,
           updatedAt: now,
         }),

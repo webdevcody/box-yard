@@ -650,6 +650,16 @@ export const MIGRATIONS: string[] = [
   -- Where a project's agents run: NULL or 'box' in Upstash boxes, 'local' on the computer running Box Yard.
   ALTER TABLE projects ADD COLUMN runner TEXT;
   `,
+  `
+  -- A project's box snapshot (shared/snapshots.ts): new boxes for it start from this provider snapshot. NULL: cold.
+  -- snapshot_size is the size of the box it was taken from; snapshot_provider the provider holding it.
+  ALTER TABLE projects ADD COLUMN snapshot_id TEXT;
+  ALTER TABLE projects ADD COLUMN snapshot_provider TEXT;
+  ALTER TABLE projects ADD COLUMN snapshot_size TEXT;
+  ALTER TABLE projects ADD COLUMN snapshot_box_id TEXT;
+  ALTER TABLE projects ADD COLUMN snapshot_bytes INTEGER;
+  ALTER TABLE projects ADD COLUMN snapshot_at INTEGER;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

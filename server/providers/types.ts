@@ -8,6 +8,13 @@ export interface ExecResult {
 
 export type BoxHealth = "running" | "paused" | "gone" | "error" | "unknown"
 
+/** A snapshot a provider saved. */
+export interface BoxSnapshotInfo {
+  id: string
+  /** Its size at the provider, when the provider says. */
+  bytes: number | null
+}
+
 export interface BoxUsageProbe {
   size?: "small" | "medium" | "large"
   keepAlive?: boolean
@@ -33,8 +40,11 @@ export interface BoxProvider {
   root(boxId: string): string
   /** Folder holding the task folders, `<root>/tasks` unless the provider says otherwise (the local runner). */
   tasksRoot?(boxId: string): string
-  /** Create a worker box with Claude Code and git ready. Returns its id. */
-  create(opts: { labels: string[]; size?: WorkerSize }): Promise<string>
+  /**
+   * Create a worker box with Claude Code and git ready. Returns its id. With `snapshotId` the box starts from that
+   * snapshot (Box.fromSnapshot) and throws when it can't; the caller decides whether to create it cold instead.
+   */
+  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string>
   health(boxId: string): Promise<BoxHealth>
   /** Wake a paused box. No-op when it is already running. */
   wake(boxId: string): Promise<void>
@@ -63,6 +73,19 @@ export interface BoxProvider {
    * creation, so without this Box Yard resizes by moving the box's work to a new box of the target size.
    */
   resize?(boxId: string, size: WorkerSize): Promise<void>
+  /**
+   * Save a box's whole disk as a snapshot new boxes can start from (`create({ snapshotId })`). Optional: a
+   * provider without it can't take project snapshots. Not retried: a second call would make a second snapshot.
+   */
+  snapshot?(boxId: string, name: string): Promise<BoxSnapshotInfo>
+  /** Delete one snapshot. Already gone is fine. Never deletes anything but the id it's given. */
+  deleteSnapshot?(snapshotId: string): Promise<void>
+  /**
+   * The home and temp folders a snapshot's scratch box is stripped in (server/boxSnapshot.ts). On Upstash they're
+   * the box's own $HOME and /tmp; local boxes give folders inside the box's own folder, so stripping one never
+   * touches this machine's home or /tmp.
+   */
+  snapshotDirs?(boxId: string): { home: string; tmp: string }
   /** Ids of boxes carrying a label, to clean up boxes a crash left behind. */
   listIds?(label: string): Promise<string[]>
   /**

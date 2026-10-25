@@ -1,5 +1,5 @@
 import type { WorkerSize } from "../../shared/types.js"
-import type { BoxHealth, BoxProvider, BoxUsageProbe, ExecResult } from "./types.js"
+import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
 
 /** Local boxes are folders named local-<id> (LocalProvider.create); every other id is an Upstash box. */
 export const isLocalBox = (boxId: string) => boxId.startsWith("local-")
@@ -38,8 +38,21 @@ export class AutoProvider implements BoxProvider {
   root(boxId: string) {
     return this.of(boxId).root(boxId)
   }
-  create(opts: { labels: string[]; size?: WorkerSize }) {
+  create(opts: { labels: string[]; size?: WorkerSize; snapshotId?: string }) {
     return this.active.create(opts)
+  }
+  /** A snapshot goes to the provider of its box; local snapshot ids start with local- like local box ids. */
+  snapshot(boxId: string, name: string): Promise<BoxSnapshotInfo> {
+    const p = this.of(boxId)
+    if (!p.snapshot) throw new Error(`${p.name} boxes can't be snapshotted`)
+    return p.snapshot(boxId, name)
+  }
+  async deleteSnapshot(snapshotId: string): Promise<void> {
+    const p = isLocalBox(snapshotId) ? this.local : this.upstash
+    if (p.deleteSnapshot) await p.deleteSnapshot(snapshotId)
+  }
+  snapshotDirs(boxId: string) {
+    return this.of(boxId).snapshotDirs?.(boxId) ?? { home: "$HOME", tmp: "/tmp" }
   }
   health(boxId: string): Promise<BoxHealth> {
     return this.of(boxId).health(boxId)

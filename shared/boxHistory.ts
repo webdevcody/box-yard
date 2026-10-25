@@ -13,6 +13,11 @@ export const BOX_EVENT_TYPES = [
   { key: "cleared", label: "Cleared" },
   { key: "size_changed", label: "Size changed" },
   { key: "orphan_deleted", label: "Orphan deleted" },
+  // Per-project snapshots (shared/snapshots.ts): one taken from this box, one that failed, and a new box that
+  // started cold because the project's snapshot couldn't be used or restored.
+  { key: "snapshot", label: "Snapshot" },
+  { key: "snapshot_failed", label: "Snapshot failed" },
+  { key: "snapshot_fallback", label: "Snapshot not used" },
 ] as const
 export type BoxEventType = (typeof BOX_EVENT_TYPES)[number]["key"]
 
@@ -27,6 +32,7 @@ export const BOX_ACTORS = [
   { key: "janitor", label: "Janitor" },
   { key: "orphan-sweep", label: "Orphan sweep" },
   { key: "provider", label: "Provider" },
+  { key: "snapshot", label: "Project snapshot" },
 ] as const
 export type BoxActorKind = (typeof BOX_ACTORS)[number]["key"]
 

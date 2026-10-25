@@ -8,6 +8,7 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { HeavyTasks } from "./memory.js"
 import type { Runner } from "./runner.js"
+import type { ProjectSnapshot } from "./snapshots.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -61,6 +62,8 @@ export interface Project {
   runner: Runner
   /** How its running agents share boxes: "off", "one-per-box" or "whole-box" (shared/memory.ts). */
   heavyTasks: HeavyTasks
+  /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
+  snapshot: ProjectSnapshot | null
   createdAt: number
   updatedAt: number
 }
@@ -399,7 +402,7 @@ export interface BoxInfo {
   lastUsedAt: number
 }
 
-export type BoxOperation = "cleanup" | "clear" | "delete" | "resize"
+export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot"
 
 /** What Clear box and Delete box would touch, for their confirmations. */
 export interface BoxContents {

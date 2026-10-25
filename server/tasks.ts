@@ -67,10 +67,10 @@ import {
   type ResizeStep,
 } from "../shared/boxSizes.js"
 
-type BoxOp = "clear" | "delete" | "resize"
+type BoxOp = "clear" | "delete" | "resize" | "snapshot"
 
 function busyMessage(boxId: string, op: BoxOperation) {
-  const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing" }[op]
+  const what = { cleanup: "a disk cleanup", clear: "clearing", delete: "deleting", resize: "resizing", snapshot: "a project snapshot" }[op]
   return `Box ${boxId} is busy: ${what} is in progress.`
 }
 
