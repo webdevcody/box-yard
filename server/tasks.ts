@@ -1706,16 +1706,15 @@ export class TaskManager {
       const more = Math.ceil(n / this.growthSlots(projectId)) - (this.creatingFor.get(projectId) ?? 0)
       if (more > 0) need.set(projectId, more)
     }
-    // Several at once, up to Settings › Boxes created at once (each finished create runs another pass), and the
-    // projects take turns, so one project's big fan-out doesn't hold up another project's single task.
+    // Several at once, up to Settings › Boxes created at once (each finished create runs another pass). The project
+    // with the fewest boxes on their way goes next, so one project's big fan-out doesn't hold up another's single
+    // task. createBox counts itself in `creatingFor` before its first await.
     const cap = this.createConcurrency()
     while (need.size && this.canCreateBox(cap)) {
-      for (const [projectId, more] of need) {
-        if (!this.canCreateBox(cap)) break
-        void this.createBox(projectId)
-        if (more > 1) need.set(projectId, more - 1)
-        else need.delete(projectId)
-      }
+      const [projectId, more] = [...need].reduce((best, next) => ((this.creatingFor.get(next[0]) ?? 0) < (this.creatingFor.get(best[0]) ?? 0) ? next : best))
+      void this.createBox(projectId)
+      if (more > 1) need.set(projectId, more - 1)
+      else need.delete(projectId)
     }
   }
 
