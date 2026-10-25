@@ -168,6 +168,23 @@ const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, na
  */
 export type InputSource = "cody" | typeof MERGE_BUTTON_SOURCE | "orchestrator" | "system" | `agent:${string}` | `captain:${string}` | `hook:${string}`
 
+/** A task to start (TaskManager.createTask / createTasks). */
+export interface NewTask {
+  id?: string
+  projectId: string
+  title: string
+  prompt: string
+  env?: Record<string, string>
+  scheduleId?: string | null
+  model?: string | null
+  effort?: Effort | null
+  routingRule?: string | null
+  routingReason?: string | null
+  attachments?: StoredUpload[]
+  /** Who the attached files are from (a Captain labels them as its own). */
+  source?: InputSource
+}
+
 /**
  * Something happened to a task that hooks (server/hooks.ts) can act on. `originHookIds` are the hooks whose
  * prompts started the turn behind it, so a hook doesn't fire on its own work.
@@ -512,42 +529,46 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ public API
 
-  createTask(input: {
-    id?: string
-    projectId: string
-    title: string
-    prompt: string
-    env?: Record<string, string>
-    scheduleId?: string | null
-    model?: string | null
-    effort?: Effort | null
-    routingRule?: string | null
-    routingReason?: string | null
-    attachments?: StoredUpload[]
-    /** Who the attached files are from (a Captain labels them as its own). */
-    source?: InputSource
-  }): Task {
-    const project = this.store.getProject(input.projectId)
-    if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
-    if (!input.title.trim()) throw new BadRequestError("title is required")
-    if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
-    const route = this.initialRoute(input)
-    const task = this.store.createTask({
-      ...input,
-      startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
-      model: route.model,
-      effort: route.effort,
-      routingRule: route.routingRule,
-      routingReason: route.routingReason,
-      branch: project.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
+  createTask(input: NewTask): Task {
+    return this.createTasks([input])[0]!
+  }
+
+  /**
+   * Start several tasks at once (create_tasks, #122). Every input is checked before anything is written, and all
+   * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
+   * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
+   * per call.
+   */
+  createTasks(inputs: NewTask[]): Task[] {
+    const projects = inputs.map((input) => {
+      const project = this.store.getProject(input.projectId)
+      if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
+      if (!input.title.trim()) throw new BadRequestError("title is required")
+      if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
+      return project
     })
-    const files = input.attachments ?? []
-    this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
-    if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
-    this.emitTask(task.id)
+    const ids = this.store.db.transaction(() =>
+      inputs.map((input, i) => {
+        const route = this.initialRoute(input)
+        const task = this.store.createTask({
+          ...input,
+          startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
+          model: route.model,
+          effort: route.effort,
+          routingRule: route.routingRule,
+          routingReason: route.routingReason,
+          branch: projects[i]!.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
+        })
+        const files = input.attachments ?? []
+        this.store.addTaskMessage(task.id, "user", input.prompt, { kind: "task_prompt", ...(files.length ? { attachments: publicFiles(files) } : {}) })
+        if (files.length) this.store.queueInput(task.id, input.source ?? "orchestrator", "These files go with the task:", files.map((f) => f.id))
+        return task.id
+      }),
+    )()
+    for (const id of ids) this.emitTask(id)
     this.publishDirectory()
     this.schedule()
-    return this.store.getTask(task.id)!
+    return ids.map((id) => this.store.getTask(id)!)
   }
 
   sendInput(
