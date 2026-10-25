@@ -13,6 +13,8 @@ export interface EntityRef {
   label: string
   /** Hover hint, e.g. the task title and status. */
   hint: string
+  /** A task's project. */
+  projectId?: string
 }
 
 export interface EntityIndex {
@@ -51,7 +53,7 @@ export function buildEntityIndex(
   const titleCounts = new Map<string, number>()
   for (const t of data.tasks ?? []) {
     const project = projectNames.get(t.projectId)
-    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), label: t.title, hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · ") })
+    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), label: t.title, hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · "), projectId: t.projectId })
     const title = t.title.trim()
     if (title) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1)
   }
