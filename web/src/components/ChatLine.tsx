@@ -2,10 +2,10 @@
 // tool calls (ToolLine) and notices. Shared by the Coordinator panel and the project Captain tab.
 import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
-import { AlarmClock, AlertTriangle, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
+import { AlarmClock, AlertTriangle, Bot, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
 import { AppLink, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
-import { toolMentions } from "../lib/linkify"
+import { routes, toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage } from "../lib/captainTranscript"
 import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
@@ -149,7 +149,44 @@ export const NOTICE_CLASS = "rounded-lg border border-zinc-800/80 bg-zinc-900/40
  * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
  * and buttons (a "Show all" toggle) keep their clicks.
  */
-export function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
+/**
+ * The task's project and a link to its Captain, as a quiet pair of links. The project comes from the notice's meta
+ * or, for notices that don't carry it, from the task; with neither known there's no chip.
+ */
+export function NoticeProject({ taskId, projectId, className }: { taskId: string; projectId?: string | null; className?: string }) {
+  const index = useEntityIndex()
+  const id = projectId ?? index.byId.get(taskId)?.projectId
+  const project = id ? index.byId.get(id) : undefined
+  if (!id || project?.kind !== "project") return null
+  const link = "rounded-sm text-zinc-500 hover:text-zinc-200 hover:underline focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
+  return (
+    <span data-testid="notice-project" className={cx("flex h-lh max-w-[60%] shrink-0 items-center gap-1 whitespace-nowrap sm:max-w-64", className)}>
+      <AppLink href={routes.project(id)} title={`Project: ${project.label}`} className={cx("min-w-0 truncate", link)}>
+        {project.label}
+      </AppLink>
+      <span aria-hidden className="text-zinc-700">
+        ·
+      </span>
+      <AppLink href={`${routes.project(id)}?tab=captain`} title={`${project.label} Captain`} className={cx("inline-flex shrink-0 items-center gap-0.5", link)}>
+        <Bot className="h-3 w-3" aria-hidden />
+        Captain
+      </AppLink>
+    </span>
+  )
+}
+
+export function NoticeCard({
+  taskId,
+  projectId,
+  project = true,
+  children,
+}: {
+  taskId: string
+  projectId?: string | null
+  /** Show NoticeProject on the right; false when the body places it itself. */
+  project?: boolean
+  children: ReactNode
+}) {
   const [, navigate] = useLocation()
   const href = `/tasks/${taskId}`
   const open = (e: MouseEvent | KeyboardEvent) => {
@@ -169,8 +206,11 @@ export function NoticeCard({ taskId, children }: { taskId: string; children: Rea
       onClick={open}
       onAuxClick={open}
       onKeyDown={open}
-      className={cx(NOTICE_CLASS, "cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
+      className={cx(NOTICE_CLASS, "flow-root cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
     >
+      {/* Floated, so the text wraps under it on phones. The markdown's first paragraph is my-1.5 leading-relaxed;
+          the same line box keeps the chip on that row. */}
+      {project && <NoticeProject taskId={taskId} projectId={projectId} className="float-right my-1.5 ml-3 leading-relaxed" />}
       {children}
     </div>
   )
@@ -234,9 +274,12 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
   if (m.role === "tool") return <ToolLine m={m} />
   if (m.role === "notice") {
     const taskId = m.meta?.taskId as string | undefined
+    const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
     const body = <Markdown>{m.content}</Markdown>
     return taskId ? (
-      <NoticeCard taskId={taskId}>{body}</NoticeCard>
+      <NoticeCard taskId={taskId} projectId={projectId}>
+        {body}
+      </NoticeCard>
     ) : (
       <div className={NOTICE_CLASS}>{body}</div>
     )

@@ -1,6 +1,35 @@
+> [!WARNING]
+> **Work in progress.** Box Yard is built for one person's workflow — mine — and it changes fast as I iterate on it.
+> Expect breaking changes between releases: settings that move, screens that get redrawn, features that come and go
+> without notice. If it's close to what you want, fork or clone it and bend it into what you need it to be.
+
+<div align="center">
+
+*"Whatever you do, work heartily, as for the Lord and not for men."* — Colossians 3:23 (ESV)
+
+<img src="web/public/icons/box-yard-icon.svg" alt="Box Yard logo" width="96">
+
 # Box Yard
 
-One chat that runs a yard of Claude Code agents, each working inside an [Upstash Box](https://upstash.com/docs/box).
+**One chat that runs a yard of Claude Code agents.**
+
+Each agent works inside its own [Upstash Box](https://upstash.com/docs/box) — or a folder on this computer — and
+keeps working when you close your laptop.
+
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.11-339933?style=flat-square)](#quick-start)
+[![Built with TypeScript](https://img.shields.io/badge/built%20with-TypeScript-3178c6?style=flat-square)](https://www.typescriptlang.org)
+[![Runs on Upstash Box](https://img.shields.io/badge/runs%20on-Upstash%20Box-00e9a3?style=flat-square)](https://upstash.com/docs/box)
+
+[**Quick start**](#quick-start) · [**Deploy**](#deploy) · [**How it works**](#how-it-works) · [**Development**](#development) · [**License**](#license)
+
+```sh
+git clone https://github.com/webdevcody/box-yard && cd box-yard && ./yard demo
+```
+
+</div>
+
+---
 
 You tell the **Coordinator** what you want. It sets up **projects** (with or without a GitHub repo) and routes project work to each project's **Captain**. Captains start and follow up on **tasks**. Each task is a headless Claude Code agent with its own folder in a worker box. Agents ask you questions, message each other, open pull requests, share preview URLs and publish files. All of it shows up live in the web app. Box Yard itself can run in a box too, so you can close your laptop and the yard keeps working.
 
@@ -230,3 +259,12 @@ Checked on 2026-10-22 with a real Upstash Box account (free plan), a Claude Code
   - The server was restarted mid-turn and the agent was picked back up.
   - With the Coordinator session reset, a follow-up still found the right agent.
 - **Not yet checked live:** QStash schedules (only run against a fake), Upstash Redis as the event bus (the file log was used), and archive restore onto a different box after a box is lost (covered by the local tests).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+<div align="center">
+<br>
+<sub>If Box Yard saves you a tab, a ⭐ helps other people find it.</sub>
+</div>
