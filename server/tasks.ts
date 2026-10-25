@@ -2687,7 +2687,7 @@ export class TaskManager {
     for (const projectId of new Set(running.map((r) => r.project_id))) {
       const cap = this.store.projectBoxLimits(projectId).agentsPerBox
       if (cap === null || running.length < cap) continue
-      return cap === 1 ? `${where} is running a ${name(projectId)} agent alone` : `${where} is running a ${name(projectId)} agent, and ${name(projectId)} allows at most ${cap} agents on a box`
+      return `${where} is running an agent of ${name(projectId)}, which ${cap === 1 ? "runs its agents alone on a box" : `allows at most ${cap} agents on a box`}`
     }
     return null
   }
