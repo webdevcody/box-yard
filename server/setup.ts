@@ -97,6 +97,27 @@ export class Setup {
     return this.checking
   }
 
+  /**
+   * Why a task asked to run on `runner` (a per-task runs_on) can't, in plain words, or null when it can. "local" needs
+   * this computer's `claude`, signed in or with a Claude key in Settings; "box" needs Upstash boxes (a key, or
+   * BOX_PROVIDER=local). Mock mode needs neither. Never a reason to run it somewhere else instead.
+   */
+  async runnerProblem(runner: Runner): Promise<string | null> {
+    const { c, credentials } = this.d
+    if (c.mock) return null
+    const creds = credentials.status()
+    if (runner === "box") {
+      return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
+    }
+    await this.refreshLocal()
+    const local = this.local?.result.check
+    if (!local) return "Box Yard couldn't check this computer's tools (claude --version didn't answer)"
+    if (!local.tools.find((t) => t.key === "claude")?.found) return `Claude Code isn't installed on this computer (\`${c.claudeBin} --version\` failed). Install it, then try again`
+    const keySet = creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set"
+    if (local.claudeLogin === false && !keySet) return "Claude Code on this computer isn't signed in: run `claude` and log in, or add a Claude key in Settings › Credentials"
+    return null
+  }
+
   status(): SetupStatus {
     const { c, credentials } = this.d
     const mock = isMockRun(c)

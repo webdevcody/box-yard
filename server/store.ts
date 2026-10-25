@@ -4,7 +4,7 @@ import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeHeavyTasks, type HeavyTasks } from "../shared/memory.js"
-import { normalizeRunner, type Runner } from "../shared/runner.js"
+import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type {
@@ -123,6 +123,8 @@ export interface TaskRow {
   effort: Effort | null
   routing_rule: string | null
   routing_reason: string | null
+  /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
+  runs_on?: string | null
   /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
   source: string | null
   pr_head_sha: string | null
@@ -356,6 +358,7 @@ type TaskPatch = Partial<{
   effort: Effort | null
   routingRule: string | null
   routingReason: string | null
+  runsOn: Runner | null
   prHeadSha: string | null
   prLabels: string[]
   mergeRequest: StoredMergeRequest | null
@@ -397,6 +400,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   effort: "effort",
   routingRule: "routing_rule",
   routingReason: "routing_reason",
+  runsOn: "runs_on",
   prHeadSha: "pr_head_sha",
   prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
@@ -464,6 +468,8 @@ interface TaskCompactionRow {
   archive_note: string | null
   created_at: number
 }
+
+const taskRunsOn = (row: { runs_on?: string | null }) => parseRunsOn(row.runs_on)
 
 const oneLine = (text: string | null | undefined, max = 200) => {
   const t = (text ?? "").replace(/\s+/g, " ").trim()
@@ -655,6 +661,11 @@ export class Store {
   }
 
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
+  /** Where a task's turns run: its own runs_on when set, else its project's "Runs on". */
+  taskRunner(row: Pick<TaskRow, "project_id" | "runs_on">): Runner {
+    return taskRunsOn(row) ?? this.projectRunner(row.project_id)
+  }
+
   projectRunner(id: string): Runner {
     return normalizeRunner((this.db.prepare("SELECT runner FROM projects WHERE id = ?").get(id) as { runner: string | null } | undefined)?.runner)
   }
@@ -968,6 +979,7 @@ export class Store {
       claudeTokens: usage.totalTokens,
       routingRule: row.routing_rule ?? null,
       routingReason: row.routing_reason ?? null,
+      runsOn: taskRunsOn(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
       createdAt: row.created_at,
@@ -1052,6 +1064,8 @@ export class Store {
     routingReason?: string | null
     /** Who started it (TaskRow.source). */
     startedBy?: string | null
+    /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
+    runsOn?: Runner | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1079,6 +1093,7 @@ export class Store {
       )
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
+    if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
     return this.getTask(id)!
   }
 
