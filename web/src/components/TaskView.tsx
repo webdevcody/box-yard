@@ -142,6 +142,7 @@ const TaskThread = memo(function TaskThread({
       <StickyScroll
         count={shown.length}
         resetKey={id}
+        restoreKey="task"
         hidden={tail.hidden}
         onLoadEarlier={tail.loadEarlier}
         className="rounded-xl border border-zinc-900 bg-zinc-950 p-4"

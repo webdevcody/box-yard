@@ -70,7 +70,7 @@ describe("GET /api/setup", () => {
     const { body } = await json<SetupStatus>("GET", "/api/setup")
     expect(body.ready).toBe(false)
     expect(body.mock).toBe(false)
-    expect(body.missing).toEqual(["Upstash Box API key", "Claude sign-in"])
+    expect(body.missing).toEqual(["a choice of where agents run", "Claude sign-in"])
     expect(body.credentials).toEqual({
       upstashBoxApiKey: { state: "unset", source: null },
       claudeOauthToken: { state: "unset", source: null },

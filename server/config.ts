@@ -203,10 +203,11 @@ export function redisEnabled(c: Config = config) {
 }
 
 /** Problems that stop Box Yard from doing real work, shown in the UI. Pass the credentials in effect (env or saved). */
-export function configProblems(c: Config = config): string[] {
+/** `claudeLogin`: this computer's own `claude` is signed in, and agents run here, so no token is needed. */
+export function configProblems(c: Config = config, opts: { claudeLogin?: boolean } = {}): string[] {
   const problems: string[] = []
   if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
-  if (!c.claudeOauthToken && !c.anthropicApiKey) {
+  if (!c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
     problems.push("Claude isn't signed in: add a subscription token (`claude setup-token`) or an Anthropic API key in Settings › Credentials, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.")
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {

@@ -8,6 +8,7 @@
 import { useEffect, useLayoutEffect, useState } from "react"
 import { navigate, useLocationProperty } from "wouter/use-browser-location"
 import { isModalOpen } from "../components/Modal"
+import { keepScrollOnNextBack } from "./scrollMemory"
 
 export const ZEN_PATH = "/zen"
 
@@ -36,11 +37,16 @@ export function enterZen() {
   navigate(ZEN_PATH, { state: ZEN_STATE })
 }
 
-/** Back to where Zen was entered from; a /zen that was opened directly goes to the Yard instead. */
+/**
+ * Back to where Zen was entered from; a /zen that was opened directly goes to the Yard instead. Like entering, it
+ * keeps the chat where it is: only the browser's own Back puts the page's old scroll position back.
+ */
 export function leaveZen() {
   if (!isZenPath(location.pathname)) return
-  if ((history.state as { zenFrom?: boolean } | null)?.zenFrom) history.back()
-  else navigate("/", { replace: true })
+  if ((history.state as { zenFrom?: boolean } | null)?.zenFrom) {
+    keepScrollOnNextBack()
+    history.back()
+  } else navigate("/", { replace: true })
 }
 
 export const toggleZen = () => (isZenPath(location.pathname) ? leaveZen() : enterZen())

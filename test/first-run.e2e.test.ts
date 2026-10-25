@@ -66,7 +66,7 @@ describe("first run", () => {
 
     // 1. Nothing configured: setup says what's missing, and the Coordinator can't sign in.
     let status = await call<SetupStatus>("GET", "/api/setup")
-    expect(status).toMatchObject({ ready: false, mock: false, missing: ["Upstash Box API key", "Claude sign-in"] })
+    expect(status).toMatchObject({ ready: false, mock: false, missing: ["a choice of where agents run", "Claude sign-in"] })
     await call("POST", "/api/chat", { content: "status" })
     await waitFor(async () => (await chatSince(0)).some((m) => m.role === "error"), "the failed turn")
     await idle()
