@@ -1,12 +1,13 @@
 // One Coordinator-style chat message: user bubbles, markdown replies with next-step chips,
 // tool calls (ToolLine) and notices. Shared by the Coordinator panel and the project Captain tab.
-import { memo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
 import { AppLink, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { routes, toolMentions } from "../lib/linkify"
-import { CAPTAIN_TOOLS, captainToolView, isLongMessage } from "../lib/captainTranscript"
+import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type NoticeKind } from "../lib/captainTranscript"
+import { NOTICE_ICON } from "./noticeIcons"
 import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
@@ -145,22 +146,19 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
 export const NOTICE_CLASS = "rounded-lg border border-zinc-800/80 bg-zinc-900/40 px-3 py-1.5 text-xs text-zinc-400"
 
 /**
- * A task notice: clicking it opens the task (Cmd/Ctrl or middle click in a new tab). Not an <a>: the notice's
- * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
- * and buttons (a "Show all" toggle) keep their clicks.
+ * The task's project and a link to its Captain, as a quiet pair of links that starts a notice's meta line (with a
+ * trailing "·" before the event). The project comes from the notice's meta or, for notices that don't carry it,
+ * from the task; with neither known there's no pair.
  */
-/**
- * The task's project and a link to its Captain, as a quiet pair of links. The project comes from the notice's meta
- * or, for notices that don't carry it, from the task; with neither known there's no chip.
- */
-export function NoticeProject({ taskId, projectId, className }: { taskId: string; projectId?: string | null; className?: string }) {
+export function NoticeProject({ taskId, projectId }: { taskId: string; projectId?: string | null }) {
   const index = useEntityIndex()
   const id = projectId ?? index.byId.get(taskId)?.projectId
   const project = id ? index.byId.get(id) : undefined
   if (!id || project?.kind !== "project") return null
   const link = "rounded-sm text-zinc-500 hover:text-zinc-200 hover:underline focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
   return (
-    <span data-testid="notice-project" className={cx("flex h-lh max-w-[60%] shrink-0 items-center gap-1 whitespace-nowrap sm:max-w-64", className)}>
+    // One line box high and top-aligned, so it sits on the meta line's first line like text.
+    <span data-testid="notice-project" className="mr-1 inline-flex h-lh max-w-full items-center gap-1 align-top whitespace-nowrap">
       <AppLink href={routes.project(id)} title={`Project: ${project.label}`} className={cx("min-w-0 truncate", link)}>
         {project.label}
       </AppLink>
@@ -171,22 +169,88 @@ export function NoticeProject({ taskId, projectId, className }: { taskId: string
         <Bot className="h-3 w-3" aria-hidden />
         Captain
       </AppLink>
+      <span aria-hidden className="text-zinc-700">
+        ·
+      </span>
     </span>
   )
 }
 
-export function NoticeCard({
+export const NOTICE_TITLE_LINK = "font-semibold text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400"
+
+/**
+ * Every notice card's layout, at every width (Cody's rule): the icon and the task title on a row of their own, so a
+ * narrow panel never squeezes the title; under it a muted meta line (the project · Captain pair, then what happened);
+ * then the card's own sections, like a file list with its Show all / Hide toggle in that list's header.
+ * The column is the card's `@container`, so sections switch on the card's width, not the window's (the panel resizes).
+ */
+export function NoticeLayout({
+  kind,
+  title,
   taskId,
-  projectId,
-  project = true,
+  project,
+  meta,
+  titleClassName = NOTICE_TITLE_LINK,
   children,
 }: {
-  taskId: string
-  projectId?: string | null
-  /** Show NoticeProject on the right; false when the body places it itself. */
-  project?: boolean
-  children: ReactNode
+  kind: NoticeKind
+  title: string | null
+  /** Links the title to the task. */
+  taskId?: string | null
+  /** The NoticeProject pair, at the start of the meta line. */
+  project?: ReactNode
+  meta?: ReactNode
+  /** The title link's look; the Captain tab's slim rows pass theirs. */
+  titleClassName?: string
+  children?: ReactNode
 }) {
+  const { icon, className, label } = NOTICE_ICON[kind]
+  return (
+    <div className="flex min-w-0 items-start gap-2 leading-relaxed">
+      <LineIcon icon={icon} className={cx("h-3.5 w-3.5", className)} label={label} />
+      <div data-testid="notice-body" className="@container min-w-0 flex-1">
+        {title && (
+          <div data-testid="notice-title" className="wrap-anywhere">
+            {taskId ? (
+              <AppLink href={`/tasks/${taskId}`} className={titleClassName}>
+                {title}
+              </AppLink>
+            ) : (
+              <span className="font-semibold text-zinc-200">{title}</span>
+            )}
+          </div>
+        )}
+        {(project || meta) && (
+          <div data-testid="notice-meta" className="wrap-anywhere text-zinc-400">
+            {project}
+            {meta}
+          </div>
+        )}
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/**
+ * A notice's event text, still markdown (a PR link, code), flowing inline after the project pair like one sentence.
+ * Only its first paragraph is inline; a longer one (a list in a notes retro) continues as blocks below.
+ */
+const NoticeEvent = memo(function NoticeEvent({ children }: { children: string }) {
+  if (!children) return null
+  return (
+    <div className="inline [&>.prose-chat]:inline [&>.prose-chat>p:first-child]:inline">
+      <Markdown>{children}</Markdown>
+    </div>
+  )
+})
+
+/**
+ * A task notice: clicking it opens the task (Cmd/Ctrl or middle click in a new tab). Not an <a>: the notice's
+ * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
+ * and buttons (a "Show all" toggle) keep their clicks.
+ */
+export function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
   const [, navigate] = useLocation()
   const href = `/tasks/${taskId}`
   const open = (e: MouseEvent | KeyboardEvent) => {
@@ -206,15 +270,29 @@ export function NoticeCard({
       onClick={open}
       onAuxClick={open}
       onKeyDown={open}
-      className={cx(NOTICE_CLASS, "flow-root cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
+      className={cx(NOTICE_CLASS, "cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
     >
-      {/* Floated, so the text wraps under it on phones. The markdown's first paragraph is my-1.5 leading-relaxed;
-          the same line box keeps the chip on that row. */}
-      {project && <NoticeProject taskId={taskId} projectId={projectId} className="float-right my-1.5 ml-3 leading-relaxed" />}
       {children}
     </div>
   )
 }
+
+/** A notice in the Coordinator chat (and Zen): a NoticeLayout, in a NoticeCard when it's about a task. */
+const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
+  const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+  const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
+  const n = useMemo(() => splitNotice(m.content, m.meta), [m.content, m.meta])
+  const body = (
+    <NoticeLayout
+      kind={n.kind}
+      title={n.title}
+      taskId={taskId}
+      project={taskId && <NoticeProject taskId={taskId} projectId={projectId} />}
+      meta={<NoticeEvent>{n.event}</NoticeEvent>}
+    />
+  )
+  return taskId ? <NoticeCard taskId={taskId}>{body}</NoticeCard> : <div className={NOTICE_CLASS}>{body}</div>
+})
 
 export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
@@ -272,18 +350,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
     )
   }
   if (m.role === "tool") return <ToolLine m={m} />
-  if (m.role === "notice") {
-    const taskId = m.meta?.taskId as string | undefined
-    const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
-    const body = <Markdown>{m.content}</Markdown>
-    return taskId ? (
-      <NoticeCard taskId={taskId} projectId={projectId}>
-        {body}
-      </NoticeCard>
-    ) : (
-      <div className={NOTICE_CLASS}>{body}</div>
-    )
-  }
+  if (m.role === "notice") return <NoticeLine m={m} />
   if (m.role === "error") {
     return (
       <div className="flex items-start gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300">

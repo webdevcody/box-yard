@@ -1,18 +1,20 @@
 // Back-to-back "published" file notices as one compact card per task: the task, "published 6 files", a strip of
 // small thumbnails (type chips for other files) and the first titles; "Show all" lists every file as a link row.
 // Every file opens the preview modal, and ←/→ step through the whole group. Grouping is lib/publishedNotices.ts.
-import { memo, useMemo, useState } from "react"
-import { ChevronDown, Paperclip } from "lucide-react"
-import { AppLink, LineIcon, META_CHIP, TimeAgo, cx } from "./ui"
+import { memo, useId, useMemo, useState } from "react"
+import { ChevronDown } from "lucide-react"
+import { META_CHIP, TimeAgo, cx } from "./ui"
 import { FileLink } from "./FileLink"
 import { KindIcon } from "./TaskFiles"
-import { NOTICE_CLASS, NoticeCard, NoticeProject } from "./ChatLine"
+import { NOTICE_CLASS, NoticeCard, NoticeLayout, NoticeProject } from "./ChatLine"
 import { previewKind } from "../lib/filePreview"
 import { previewGallery, publishedLabel, sameGroup, type PublishedFileRef, type PublishedGroup } from "../lib/publishedNotices"
 
-/** Thumbnails shown before "+N" (fewer on phones, where they're bigger tap targets), so the strip stays one line. */
+/** Thumbnails shown before "+N" (fewer in a narrow card), so the strip stays one line. */
 export const STRIP_MAX = 6
-const STRIP_MAX_PHONE = 4
+const STRIP_MAX_NARROW = 4
+
+export const SLIM_TITLE_LINK = "font-medium text-zinc-200 hover:underline"
 
 const kindOf = (f: PublishedFileRef) => previewKind({ url: f.url, name: f.filename })
 const extOf = (f: PublishedFileRef) => {
@@ -48,14 +50,21 @@ function Thumb({ f, gallery, className }: { f: PublishedFileRef; gallery: () => 
   )
 }
 
-/** `project` adds the task's project and Captain links (the Coordinator's card; the Captain tab is that project already). */
+/**
+ * A NoticeLayout: the task on its own row, "box-yard · Captain · published 2 files" under it, the thumbnail strip,
+ * then the file list. The list's header line (the first titles, or "2 files" when open) carries the Show all / Hide
+ * toggle, so the toggle sits on the list it opens and closes, never by the title.
+ * `project` adds the task's project and Captain links (the Coordinator's card; the Captain tab is that project already).
+ * `time` is the Captain tab's row: the time on the right of the meta line, and that tab's quieter title.
+ */
 function GroupBody({ group, time, project }: { group: PublishedGroup; time?: number; project?: boolean }) {
   const [open, setOpen] = useState(false)
+  const listId = useId()
   const files = group.files
   const gallery = useMemo(() => previewGallery(files), [files])
   const getGallery = () => gallery
   const more = files.length - STRIP_MAX
-  const morePhone = files.length - STRIP_MAX_PHONE
+  const moreNarrow = files.length - STRIP_MAX_NARROW
   const moreChip = (n: number, className: string) =>
     n > 0 &&
     !open && (
@@ -72,6 +81,7 @@ function GroupBody({ group, time, project }: { group: PublishedGroup; time?: num
     <button
       type="button"
       aria-expanded={open}
+      aria-controls={listId}
       onClick={() => setOpen((o) => !o)}
       className={cx(META_CHIP, "ml-auto border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200")}
     >
@@ -80,63 +90,74 @@ function GroupBody({ group, time, project }: { group: PublishedGroup; time?: num
     </button>
   )
   return (
-    <div data-testid="published-group" data-count={files.length} className="flex min-w-0 items-start gap-2">
-      <LineIcon icon={Paperclip} className="h-3.5 w-3.5 text-zinc-400" label="Files published" />
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-x-2">
-          <div className="min-w-0 flex-1 wrap-anywhere">
-            {group.taskId ? (
-              <AppLink href={`/tasks/${group.taskId}`} className="font-semibold text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400">
-                {group.taskTitle}
-              </AppLink>
-            ) : (
-              <span className="font-semibold text-zinc-200">{group.taskTitle}</span>
-            )}{" "}
-            <span className="text-zinc-400">{publishedLabel(files.length)}</span>
+    <div data-testid="published-group" data-count={files.length}>
+      <NoticeLayout
+        kind="artifact"
+        title={group.taskTitle}
+        taskId={group.taskId}
+        project={project && group.taskId && <NoticeProject taskId={group.taskId} />}
+        titleClassName={time !== undefined ? SLIM_TITLE_LINK : undefined}
+        meta={
+          <>
+            {publishedLabel(files.length)}
             {time !== undefined && (
-              <span className="ml-1.5 text-[11px] text-zinc-600">
+              <span className="float-right ml-2 text-[11px] text-zinc-600">
                 <TimeAgo ts={time} />
               </span>
             )}
-          </div>
-          {project && group.taskId && <NoticeProject taskId={group.taskId} />}
-          {toggle}
-        </div>
-        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          </>
+        }
+      >
+        {/* A narrow card shows fewer thumbnails before "+N", so the strip stays one line. */}
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
           {files.slice(0, STRIP_MAX).map((f, i) => (
-            <Thumb key={f.id} f={f} gallery={getGallery} className={i >= STRIP_MAX_PHONE ? "max-sm:hidden" : undefined} />
+            <Thumb key={f.id} f={f} gallery={getGallery} className={i >= STRIP_MAX_NARROW ? "@max-md:hidden" : undefined} />
           ))}
-          {moreChip(morePhone, "sm:hidden")}
-          {moreChip(more, "max-sm:hidden")}
+          {moreChip(moreNarrow, "@md:hidden")}
+          {moreChip(more, "@max-md:hidden")}
         </div>
-        {open ? (
-          <ul className="mt-1.5 space-y-0.5">
-            {files.map((f) => (
-              <li key={f.id}>
-                <FileLink
-                  href={f.url}
-                  name={f.filename}
-                  fileTitle={f.title}
-                  gallery={getGallery}
-                  className="-mx-1 flex min-h-11 items-center gap-1.5 rounded px-1 text-zinc-300 hover:bg-zinc-800/60 hover:text-zinc-100 sm:min-h-0 sm:py-0.5"
-                >
-                  <KindIcon kind={kindOf(f)} className="h-3.5 w-3.5" />
-                  <span className="min-w-0 wrap-anywhere">{f.title}</span>
-                  <span className="ml-auto shrink-0 pl-2 text-[10px] text-zinc-600 max-sm:hidden">{f.filename.length > 28 ? extOf(f) : f.filename}</span>
-                </FileLink>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="mt-1 truncate text-zinc-500" title={files.map((f) => f.title).join("\n")}>
-            {files
-              .slice(0, 3)
-              .map((f) => f.title)
-              .join(" · ")}
-            {files.length > 3 && ` · +${files.length - 3} more`}
+        <div data-testid="published-files" className="mt-1">
+          <div data-testid="published-files-header" className="flex min-w-0 items-center gap-2">
+            {open ? (
+              <span className="min-w-0 flex-1 truncate text-zinc-500">{files.length} files</span>
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-zinc-500" title={files.map((f) => f.title).join("\n")}>
+                {files
+                  .slice(0, 3)
+                  .map((f) => f.title)
+                  .join(" · ")}
+                {files.length > 3 && ` · +${files.length - 3} more`}
+              </span>
+            )}
+            {toggle}
           </div>
-        )}
-      </div>
+          {open && (
+            <ul id={listId} className="mt-0.5 space-y-0.5">
+              {files.map((f) => (
+                <li key={f.id}>
+                  <FileLink
+                    href={f.url}
+                    name={f.filename}
+                    fileTitle={f.title}
+                    gallery={getGallery}
+                    className="-mx-1 flex min-h-11 items-center gap-1.5 rounded px-1 text-zinc-300 hover:bg-zinc-800/60 hover:text-zinc-100 sm:min-h-0 sm:py-0.5"
+                  >
+                    {/* The icon stays on the first line of a title that wraps. */}
+                    <span className="flex min-w-0 items-start gap-1.5">
+                      <span className="flex h-lh shrink-0 items-center">
+                        <KindIcon kind={kindOf(f)} className="h-3.5 w-3.5" />
+                      </span>
+                      <span className="min-w-0 wrap-anywhere">{f.title}</span>
+                    </span>
+                    {/* The file name only where the title still gets most of the row. */}
+                    <span className="ml-auto shrink-0 pl-2 text-[10px] text-zinc-600 @max-md:hidden">{f.filename.length > 28 ? extOf(f) : f.filename}</span>
+                  </FileLink>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </NoticeLayout>
     </div>
   )
 }
@@ -148,7 +169,7 @@ export const PublishedCard = memo(
     return (
       <div id={`chat-${group.id}`}>
         {group.taskId ? (
-          <NoticeCard taskId={group.taskId} project={false}>
+          <NoticeCard taskId={group.taskId}>
             {body}
           </NoticeCard>
         ) : (
@@ -160,7 +181,7 @@ export const PublishedCard = memo(
   (a, b) => sameGroup(a.group, b.group),
 )
 
-/** The Captain tab's slim form, with the newest file's time. */
+/** The Captain tab's slim form, with the newest file's time and its other rows' title (CaptainTab's NoticeRow). */
 export const PublishedRow = memo(
   function PublishedRow({ group }: { group: PublishedGroup }) {
     return (

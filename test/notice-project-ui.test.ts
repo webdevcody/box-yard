@@ -59,6 +59,21 @@ describe("task notice project and Captain links", () => {
     expect(host.querySelector('a[href="/tasks/task_painted01"]')).toBeTruthy()
   })
 
+  it("the title has a row of its own; project · Captain and the event go on the line under it", () => {
+    line(notice(PR, { taskId: task.id }))
+    const title = host.querySelector('[data-testid="notice-title"]')!
+    expect(title.textContent).toBe(task.title)
+    expect(title.querySelectorAll("a")).toHaveLength(1)
+    expect(title.querySelector("a")?.getAttribute("href")).toBe("/tasks/task_painted01")
+    expect(title.contains(chip())).toBe(false)
+    const meta = title.nextElementSibling!
+    expect(meta.getAttribute("data-testid")).toBe("notice-meta")
+    expect(meta.firstElementChild).toBe(chip())
+    // The PR's URL reads as a short link.
+    expect(meta.textContent).toContain("opened PR #106")
+    expect(meta.querySelector('a[href="https://github.com/webdevcody/tiny-town/pull/106"]')?.textContent).toBe("PR #106")
+  })
+
   it("prefers a project id the notice carries", () => {
     const other = { id: "prj_otherone", name: "other", repo: "x/other" } as Project
     qc.setQueryData(keys.projects, [project, other])
