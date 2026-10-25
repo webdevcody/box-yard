@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useState } from "react"
 import { Link, useLocation } from "wouter"
-import { AlarmClock, Archive, DollarSign, Inbox, LayoutGrid, Plus, Search } from "lucide-react"
+import { AlarmClock, Archive, DollarSign, Inbox, LayoutGrid, MessageSquare, Plus, Search } from "lucide-react"
 import { agentCapacity } from "../../../shared/types"
 import { useBoxes, useHealth, useProjects, useSchedules, useTasks } from "../lib/queries"
 import { inInbox, usePendingCloses } from "../lib/inbox"
@@ -12,7 +12,7 @@ import type { Connection } from "../lib/stream"
 import { BrandLogo } from "./BrandLogo"
 import { navItem, ProjectList } from "./ProjectList"
 
-export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { connection: Connection; onNavigate?: () => void }) {
+export const Sidebar = memo(function Sidebar({ connection, onNavigate, onOpenChat }: { connection: Connection; onNavigate?: () => void; onOpenChat?: () => void }) {
   const [location, navigate] = useLocation()
   const projects = useProjects()
   const tasks = useTasks()
@@ -61,6 +61,18 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate }: { conne
           title={connection === "live" ? "Live updates on" : "Reconnecting…"}
           className={cx("ml-auto h-2 w-2 rounded-full", connection === "live" ? "bg-emerald-500" : "animate-pulse bg-amber-500")}
         />
+        {/* Between lg and xl the Coordinator is a drawer and there's no top bar, so it opens from here,
+            where it can't cover a composer's send button the way a floating button did. */}
+        {onOpenChat && (
+          <button
+            onClick={onOpenChat}
+            className="-my-1 -mr-1.5 hidden h-8 w-8 place-items-center rounded-lg text-yard-400 hover:bg-zinc-800 hover:text-yard-300 lg:grid xl:hidden"
+            title="Open the Coordinator"
+            aria-label="Open the Coordinator"
+          >
+            <MessageSquare className="h-4 w-4" />
+          </button>
+        )}
       </div>
 
       <div className="px-2 pb-2">

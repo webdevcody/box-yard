@@ -40,6 +40,7 @@ export function App() {
   const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: 320, max: 600, edge: "left" })
   const closeNav = useCallback(() => setNavOpen(false), [])
   const closeChat = useCallback(() => setChatOpen(false), [])
+  const openChat = useCallback(() => setChatOpen(true), [])
   const zen = useZen()
   useZenHotkeys(zen)
   const agentSettings = useAgentSettings({ enabled: authed })
@@ -73,7 +74,7 @@ export function App() {
         <div className={cx("fixed inset-y-0 left-0 z-40 w-[min(20rem,calc(100vw-2rem))] transition-transform lg:relative lg:w-[var(--panel-w)] lg:translate-x-0", navOpen ? "translate-x-0" : "-translate-x-full")}
           style={{ "--panel-w": `${sidebarSize.width}px` } as CSSProperties}
         >
-          <Sidebar connection={connection} onNavigate={closeNav} />
+          <Sidebar connection={connection} onNavigate={closeNav} onOpenChat={openChat} />
           <ResizeHandle {...sidebarSize.handle} className="lg:block" />
         </div>
       )}
@@ -96,8 +97,7 @@ export function App() {
               <Routes />
             </div>
           </div>
-          {/* Clear of the floating orchestrator button, which shows between lg and xl */}
-          <Toasts className={chatOpen ? undefined : "lg:bottom-20 xl:bottom-4"} />
+          <Toasts />
         </main>
       )}
 
@@ -115,15 +115,6 @@ export function App() {
         {!zen && <ResizeHandle {...chatSize.handle} className="xl:block" />}
         <ChatPanel onClose={closeChat} zen={zen} />
       </div>
-      {!zen && !chatOpen && (
-        <button
-          onClick={() => setChatOpen(true)}
-          className="fixed right-4 bottom-4 z-30 hidden rounded-full bg-yard-500 p-3 text-zinc-950 shadow-lg hover:bg-yard-400 lg:block xl:hidden"
-          title="Open the Coordinator"
-        >
-          <MessageSquare className="h-5 w-5" />
-        </button>
-      )}
       {zen && <Toasts quiet />}
       <CommandPalette />
       <SettingsHost />
