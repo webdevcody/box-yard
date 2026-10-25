@@ -473,7 +473,7 @@ export function NewTaskDialog({
           </Select>
         </Field>
       </div>
-      <RunHereToggle on={runsOn === "local"} projectLocal={projectRunner === "local"} onChange={(on) => setRunner(on ? "local" : "box")} />
+      <RunHereToggle on={runsOn === "local"} projectLocal={projectRunner === "local"} onChange={(on) => setRunner(on ? "local" : projectRunner === "local" ? "box" : projectRunner)} />
       <div role="group" aria-label="Files" className="space-y-2">
         {files.length > 0 && (
           <ul className="flex flex-wrap gap-2">
