@@ -106,8 +106,8 @@ describe("settings", () => {
 
 describe("compaction log", () => {
   it("names files so they sort chronologically", () => {
-    expect(compactionStamp(Date.UTC(2026, 9, 22, 18, 40, 5, 321))).toBe("2026-10-22T18-40-05Z")
-    expect(compactionStamp(Date.UTC(2026, 9, 22, 18, 40, 5))).toBe("2026-10-22T18-40-05Z")
+    expect(compactionStamp(Date.UTC(2026, 9, 22, 18, 40, 5, 321))).toBe("2026-10-22T18-40-05.321Z")
+    expect(compactionStamp(Date.UTC(2026, 9, 22, 18, 40, 5))).toBe("2026-10-22T18-40-05.000Z")
   })
   it("writes frontmatter and sections, fills in tokens_after, and never overwrites", () => {
     const dir = path.join(tmpDir(), "orchestrator", "compactions")
@@ -127,18 +127,18 @@ describe("compaction log", () => {
     }
     const first = writeCompaction(dir, meta, summary, [task])
     const file = first.markdownFile
-    expect(path.basename(file)).toBe("2026-10-22T18-40-05Z.md")
-    expect(path.basename(first.jsonFile)).toBe("2026-10-22T18-40-05Z.json")
+    expect(path.basename(file)).toBe("2026-10-22T18-40-05.000Z.md")
+    expect(path.basename(first.jsonFile)).toBe("2026-10-22T18-40-05.000Z.json")
     expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tasks[0].taskId).toBe("task_abc123")
     const second = writeCompaction(dir, meta, summary)
-    expect(path.basename(second.markdownFile)).toBe("2026-10-22T18-40-05Z-2.md")
+    expect(path.basename(second.markdownFile)).toBe("2026-10-22T18-40-05.000Z-2.md")
     finishCompaction(file, 38_000)
     const text = fs.readFileSync(file, "utf8")
-    expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\ntask_ids: task_abc123\n---/)
+    expect(text).toMatch(/^---\ntimestamp: 2026-10-22T18:40:05\.000Z\nsession_id: sess-1\nmodel: claude-opus-5-5\ntrigger: auto\ntokens_before: 412000\ntokens_after: 38000\ntask_ids: task_abc123\n---/)
     expect(JSON.parse(fs.readFileSync(first.jsonFile, "utf8")).tokensAfter).toBe(38_000)
     for (const h of ["## Decisions and preferences", "## Projects and repos", "## Ongoing work", "## Open threads and next steps"]) expect(text).toContain(h)
     // The -2 file was written second, so it lists after the first.
-    expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05Z.md", "2026-10-22T18-40-05Z-2.md"])
+    expect(listCompactions(dir)).toEqual(["2026-10-22T18-40-05.000Z.md", "2026-10-22T18-40-05.000Z-2.md"])
     expect(fs.readdirSync(dir).some((f) => f.endsWith(".tmp"))).toBe(false)
     expect(lastCompaction(dir)).toMatchObject({ trigger: "auto", tokensBefore: 412_000 })
   })
@@ -149,11 +149,11 @@ describe("compaction log", () => {
     for (let n = 1; n <= 11; n++) writeCompaction(dir, { at, sessionId: "s", model: "m", trigger: "button", tokensBefore: n }, summary)
     writeCompaction(dir, { at: at - 1000, sessionId: "s", model: "m", trigger: "button", tokensBefore: 0 }, summary)
     const names = listCompactions(dir)
-    expect(names[0]).toBe("2026-10-22T18-40-04Z.md")
-    expect(names.slice(1, 4)).toEqual(["2026-10-22T18-40-05Z.md", "2026-10-22T18-40-05Z-2.md", "2026-10-22T18-40-05Z-3.md"])
-    expect(names.at(-1)).toBe("2026-10-22T18-40-05Z-11.md")
+    expect(names[0]).toBe("2026-10-22T18-40-04.000Z.md")
+    expect(names.slice(1, 4)).toEqual(["2026-10-22T18-40-05.000Z.md", "2026-10-22T18-40-05.000Z-2.md", "2026-10-22T18-40-05.000Z-3.md"])
+    expect(names.at(-1)).toBe("2026-10-22T18-40-05.000Z-11.md")
     expect(lastCompaction(dir)).toMatchObject({ tokensBefore: 11 })
-    expect(compactionsPrompt(dir)).toContain(`The newest: ${dir}/2026-10-22T18-40-05Z-11.md, ${dir}/2026-10-22T18-40-05Z-10.md,`)
+    expect(compactionsPrompt(dir)).toContain(`The newest: ${dir}/2026-10-22T18-40-05.000Z-11.md, ${dir}/2026-10-22T18-40-05.000Z-10.md,`)
   })
   it("cleans and validates summaries", () => {
     expect(cleanSummary("Sure!\n\n## Decisions and preferences\n- a")).toBe("## Decisions and preferences\n- a")
@@ -171,7 +171,7 @@ describe("compaction log", () => {
     for (let i = 0; i < 7; i++) writeCompaction(dir, { at: Date.UTC(2026, 0, 1, 0, 0, i), sessionId: "s", model: "m", trigger: "button", tokensBefore: 1 }, "## Decisions and preferences\n- x")
     const p = compactionsPrompt(dir)
     expect(p).toContain("are 7 files")
-    expect(p).toContain("2026-01-01T00-00-06Z.md")
-    expect(p).not.toContain("2026-01-01T00-00-00Z.md")
+    expect(p).toContain("2026-01-01T00-00-06.000Z.md")
+    expect(p).not.toContain("2026-01-01T00-00-00.000Z.md")
   })
 })

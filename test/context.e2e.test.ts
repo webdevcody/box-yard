@@ -320,7 +320,7 @@ describe("orchestrator usage, compaction and the durable log", () => {
     await call(r, "POST", "/api/orchestrator/compact")
     await waitFor(async () => (compactions(r).length === 1 && !(await call<OrchestratorState>(r, "GET", "/api/orchestrator")).compacting ? true : null), "compaction")
     const [name] = compactions(r)
-    expect(name).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.md$/)
+    expect(name).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z\.md$/)
     const text = fs.readFileSync(path.join(r.yard.orchestrator.compactionsDir, name!), "utf8")
     expect(text).toMatch(/trigger: button/)
     expect(text).toMatch(new RegExp(`tokens_before: ${before}\\b`))

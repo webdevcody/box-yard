@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer, type McpCaller } from "../server/mcp.js"
-import { captainCompactionsDir, findCompactionRecord, lastCompaction, listCompactions, readCompactionRecords, writeCompaction } from "../server/compactions.js"
+import { captainCompactionsDir, compactionTime, findCompactionRecord, lastCompaction, listCompactions, readCompactionRecords, writeCompaction } from "../server/compactions.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import type { CaptainMessage, CaptainState, CompactionTaskSnapshot, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
@@ -40,12 +40,12 @@ describe("Captain compaction records", () => {
       "---\ntimestamp: 2026-10-19T10:00:00Z\nsession_id: old\nmodel: m\ntrigger: auto\ntokens_before: 9\ntokens_after: 1\n---\n\n# Captain compaction summary: demo\n\nSee task_named0001.\n",
     )
 
-    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual(["2026-10-21T10-00-00Z", "2026-10-20T10-00-00Z", "2026-10-19T10-00-00Z"])
-    expect(readCompactionRecords(dir, { limit: 1 }).map((c) => c.id)).toEqual(["2026-10-21T10-00-00Z"])
+    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual(["2026-10-21T10-00-00.000Z", "2026-10-20T10-00-00.000Z", "2026-10-19T10-00-00Z"])
+    expect(readCompactionRecords(dir, { limit: 1 }).map((c) => c.id)).toEqual(["2026-10-21T10-00-00.000Z"])
     const snapped = readCompactionRecords(dir, { taskId: "task_snapped01" })
-    expect(snapped.map((c) => c.id)).toEqual(["2026-10-20T10-00-00Z"])
+    expect(snapped.map((c) => c.id)).toEqual(["2026-10-20T10-00-00.000Z"])
     expect(snapped[0]).toMatchObject({ sessionId: "s1", model: "claude-opus-5-5", taskCount: 1, tasks: [{ taskId: "task_snapped01" }] })
-    expect(readCompactionRecords(dir, { taskId: "task_named0001" }).map((c) => c.id)).toEqual(["2026-10-21T10-00-00Z", "2026-10-19T10-00-00Z"])
+    expect(readCompactionRecords(dir, { taskId: "task_named0001" }).map((c) => c.id)).toEqual(["2026-10-21T10-00-00.000Z", "2026-10-19T10-00-00Z"])
     expect(readCompactionRecords(dir, { taskId: "task_nowhere01" })).toEqual([])
 
     const old = findCompactionRecord(dir, "2026-10-19T10-00-00Z")!
@@ -55,14 +55,49 @@ describe("Captain compaction records", () => {
     expect(readCompactionRecords(path.join(dir, "missing"))).toEqual([])
   })
 
-  it("orders two compactions from the same second oldest first", () => {
+  it("gives two compactions from the same second their own ids, with the exact time", () => {
     const dir = tmpDir()
     const at = Date.parse("2026-10-20T10:00:00Z")
     writeCompaction(dir, meta(at), SUMMARY)
     writeCompaction(dir, meta(at + 300), SUMMARY)
-    expect(listCompactions(dir)).toEqual(["2026-10-20T10-00-00Z.md", "2026-10-20T10-00-00Z-2.md"])
-    expect(lastCompaction(dir)!.file).toBe(path.join(dir, "2026-10-20T10-00-00Z-2.md"))
-    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual(["2026-10-20T10-00-00Z-2", "2026-10-20T10-00-00Z"])
+    expect(listCompactions(dir)).toEqual(["2026-10-20T10-00-00.000Z.md", "2026-10-20T10-00-00.300Z.md"])
+    expect(lastCompaction(dir)).toMatchObject({ at: at + 300, file: path.join(dir, "2026-10-20T10-00-00.300Z.md") })
+    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual(["2026-10-20T10-00-00.300Z", "2026-10-20T10-00-00.000Z"])
+    expect(readCompactionRecords(dir, { before: compactionTime("2026-10-20T10-00-00.300Z")! }).map((c) => c.id)).toEqual(["2026-10-20T10-00-00.000Z"])
+  })
+
+  it("orders compactions from the same millisecond oldest first, without overwriting one", () => {
+    const dir = tmpDir()
+    const at = Date.parse("2026-10-20T10:00:00.250Z")
+    for (let i = 0; i < 11; i++) writeCompaction(dir, meta(at), `${SUMMARY}- copy ${i}\n`)
+    const ids = ["2026-10-20T10-00-00.250Z", ...Array.from({ length: 10 }, (_, i) => `2026-10-20T10-00-00.250Z-${i + 2}`)]
+    expect(listCompactions(dir)).toEqual(ids.map((id) => `${id}.md`))
+    expect(lastCompaction(dir)!.file).toBe(path.join(dir, `${ids.at(-1)}.md`))
+    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual([...ids].reverse())
+    expect(findCompactionRecord(dir, ids[0]!)!.markdown).toContain("- copy 0")
+    expect(findCompactionRecord(dir, ids.at(-1)!)!.markdown).toContain("- copy 10")
+  })
+
+  it("orders old second-precision ids and new millisecond ids by time", () => {
+    const dir = tmpDir()
+    const old = (stamp: string, iso: string) =>
+      fs.writeFileSync(path.join(dir, `${stamp}.md`), `---\ntimestamp: ${iso}\nsession_id: old\nmodel: m\ntrigger: auto\ntokens_before: 9\ntokens_after: 1\n---\n\n# Old\n\nSee task_named0001.\n`)
+    old("2026-10-20T10-00-00Z", "2026-10-20T10:00:00Z")
+    old("2026-10-20T10-00-00Z-2", "2026-10-20T10:00:00Z")
+    old("2026-10-20T10-00-02Z", "2026-10-20T10:00:02Z")
+    // The same second as the old ones: as strings, "…00.500Z" sorts before "…00Z" and "…01.999Z" after "…02Z".
+    writeCompaction(dir, meta(Date.parse("2026-10-20T10:00:00.500Z")), `${SUMMARY}- task_named0001\n`)
+    writeCompaction(dir, meta(Date.parse("2026-10-20T10:00:01.999Z")), SUMMARY)
+    writeCompaction(dir, meta(Date.parse("2026-10-20T10:00:02.001Z")), SUMMARY)
+    const ids = ["2026-10-20T10-00-00Z", "2026-10-20T10-00-00Z-2", "2026-10-20T10-00-00.500Z", "2026-10-20T10-00-01.999Z", "2026-10-20T10-00-02Z", "2026-10-20T10-00-02.001Z"]
+    expect(listCompactions(dir)).toEqual(ids.map((id) => `${id}.md`))
+    expect(lastCompaction(dir)!.at).toBe(Date.parse("2026-10-20T10:00:02.001Z"))
+    expect(readCompactionRecords(dir).map((c) => c.id)).toEqual([...ids].reverse())
+    expect(readCompactionRecords(dir, { taskId: "task_named0001" }).map((c) => c.id)).toEqual(["2026-10-20T10-00-02Z", "2026-10-20T10-00-00.500Z", "2026-10-20T10-00-00Z-2", "2026-10-20T10-00-00Z"])
+    expect(readCompactionRecords(dir, { before: compactionTime("2026-10-20T10-00-02Z")! }).map((c) => c.id)).toEqual(ids.slice(0, 4).reverse())
+    for (const id of ids) expect(findCompactionRecord(dir, id)?.id).toBe(id)
+    expect(compactionTime("2026-10-20T10-00-01.999Z-2")).toBe(Date.parse("2026-10-20T10:00:01.999Z"))
+    expect(compactionTime("2026-10-20T10-00-02Z-3")).toBe(Date.parse("2026-10-20T10:00:02Z"))
   })
 })
 
@@ -169,7 +204,10 @@ describe("compaction tools and Captain compactions (#52)", () => {
     expect(text).toMatch(new RegExp(`^task_ids: .*${active.id}`, "m"))
     expect(text).toContain(finished.id)
     expect(text).not.toContain(elsewhere.id)
-    // The next one only what's active, updated or mentioned since.
+    // The next one only what's active, updated or mentioned since. The active task moves in the very
+    // millisecond of the first compaction (the boundary is inclusive); the done one doesn't move.
+    expect(compactionTime(first!), "the id and the recorded time keep the milliseconds").toBe(after.lastCompaction!.at)
+    r.yard.store.db.prepare("UPDATE tasks SET updated_at = ? WHERE id = ?").run(after.lastCompaction!.at, active.id)
     await compact(2)
     const second = ids().find((x) => x !== first)!
     expect(fs.readFileSync(path.join(dir, `${second}.md`), "utf8")).not.toContain(finished.id)
@@ -216,13 +254,13 @@ describe("compaction tools and Captain compactions (#52)", () => {
     writeCompaction(captainCompactionsDir(r.dataDir, b.id), meta(Date.parse("2026-10-21T10:00:00Z")), both)
 
     const alpha = await mcpAs(r, { kind: "captain", projectId: a.id })
-    expect((await alpha.json("list_compactions")).map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00Z"])
-    expect((await alpha.json("list_compactions", { task: ta.id })).map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00Z"])
-    expect((await alpha.json("find_compactions_by_task", { task: ta.id })).captainCompactions.map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00Z"])
+    expect((await alpha.json("list_compactions")).map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00.000Z"])
+    expect((await alpha.json("list_compactions", { task: ta.id })).map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00.000Z"])
+    expect((await alpha.json("find_compactions_by_task", { task: ta.id })).captainCompactions.map((c: { id: string }) => c.id)).toEqual(["2026-10-20T10-00-00.000Z"])
     for (const [name, args] of [
       ["list_compactions", { project: "beta" }],
       ["list_compactions", { task: tb.id }],
-      ["read_compaction", { compaction: "2026-10-21T10-00-00Z", project: b.id }],
+      ["read_compaction", { compaction: "2026-10-21T10-00-00.000Z", project: b.id }],
       ["find_compactions_by_task", { task: tb.id }],
     ] as const) {
       const res = await alpha.raw(name, args)
@@ -230,14 +268,14 @@ describe("compaction tools and Captain compactions (#52)", () => {
       expect(res.content[0]!.text).toMatch(/^Out of scope: /)
     }
     // Beta's id isn't in alpha's folder, and a path can't reach it either.
-    for (const compaction of ["2026-10-21T10-00-00Z", `../../${b.id}/compactions/2026-10-21T10-00-00Z`]) {
+    for (const compaction of ["2026-10-21T10-00-00.000Z", `../../${b.id}/compactions/2026-10-21T10-00-00.000Z`]) {
       const res = await alpha.raw("read_compaction", { compaction })
       expect(res.isError).toBe(true)
       expect(res.content[0]!.text).toMatch(/^No Captain compaction/)
     }
 
     const coordinator = await mcpAs(r, { kind: "coordinator" })
-    expect((await coordinator.json("find_compactions_by_task", { task: tb.id })).captainCompactions.map((c: { id: string }) => c.id)).toEqual(["2026-10-21T10-00-00Z"])
-    expect((await coordinator.json("read_compaction", { compaction: "2026-10-21T10-00-00Z", project: "beta" })).captain).toBe(b.id)
+    expect((await coordinator.json("find_compactions_by_task", { task: tb.id })).captainCompactions.map((c: { id: string }) => c.id)).toEqual(["2026-10-21T10-00-00.000Z"])
+    expect((await coordinator.json("read_compaction", { compaction: "2026-10-21T10-00-00.000Z", project: "beta" })).captain).toBe(b.id)
   })
 })

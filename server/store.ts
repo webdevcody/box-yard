@@ -1757,7 +1757,7 @@ export class Store {
 
   listChatSince(since: number): ChatMessage[] {
     const rows = this.db
-      .prepare("SELECT * FROM chat_messages WHERE created_at > ? ORDER BY created_at ASC, rowid ASC")
+      .prepare("SELECT * FROM chat_messages WHERE created_at >= ? ORDER BY created_at ASC, rowid ASC")
       .all(since) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
     return rows.map((r) => ({
       id: r.id,
