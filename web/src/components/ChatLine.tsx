@@ -160,7 +160,7 @@ export function NoticeProject({ taskId, projectId, className }: { taskId: string
   if (!id || project?.kind !== "project") return null
   const link = "rounded-sm text-zinc-500 hover:text-zinc-200 hover:underline focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
   return (
-    <span data-testid="notice-project" className={cx("flex h-lh max-w-[45%] shrink-0 items-center gap-1 whitespace-nowrap sm:max-w-64", className)}>
+    <span data-testid="notice-project" className={cx("flex h-lh max-w-[60%] shrink-0 items-center gap-1 whitespace-nowrap sm:max-w-64", className)}>
       <AppLink href={routes.project(id)} title={`Project: ${project.label}`} className={cx("min-w-0 truncate", link)}>
         {project.label}
       </AppLink>
@@ -206,11 +206,12 @@ export function NoticeCard({
       onClick={open}
       onAuxClick={open}
       onKeyDown={open}
-      className={cx(NOTICE_CLASS, "flex cursor-pointer items-start gap-2 hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
+      className={cx(NOTICE_CLASS, "flow-root cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
     >
-      <div className="min-w-0 flex-1">{children}</div>
-      {/* The markdown's first paragraph is my-1.5 leading-relaxed; the same line box keeps the chip on that row. */}
-      {project && <NoticeProject taskId={taskId} projectId={projectId} className="my-1.5 leading-relaxed" />}
+      {/* Floated, so the text wraps under it on phones. The markdown's first paragraph is my-1.5 leading-relaxed;
+          the same line box keeps the chip on that row. */}
+      {project && <NoticeProject taskId={taskId} projectId={projectId} className="float-right my-1.5 ml-3 leading-relaxed" />}
+      {children}
     </div>
   )
 }
