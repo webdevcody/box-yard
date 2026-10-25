@@ -421,7 +421,7 @@ function ProjectBoxSettings(p: {
           ))}
         </Select>
       </OverrideField>
-      <div className="grid gap-3 @2xl:grid-cols-3">
+      <div className="grid gap-3 @4xl:grid-cols-3">
         <OverrideField
           id="project-agents-per-box"
           label="Agents per box"
@@ -464,7 +464,7 @@ function OverrideField({ id, label, global, set, onClear, hint, children }: { id
       <label htmlFor={id} className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">
         {label}
       </label>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {children}
         {set && (
           <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={onClear} title={`Clear this project's ${label.toLowerCase()}: the global one applies`} data-testid={`${id}-clear`}>
@@ -490,7 +490,7 @@ function LimitInput({ id, range, value, onChange, placeholder }: { id: string; r
       inputMode="numeric"
       min={range.min}
       max={range.max}
-      className={cx(inputClass, "min-w-0")}
+      className={cx(inputClass, "max-w-40 min-w-0")}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
