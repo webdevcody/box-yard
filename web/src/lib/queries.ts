@@ -386,7 +386,7 @@ export const useRunPod = (o: { enabled?: boolean; poll?: boolean } = {}) =>
 /** GPU types RunPod offers on Secure Cloud, cheapest first. */
 export const useRunPodGpus = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.runpodGpus, queryFn: () => api<RunPodGpuOption[]>("/api/runpod/gpus"), enabled: o.enabled, staleTime: 5 * 60_000 })
-/** A RunPod action: save settings, build the image, stop a pod, keep it warm, delete a volume. */
+/** A RunPod action: save settings, build the image, keep a pod warm, delete a volume. */
 export function useRunPodAction<T>(title: string, call: (input: T) => Promise<RunPodStatus | RunPodImageBuild>) {
   const qc = useQueryClient()
   return useMutation({
