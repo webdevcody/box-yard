@@ -1,10 +1,20 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+// Select text in a chat or transcript and "Start new task" turns it into work: the shared New task popover opens
+// with the quote and a box for instructions. Enter sends both to whoever routes the work (the Coordinator, or the
+// project's Captain in its chat); "More options" starts the task directly from the full New task dialog.
+import { useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from "react"
 import { MessageSquarePlus } from "lucide-react"
-import { buildSelectionTaskPrompt, type SelectionTaskSource } from "../lib/selectionTask"
+import { buildSelectionTaskBrief, buildSelectionTaskPrompt, selectionTarget, type SelectionTaskSource } from "../lib/selectionTask"
+import { saveDraft, selectionScope } from "../lib/newTask"
 import { toast } from "../lib/toast"
 import { useOwnerName } from "../lib/queries"
-import { Button, cx } from "./ui"
-import { Modal } from "./Modal"
+import { NewTaskDialog, NewTaskPopover } from "./NewTask"
+
+interface Rect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
 
 interface SelectionInfo {
   text: string
@@ -23,7 +33,13 @@ export function SelectionToTask({
 }) {
   const root = useRef<HTMLDivElement>(null)
   const [selection, setSelection] = useState<SelectionInfo | null>(null)
-  const [draft, setDraft] = useState<SelectionInfo | null>(null)
+  /** The popover is open on this selection, hanging from where its action button was. */
+  const [draft, setDraft] = useState<(SelectionInfo & { rect: Rect }) | null>(null)
+  /** "More options": the full New task dialog for this selection and the instructions typed so far. */
+  const [dialog, setDialog] = useState<{ text: string; instructions: string } | null>(null)
+  const anchor = useRef<HTMLSpanElement>(null)
+  const popoverId = useId()
+  const ownerName = useOwnerName()
 
   useEffect(() => {
     const update = () => {
@@ -52,19 +68,27 @@ export function SelectionToTask({
     }
   }, [source])
 
-  const open = () => {
+  const open = (e: MouseEvent<HTMLButtonElement>) => {
     if (!selection) return
-    setDraft(selection)
+    const r = e.currentTarget.getBoundingClientRect()
+    setDraft({ ...selection, rect: { left: r.left, top: r.top, width: r.width, height: r.height } })
+    setSelection(null)
+  }
+
+  const finish = () => {
+    setDraft(null)
+    window.getSelection()?.removeAllRanges()
   }
 
   return (
     <div ref={root} className="contents">
       {children}
-      {source && selection && (
+      {source && selection && !draft && (
         <>
           <button
             type="button"
             data-selection-task-action
+            aria-haspopup="dialog"
             onMouseDown={(e) => e.preventDefault()}
             onClick={open}
             className="fixed z-40 hidden -translate-x-1/2 items-center gap-1.5 rounded-full border border-yard-400/50 bg-zinc-900/95 px-3 py-1.5 text-xs font-medium text-yard-200 shadow-lg shadow-black/40 backdrop-blur hover:border-yard-300 hover:text-yard-100 focus:ring-2 focus:ring-yard-500 focus:outline-none [@media(pointer:fine)]:inline-flex"
@@ -75,6 +99,7 @@ export function SelectionToTask({
           <div data-selection-task-action className="fixed inset-x-3 bottom-3 z-40 [@media(pointer:fine)]:hidden">
             <button
               type="button"
+              aria-haspopup="dialog"
               onMouseDown={(e) => e.preventDefault()}
               onClick={open}
               className="flex w-full items-center justify-center gap-2 rounded-2xl border border-yard-400/50 bg-zinc-900/95 px-4 py-3 text-sm font-medium text-yard-100 shadow-2xl shadow-black/50 backdrop-blur"
@@ -85,77 +110,43 @@ export function SelectionToTask({
         </>
       )}
       {source && draft && (
-        <SelectionPrompt
-          source={source}
-          selection={draft}
-          onClose={() => setDraft(null)}
-          onSubmit={(prompt) => {
-            onPrompt(prompt)
-            setDraft(null)
-            setSelection(null)
-            window.getSelection()?.removeAllRanges()
-            toast.info("Sent to orchestrator", "The Coordinator will decide where this task belongs.")
+        <>
+          {/* Where the action button was: the popover hangs from it (the button itself goes once the selection does). */}
+          <span ref={anchor} aria-hidden className="pointer-events-none fixed" style={draft.rect} />
+          <NewTaskPopover
+            id={popoverId}
+            trigger={anchor}
+            heading="New task from selection"
+            quote={draft.text}
+            placeholder="Additional instructions (optional)"
+            scope={selectionScope(draft.text)}
+            defaultProjectId={source.project?.id}
+            onStart={(instructions) => {
+              onPrompt(buildSelectionTaskPrompt({ source, selectedText: draft.text, instructions, ownerName }))
+              finish()
+              toast.info(`Sent to ${selectionTarget(source)}`, "It will decide where this task belongs.")
+            }}
+            onClose={() => setDraft(null)}
+            onMore={(_, instructions) => {
+              setDialog({ text: draft.text, instructions })
+              setDraft(null)
+            }}
+          />
+        </>
+      )}
+      {source && dialog && (
+        <NewTaskDialog
+          projectId={source.project?.id}
+          initialPrompt={buildSelectionTaskBrief({ source, selectedText: dialog.text, instructions: dialog.instructions })}
+          onCancel={() => setDialog(null)}
+          onDone={() => {
+            saveDraft(selectionScope(dialog.text), "")
+            setDialog(null)
+            finish()
           }}
         />
       )}
     </div>
-  )
-}
-
-function SelectionPrompt({
-  source,
-  selection,
-  onClose,
-  onSubmit,
-}: {
-  source: SelectionTaskSource
-  selection: SelectionInfo
-  onClose: () => void
-  onSubmit: (prompt: string) => void
-}) {
-  const [instructions, setInstructions] = useState("")
-  const ownerName = useOwnerName()
-  const preview = useMemo(() => selection.text.replace(/\s+/g, " ").trim().slice(0, 260), [selection.text])
-  return (
-    <Modal
-      title="Start new task from selection"
-      description="Add optional instructions; the orchestrator will choose the task placement."
-      size="sm"
-      onClose={onClose}
-      onSubmit={(e) => {
-        e.preventDefault()
-        onSubmit(buildSelectionTaskPrompt({ source, selectedText: selection.text, instructions, ownerName }))
-      }}
-      footer={
-        <>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Cancel
-          </Button>
-          <Button type="submit" variant="primary">
-            Send to orchestrator
-          </Button>
-        </>
-      }
-    >
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-400">
-        <div className="mb-1 font-medium text-zinc-300">Selected context</div>
-        <div className="line-clamp-4">{preview}</div>
-      </div>
-      <label className="block space-y-1.5">
-        <span className="text-xs font-medium tracking-wide text-zinc-400 uppercase">Instructions</span>
-        <textarea
-          autoFocus
-          value={instructions}
-          onChange={(e) => setInstructions(e.currentTarget.value)}
-          rows={4}
-          placeholder="What should the new task do with this context?"
-          className={cx(
-            "w-full resize-none rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600",
-            "focus:border-yard-500/60 focus:ring-2 focus:ring-yard-500/20 focus:outline-none",
-          )}
-        />
-      </label>
-    </Modal>
   )
 }
 
