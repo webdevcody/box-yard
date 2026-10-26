@@ -35,7 +35,7 @@ import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { SelectionToTask } from "./SelectionToTask"
 import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
@@ -52,17 +52,29 @@ export function CaptainTab({ project }: { project: Project }) {
   const send = useSendCaptainMessage(project.id)
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
+  const thread = useRef<StickyScrollHandle>(null)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
-  const submit = useCallback(
+  // A suggested next step sends without touching the composer (no keyboard pops up on a phone).
+  const followUp = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
-      send.mutate({ id: newClientId("chat"), content, attachments })
-      box.current?.focus()
+      const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      thread.current?.scrollToEnd()
+      return sending
     },
-    [send.mutate],
+    [send.mutateAsync],
+  )
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const sending = followUp(text, attachments)
+      box.current?.focus()
+      return sending
+    },
+    [followUp],
   )
   const toggleGroup = useCallback(
     (id: string) =>
@@ -109,6 +121,7 @@ export function CaptainTab({ project }: { project: Project }) {
 
       <SelectionToTask source={selectionSource} onPrompt={submit}>
         <StickyScroll
+          handle={thread}
           count={list.length}
           resetKey={project.id}
           restoreKey="captain"
@@ -119,7 +132,7 @@ export function CaptainTab({ project }: { project: Project }) {
         >
           {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
           {tail.visible.map((row) => (
-            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={submit} />
+            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
           ))}
           {busy && (
             // Just the dots, like the Coordinator's: the header's robot says it's working.

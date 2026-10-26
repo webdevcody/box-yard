@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, createElement } from "react"
+import { act, createElement, createRef } from "react"
 import { createRoot, type Root } from "react-dom/client"
-import { StickyScroll } from "../web/src/components/StickyScroll.js"
+import { StickyScroll, type StickyScrollHandle } from "../web/src/components/StickyScroll.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -89,10 +89,12 @@ const userScroll = (dy: number) => {
   scroller.scrollTop = top + dy
 }
 
+const handle = createRef<StickyScrollHandle>()
+
 function Thread({ heights }: { heights: number[] }) {
   return createElement(
     StickyScroll,
-    { count: heights.length, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
+    { handle, count: heights.length, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
   )
 }
 
@@ -106,7 +108,16 @@ function streamDelta(px = 30) {
   frame()
 }
 
+// requestAnimationFrame callbacks wait here until the test runs the next frame.
+let frames: FrameRequestCallback[] = []
+const nextFrame = () => act(() => frames.splice(0).forEach((cb) => cb(0)))
+let viewport: EventTarget
+
 beforeEach(() => {
+  frames = []
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb))
+  viewport = new EventTarget()
+  vi.stubGlobal("visualViewport", viewport)
   vi.stubGlobal("ResizeObserver", FakeResizeObserver)
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
@@ -294,5 +305,98 @@ describe("StickyScroll", () => {
     act(() => void inner.dispatchEvent(new WheelEvent("wheel", { deltaY: -20, bubbles: true })))
     streamDelta()
     expect(atBottom()).toBe(true)
+  })
+
+  describe("after a send (scrollToEnd)", () => {
+    // Reading history far up, unpinned.
+    const readHistory = () => {
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-1200)
+      frame()
+      expect(jumpButton()).toBeDefined()
+    }
+    // The composer sends: the sent message renders a moment later (React Query notifies on a timer).
+    const send = () => act(() => handle.current!.scrollToEnd())
+    const messageRenders = (h = 80) => {
+      heights.push(h)
+      render()
+      frame()
+    }
+
+    it("a send scrolls to the bottom, even from far up", () => {
+      readHistory()
+      send()
+      nextFrame()
+      flush()
+      expect(atBottom()).toBe(true)
+      expect(jumpButton()).toBeUndefined()
+    })
+
+    it("lands on the sent message when it renders after the frame", () => {
+      readHistory()
+      send()
+      nextFrame()
+      frame()
+      messageRenders()
+      expect(atBottom()).toBe(true)
+      expect(rowTop(rows().at(-1)!) + height(rows().at(-1)!)).toBe(VIEW)
+    })
+
+    it("lands on the sent message when it renders before the frame", () => {
+      readHistory()
+      send()
+      messageRenders()
+      nextFrame()
+      flush()
+      expect(atBottom()).toBe(true)
+    })
+
+    it("stays pinned while the reply streams in", () => {
+      readHistory()
+      send()
+      nextFrame()
+      messageRenders()
+      messageRenders(40)
+      for (let i = 0; i < 5; i++) streamDelta()
+      expect(atBottom()).toBe(true)
+    })
+
+    it("a streaming reply doesn't pull the view back down after scrolling up again", () => {
+      readHistory()
+      send()
+      nextFrame()
+      messageRenders()
+      messageRenders(40)
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-300)
+      frame()
+      const reading = top
+      for (let i = 0; i < 10; i++) streamDelta()
+      expect(top).toBe(reading)
+      expect(jumpButton()).toBeDefined()
+    })
+
+    it("scrolling up before the frame cancels the glide", () => {
+      readHistory()
+      send()
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-100)
+      frame()
+      const reading = top
+      nextFrame()
+      messageRenders()
+      expect(top).toBe(reading)
+    })
+
+    it("follows the visual viewport (an iOS keyboard closing) back to the bottom", () => {
+      send()
+      nextFrame()
+      flush()
+      // The keyboard took the bottom: the browser left scrollTop short of it.
+      top -= 200
+      dispatched = top
+      act(() => void viewport.dispatchEvent(new Event("resize")))
+      expect(atBottom()).toBe(true)
+    })
   })
 })
