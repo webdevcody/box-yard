@@ -455,7 +455,7 @@ function ProjectBoxSettings(p: {
         <OverrideField
           id="project-agents-per-box"
           label="Agents at once (this project)"
-          global={`the box's own limit, ${agents.long}`}
+          global={agents.long}
           set={p.agentsPerBox.trim() !== ""}
           onClear={() => p.setAgentsPerBox("")}
           hint="How many of this project's agents can run at the same time on one box or this computer. Other projects' agents never wait for it. 1: one at a time (game engines, big builds, headless browsers)."
