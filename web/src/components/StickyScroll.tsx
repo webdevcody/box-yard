@@ -96,8 +96,11 @@ export function StickyScroll({
   const toBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scroller.current
     if (!el) return
-    if (behavior === "auto") setTop(el, el.scrollHeight)
-    else el.scrollTo({ top: el.scrollHeight, behavior })
+    if (behavior === "auto") return setTop(el, el.scrollHeight)
+    // From far up, jump to a screen above the bottom and glide only that last stretch.
+    const near = el.scrollHeight - 2 * el.clientHeight
+    if (el.scrollTop < near) setTop(el, near)
+    el.scrollTo({ top: el.scrollHeight, behavior })
   }
 
   // Remember the first row that reaches into the view and where it sits.
