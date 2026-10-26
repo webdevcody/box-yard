@@ -4,7 +4,7 @@ import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
 import type { EntityIndex, EntityRef } from "./linkify"
 import { groupPublished, type PublishedGroup } from "./publishedNotices"
 
-export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "info"
+export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "settings" | "info"
 
 /** A piece of a notice's one-line summary: plain text, or a link (artifact, PR, page). */
 export type NoticeSegment = { text: string } | { href: string; label: string }
@@ -29,6 +29,8 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
   "⚠": "warning",
   // The notes retro and the notes budget (server/retro.ts, server/notes.ts).
   "📝": "notes",
+  // The Coordinator's update_settings (server/mcp.ts).
+  "⚙": "settings",
 }
 
 const LEADING_EMOJI = /^\s*(\p{Extended_Pictographic})️?\s*/u

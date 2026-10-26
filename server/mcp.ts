@@ -15,6 +15,7 @@ import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS,
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
 import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
+import { SETTINGS_GROUPS, changeLine, type SettingsGroup, type SettingsTools } from "./settingsTools.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
@@ -42,6 +43,8 @@ export interface McpDeps {
   uploads: Uploads
   /** Optional so tests can build the server without it; then effort is fixed. */
   settings?: SettingsStore
+  /** get_settings / update_settings (Coordinator only). Optional so tests can build the server without them. */
+  settingsTools?: SettingsTools
   captains?: CaptainManager
   /** Optional so older tests can build the server without it; then the hook tools aren't offered. */
   hooks?: HookEngine
@@ -1784,6 +1787,51 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
     }),
   )
+
+  // ---------------------------------------------------------------- global Settings
+  // Coordinator only: Captains get neither tool, and update_settings refuses a Captain even if one reached it.
+  const settingsTools = deps.settingsTools
+  if (settingsTools) {
+    coordinatorOnly(
+      server.registerTool(
+        "get_settings",
+        {
+          description:
+            "Read Box Yard's global Settings, everything the Settings dialog shows: each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
+            "An env var only seeds a value: saving one here overrides it, as in the Settings UI. Rows with envLocked (group server) come only from env vars on the server. " +
+            "API keys and tokens (group credentials, voice.*ApiKey) show only as set / not set.",
+          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
+        },
+        safe(async (a: { group?: SettingsGroup }) => okCompact({ settings: settingsTools.list(a.group) })),
+      ),
+    )
+    coordinatorOnly(
+      server.registerTool(
+        "update_settings",
+        {
+          description:
+            "Change global Settings for Cody, through the same checks and save path as the Settings UI (the pool re-reads its limits right away). " +
+            'Pass a partial patch keyed like get_settings: { "slotsPerBox": 3, "maxBoxes": 20, "localAgents": 3, "agentModel": "claude-opus-5-5", "runpod.maxHourlyUsd": 2, "runner": "local" }. ' +
+            'An object setting takes only the fields that change ({ "budget": { "dailyUsd": 5 } }). ' +
+            "The whole patch is checked first: an unknown key, an out-of-range value, a server env-only key or any API key or token fails the call and nothing changes. " +
+            "Returns before → after for every value that changed (a new workerSize also moves the size-default box limits), and Cody gets a notice with your reason.",
+          inputSchema: {
+            patch: z.record(z.string(), z.unknown()).describe("Settings to change, by get_settings key."),
+            reason: z.string().trim().min(3).max(500).describe('Why, in one line for Cody (e.g. "Cody asked for 3 agents per box").'),
+          },
+        },
+        safe(async (a: { patch: Record<string, unknown>; reason: string }) => {
+          if (scopeId) throw outOfScope("global Settings are changed only by the Coordinator")
+          const changes = await settingsTools.update(a.patch)
+          if (!changes.length) return ok({ changed: [], note: "Every value was already set that way; nothing was saved." })
+          const line = changeLine(changes)
+          console.log(`[box-yard] settings changed by the Coordinator: ${line} (reason: ${a.reason})`)
+          tasks.notice(`⚙️ **Settings** changed by the Coordinator: ${line}. Reason: ${a.reason}`, { kind: "settings", changes, reason: a.reason }, { wake: false })
+          return ok({ changed: changes, next: "Applies from the next turn on; the pool already uses new limits." })
+        }),
+      ),
+    )
+  }
 
   // ---------------------------------------------------------------- hooks
   // Coordinator: global hooks and any project's. A Captain: only its own project's hooks and their runs,
