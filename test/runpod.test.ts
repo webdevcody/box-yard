@@ -198,8 +198,12 @@ describe("the pod image", () => {
 
 describe("RunPodProvider", () => {
   const gpu = (id: string, price: number) => ({ id, name: id, memory: 24, secure: true, price: { secure: price, community: price }, availability: "HIGH" })
-  function provider(pods: RunPodPod[], o: { settings?: Partial<RunPodSettings>; projectCap?: (id: string) => number | null; volumes?: unknown[] } = {}) {
+  function provider(
+    pods: RunPodPod[],
+    o: { settings?: Partial<RunPodSettings>; projectCap?: (id: string) => number | null; volumes?: unknown[]; routes?: Parameters<typeof fakeFetch>[0] } = {},
+  ) {
     const f = fakeFetch({
+      ...o.routes,
       "GET https://api.runpod.io/v2/pods": () => ({ body: { pods } }),
       "GET https://api.runpod.io/v2/catalog/gpus": () => ({ body: { gpus: [gpu("NVIDIA RTX A5000", 0.27), gpu("NVIDIA A40", 0.4)] } }),
       "GET https://api.runpod.io/v2/catalog/datacenters": () => ({
@@ -270,6 +274,18 @@ describe("RunPodProvider", () => {
     expect(await p.publicUrl("runpod-proj_a", POD_HTTP_PORTS[1]!)).toBe(`https://p1-${POD_HTTP_PORTS[1]}.proxy.runpod.net`)
     await expect(p.publicUrl("runpod-proj_a", POD_HTTP_PORTS[1]! + 1)).rejects.toThrow(/first port/)
     await expect(p.publicUrl("runpod-proj_x", 4000)).rejects.toThrow(/isn't running/)
+  })
+
+  it("terminates a pod (never just stops it) and leaves its network volume alone", async () => {
+    const actions: unknown[] = []
+    const p = provider([{ id: "p1", name: "boxyard-inst1-prj_a", status: "RUNNING" }], {
+      volumes: [{ id: "v1", name: "boxyard-inst1-prj_a", size: 20, dataCenterId: "CA-MTL-1" }],
+      routes: { "POST https://api.runpod.io/v2/pods/p1/action": (init) => (actions.push(JSON.parse(String(init?.body))), { body: {} }) },
+    })
+    await p.destroy("runpod-prj_a")
+    expect(actions).toEqual([{ action: "terminate" }])
+    expect(p.calls.filter((c) => c.method !== "GET").map((c) => `${c.method} ${c.url}`)).toEqual(["POST https://api.runpod.io/v2/pods/p1/action"])
+    expect(p.calls.some((c) => c.url.includes("network-volumes") && c.method !== "GET")).toBe(false)
   })
 
   it("can't make boxes through the pool", async () => {

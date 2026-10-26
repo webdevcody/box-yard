@@ -453,9 +453,22 @@ export interface BoxInfo {
 
 export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot"
 
-/** What Clear box and Delete box would touch, for their confirmations. */
+/**
+ * A task's part in the delete safety check (server/boxDelete.ts): "ok" lets the box go, the rest hold it. The
+ * Coordinator and Captains (delete_box) are refused by any of them; Cody can stop agents, or delete anyway.
+ */
+export type BoxDeleteVerdict = "ok" | "running" | "queued" | "unpushed" | "dirty" | "unchecked"
+
+/** Tasks Cody can delete past with "Delete anyway": all but "ok", and running agents (those are stopped instead). */
+export const deleteAtRisk = <T extends { verdict: BoxDeleteVerdict }>(tasks: T[]): T[] => tasks.filter((t) => t.verdict !== "ok" && t.verdict !== "running")
+
+/** What Clear box and Delete box would touch, for their confirmations, and the safety check delete_box runs. */
 export interface BoxContents {
   boxId: string
+  /** A worker box (deleted at its provider) or a RunPod GPU pod (terminated; its network volume stays). */
+  kind: "box" | "pod"
+  /** The box id, or "GPU pod #1 · project" for a pod. */
+  label: string
   tasks: {
     id: string
     title: string
@@ -467,12 +480,20 @@ export interface BoxContents {
     uncommitted: number | null
     /** The workspace already has an archive newer than its last activity. */
     archived: boolean
+    prState: PrState | null
+    verdict: BoxDeleteVerdict
+    /** Why it holds the delete, or what happens to it ("archived first", "needs no archive: PR merged…"). */
+    detail: string
   }[]
   /** Agents running on the box: Clear and Delete refuse unless asked to stop them. */
   running: number
   /** Disk in use on the box (df), and how much of it is Box Yard's folders (du). */
   diskUsedBytes: number | null
   diskBytes: number | null
+  /** Why nobody can delete it right now (another operation on it, still being created, a pod that isn't up), or null. */
+  busy: string | null
+  /** Every reason delete_box refuses it (busy, then each task that isn't "ok"); empty when it may go. */
+  refusals: string[]
 }
 
 export interface Health {

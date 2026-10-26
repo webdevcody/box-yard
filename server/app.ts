@@ -796,11 +796,6 @@ export function createBoxYard(
       throw new BadRequestError((err as Error).message)
     }
   })
-  api.post("/runpod/pods/:boxId/stop", async (req, res) => {
-    const boxId = String(req.params.boxId)
-    await tasks.stopGpuPod(boxId, { actor: { kind: "owner" }, reason: "Stopped from Settings › RunPod GPU." })
-    res.json(await runpodStatus())
-  })
   api.post("/runpod/pods/:boxId/keep-warm", async (req, res) => {
     const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
     await runpod.keepWarm(String(req.params.boxId), minutes)
@@ -1068,10 +1063,14 @@ export function createBoxYard(
     const body = parse(z.object({ stopAgents: z.boolean().optional() }), req.body ?? {})
     res.json(await tasks.clearBox(req.params.id!, { stopAgents: body.stopAgents }))
   })
-  /** Archive every workspace, then destroy the box. 409 while agents run, unless ?stopAgents=1. */
+  /**
+   * Archive every workspace, then destroy the box, or terminate a RunPod GPU pod (`runpod-*`; its volume stays).
+   * 409 while agents run, unless ?stopAgents=1, and when the safety check flags a task (queued, unpushed or
+   * uncommitted work), unless ?override=1 (Delete anyway). GET /boxes/:id/contents has the check.
+   */
   api.delete("/boxes/:id", async (req, res) => {
-    await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1" })
-    res.json({ ok: true })
+    const result = await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1", override: req.query.override === "1" })
+    res.json({ ok: true, ...result })
   })
 
   /** What resizing to ?size= would do: in place or by migration, the running agents, and a scale-down's disk fit. */
