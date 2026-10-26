@@ -39,6 +39,7 @@ import type {
   Project,
   ProjectNote,
   QueuedMessage,
+  SendNowDelivery,
   Schedule,
   ScheduleRun,
   ScheduleTarget,
@@ -197,6 +198,38 @@ export function useQueuedMessageActions(taskId: string) {
     onSettled: settle,
   })
   return { edit, remove, restore }
+}
+
+/**
+ * What "Send now" on the task's Queued rows needs: whether a turn is running (Send now stops it, so it asks
+ * first) and which PR it is merging, if any. A small select, so other task updates don't re-render the queue.
+ */
+export function useSendNowState(id: string) {
+  const select = useCallback((list: Task[]) => {
+    const t = list.find((x) => x.id === id)
+    if (!t) return null
+    const running = t.status === "working" || t.status === "starting"
+    return { running, compacting: t.compacting, mergingPr: running && t.mergeRequest?.deliveredAt ? t.mergeRequest.prNumber : null }
+  }, [id])
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
+}
+
+/** "Send now": stop the task's current turn (like Stop) so the next one delivers every queued message, in order. */
+export function useSendQueuedNow(taskId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (o: { allowMergeInterrupt?: boolean }) =>
+      api<{ task: Task; delivery: SendNowDelivery; queued: number }>(`/api/tasks/${taskId}/queue/send-now`, { method: "POST", body: o }),
+    onSuccess: ({ delivery, queued }) => {
+      const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
+      if (delivery === "interrupted") toast.info("Sending now", `Stopping the current step. The next turn gets ${them}, in order.`)
+      else if (delivery === "after_compaction") toast.info("Sending after compaction", `The agent is compacting its context; ${them} go out right after.`)
+      else if (delivery === "already_delivered") toast.info("Already on their way", "A turn has taken the queued messages.")
+      else toast.info("Sending", `No step to stop: ${them} go out as the agent's next turn starts.`)
+    },
+    onError: fail("Couldn't send now"),
+    onSettled: () => void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) }),
+  })
 }
 
 /**

@@ -2,12 +2,13 @@
 // The task page lists them as Queued rows below the live transcript, in send order; the Coordinator chat and
 // the Captain tab show them as their usual bubbles under the live turn (QueuedChatMessage). Each can be edited
 // in place or deleted (with Undo) until a turn takes it; the server refuses changes after that ("already
-// delivered"), so an edit or delete never races the delivery.
+// delivered"), so an edit or delete never races the delivery. On the task page, Send now stops the current
+// step (like Stop) so the next turn delivers the whole queue right away; it asks inline first while a turn runs.
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
 import { useQueryClient } from "@tanstack/react-query"
-import { Clock, Loader2, Pencil, Trash2 } from "lucide-react"
+import { Clock, Loader2, Pencil, SendHorizontal, Trash2 } from "lucide-react"
 import type { CaptainMessage, ChatMessage, QueuedMessage } from "../../../shared/types"
-import { keys, useOwnerName, useQueuedChatActions, useQueuedMessageActions, useTaskQueue } from "../lib/queries"
+import { keys, useOwnerName, useQueuedChatActions, useQueuedMessageActions, useSendNowState, useSendQueuedNow, useTaskQueue } from "../lib/queries"
 import { isQueued } from "../lib/queued"
 import { UNDO_MS } from "../lib/inbox"
 import { navigate } from "wouter/use-browser-location"
@@ -23,7 +24,11 @@ const ICON_BUTTON =
 export const TaskQueue = memo(function TaskQueue({ taskId }: { taskId: string }) {
   const queue = useTaskQueue(taskId)
   const { edit, remove, restore } = useQueuedMessageActions(taskId)
+  const sendNowState = useSendNowState(taskId)
+  const sendNow = useSendQueuedNow(taskId)
   const [editing, setEditing] = useState<string | null>(null)
+  // The row whose Send now is asking "Stop the current step?" inline.
+  const [confirming, setConfirming] = useState<string | null>(null)
   // Deleted rows stay in place as an Undo line for a few seconds (the server keeps them longer).
   const [deleted, setDeleted] = useState<QueuedMessage[]>([])
   const list = queue.data ?? []
@@ -77,6 +82,22 @@ export const TaskQueue = memo(function TaskQueue({ taskId }: { taskId: string })
     [edit.mutate],
   )
   const dropUndo = useCallback((id: string) => setDeleted((d) => d.filter((x) => x.id !== id)), [])
+  // A running turn is stopped by Send now, so that asks first; otherwise nothing is interrupted and it just goes.
+  const interrupts = Boolean(sendNowState?.running && !sendNowState.compacting)
+  const mergingPr = sendNowState?.mergingPr ?? null
+  const onSendNow = useCallback(
+    (m: QueuedMessage) => {
+      if (interrupts) setConfirming(m.id)
+      else sendNow.mutate({})
+    },
+    [interrupts, sendNow.mutate],
+  )
+  const onConfirmSendNow = useCallback(() => {
+    setConfirming(null)
+    sendNow.mutate({ allowMergeInterrupt: mergingPr !== null })
+  }, [mergingPr, sendNow.mutate])
+  const onCancelSendNow = useCallback(() => setConfirming(null), [])
+  const waiting = list.filter((m) => m.status === "queued").length
 
   if (!rows.length) return null
   return (
@@ -85,7 +106,18 @@ export const TaskQueue = memo(function TaskQueue({ taskId }: { taskId: string })
         deleted ? (
           <DeletedRow key={m.id} m={m} onUndo={onUndo} onExpire={dropUndo} />
         ) : (
-          <QueuedRow key={m.id} m={m} editing={editing === m.id} onEdit={setEditing} onSave={onSave} onDelete={onDelete} />
+          <QueuedRow
+            key={m.id}
+            m={m}
+            editing={editing === m.id}
+            onEdit={setEditing}
+            onSave={onSave}
+            onDelete={onDelete}
+            running={Boolean(sendNowState?.running)}
+            sending={sendNow.isPending}
+            onSendNow={onSendNow}
+            confirm={confirming === m.id ? { count: waiting, mergingPr, onConfirm: onConfirmSendNow, onCancel: onCancelSendNow } : null}
+          />
         ),
       )}
     </div>
@@ -98,12 +130,22 @@ const QueuedRow = memo(function QueuedRow({
   onEdit,
   onSave,
   onDelete,
+  running,
+  sending,
+  onSendNow,
+  confirm,
 }: {
   m: QueuedMessage
   editing: boolean
   onEdit: (id: string | null) => void
   onSave: (m: QueuedMessage, text: string) => void
   onDelete: (m: QueuedMessage) => void
+  /** A turn is running: the message waits for it to end, and Send now would stop it. */
+  running: boolean
+  sending: boolean
+  onSendNow: (m: QueuedMessage) => void
+  /** Send now is asking on this row: how many messages it sends, and the PR being merged (a warning), if any. */
+  confirm: SendNowConfirmProps | null
 }) {
   const ownerName = useOwnerName()
   const delivering = m.status === "delivering"
@@ -125,6 +167,17 @@ const QueuedRow = memo(function QueuedRow({
         </span>
         {!delivering && settled && !editing && (
           <span className="-my-2.5 ml-auto flex shrink-0 sm:-my-0.5">
+            <button
+              type="button"
+              className={cx(ICON_BUTTON, "hover:text-yard-300", confirm && "bg-zinc-800 text-yard-300")}
+              title={running ? "Send now: stops the current step and sends the queued messages now" : "Send now"}
+              aria-label="Send queued messages now"
+              aria-expanded={running ? Boolean(confirm) : undefined}
+              disabled={sending}
+              onClick={() => onSendNow(m)}
+            >
+              <SendHorizontal className="h-3.5 w-3.5" />
+            </button>
             <button type="button" className={ICON_BUTTON} title="Edit" aria-label="Edit queued message" onClick={() => onEdit(m.id)}>
               <Pencil className="h-3.5 w-3.5" />
             </button>
@@ -146,9 +199,56 @@ const QueuedRow = memo(function QueuedRow({
         m.text && <div className="mt-0.5 line-clamp-6 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-300">{m.text}</div>
       )}
       <AttachmentList files={m.attachments.length ? m.attachments : undefined} />
+      {!delivering && !confirm && (
+        <div className="mt-1 text-[11px] text-zinc-500">{running ? "Delivered when the current turn ends." : "Delivered when the agent's next turn starts."}</div>
+      )}
+      {confirm && <SendNowConfirm {...confirm} />}
     </div>
   )
 })
+
+interface SendNowConfirmProps {
+  count: number
+  mergingPr: number | null
+  onConfirm: () => void
+  onCancel: () => void
+}
+
+/** Send now's inline "are you sure": it stops work in progress, and a merge midway gets its own warning. */
+function SendNowConfirm({ count, mergingPr, onConfirm, onCancel }: SendNowConfirmProps) {
+  const go = useRef<HTMLButtonElement>(null)
+  useEffect(() => go.current?.focus(), [])
+  const merging = mergingPr !== null
+  return (
+    <div
+      role="alertdialog"
+      aria-label="Send the queued messages now?"
+      onKeyDown={(e) => {
+        if (e.key !== "Escape") return
+        e.preventDefault()
+        onCancel()
+      }}
+      className={cx("mt-2 rounded-md border px-2.5 py-2 text-xs", merging ? "border-red-500/40 bg-red-500/5" : "border-yard-500/30 bg-yard-500/5")}
+    >
+      <p className="text-zinc-300">
+        Stops the current step and sends {count === 1 ? "the queued message" : `all ${count} queued messages`} now, in order. The agent keeps its workspace and session.
+      </p>
+      {merging && (
+        <p role="alert" className="mt-1 font-medium text-red-300">
+          The agent is merging PR #{mergingPr} in this turn. Sending now stops the merge midway.
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap items-center justify-end gap-1.5">
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
+          Keep waiting
+        </Button>
+        <Button ref={go} type="button" size="sm" variant={merging ? "danger" : "primary"} onClick={onConfirm}>
+          <SendHorizontal className="h-3.5 w-3.5" /> {merging ? "Stop the merge and send" : "Send now"}
+        </Button>
+      </div>
+    </div>
+  )
+}
 
 /**
  * Edit a queued message in place. `locked`: a turn is taking it right now, so the edit can't be saved any more.
