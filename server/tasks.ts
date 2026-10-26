@@ -1250,6 +1250,7 @@ export class TaskManager {
             reachable,
             git: git.get(r.id) ?? null,
             archived,
+            archivesAll: pod,
           })
         : { verdict: "ok" as const, detail: "no workspace to reach; it restores from its last archive" }
       return {

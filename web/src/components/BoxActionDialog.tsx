@@ -27,14 +27,14 @@ const COPY = {
     title: "Delete box",
     verb: "delete",
     steps: [
-      "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included. If one can't be archived, nothing is deleted.",
+      "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included (a merged PR with nothing unpushed needs none). If one can't be archived, nothing is deleted.",
       "Destroys the box at the provider.",
       "Its projects' next tasks go to another box or a new one, restoring from the archive.",
     ],
     confirm: "Delete box",
   },
   terminate: {
-    title: "Terminate pod",
+    title: "Terminate",
     verb: "terminate",
     steps: [
       "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included. If one can't be archived, nothing is terminated.",
@@ -191,8 +191,9 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
             ))}
           </ul>
           <p className="text-xs text-red-200/80">
-            Every workspace is still archived first, uncommitted files included, so that work lives on only in Box Yard's archive, not on GitHub. Queued tasks go to another{" "}
-            {target.kind === "pod" ? "pod" : "box"}. If a workspace can't be archived, nothing is {target.kind === "pod" ? "terminated" : "deleted"}. Agents can't do this; only you can.
+            Every workspace is still archived first, uncommitted files included, so that work lives on only in Box Yard's archive, not on GitHub.
+            {risky.some((t) => t.verdict === "queued") && ` Queued tasks go to another ${target.kind === "pod" ? "pod" : "box"}.`} If a workspace can't be archived, nothing is{" "}
+            {target.kind === "pod" ? "terminated" : "deleted"}. Agents can't do this; only you can.
           </p>
         </div>
       ) : (
@@ -305,12 +306,13 @@ function OnTheBox({ target, contents, loading, error, checks }: { target: Target
           </ul>
         </div>
       )}
-      {contents.tasks.length > 0 && (
+      {/* Delete and Terminate say per task what happens to its archive (a merged, pushed one needs none). */}
+      {!checks && contents.tasks.length > 0 && (
         <div className="flex gap-2 text-zinc-300">
           <Archive className="mt-px h-3.5 w-3.5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
             {toArchive ? `${toArchive} of ${contents.tasks.length} ${contents.tasks.length === 1 ? "workspace needs" : "workspaces need"} a fresh archive first.` : "Every workspace already has an up-to-date archive."}
-            {!checks && dirty.length > 0 && (
+            {dirty.length > 0 && (
               <ul className="mt-1 space-y-0.5 text-amber-200">
                 {dirty.map((t) => (
                   <li key={t.id} className="flex min-w-0 gap-1.5">

@@ -70,6 +70,8 @@ export interface VerdictInput {
   git: WorkspaceGit | null
   /** Its archive is newer than its last activity. */
   archived: boolean
+  /** A GPU pod: stopGpuPod archives every workspace, so a merged one isn't spared the archive. */
+  archivesAll?: boolean
 }
 
 const UNPUSHED = /^no (\d+) unpushed commits?$/
@@ -87,7 +89,7 @@ export function deleteVerdict(t: VerdictInput): { verdict: BoxDeleteVerdict; det
   if (!t.reachable) return { verdict: "unchecked", detail: "the box didn't answer, so its workspace couldn't be checked" }
   const full = t.git?.full ?? null
   if (!full) return { verdict: "unchecked", detail: "its workspace couldn't be checked" }
-  if (full === "yes") return { verdict: "ok", detail: merged ? "PR merged and nothing unpushed: needs no archive" : `nothing uncommitted or unpushed; ${archive}` }
+  if (full === "yes") return { verdict: "ok", detail: merged && !t.archivesAll ? "PR merged and nothing unpushed: needs no archive" : `nothing uncommitted or unpushed; ${archive}` }
   if (full === "no no work folder") return { verdict: "ok", detail: "no workspace on the box" }
   if (full === "no not a git repo" && !t.hasRepo) return { verdict: "ok", detail: `no repo, so its folder only lives on the box; ${archive}` }
   const commits = UNPUSHED.exec(full) ?? UNPUSHED.exec(t.git?.committed ?? "")

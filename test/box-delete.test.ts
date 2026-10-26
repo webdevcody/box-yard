@@ -112,6 +112,8 @@ describe("deleteVerdict", () => {
     expect(v({ git: { changed: 0, full: "yes", committed: "yes" } })).toBe("ok: nothing uncommitted or unpushed; archived first")
     expect(v({ git: { changed: 0, full: "yes", committed: "yes" }, archived: true })).toBe("ok: nothing uncommitted or unpushed; its archive is up to date")
     expect(v({ prState: "merged", git: { changed: 0, full: "yes", committed: "yes" } })).toBe("ok: PR merged and nothing unpushed: needs no archive")
+    // A GPU pod archives every workspace before it's terminated, merged or not.
+    expect(v({ prState: "merged", git: { changed: 0, full: "yes", committed: "yes" }, archivesAll: true })).toBe("ok: nothing uncommitted or unpushed; archived first")
     expect(v({ prState: "merged", git: { changed: 3, full: "no uncommitted changes", committed: "yes" } })).toBe(
       "ok: PR merged and its branch fully pushed; the leftover uncommitted changes are archived first",
     )
