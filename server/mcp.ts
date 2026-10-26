@@ -4,7 +4,7 @@ import type { Request, Response } from "express"
 import { z } from "zod"
 import { capReply, preview } from "./replies.js"
 import type { Store } from "./store.js"
-import type { TaskManager } from "./tasks.js"
+import type { SendNowResult, TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
 import type { Artifacts } from "./artifacts.js"
 import type { StoredUpload, Uploads } from "./uploads.js"
@@ -75,6 +75,19 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
       return fail(errorMessage(err))
     }
   }
+}
+
+const SEND_NOW_DESCRIPTION =
+  "true: deliver it now. If the agent is mid-turn, its current step is stopped (like stop_task: workspace, session and queue kept) and the next turn resumes the session with this and every other queued message, in send order. Use it only when the message changes what the agent is doing right now. No effect when it isn't mid-turn."
+const ALLOW_MERGE_INTERRUPT_DESCRIPTION =
+  "A turn that is carrying a merge request (the task shows mergeRequested with deliveredAt) is never interrupted unless you pass allow_merge_interrupt: true; without it the call fails and nothing changes."
+
+/** What sendQueuedNow did, for the MCP reply. */
+function sendNowDelivery(r: SendNowResult): string {
+  if (r.delivery === "interrupted") return `interrupting: the current step is being stopped; the next turn resumes the session with all ${r.queued} queued message${r.queued === 1 ? "" : "s"}, in order`
+  if (r.delivery === "after_compaction") return "after compaction: the agent is compacting its context; the queued messages go out right after, in the same session"
+  if (r.delivery === "already_delivered") return "already delivered: a turn has taken the queued messages (or none were queued)"
+  return "next turn: no turn had to be stopped; the queued messages go out with the agent's next turn"
 }
 
 const attachmentsSchema = z
@@ -1088,7 +1101,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description:
         "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
         "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends. If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments. " +
+        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends; pass interrupt: true to deliver it now instead (see interrupt). If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments. " +
         'To continue an existing task somewhere else (Cody: "continue it locally", "on my machine"), pass runs_on: it pins the task to that runner from its next turn on. Before its next turn (after any running turn ends) its workspace moves there when nothing would be lost: its turn-end archive and push hold all the work. If it can\'t move safely (no fresh archive, the archive is too big, or the push failed), it keeps running where its workspace is and the task\'s log says why. A runner that can\'t run fails the call with the reason, and nothing is sent.',
       inputSchema: {
         task: z.string(),
@@ -1098,11 +1111,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           .enum(RUNNERS)
           .optional()
           .describe('Pin the task to "local" (this computer) or "box" (an Upstash box) from its next turn on, over the project\'s "Runs on". Omit it to leave it where it runs.'),
+        interrupt: z.boolean().optional().describe(SEND_NOW_DESCRIPTION),
+        allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION),
         ...routeParams,
       },
     },
-    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; interrupt?: boolean; allow_merge_interrupt?: boolean; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
+      // Refused before anything is sent, so a refusal leaves no message behind.
+      const risk = a.interrupt && !a.allow_merge_interrupt ? tasks.mergeInterruptRisk(store.getTaskRow(before.id)!) : null
+      if (risk) return fail(`${risk} Nothing was sent. Send it without interrupt (it goes out when the turn ends), or pass allow_merge_interrupt: true if it can't wait.`)
       await tasks.requireRunner(a.runs_on)
       if (a.runs_on) tasks.setRunsOn(before.id, a.runs_on)
       const how = delivery(before)
@@ -1112,6 +1130,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingRule: a.routing_rule,
         routingReason: a.routing_reason,
       })
+      if (a.interrupt) {
+        const now = await tasks.sendQueuedNow(t.id, { by: scopeId ? "captain" : "coordinator", allowMergeInterrupt: a.allow_merge_interrupt })
+        return ok({ ...brief(now.task), delivery: now.delivery === "interrupted" ? sendNowDelivery(now) : how })
+      }
       // Until a turn takes it, the message can still be changed or withdrawn by this id.
       const queued = store.getQueuedInput(t.id, inputId) ? inputId : undefined
       return ok({ ...brief(t), delivery: how, queuedMessageId: queued })
@@ -1139,6 +1161,22 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const t = task(a.task)
       const list = tasks.listQueue(t.id)
       return ok({ task: t.id, title: t.title, status: t.status, messages: list.map(queuedView) })
+    }),
+  )
+
+  server.registerTool(
+    "deliver_queued_now",
+    {
+      description:
+        "Send now: deliver the messages queued for a task's next turn without waiting for its current turn to end. It stops the current step the way stop_task does (the workspace, session and queue are kept), then the next turn resumes the session with every queued message, in send order. " +
+        "Use it when a queued message changes or cancels what the agent is doing and waiting for the turn to end would waste work. If no turn is running, the messages simply go out with the next turn. " +
+        ALLOW_MERGE_INTERRUPT_DESCRIPTION,
+      inputSchema: { task: z.string(), allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION) },
+    },
+    safe(async (a: { task: string; allow_merge_interrupt?: boolean }) => {
+      const t = task(a.task)
+      const now = await tasks.sendQueuedNow(t.id, { by: scopeId ? "captain" : "coordinator", allowMergeInterrupt: a.allow_merge_interrupt })
+      return ok({ ...brief(now.task), queuedMessages: now.queued, delivery: sendNowDelivery(now) })
     }),
   )
 
