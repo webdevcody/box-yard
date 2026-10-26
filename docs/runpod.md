@@ -35,7 +35,7 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
    | Setting | Default | What it does |
    | --- | --- | --- |
    | Idle stop | 10 min | Time with no task working before a pod is stopped |
-   | Agents per pod | 3 | Agents that share one pod, unless the project sets Agents per box |
+   | Agents per pod | 3 | Agents that share one pod, unless the project sets Agents at once |
    | Max per project | $1/hr | Most one project's pods may cost together, unless the project sets its own GPU cap |
    | Max for all pods | $3/hr | Most all of this install's pods may cost together |
    | Network volume | 30 GB | Size of each project's volume (pod #1 only) |
@@ -50,7 +50,7 @@ A project can run its agents on a RunPod GPU pod instead of an Upstash box or th
     1. its own pod while that's up, since its workspace is there;
     2. a free slot on another of its project's pods;
     3. a new pod, while the project has fewer than its **Max boxes** (20 when unset) and one more fits under the caps.
-  - Slots per pod are the project's **Agents per box**, else Agents per pod. With Agents per box 1 and Max boxes 4, four queued tasks get four pods.
+  - Slots per pod are the project's **Agents at once** (agents_per_box), else Agents per pod. With Agents at once 1 and Max boxes 4, four queued tasks get four pods.
 - **Spending caps.** Before it counts on a new pod, Box Yard adds the pods' RunPod prices to the list price of the first of the project's GPU types that its cloud offers and that fits. A Community pod counts at the Community price. A pod still starting counts at that list price.
   - If that would go over the project's cap (Project › Settings › Boxes › GPU cap, `update_project gpu_max_hourly_usd`, else Max per project), the task waits. Its reason says so, e.g. `Waiting: RunPod cap $1/hr reached: game's 3 pods cost $0.81/hr and another RTX A5000 is $0.27/hr`.
   - The same happens at the total cap.

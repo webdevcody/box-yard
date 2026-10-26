@@ -57,6 +57,7 @@ const attachmentIds = z.array(z.string()).max(20).optional()
 /** A project's own box settings; null clears one (the global setting applies). */
 const projectBoxLimits = {
   agentsPerBox: z.number().int().min(PROJECT_BOX_LIMITS.agentsPerBox.min).max(PROJECT_BOX_LIMITS.agentsPerBox.max).nullable().optional(),
+  wholeMachine: z.boolean().optional(),
   tasksPerBox: z.number().int().min(PROJECT_BOX_LIMITS.tasksPerBox.min).max(PROJECT_BOX_LIMITS.tasksPerBox.max).nullable().optional(),
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
   gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
@@ -465,7 +466,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
