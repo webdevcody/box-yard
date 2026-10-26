@@ -21,6 +21,7 @@ import { resizeLine } from "../lib/boxResize"
 import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
+import { WaitReason } from "./WaitReason"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -270,8 +271,8 @@ function FilterTabs({ boxes, selected }: { boxes: BoxInfo[]; selected: BoxFilter
   )
 }
 
-/** A project's Agents per box holding a box below its slots while one of its agents runs there. */
-const projectLimitLine = (l: NonNullable<BoxInfo["projectLimit"]>) => (l.slots === 1 ? `${l.project} runs its agents alone` : `${l.project} allows ${l.slots} agents while it runs here`)
+/** A project that needs the whole machine running on the box: no other project's agents start there meanwhile. */
+const projectLimitLine = (l: NonNullable<BoxInfo["projectLimit"]>) => `${l.project} needs the whole machine (${l.slots === 1 ? "1 of its agents" : `up to ${l.slots} of its agents`} at once)`
 
 /** A thin bar; segmented when there are few enough slots to count at a glance. */
 function Meter({ used, total, className, tone, label }: { used: number; total: number; className?: string; tone?: keyof typeof TONE_BAR; label?: string }) {
@@ -846,7 +847,7 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
           <div className="mt-0.5 flex items-start gap-1 text-xs text-amber-300/90" data-testid="wait-reason">
             <LineIcon icon={waitIconOf(task)} className="h-3 w-3" />
             <span className="line-clamp-2 min-w-0 wrap-anywhere sm:truncate" title={note}>
-              {note}
+              {note === task.waitReason ? <WaitReason task={task} inLink /> : note}
             </span>
           </div>
         )}

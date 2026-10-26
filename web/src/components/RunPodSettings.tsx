@@ -34,7 +34,7 @@ const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit:
   },
   { key: "minVcpus", label: "Min vCPUs", unit: "vCPUs", help: "…and at least this many vCPUs. Fewer hosts qualify the higher these are, so a pod may wait longer for one." },
   { key: "idleMinutes", label: "Stop when idle", unit: "min", help: "A pod with no agent running or waiting is stopped after this long. Its network volume stays; the next task starts a new pod." },
-  { key: "agentsPerPod", label: "Agents per pod", unit: "agents", help: "Agents of one project that may run on its pod at once, unless the project sets its own Agents per box." },
+  { key: "agentsPerPod", label: "Agents per pod", unit: "agents", help: "Agents of one project that may run on its pod at once, unless the project sets its own Agents at once." },
   {
     key: "maxHourlyUsd",
     label: "Max per project",

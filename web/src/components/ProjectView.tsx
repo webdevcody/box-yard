@@ -386,12 +386,16 @@ const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) 
  */
 function ProjectBoxSettings(p: {
   info: SettingsInfo | undefined
+  /** The project's name, for the line that says what Agents at once does. */
+  name: string
   local: boolean
   gpu: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
   agentsPerBox: string
   setAgentsPerBox: (v: string) => void
+  wholeMachine: boolean
+  setWholeMachine: (v: boolean) => void
   tasksPerBox: string
   setTasksPerBox: (v: string) => void
   maxBoxes: string
@@ -425,10 +429,10 @@ function ProjectBoxSettings(p: {
         </button>
       </div>
       <p className="text-xs text-zinc-500">
-        Leave one blank to use the global setting. Where projects share a box, the strictest limit wins.
-        {p.local && " This project runs on this computer: Agents per box also limits its agents here, and the rest apply when it runs on boxes."}
+        Leave one blank to use the global setting. Where projects share a box, the strictest Tasks per box wins.
+        {p.local && " This project runs on this computer: Agents at once also limits its agents here, within Settings › Local agents, and the rest apply when it runs on boxes."}
         {p.gpu &&
-          " This project runs on RunPod GPU pods: Agents per box sets its agents per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Tasks per box and Box size apply when it runs on boxes."}
+          " This project runs on RunPod GPU pods: Agents at once sets its agents per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Tasks per box and Box size apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -450,11 +454,12 @@ function ProjectBoxSettings(p: {
       <div className="grid gap-3 @4xl:grid-cols-3">
         <OverrideField
           id="project-agents-per-box"
-          label="Agents per box"
-          global={agents.long}
+          label="Agents at once (this project)"
+          global={`the box's own limit, ${agents.long}`}
           set={p.agentsPerBox.trim() !== ""}
           onClear={() => p.setAgentsPerBox("")}
-          hint="Most agents running at once on a box while one of this project's runs there, other projects' included. 1: each agent has a box to itself (game engines, big builds, headless browsers)."
+          hint="How many of this project's agents can run at the same time on one box or this computer. Other projects' agents never wait for it. 1: one at a time (game engines, big builds, headless browsers)."
+          effect={agentsAtOnceLine(p.name, p.agentsPerBox, p.wholeMachine)}
         >
           <LimitInput id="project-agents-per-box" range={PROJECT_BOX_LIMITS.agentsPerBox} value={p.agentsPerBox} onChange={p.setAgentsPerBox} placeholder={`Global: ${agents.short}`} />
         </OverrideField>
@@ -479,6 +484,15 @@ function ProjectBoxSettings(p: {
           <LimitInput id="project-max-boxes" range={PROJECT_BOX_LIMITS.maxBoxes} value={p.maxBoxes} onChange={p.setMaxBoxes} placeholder={`Global: ${pool}`} />
         </OverrideField>
       </div>
+      <label className="flex min-h-11 items-start gap-2 text-sm text-zinc-200 sm:min-h-0" htmlFor="project-whole-machine">
+        <input id="project-whole-machine" type="checkbox" className="mt-0.5 shrink-0" checked={p.wholeMachine} onChange={(e) => p.setWholeMachine(e.target.checked)} data-testid="project-whole-machine" />
+        <span className="min-w-0">
+          Needs the whole machine
+          <span className="block text-xs text-zinc-500">
+            No other project's agents run on the same box or this computer while one of its agents runs, and its agents wait for theirs to finish. For heavy benchmarks that need the machine to themselves. Off by default.
+          </span>
+        </span>
+      </label>
       {p.gpu && (
         <OverrideField
           id="project-gpu-cap"
@@ -555,7 +569,26 @@ function ProjectBoxSettings(p: {
 }
 
 /** A project setting with a global fallback: its label, the control, "Using global: …" (or the global it overrides) and Use global. */
-function OverrideField({ id, label, global, set, onClear, hint, children }: { id: string; label: string; global: string; set: boolean; onClear: () => void; hint: string; children: ReactNode }) {
+function OverrideField({
+  id,
+  label,
+  global,
+  set,
+  onClear,
+  hint,
+  effect,
+  children,
+}: {
+  id: string
+  label: string
+  global: string
+  set: boolean
+  onClear: () => void
+  hint: string
+  /** What the value does, as it stands (e.g. "survive-the-night: 1 at a time; other projects unaffected."). */
+  effect?: string
+  children: ReactNode
+}) {
   return (
     <div className="min-w-0 space-y-1.5">
       <label htmlFor={id} className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">
@@ -575,8 +608,20 @@ function OverrideField({ id, label, global, set, onClear, hint, children }: { id
         </span>{" "}
         {hint}
       </p>
+      {effect && (
+        <p className="text-xs text-zinc-300" data-testid={`${id}-effect`}>
+          {effect}
+        </p>
+      )}
     </div>
   )
+}
+
+/** What Agents at once and Needs the whole machine do together, for the project's name: "survive-the-night: 1 at a time; other projects unaffected." */
+export function agentsAtOnceLine(name: string, agentsAtOnce: string, wholeMachine: boolean): string {
+  const n = Number.parseInt(agentsAtOnce, 10)
+  const own = Number.isFinite(n) && n > 0 ? `${n} at a time` : "up to the box's limit"
+  return `${name || "This project"}: ${own}; ${wholeMachine ? "no other project's agents run beside it." : "other projects unaffected."}`
 }
 
 function LimitInput({
@@ -628,6 +673,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
   const [depCache, setDepCache] = useState<"" | "on" | "off">(project.depCache === null || project.depCache === undefined ? "" : project.depCache ? "on" : "off")
   const [agentsPerBox, setAgentsPerBox] = useState(project.agentsPerBox?.toString() ?? "")
+  const [wholeMachine, setWholeMachine] = useState(project.wholeMachine ?? false)
   const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
   const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
   const [gpuMaxHourlyUsd, setGpuMaxHourlyUsd] = useState(project.gpuMaxHourlyUsd?.toString() ?? "")
@@ -672,6 +718,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
           depCache: depCache ? depCache === "on" : null,
           agentsPerBox: optionalInt(agentsPerBox),
+          wholeMachine,
           tasksPerBox: optionalInt(tasksPerBox),
           maxBoxes: optionalInt(maxBoxes),
           ...(runner === "gpu" || project.gpuMaxHourlyUsd !== null ? { gpuMaxHourlyUsd: optionalNumber(gpuMaxHourlyUsd) } : {}),
@@ -744,12 +791,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       </div>
       <ProjectBoxSettings
         info={settings.data}
+        name={name}
         local={runner === "local"}
         gpu={runner === "gpu"}
         boxSize={boxSize}
         setBoxSize={setBoxSize}
         agentsPerBox={agentsPerBox}
         setAgentsPerBox={setAgentsPerBox}
+        wholeMachine={wholeMachine}
+        setWholeMachine={setWholeMachine}
         tasksPerBox={tasksPerBox}
         setTasksPerBox={setTasksPerBox}
         maxBoxes={maxBoxes}
