@@ -28,7 +28,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type Task, type TaskStatus, type WaitFor } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFor } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
@@ -243,6 +243,16 @@ export interface TaskEvent {
   agentWake?: boolean
 }
 export type TaskEventListener = (event: TaskEvent) => void
+
+/** Who pressed "Send now" (sendQueuedNow): Cody on the task page, or the Coordinator or a Captain over MCP. */
+export type SendNowBy = "cody" | "coordinator" | "captain"
+
+export interface SendNowResult {
+  task: Task
+  delivery: SendNowDelivery
+  /** How many messages were queued (not yet claimed by a turn) when it was asked. */
+  queued: number
+}
 
 /** Who asks for a merge other than Cody's Merge button (requestMerge): a hook, with its labels. */
 export interface MergeRequester {
@@ -925,6 +935,50 @@ export class TaskManager {
     this.addEvent(row.id, withOwner("Stopped by Cody.", this.owner()))
     this.emitTask(row.id)
     return this.store.getTask(row.id)!
+  }
+
+  /**
+   * "Send now": deliver the task's queued messages without waiting for the current turn to end. The turn is
+   * stopped like Stop does (workspace and session kept, the queue kept), and the next turn resumes the session
+   * with every queued message, in order. A task with no running turn just gets them with its next turn, as
+   * with any send. A turn that ends on its own meanwhile keeps its own outcome (the kill only hits that turn),
+   * and one new turn delivers the queue either way.
+   *
+   * A turn that is carrying a merge request is only interrupted with `allowMergeInterrupt` (see mergeInterruptRisk).
+   */
+  async sendQueuedNow(taskId: string, opts: { by: SendNowBy; allowMergeInterrupt?: boolean }): Promise<SendNowResult> {
+    const row = this.requireRow(taskId)
+    const inputs = this.store.listQueuedInputs(taskId)
+    const queued = inputs.filter((i) => i.status === "queued").length
+    const result = (delivery: SendNowResult["delivery"]): SendNowResult => ({ task: this.store.getTask(taskId)!, delivery, queued })
+    // A turn already took them (it ended on its own as this was asked), or none is running: the next turn has them.
+    if (!queued) return result("already_delivered")
+    const running = Boolean(row.current_turn_id && row.box_id) && (row.status === "working" || row.status === "starting")
+    if (!running) {
+      this.schedule()
+      return result("next_turn")
+    }
+    // A /compact turn is short and queued messages always wait for it: they go out right after.
+    if (row.compacting || row.compact_pending) return result("after_compaction")
+    // A turn still setting up that hasn't claimed the queue yet takes all of it when it starts.
+    if (row.status === "starting" && !inputs.some((i) => i.status === "delivering")) return result("next_turn")
+    const risk = this.mergeInterruptRisk(row)
+    if (risk && !opts.allowMergeInterrupt) throw new ConflictError(`${risk} Wait for that turn to end, or confirm that you want to interrupt the merge.`)
+    const who = opts.by === "coordinator" ? "The Coordinator" : opts.by === "captain" ? "The project's Captain" : withOwner("Cody", this.owner())
+    const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
+    this.addEvent(row.id, `${who} sent ${them} now: stopping the current step so the next turn delivers ${queued === 1 ? "it" : "them"}.`, { kind: "send_now", queued })
+    if (row.status === "starting") this.stopRequested.add(row.id)
+    else await this.killTurn(row, row.current_turn_id).catch(() => {})
+    // The runner writes turn_end once it stops; that turn ends "stopped" and the scheduler starts the next one.
+    this.emitTask(row.id)
+    return result("interrupted")
+  }
+
+  /** Why stopping the task's current turn now would cut a merge short (it carries a merge request), or null. */
+  mergeInterruptRisk(row: TaskRow): string | null {
+    const req = this.store.mergeRequestOf(row)
+    if (!req?.deliveredAt || !row.current_turn_id || row.status !== "working") return null
+    return `The agent is merging PR #${req.prNumber} in its current turn${req.requestedBy ? ` (the ${req.requestedBy} asked)` : ""}, so sending now would stop the merge midway.`
   }
 
   /** The queue is dropped (stop, close): what people sent lands in the transcript marked undelivered. */
@@ -4190,10 +4244,13 @@ export class TaskManager {
     void loop()
   }
 
-  private async killTurn(row: TaskRow) {
+  /** Stop the task's running turn. `turnId`: only if that turn is still the one on the box (not a newer one). */
+  private async killTurn(row: TaskRow, turnId?: string | null) {
     if (!row.box_id) return
-    const pidFile = `${this.taskDir(row.box_id, row.id)}/turn.pid`
-    await this.provider.exec(row.box_id, `[ -f ${q(pidFile)} ] && (kill -TERM -- -$(cat ${q(pidFile)}) 2>/dev/null || kill -TERM $(cat ${q(pidFile)}) 2>/dev/null); true`)
+    const dir = this.taskDir(row.box_id, row.id)
+    const pidFile = `${dir}/turn.pid`
+    const only = turnId ? `grep -qF ${q(`"turnId":${JSON.stringify(turnId)}`)} ${q(`${dir}/turn.json`)} && ` : ""
+    await this.provider.exec(row.box_id, `${only}[ -f ${q(pidFile)} ] && (kill -TERM -- -$(cat ${q(pidFile)}) 2>/dev/null || kill -TERM $(cat ${q(pidFile)}) 2>/dev/null); true`)
   }
 
   // ------------------------------------------------------------------ events
