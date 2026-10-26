@@ -1238,7 +1238,9 @@ export class TaskManager {
           : `Box ${boxId} is ${box!.status}`
     const tasks = rows.map((r) => {
       const archived = this.hasFreshArchive(r)
-      const v = up
+      // A box that isn't up has no workspace to check, but its running and queued tasks still say so.
+      const v =
+        up || r.current_turn_id || this.wantsTurn(r)
         ? deleteVerdict({
             status: r.status,
             running: Boolean(r.current_turn_id),
@@ -1346,12 +1348,23 @@ export class TaskManager {
     }
     const overridden = risky.length ? withOwner(` Cody chose ${pod ? "Terminate" : "Delete"} anyway past: ${risky.map(refusalLine).join("; ")}.`, this.owner()) : ""
     const result: BoxDeleteResult = { boxId, kind: pod ? "pod" : "box", label: check.label, archived: [], fromGitHub: [] }
+    // The check ran before the box was claimed: an agent's delete also refuses a turn that started or got queued since.
+    const lateCheck = () => {
+      if (owner) return
+      const late = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id || this.wantsTurn(r))
+      if (late.length) {
+        const why = late.map((r) => refusalLine({ id: r.id, title: r.title, detail: r.current_turn_id ? "an agent started on it during the check" : "it was queued during the check" }))
+        throw new ConflictError(`${check.label} was not ${pod ? "terminated" : "deleted"}:\n- ${why.join("\n- ")}`)
+      }
+    }
     if (pod) {
       this.claimBox(boxId, "delete", stopAgents)
       try {
+        lateCheck()
         if (stopAgents) await this.stopAgentsOn(boxId)
         const reason = opts.reason?.trim() || (owner ? "Terminated from Settings › RunPod GPU." : "No reason given.")
         await this.stopGpuPod(boxId, { actor, reason: `${reason}${overridden}` })
+        // stopGpuPod archived every started workspace (a pod's tasks keep its id and restore on its next start).
         result.archived = this.store.listTaskRows({ boxId }).filter((r) => r.session_started).map((r) => r.id)
         return result
       } finally {
@@ -1363,6 +1376,7 @@ export class TaskManager {
     if (reachable) {
       this.claimBox(boxId, "delete", stopAgents)
       try {
+        lateCheck()
         if (stopAgents) await this.stopAgentsOn(boxId)
         // A cleanup may be parking workspaces right now; let it finish first.
         while (this.janitor.isRunning(boxId)) await new Promise((r) => setTimeout(r, 200))
