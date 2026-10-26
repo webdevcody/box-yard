@@ -4,6 +4,7 @@ import path from "node:path"
 import { randomBytes, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
+import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError, NotFoundError } from "./store.js"
@@ -300,8 +301,10 @@ export function createBoxYard(
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
-  const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
-  const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
+  // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
+  const mcpUrl = `${selfUrl(c.host, c.port)}/mcp`
+  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
+  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   tasks.onNotice = (content, meta, opts) => {
     const wake = opts.wake !== false
