@@ -129,15 +129,34 @@ export function refusalsOf(busy: string | null, tasks: Pick<CheckedTask, "id" | 
 /** Tasks Cody can delete past with "Delete anyway" (running agents are stopped instead, never overridden). */
 export const atRisk = (c: Pick<BoxContents, "tasks">) => c.tasks.filter((t) => t.verdict !== "ok" && t.verdict !== "running")
 
+/** "box_x · tiny-town" or "GPU pod #1 · vision · runpod-prj_x · vision": what a box is and whose work is on it. */
+export function boxHead(c: Pick<BoxContents, "boxId" | "label" | "tasks">, projectName: (id: string) => string): string {
+  const projects = [...new Set(c.tasks.map((t) => t.projectId))].map(projectName)
+  return [c.label, ...(c.label !== c.boxId ? [c.boxId] : []), ...(projects.length ? [projects.join(", ")] : [])].join(" · ")
+}
+
 /**
  * One line for a box in delete_idle_boxes: label, projects, and its tasks grouped by what happens to them.
  * "box_x · tiny-town · 3 tasks: 2 PR merged and nothing unpushed: needs no archive; 1 archived first".
  */
 export function boxSummary(c: BoxContents, projectName: (id: string) => string): string {
-  const projects = [...new Set(c.tasks.map((t) => t.projectId))].map(projectName)
-  const head = [c.label, ...(c.label !== c.boxId ? [c.boxId] : []), ...(projects.length ? [projects.join(", ")] : [])].join(" · ")
+  const head = boxHead(c, projectName)
   if (!c.tasks.length) return `${head} · no tasks`
   const groups = new Map<string, number>()
   for (const t of c.tasks) groups.set(t.detail, (groups.get(t.detail) ?? 0) + 1)
   return `${head} · ${c.tasks.length} ${c.tasks.length === 1 ? "task" : "tasks"}: ${[...groups].map(([d, n]) => `${n} ${d}`).join("; ")}`
+}
+
+/** Run `fn` over `items`, at most `limit` at a time, in order. */
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++
+      out[i] = await fn(items[i]!)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return out
 }

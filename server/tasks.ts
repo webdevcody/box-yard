@@ -1463,6 +1463,19 @@ export class TaskManager {
     return [...new Set([...this.store.listTaskRows({ boxId }).map((r) => r.project_id), ...(owner ? [owner] : [])])]
   }
 
+  /** The box (or GPU pod) holds `projectId`'s work and no other project's: what a Captain may delete. */
+  onlyProjectOn(boxId: string, projectId: string): boolean {
+    const on = [...new Set([...(isGpuBox(boxId) ? [gpuBoxProject(boxId)] : []), ...this.projectsOnBox(boxId)])]
+    return on.length > 0 && on.every((p) => p === projectId)
+  }
+
+  /** Running boxes and GPU pods delete_idle_boxes looks at: with a project, only those holding nothing but its work. */
+  async deleteCandidates(projectId?: string): Promise<string[]> {
+    const pods = this.gpu?.enabled() ? ((await this.gpuPods()) ?? []).filter((p) => p.pod.status === "RUNNING").map((p) => p.boxId) : []
+    const ids = [...this.store.listBoxes().filter((b) => b.status === "ready").map((b) => b.id), ...pods]
+    return projectId ? ids.filter((id) => this.onlyProjectOn(id, projectId)) : ids
+  }
+
   /** What resizing a box to `to` would do, and why it can't right now (for the Resize modal). */
   async resizePlan(boxId: string, to: BoxSize): Promise<ResizePlan> {
     const box = this.store.getBox(boxId)

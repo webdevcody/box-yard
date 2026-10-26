@@ -18,7 +18,9 @@ import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
-import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS } from "../shared/runpod.js"
+import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS, isGpuBox } from "../shared/runpod.js"
+import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
+import type { BoxActor } from "../shared/boxHistory.js"
 import { errorMessage } from "./util/retry.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
@@ -2130,6 +2132,117 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         size: job.size,
         ...(named.snapshot ? { replaces: named.snapshot.id } : {}),
         next: `You'll get a notice when it's saved (list_projects shows progress). Fan out after that: boxes made before then start without it. New ${named.name} boxes of ${job.size} or bigger will start from it.`,
+      })
+    }),
+  )
+
+  // ---------------------------------------------------------------- deleting boxes
+  // The same safety check as Box Yard's own cleanups (server/boxDelete.ts), strict for MCP callers: no stopping
+  // agents and no override (Cody has those on the Boxes page). A Captain only reaches boxes holding nothing but its
+  // own project's work.
+  const deleter: BoxActor = scopeId ? { kind: "captain", projectId: scopeId } : { kind: "coordinator" }
+  const projectName = (id: string) => store.getProject(id)?.name ?? id
+  /** A box id or GPU pod id this caller may delete. */
+  const deletableBox = (ref: string): string => {
+    const id = ref.trim()
+    if (!isGpuBox(id) && !store.getBox(id)) throw new Error(`No box "${ref}". Use pool_status.`)
+    if (scopeId && !tasks.onlyProjectOn(id, scopeId)) {
+      const on = tasks.projectsOnBox(id).map(projectName)
+      throw outOfScope(`box ${id} ${on.length ? `holds work of ${on.join(", ")}` : "holds no work of your project"}, and a Captain can only delete a box that holds nothing but its own project's`)
+    }
+    return id
+  }
+  const SAFETY =
+    "Safety check first, the same as Box Yard's own cleanups: refused while an agent runs or a task is queued on it, and while any workspace has uncommitted or unpushed work, unless that task's PR is merged and its branch fully pushed. " +
+    "Every workspace is archived first (a merged, fully pushed one needs no archive). RunPod network volumes and project snapshots are never touched. " +
+    owner("You can't stop agents or override the check: tell Cody what holds the box, and Cody can delete it anyway from the Boxes page. ")
+
+  server.registerTool(
+    "delete_box",
+    {
+      description:
+        "Delete one worker box at its provider, or terminate a RunPod GPU pod (runpod-<project>[-n]; terminated, never just stopped, and its network volume stays). " +
+        SAFETY +
+        "The tasks on it keep working: each restores from its archive on its next turn, on another box or a new pod. The box history records it as deleted by you, with your reason. " +
+        "To clear out many boxes, use delete_idle_boxes (dry run first)." +
+        (scopeId ? " As a Captain you can only delete a box that holds nothing but your project's work." : ""),
+      inputSchema: {
+        box: z.string().describe("Box id from pool_status, or a GPU pod's runpod-… id"),
+        reason: z.string().trim().min(3).max(500).describe("Why, in one sentence for the box history (e.g. \"Idle since tiny-town's last PR merged\")."),
+      },
+    },
+    safe(async (a: { box: string; reason: string }) => {
+      const id = deletableBox(a.box)
+      const r = await tasks.destroyBox(id, { actor: deleter, reason: a.reason })
+      if (r.alreadyGone) return ok(`${id} was already gone at the provider; Box Yard dropped its records.`)
+      return ok({
+        [r.kind === "pod" ? "terminated" : "deleted"]: r.label === id ? id : `${r.label} (${id})`,
+        ...(r.kind === "pod" ? { volume: "kept" } : {}),
+        archived: r.archived.length ? r.archived : undefined,
+        no_archive_needed: r.fromGitHub.length ? r.fromGitHub.map((t) => `${t} (PR merged, nothing unpushed)`) : undefined,
+        next: "Its tasks restore from their archive on their next turn. box_history has the row.",
+      })
+    }),
+  )
+
+  server.registerTool(
+    "delete_idle_boxes",
+    {
+      description:
+        "Find idle boxes (and RunPod GPU pods) and delete them, after the same safety check as delete_box on each. " +
+        "dry_run (the default) changes nothing: it lists each box it would delete with what happens to its tasks, and each box it skips with why. Show Cody that list before deleting when Cody hasn't asked for it outright. " +
+        "With dry_run: false and a reason it deletes those boxes (each is checked again first) and says what it deleted, what failed and what it skipped. " +
+        SAFETY +
+        (scopeId ? "As a Captain you only see boxes that hold nothing but your project's work." : "With project, only boxes holding nothing but that project's work; without it, every running box."),
+      inputSchema: {
+        project: z.string().optional().describe(scopeId ? "Your project (the default)" : "Project id or name: only boxes holding nothing but its work"),
+        dry_run: z.boolean().optional().describe("Default true: only report what it would delete and why each other box is skipped"),
+        reason: z.string().trim().min(3).max(500).optional().describe("Required when dry_run is false: why, in one sentence for each box's history"),
+      },
+    },
+    safe(async (a: { project?: string; dry_run?: boolean; reason?: string }) => {
+      const projectId = projectFilter(a.project)
+      const dry = a.dry_run !== false
+      if (!dry && !a.reason) return fail("Give a reason when dry_run is false; it goes in each box's history.")
+      const ids = await tasks.deleteCandidates(projectId)
+      const scope = projectId ? `${projectName(projectId)}-only` : "running"
+      if (!ids.length) return ok(`No ${scope} boxes to look at.`)
+      const checked = await mapLimit(ids, 4, async (id) => {
+        try {
+          return { id, contents: await tasks.boxContents(id), error: null }
+        } catch (err) {
+          return { id, contents: null, error: errorMessage(err) }
+        }
+      })
+      const go = checked.filter((x) => x.contents && !x.contents.refusals.length)
+      const skipped = checked
+        .filter((x) => !x.contents || x.contents.refusals.length)
+        .map((x) => (x.contents ? `${boxHead(x.contents, projectName)}: ${x.contents.refusals.join("; ")}` : `${x.id}: couldn't check it (${x.error})`))
+      if (dry) {
+        return ok({
+          dry_run: true,
+          summary: `Would delete ${go.length} of ${ids.length} ${scope} ${ids.length === 1 ? "box" : "boxes"}; ${skipped.length} skipped.`,
+          would_delete: go.map((x) => boxSummary(x.contents!, projectName)),
+          skipped,
+          next: go.length ? "To delete them, call delete_idle_boxes again with dry_run: false and a reason. Each box is checked again first." : undefined,
+        })
+      }
+      const done = await mapLimit(go, 3, async (x) => {
+        try {
+          const r = await tasks.destroyBox(x.id, { actor: deleter, reason: a.reason })
+          return { ok: r.alreadyGone ? `${x.id} (already gone at the provider)` : boxSummary(x.contents!, projectName) }
+        } catch (err) {
+          return { failed: `${boxHead(x.contents!, projectName)}: ${errorMessage(err).replace(/\n- /g, "; ").replace(/:\s*;/, ":")}` }
+        }
+      })
+      const deleted = done.flatMap((d) => (d.ok ? [d.ok] : []))
+      const failed = done.flatMap((d) => (d.failed ? [d.failed] : []))
+      return ok({
+        summary: `Deleted ${deleted.length} of ${ids.length} ${scope} ${ids.length === 1 ? "box" : "boxes"}${failed.length ? `; ${failed.length} failed` : ""}; ${skipped.length} skipped.`,
+        deleted,
+        failed: failed.length ? failed : undefined,
+        skipped: skipped.length ? skipped : undefined,
+        next: "Their tasks restore from their archive on their next turn. box_history (type deleted) lists each with your reason.",
       })
     }),
   )
