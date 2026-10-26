@@ -56,17 +56,25 @@ export function CaptainTab({ project }: { project: Project }) {
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
-  const submit = useCallback(
+  // A suggested next step sends without touching the composer (no keyboard pops up on a phone).
+  const followUp = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
       const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
       thread.current?.scrollToEnd()
-      box.current?.focus()
       return sending
     },
     [send.mutateAsync],
+  )
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const sending = followUp(text, attachments)
+      box.current?.focus()
+      return sending
+    },
+    [followUp],
   )
   const toggleGroup = useCallback(
     (id: string) =>
@@ -124,7 +132,7 @@ export function CaptainTab({ project }: { project: Project }) {
         >
           {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
           {tail.visible.map((row) => (
-            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={submit} />
+            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
           ))}
           {busy && (
             <div className="flex items-center gap-2 px-1 py-1 text-xs text-sky-400" aria-live="polite">

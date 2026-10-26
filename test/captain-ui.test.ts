@@ -7,6 +7,7 @@ import { ChatLine } from "../web/src/components/ChatLine.js"
 import { CaptainTab } from "../web/src/components/CaptainTab.js"
 import { keys } from "../web/src/lib/queries.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project } from "../shared/types.js"
+import { NEXT_STEPS_META_KEY } from "../shared/nextSteps.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -124,5 +125,25 @@ describe("Captain tab: an agent's message_captain", () => {
     expect(rows[0]!.querySelector("a")?.getAttribute("href")).toBe("/tasks/task_abc123def")
     expect(rows[1]!.textContent).not.toContain("waits")
     expect(rows[2]!.textContent).toContain("held by loop guard")
+  })
+})
+
+describe("Captain tab: suggested next steps", () => {
+  it("clicking one sends it without focusing the composer", async () => {
+    vi.stubGlobal("requestAnimationFrame", () => 0)
+    qc.setQueryData<CaptainMessage[]>(keys.captainMessages(project.id), [
+      { id: "cap_reply00001", projectId: project.id, role: "assistant", content: "Done.", meta: { [NEXT_STEPS_META_KEY]: ["Open the PR"] }, createdAt: 1 },
+    ])
+    qc.setQueryData<CaptainState>(keys.captain(project.id), {
+      projectId: project.id, busy: false, usage: { tokens: null, window: null, updatedAt: null }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null,
+    })
+    qc.setQueryData(keys.captainCompactions(project.id), [])
+    render(createElement(CaptainTab, { project }))
+
+    const chip = [...host.querySelectorAll("button")].find((b) => b.textContent === "Open the PR")!
+    chip.focus()
+    await act(async () => void chip.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })))
+    expect(document.activeElement).not.toBe(host.querySelector("textarea"))
+    expect(qc.getQueryData<CaptainMessage[]>(keys.captainMessages(project.id))!.map((m) => m.content)).toContain("Open the PR")
   })
 })

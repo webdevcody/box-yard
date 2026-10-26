@@ -63,7 +63,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
   const addGithub = useCallback(() => openSettings("credentials"), [openSettings])
 
-  const submit = useCallback(
+  // A suggested next step sends without touching the composer (no keyboard pops up on a phone).
+  const followUp = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
@@ -71,10 +72,17 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
       list.current?.scrollToEnd()
       markTryFirstDone()
-      box.current?.focus()
       return sending
     },
     [send.mutateAsync],
+  )
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const sending = followUp(text, attachments)
+      box.current?.focus()
+      return sending
+    },
+    [followUp],
   )
 
   const messages = chat.data ?? NO_MESSAGES
@@ -207,9 +215,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 </div>
               </div>
             )}
-            <ChatLines messages={settled} onFollowUp={submit} />
+            <ChatLines messages={settled} onFollowUp={followUp} />
             <StreamingReply busy={Boolean(busy.data)} />
-            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={submit} />}
+            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
           </StickyScroll>
         </SelectionToTask>
 
