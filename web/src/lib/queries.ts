@@ -15,6 +15,7 @@ import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
+import { playSendSound } from "./sendSound"
 import type {
   BoxCleanup,
   BoxContents,
@@ -221,13 +222,17 @@ export function useSendQueuedNow(taskId: string) {
     mutationFn: (o: { allowMergeInterrupt?: boolean }) =>
       api<{ task: Task; delivery: SendNowDelivery; queued: number }>(`/api/tasks/${taskId}/queue/send-now`, { method: "POST", body: o }),
     onSuccess: ({ delivery, queued }) => {
+      playSendSound()
       const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
       if (delivery === "interrupted") toast.info("Sending now", `Stopping the current step. The next turn gets ${them}, in order.`)
       else if (delivery === "after_compaction") toast.info("Sending after compaction", `The agent is compacting its context; ${them} go out right after.`)
       else if (delivery === "already_delivered") toast.info("Already on their way", "A turn has taken the queued messages.")
       else toast.info("Sending", `No step to stop: ${them} go out as the agent's next turn starts.`)
     },
-    onError: fail("Couldn't send now"),
+    onError: (err) => {
+      playSendSound("failed")
+      fail("Couldn't send now")(err)
+    },
     onSettled: () => void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) }),
   })
 }
@@ -756,9 +761,13 @@ export function useCreateTask() {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't start the task")(err)
     },
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (task) => {
+      playSendSound()
+      qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+    },
   })
 }
 
@@ -783,9 +792,11 @@ export function useSendTaskMessage(taskId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't send the message")(err)
     },
     onSuccess: (task) => {
+      playSendSound()
       qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
       void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) })
     },
@@ -1075,9 +1086,13 @@ export function useSendChat() {
     onError: (err, _v, ctx) => {
       ctx?.undo()
       qc.setQueryData(keys.chatBusy, false)
+      playSendSound("failed")
       fail("Couldn't send to the Coordinator")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<ChatMessage[]>(keys.chat, (list) => settleOptimistic(list, msg)),
+    onSuccess: (msg) => {
+      playSendSound()
+      qc.setQueryData<ChatMessage[]>(keys.chat, (list) => settleOptimistic(list, msg))
+    },
   })
 }
 
@@ -1104,9 +1119,13 @@ export function useSendCaptainMessage(projectId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't message the Captain")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => settleOptimistic(list, msg)),
+    onSuccess: (msg) => {
+      playSendSound()
+      qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => settleOptimistic(list, msg))
+    },
   })
 }
 
