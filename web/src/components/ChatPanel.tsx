@@ -1,11 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
-import { Bot, Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
+import { Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
-import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { AgentIcon, Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
@@ -120,13 +120,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             : "border-b border-zinc-900 px-4 py-3",
         )}
       >
-        <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+        <AgentIcon busy={Boolean(busy.data)} />
         <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
           {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
           {zen && <span className="max-sm:hidden">Box Yard </span>}
           Coordinator
         </div>
-        {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
           <VoiceControl />
