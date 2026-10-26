@@ -17,6 +17,7 @@ export interface SelectionTaskContext {
 export type SelectionTaskSource =
   | { kind: "task"; project: SelectionProjectContext; task: SelectionTaskContext }
   | { kind: "orchestrator"; project?: SelectionProjectContext | null }
+  | { kind: "captain"; project: SelectionProjectContext }
 
 export function projectContext(project: Project | null | undefined): SelectionProjectContext | null {
   return project ? { id: project.id, name: project.name } : null
@@ -42,6 +43,20 @@ export function buildSelectionTaskPrompt(input: { source: SelectionTaskSource; s
   return lines.join("\n")
 }
 
+/**
+ * The same selection as a prompt for an agent, not a chat to route it: the instructions first, then where the text
+ * came from and the full quote. The New task dialog ("More options") starts the task with it directly.
+ */
+export function buildSelectionTaskBrief(input: { source: SelectionTaskSource; selectedText: string; instructions: string }): string {
+  const instructions = input.instructions.trim() || "Follow up on this Box Yard output."
+  return [instructions, "", "## Context", ...contextLines(input.source), "", "## Selected output", quote(truncate(input.selectedText.trim(), MAX_SELECTED_CHARS))].join("\n")
+}
+
+/** Where the selection's prompt goes, for the toast after sending it. */
+export function selectionTarget(source: SelectionTaskSource): string {
+  return source.kind === "captain" ? `${source.project.name}'s Captain` : "the Coordinator"
+}
+
 function contextLines(source: SelectionTaskSource): string[] {
   const lines: string[] = []
   if (source.project) lines.push(`- Project: ${source.project.name} (${source.project.id})`)
@@ -50,6 +65,8 @@ function contextLines(source: SelectionTaskSource): string[] {
     lines.push(`- Source task: ${source.task.title} (${source.task.id})`)
     if (source.task.branch) lines.push(`- Source branch: ${source.task.branch}`)
     if (source.task.prUrl) lines.push(`- Source pull request: ${source.task.prUrl}`)
+  } else if (source.kind === "captain") {
+    lines.push("- Source: the project Captain's chat output")
   } else {
     lines.push("- Source: orchestrator chat output")
   }
