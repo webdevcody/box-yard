@@ -86,7 +86,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "notifications",
     label: "Notifications",
-    description: "How this browser tells you a task finished or needs you. Saved in this browser only.",
+    description: "How this browser tells you a task finished or needs you, and the sound a send makes. Saved in this browser only.",
     fields: [],
   },
   {

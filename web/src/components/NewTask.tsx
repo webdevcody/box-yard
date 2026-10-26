@@ -7,6 +7,7 @@ import { useLocation } from "wouter"
 import { AlertTriangle, FileText, Laptop, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, X } from "lucide-react"
 import { newClientId, useAgentSettings, useCreateTask, useProjects, useSettings } from "../lib/queries"
 import { draftScope, loadDraft, saveDraft } from "../lib/newTask"
+import { primeSendSound } from "../lib/sendSound"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
@@ -209,6 +210,7 @@ export function NewTaskPopover({
 
   const submit = () => {
     const prompt = text.trim()
+    primeSendSound()
     if (onStart) {
       saveDraft(scope, "")
       onClose(false)
@@ -464,6 +466,7 @@ export function NewTaskDialog({
       onSubmit={(e) => {
         e.preventDefault()
         if (!canStart) return
+        primeSendSound()
         const id = newClientId("task")
         create.mutate({
           id,
