@@ -78,6 +78,7 @@ const hookFilters = z.object({
   excludeLabels: labelList,
   includeDrafts: z.boolean().optional(),
   includeQuiet: z.boolean().optional(),
+  includeAgentWakes: z.boolean().optional(),
 })
 
 const schemas = {

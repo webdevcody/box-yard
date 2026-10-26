@@ -19,6 +19,7 @@ import {
   MERGE_BUTTON_SOURCE,
   firstTurnPrompt,
   followupPrompt,
+  prStatusLine,
   mergeRequestPrompt,
   recapPrompt,
   recapWorkspaceNote,
@@ -40,6 +41,7 @@ import { errorMessage, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
@@ -227,6 +229,8 @@ export interface TaskEvent {
   originHookIds: string[]
   /** The agent opened or pushed to its PR during this turn. */
   sawPr?: boolean
+  /** task.finished: a quiet agent wake (server/turnTrigger.ts), which hooks skip unless they include agent wakes. */
+  agentWake?: boolean
 }
 export type TaskEventListener = (event: TaskEvent) => void
 
@@ -256,6 +260,10 @@ interface CaptainWait {
   /** When the runner stops waiting, plus a little slack for the write. */
   until: number
 }
+
+/** What a retried turn keeps of the turn it retries: its trigger and the PR as that turn began. */
+const carriedTrigger = (flags: TurnFlags): Pick<TurnFlags, "trigger" | "prBefore"> =>
+  flags.trigger ? { trigger: flags.trigger, ...(flags.prBefore !== undefined ? { prBefore: flags.prBefore } : {}) } : {}
 
 /** Task-message meta for a Captain's message, so the transcript can say which Captain steered the task. */
 const captainMeta = (store: Store, projectId: string) => ({ source: "captain", captainProjectId: projectId, captainName: store.getProject(projectId)?.name ?? null })
@@ -3550,7 +3558,12 @@ export class TaskManager {
       const budgeted = budgetNotes(notes, noteBudgetOf(this.settings.get(), project))
       const projectName = (id: string) => this.store.getProject(id)?.name
       const ownerName = this.owner()
-      const followup = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
+      const messages = followupPrompt(inputs.length ? inputs : [{ source: "system", content: "Continue." }], projectName, ownerName)
+      // A resumed task with a PR hears the PR's state as it stands now (GitHub, with a short timeout), so it never
+      // reports a stale one, like "still waiting for review" on a PR Cody merged hours ago.
+      const pr = !compact && !firstTurn && row.pr_url ? await this.prs.live(taskId) : null
+      const followup = pr ? `${messages}\n\n---\n\n${prStatusLine(pr, { baseBranch: project.baseBranch })}` : messages
+      row = this.requireRow(taskId)
       if (recapped) {
         row = this.recapSession(row, prepared!, project.baseBranch)
       }
@@ -3588,6 +3601,17 @@ export class TaskManager {
       // Setup ran long enough for maintain() to give up on this start: its slot is free again, so no agent may run.
       const superseded = () => this.store.getTaskRow(taskId)?.current_turn_id !== turnId
       if (superseded()) throw new TurnSuperseded()
+      // What started the turn (mixed queues: the highest-ranked sender, server/turnTrigger.ts), and the PR as it began.
+      // A retry keeps the retried turn's, and a first turn counts as whoever started the task.
+      const before = this.store.turnFlags(row)
+      const retry = Boolean(before.interrupts || before.sleeps)
+      const trigger = compact
+        ? null
+        : turnTrigger(
+            queued.map((i) => i.source),
+            { carried: firstTurn ? taskTrigger(row) : retry ? (before.trigger ?? null) : null, fallback: "system" },
+          )
+      const prBefore = retry && before.prBefore !== undefined ? before.prBefore : prMark(row)
       this.store.startTaskTurn({
         id: turnId,
         taskId,
@@ -3597,6 +3621,7 @@ export class TaskManager {
         routingRule: route.rule,
         routingReason: route.reason,
         status: compact ? "compact" : "started",
+        trigger,
       })
 
       // setsid (where it exists; macOS has none) + nohup: the turn survives a
@@ -3621,12 +3646,12 @@ export class TaskManager {
       this.diskHold.delete(taskId)
       const flags = this.store.turnFlags(row)
       // Hooks whose prompts are in this turn (a retried turn keeps the interrupted one's), so they don't fire on it.
-      const hookIds = [...new Set([...queued.filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length)), ...(flags.interrupts || flags.sleeps ? (flags.hookIds ?? []) : [])])]
+      const hookIds = [...new Set([...queued.filter((i) => i.source.startsWith("hook:")).map((i) => i.source.slice("hook:".length)), ...(retry ? (flags.hookIds ?? []) : [])])]
       this.store.updateTask(taskId, {
         status: "working",
         sessionStarted: true,
         ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
-        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, ...(hookIds.length ? { hookIds } : {}) } as TurnFlags,
+        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, ...(hookIds.length ? { hookIds } : {}), ...(trigger ? { trigger, prBefore } : {}) } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
       })
@@ -4408,6 +4433,8 @@ export class TaskManager {
     const result = typeof ev.result === "string" ? ev.result : null
     const noopIgnored = flags.noop && !stopped ? noopBlockers(this.runEvidence(row, flags, status)) : []
     const outcome = flags.noop && !stopped && !noopIgnored.length ? "noop" : null
+    // Only other agents' messages started this turn, and nothing real changed: Cody isn't told (server/turnTrigger.ts).
+    const agentWake = !stopped && quietAgentWake({ trigger: flags.trigger, status, sawPr: Boolean(flags.sawPr), prBefore: flags.prBefore, prAfter: prMark(row) })
     const turnCost = this.recordTaskClaudeUsage(row, ev)
     if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: stopped ? "stopped" : status, costUsd: turnCost, error })
     this.store.updateTask(row.id, {
@@ -4421,7 +4448,7 @@ export class TaskManager {
       question: status === "needs_input" ? (flags.asked ?? null) : null,
       turnFlags: { interrupts: 0, ...(flags.hookIds ? { lastHookIds: flags.hookIds } : {}) },
       outcome,
-    }, { quiet: stopped })
+    }, { quiet: stopped || agentWake })
     this.settleMergeRequest(row.id, "turn")
     if (row.box_id) this.store.touchBox(row.box_id)
 
@@ -4438,14 +4465,14 @@ export class TaskManager {
       this.addEvent(row.id, "Quiet run: the agent found nothing to do and changed nothing, so it's hidden from Recent and notifications.", { kind: "quiet" })
       this.store.dropTaskNotices(row.id)
     } else if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
-    else if (status === "done") this.notice(`✅ **${row.title}** is done: ${gist}`, { taskId: row.id })
+    else if (status === "done") this.finishedNotice(row, `✅ **${row.title}** is done: ${gist}`, agentWake)
     else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${preview(error ?? "", 300, "call get_task for the full error")}`, { taskId: row.id })
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
-      this.notice(`💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, { taskId: row.id })
+      this.finishedNotice(row, `💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, agentWake)
     }
     // The PR as it stands now: turn_end just asked GitHub (head commit and state), or the runner's push if it couldn't.
     const livePr = Boolean(row.pr_url) && !isFinalPrState(pr ?? row.pr_state)
-    if (!stopped) this.turnEvents(row, status, Boolean(more), Boolean(finished && isQuietRun(finished)), flags, livePr)
+    if (!stopped) this.turnEvents(row, status, Boolean(more), Boolean(finished && isQuietRun(finished)), flags, livePr, agentWake)
 
     this.emitTask(row.id)
     this.publishDirectory()
@@ -4485,7 +4512,7 @@ export class TaskManager {
       currentTurnId: null,
       ...usageFields(ev.usage),
       sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
-      turnFlags: { interrupts: flags.interrupts ?? 0, sleeps: (flags.sleeps ?? 0) + 1, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}) },
+      turnFlags: { interrupts: flags.interrupts ?? 0, sleeps: (flags.sleeps ?? 0) + 1, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}), ...carriedTrigger(flags) },
     })
     this.addEvent(row.id, `Turn ${row.turn_count} was cut off while this computer slept (${asleep}); it carries on now instead of failing.`)
     this.emitTask(row.id)
@@ -4493,8 +4520,19 @@ export class TaskManager {
     this.schedule()
   }
 
+  /**
+   * A resting turn's update. A quiet agent wake's goes to the project's Captain only, without waking it (it reads it
+   * on its next turn), and to the transcript: not to the Coordinator chat or Zen.
+   */
+  private finishedNotice(row: TaskRow, content: string, agentWake: boolean) {
+    if (!agentWake) return this.notice(content, { taskId: row.id })
+    this.onNotice?.(content, { taskId: row.id, agentWake: true }, { wake: false })
+    const captain = `${this.store.getProject(row.project_id)?.name ?? "project"} Captain`
+    this.addEvent(row.id, `Only other agents' messages started this turn and nothing changed, so its update went to the ${captain}, not the Coordinator chat: ${content}`, { kind: "agent_wake" })
+  }
+
   /** The hook events a finished turn raises. A stopped turn raises none: Cody stepped in. */
-  private turnEvents(row: TaskRow, status: TaskStatus, more: boolean, quiet: boolean, flags: TurnFlags, livePr: boolean) {
+  private turnEvents(row: TaskRow, status: TaskStatus, more: boolean, quiet: boolean, flags: TurnFlags, livePr: boolean, agentWake = false) {
     const base = { taskId: row.id, turnId: row.current_turn_id, originHookIds: flags.hookIds ?? [], sawPr: Boolean(flags.sawPr) }
     if (row.schedule_id && ["done", "idle", "pr_ready", "failed"].includes(status) && !more) this.emitTaskEvent({ ...base, type: "schedule.run_finished" })
     // A quiet run did nothing worth acting on; only schedule.run_finished hooks that include quiet runs see it.
@@ -4502,7 +4540,8 @@ export class TaskManager {
     if (status === "failed") this.emitTaskEvent({ ...base, type: "task.failed" })
     else if (status === "needs_input") this.emitTaskEvent({ ...base, type: "task.needs_input" })
     else if (!more && (status === "idle" || status === "pr_ready" || status === "done")) {
-      this.emitTaskEvent({ ...base, type: "task.finished" })
+      // A quiet agent wake's task.finished fires only the hooks that include agent wakes (HookFilters.includeAgentWakes).
+      this.emitTaskEvent({ ...base, type: "task.finished", ...(agentWake ? { agentWake: true } : {}) })
       // Any resting turn with an open PR, not just pr_ready: an agent that opens a PR and calls mark_done ends "done".
       // The hook engine fires once per head commit, so a later turn on the same commit doesn't fire again.
       if (livePr) this.emitTaskEvent({ ...base, type: "task.pr_ready" })
@@ -5398,7 +5437,7 @@ export class TaskManager {
       this.emitTaskEvent({ type: "task.failed", taskId: row.id, turnId: row.current_turn_id, originHookIds: flags.hookIds ?? [] })
     } else {
       this.store.queueInput(row.id, "system", `Your previous turn was interrupted (${reason}). Check where things stand (git status, files) and continue the task.`)
-      this.store.updateTask(row.id, { status: "queued", currentTurnId: null, turnFlags: { interrupts, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}) } })
+      this.store.updateTask(row.id, { status: "queued", currentTurnId: null, turnFlags: { interrupts, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}), ...carriedTrigger(flags) } })
       this.addEvent(row.id, `Turn interrupted (${reason}); retrying.`)
     }
     this.emitTask(row.id)

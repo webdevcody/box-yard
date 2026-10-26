@@ -1787,6 +1787,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         exclude_labels: z.array(z.string()).optional().describe('Skip PRs with any of these labels, e.g. ["no-automerge"]'),
         include_drafts: z.boolean().optional().describe("Also fire for draft PRs (off by default)"),
         include_quiet: z.boolean().optional().describe("schedule.run_finished: also fire for quiet no-op runs (off by default)"),
+        include_agent_wakes: z
+          .boolean()
+          .optional()
+          .describe("task.finished: also fire for turns only another agent's message_agent started that changed nothing (no new PR, merge, failure or question). Off by default"),
       })
       .optional()
     type FiltersArg = z.infer<typeof filtersSchema>
@@ -1802,6 +1806,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             excludeLabels: f.exclude_labels,
             includeDrafts: f.include_drafts,
             includeQuiet: f.include_quiet,
+            includeAgentWakes: f.include_agent_wakes,
           }
     const triggers = HOOK_TRIGGERS.map((t) => `${t} (${TRIGGER_INFO[t].description})`).join("; ")
     const actions = HOOK_ACTIONS.map((a) => `${a} (${ACTION_INFO[a].description})`).join("; ")

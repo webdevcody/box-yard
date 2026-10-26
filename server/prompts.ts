@@ -3,6 +3,7 @@ import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { formatBytes } from "../shared/disk.js"
 import { DEFAULT_NOTE_BUDGET, noteLine, shortTokens, type NoteBudget } from "../shared/notes.js"
+import type { LivePr } from "./prs.js"
 
 export interface DirectoryEntry {
   id: string
@@ -60,6 +61,7 @@ export function workerSystemPrompt(input: {
       `When the change is ready: run the tests/linters the repo has, commit with clear messages, then call create_pull_request.`,
       `If Cody gives feedback later, push more commits to the same branch and call create_pull_request again to update it.`,
       `Never push to ${project.baseBranch} directly and never force-push.`,
+      `Never claim a pull request's status (open, waiting for review, merged) from memory. When you resume, Box Yard ends your message with a "Pull request status" line read from GitHub as the turn started; without it, check with \`gh pr view <number> --json state,mergedAt,headRefOid\`. If the PR is merged, never say it's waiting for review, and never push to its branch again: base any new work on ${project.baseBranch} (a new branch and a new PR).`,
       input.pushAtTurnEnd
         ? `Box Yard pushes your branch, and any uncommitted work to a hidden ref, at the end of every turn. So add new commits rather than amending or rebasing ones from earlier turns.`
         : ``,
@@ -191,6 +193,49 @@ export function followupPrompt(
     .join("\n\n---\n\n")
 }
 
+/**
+ * The line a resumed turn's prompt ends with when the task has a PR (TaskManager.launch): its state as the turn
+ * started, read from GitHub (PrTracker.live), so the agent never reports a stale state like "still waiting for
+ * review" on a PR that was merged hours ago.
+ */
+export function prStatusLine(pr: LivePr, opts: { baseBranch: string; now?: number }): string {
+  const n = pr.number ? `#${pr.number}` : ""
+  const head = pr.headSha ? `, head commit ${pr.headSha.slice(0, 12)}` : ""
+  const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC"
+  const ago = (ms: number) => {
+    const min = Math.max(0, Math.round(((opts.now ?? Date.now()) - ms) / 60_000))
+    return min < 1 ? "under a minute ago" : min < 90 ? `${min} min ago` : `${Math.round(min / 60)} h ago`
+  }
+  const source =
+    pr.source === "github"
+      ? "checked on GitHub as this turn started"
+      : pr.source === "fresh"
+        ? pr.state === "merged"
+          ? "merged is final"
+          : `checked on GitHub ${ago(pr.checkedAt ?? opts.now ?? Date.now())}`
+        : pr.checkedAt
+          ? `GitHub didn't answer just now; this is Box Yard's last check, ${ago(pr.checkedAt)}`
+          : "GitHub couldn't be checked just now; this is Box Yard's last known state"
+  const view = `\`gh pr view ${pr.number ?? pr.url} --json state,mergedAt,headRefOid\``
+  let state: string
+  let advice: string
+  if (pr.state === "merged") {
+    const by = [pr.mergedAt ? `at ${when(pr.mergedAt)}` : "", pr.mergedBy ? `by ${pr.mergedBy}` : ""].filter(Boolean).join(" ")
+    state = `MERGED${by ? ` ${by}` : ""}${head}`
+    advice = `It is not waiting for review: don't say it is. Never push to its branch again; base any new work on ${opts.baseBranch} (a new branch and a new PR).`
+  } else if (pr.state === "closed") {
+    state = `CLOSED without merging${head}`
+    advice = "It is not waiting for review."
+  } else if (pr.state === "open" || pr.state === "draft") {
+    state = `${pr.state === "draft" ? "OPEN as a draft" : "OPEN"}, not merged${head}`
+    advice = pr.source === "fallback" ? `Check it with ${view} before saying anything about its status.` : ""
+  } else {
+    state = `in an unknown state${head}`
+    advice = `Check it with ${view} before saying anything about its status.`
+  }
+  return `Pull request status (from Box Yard; ${source}): ${n ? `${n} ` : ""}${pr.url} is ${state}.${advice ? ` ${advice}` : ""}`
+}
+
 /** What a recapped session finds in its folder: a fresh clone, not its old work tree. */
 /**
  * What a recap says about the folder. `restoreFailed`: the workspace archive exists but couldn't be restored on this
@@ -273,7 +318,7 @@ Routing every request (check list_projects / list_tasks first when you're not su
    Pick the cron and time zone carefully. Manage either kind with list_schedules, update_schedule (enabled: false pauses), run_schedule_now, list_schedule_runs, delete_schedule.
 
 Hooks (automations on task events): create_hook, list_hooks, update_hook, delete_hook, list_hook_runs.
-- A hook runs by itself when a task event happens: task.finished, task.pr_ready (a turn ended with an open PR; fires once per head commit), task.failed, task.needs_input, pr.merged, or schedule.run_finished. It sends a prompt template to the same task, to the project's Captain or to you, or creates a new task. Filters narrow it: project, title/prompt regex, who started the task, PR labels (exclude_labels like no-automerge); draft PRs and quiet runs are skipped by default.
+- A hook runs by itself when a task event happens: task.finished, task.pr_ready (a turn ended with an open PR; fires once per head commit), task.failed, task.needs_input, pr.merged, or schedule.run_finished. It sends a prompt template to the same task, to the project's Captain or to you, or creates a new task. Filters narrow it: project, title/prompt regex, who started the task, PR labels (exclude_labels like no-automerge); draft PRs and quiet runs are skipped by default, and so are task.finished turns that only another agent's message started and that changed nothing (include_agent_wakes turns them on).
 - Global hooks (no project) are yours and see every project; project hooks belong to that project's Captain. The built-in template "pr_merge" ("On PR ready → merge") sends the Merge PR button's standard merge request when a PR is ready.
 - Suggest a hook when Cody asks for the same follow-up a second time ("merge it when it's ready", "tell me when X fails", "always run the tests after"), or says "whenever"/"every time" about task events. Describe it in a sentence and create it only when they agree; new hooks are off unless enabled: true.
 - Hook fires show up in your "[Box Yard updates]" as "🪝 … hook …" lines. The hook already did that step, so don't repeat it, and don't start the same work in parallel.

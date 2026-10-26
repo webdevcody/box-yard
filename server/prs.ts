@@ -19,6 +19,10 @@ export const PR_POLL_MS = 60_000
 export const PR_MAX_BACKOFF_MS = 15 * 60_000
 export const PR_BATCH = 50
 export const RATE_FLOOR = 200
+/** How long a turn waits for GitHub before it starts with Box Yard's last known PR state instead. */
+export const PR_LIVE_TIMEOUT_MS = 4_000
+/** A PR state Box Yard checked this recently is used as is when a turn starts. */
+export const PR_LIVE_FRESH_MS = 30_000
 
 export interface PrInfo {
   state: PrState
@@ -35,6 +39,23 @@ export interface PrChange {
   info: PrInfo
   /** The task's new status when the PR moved it (pr_ready → done or idle). */
   status: TaskStatus | null
+}
+
+/** A task's PR as a turn starts (PrTracker.live), for the PR line in the turn's prompt. */
+export interface LivePr {
+  url: string
+  number: number | null
+  state: PrState | null
+  mergedAt: number | null
+  mergedBy: string | null
+  headSha: string | null
+  /** When GitHub last answered about it (this server's life only), or null. */
+  checkedAt: number | null
+  /**
+   * `github`: asked just now. `fresh`: checked within PR_LIVE_FRESH_MS, or merged (final). `fallback`: GitHub didn't
+   * answer in time (or can't be asked: no token, rate limit), so it's Box Yard's last known state.
+   */
+  source: "github" | "fresh" | "fallback"
 }
 
 export interface PrTrackerDeps {
@@ -103,6 +124,8 @@ export class PrTracker {
   pausedUntil = 0
   /** GraphQL requests sent so far. */
   requests = 0
+  /** When GitHub last answered about each task's PR. */
+  private readonly checkedAt = new Map<string, number>()
 
   constructor(deps: PrTrackerDeps) {
     this.deps = deps
@@ -173,6 +196,39 @@ export class PrTracker {
     return after?.pr_url === row.pr_url ? (after.pr_state ?? null) : null
   }
 
+  /**
+   * A task's PR as a turn starts: a state Box Yard checked moments ago (or a merged one, which is final) as is,
+   * else asked from GitHub with a short timeout, else the last known state. Never throws and never waits longer
+   * than timeoutMs, so a slow or unreachable GitHub doesn't hold the turn up. Null when the task has no PR.
+   */
+  async live(taskId: string, opts: { timeoutMs?: number; freshMs?: number } = {}): Promise<LivePr | null> {
+    const row = this.store.getTaskRow(taskId)
+    if (!row?.pr_url) return null
+    const checked = this.checkedAt.get(taskId) ?? null
+    const fresh = row.pr_state === "merged" || (checked !== null && this.now() - checked < (opts.freshMs ?? PR_LIVE_FRESH_MS))
+    let source: LivePr["source"] = fresh ? "fresh" : "fallback"
+    if (!fresh) {
+      const asked = this.now()
+      let timer: NodeJS.Timeout | undefined
+      const timeout = new Promise<void>((resolve) => (timer = setTimeout(resolve, opts.timeoutMs ?? PR_LIVE_TIMEOUT_MS)))
+      await Promise.race([this.check(taskId).catch(() => null), timeout])
+      clearTimeout(timer)
+      if ((this.checkedAt.get(taskId) ?? 0) >= asked) source = "github"
+    }
+    const now = this.store.getTaskRow(taskId)
+    if (!now?.pr_url) return null
+    return {
+      url: now.pr_url,
+      number: prNumber(now.pr_url),
+      state: now.pr_state,
+      mergedAt: now.pr_merged_at,
+      mergedBy: now.pr_merged_by,
+      headSha: now.pr_head_sha,
+      checkedAt: this.checkedAt.get(taskId) ?? null,
+      source,
+    }
+  }
+
   /** Requests run one after another, never in parallel. */
   private exclusive<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn)
@@ -196,7 +252,9 @@ export class PrTracker {
           const infos = await this.query(token, batch)
           batch.forEach((row, j) => {
             const info = infos[j]
-            if (info) this.apply(row.id, row.pr_url!, info)
+            if (!info) return
+            this.checkedAt.set(row.id, this.now())
+            this.apply(row.id, row.pr_url!, info)
           })
         } catch (err) {
           failed = true

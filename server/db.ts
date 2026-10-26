@@ -690,6 +690,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN gpu_min_ram_gb INTEGER;
   ALTER TABLE projects ADD COLUMN gpu_min_vcpus INTEGER;
   `,
+  `
+  -- What started each turn (server/turnTrigger.ts): cody, coordinator, captain, hook, schedule, system or agent.
+  -- An "agent" turn (only other agents' messages) is a quiet agent wake. NULL: turns from before this column.
+  ALTER TABLE task_turns ADD COLUMN trigger TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

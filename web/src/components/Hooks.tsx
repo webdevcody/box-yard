@@ -615,6 +615,11 @@ function HookEditor({
                     Include quiet no-op runs
                   </Check>
                 )}
+                {d.trigger === "task.finished" && (
+                  <Check checked={d.includeAgentWakes} onChange={(v) => set("includeAgentWakes", v)}>
+                    Include turns another agent woke
+                  </Check>
+                )}
               </div>
             </div>
           )}
