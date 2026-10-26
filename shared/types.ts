@@ -61,11 +61,16 @@ export interface Project {
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
   /**
-   * Most agents running at once on a box while one of its agents runs there, every project's counted (1: each of its
-   * agents has a box to itself). The stricter of this, the box's own limit and every other running project's wins.
-   * null uses the box's limit (Settings › Agents per box).
+   * Agents at once: how many of its own agents may run at the same time on one box, GPU pod or this computer. Other
+   * projects' agents never wait for it; the box's own limit (Settings › Agents per box, or › Local agents) bounds
+   * them. null: only the box's limit (server/agentLimits.ts).
    */
   agentsPerBox: number | null
+  /**
+   * Needs the whole machine (off by default): while one of its agents runs on a box or this computer, no other
+   * project's agent starts there, and its agents wait for the others' to finish (server/agentLimits.ts).
+   */
+  wholeMachine: boolean
   /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Resident tasks per box. */
   tasksPerBox: number | null
   /** Most boxes its tasks use at once (boxes made for it or holding its task folders); null: only Settings › Max boxes. */
@@ -131,6 +136,13 @@ export interface PreviewLink {
   label: string
 }
 
+/** A task a queued task's wait reason names as what holds it back (Task.waitFor). */
+export interface WaitFor {
+  taskId: string
+  /** As the reason text has it. */
+  title: string
+}
+
 export interface Task {
   id: string
   projectId: string
@@ -156,6 +168,8 @@ export interface Task {
   waitReason: string | null
   /** Set when that wait is for a box of at least this size (the project's box size): no such box has room yet. */
   waitBoxSize: BoxSize | null
+  /** The tasks holding it back that the wait reason names, in the order it names them (each `title` is in the text), so the UI links them. */
+  waitFor: WaitFor[]
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number

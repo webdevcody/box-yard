@@ -266,10 +266,13 @@ describe("RunPod GPU: pods per project", () => {
     const busy = boxOf(r, a)!
     await r.yard.tasks.stopTask(b)
     await waitFor(() => !r.yard.store.getTaskRow(b)?.current_turn_id, "b to stop")
-    // The sweep runs once a minute; jump past Settings › RunPod GPU › Stop when idle.
+    // The sweep runs once a minute; jump past Settings › RunPod GPU › Stop when idle. A sweep that finds b's
+    // workspace still archiving starts the archive and keeps the pod, so each try moves the clock a sweep further:
+    // a clock that stood still would leave every later try inside the once-a-minute throttle.
     const sweep = (now: number) => (r.yard.tasks as unknown as { sweepGpuPods(now: number): Promise<void> }).sweepGpuPods(now)
+    let clock = Date.now() + 60 * 60_000
     await waitFor(async () => {
-      await sweep(Date.now() + 60 * 60_000 + Math.random())
+      await sweep((clock += 61_000))
       return r.pods.terminated.includes(idle)
     }, "the idle pod to stop")
     expect(r.pods.terminated).toEqual([idle])

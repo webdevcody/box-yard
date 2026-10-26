@@ -4,6 +4,7 @@ import path from "node:path"
 import { randomBytes, randomUUID } from "node:crypto"
 import { execFile } from "node:child_process"
 import { z } from "zod"
+import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
 import { Store, BadRequestError, NotFoundError } from "./store.js"
@@ -14,6 +15,7 @@ import { TaskManager, type GpuRunner, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
+import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
@@ -57,6 +59,7 @@ const attachmentIds = z.array(z.string()).max(20).optional()
 /** A project's own box settings; null clears one (the global setting applies). */
 const projectBoxLimits = {
   agentsPerBox: z.number().int().min(PROJECT_BOX_LIMITS.agentsPerBox.min).max(PROJECT_BOX_LIMITS.agentsPerBox.max).nullable().optional(),
+  wholeMachine: z.boolean().optional(),
   tasksPerBox: z.number().int().min(PROJECT_BOX_LIMITS.tasksPerBox.min).max(PROJECT_BOX_LIMITS.tasksPerBox.max).nullable().optional(),
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
   gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
@@ -231,6 +234,8 @@ export interface BoxYard {
   captains: CaptainManager
   scheduler: Scheduler
   settings: SettingsStore
+  /** The Coordinator's get_settings / update_settings, on the Settings UI's save paths. */
+  settingsTools: SettingsTools
   /** Settings › Credentials and the first-run setup status (GET /api/setup). */
   setup: Setup
   ttsSettings: TtsSettingsStore
@@ -300,8 +305,10 @@ export function createBoxYard(
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
-  const captains = new CaptainManager(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
-  const orchestrator = new Orchestrator(c, store, hub, { url: `http://127.0.0.1:${c.port}/mcp`, token: mcpToken }, settings)
+  // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
+  const mcpUrl = `${selfUrl(c.host, c.port)}/mcp`
+  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
+  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   tasks.onNotice = (content, meta, opts) => {
     const wake = opts.wake !== false
@@ -371,10 +378,58 @@ export function createBoxYard(
   app.set("trust proxy", true)
   app.use(express.json({ limit: "10mb", verify: (req, _res, buf) => void ((req as Request & { rawBody?: string }).rawBody = buf.toString("utf8")) }))
 
+  // The Settings UI's saves. The Coordinator's update_settings goes through the same ones, side effects included.
+  const saveSettings = (patch: unknown) => {
+    const info = settings.update(patch)
+    hub.broadcast({ type: "settings", info })
+    applyPoolChange()
+    // A smaller notes budget can put projects over it: their Captains hear about it.
+    notes.checkAllBudgets()
+    // Turning the notes retro on picks up what finished while it was off.
+    retro.catchUp()
+    return info
+  }
+  const saveRunpodSettings = (patch: unknown) => {
+    runpod.store.update(patch)
+    applyPoolChange()
+  }
+  const saveTtsSettings = (patch: unknown) => {
+    const info = ttsSettings.update(patch)
+    hub.broadcast({ type: "tts", info })
+    return info
+  }
+  const saveRunner = async (runner: unknown) => {
+    setup.setRunner(runner)
+    if (setup.runnerChoice() === "local") await setup.refreshLocal()
+    const status = setup.status()
+    hub.broadcast({ type: "setup", status })
+    // A gh login may now stand in for the GitHub token, and /api/health's problems change.
+    applyPoolChange()
+    return status
+  }
+  const settingsTools = new SettingsTools({
+    settings,
+    tts: ttsSettings,
+    runpod: runpod.store,
+    runner: () => setup.runnerChoice(),
+    credentials: () => setup.status().credentials,
+    server: () => ({
+      timezone: { value: c.defaultTimezone, envVar: "BOXYARD_TIMEZONE" },
+      maxUploadMb: { value: c.maxUploadMb, envVar: "BOXYARD_MAX_UPLOAD_MB" },
+      scheduler: { value: scheduler.mode, envVar: "QSTASH_TOKEN", note: "qstash when QSTASH_TOKEN is set, else local" },
+      boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else Upstash once an Upstash key is saved in Settings › Credentials" },
+      localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
+    }),
+    save: { settings: saveSettings, runpod: saveRunpodSettings, voice: saveTtsSettings, runner: saveRunner },
+  })
+
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
   app.all(
     "/mcp",
-    mcpHandler({ store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner() }, mcpToken),
+    mcpHandler(
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner() },
+      mcpToken,
+    ),
   )
 
   // QStash calls this when a schedule is due. No login: the QStash signature is the auth.
@@ -466,7 +521,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
@@ -689,13 +744,7 @@ export function createBoxYard(
   })
   /** The setup choice of where agents run: "local" (This computer, no Upstash key needed) or "box". New projects follow it. */
   api.put("/setup/runner", async (req, res) => {
-    setup.setRunner(parse(z.object({ runner: z.enum(SETUP_RUNNERS) }).strict(), req.body).runner)
-    if (setup.runnerChoice() === "local") await setup.refreshLocal()
-    const status = setup.status()
-    hub.broadcast({ type: "setup", status })
-    // A gh login may now stand in for the GitHub token, and /api/health's problems change.
-    applyPoolChange()
-    res.json(status)
+    res.json(await saveRunner(parse(z.object({ runner: z.enum(SETUP_RUNNERS) }).strict(), req.body).runner))
   })
   /** Look at this computer's tools and logins again now (the "Check again" button). */
   api.post("/setup/local/check", async (_req, res) => {
@@ -731,8 +780,7 @@ export function createBoxYard(
     res.json(await runpodStatus())
   })
   api.put("/runpod/settings", async (req, res) => {
-    runpod.store.update(req.body)
-    applyPoolChange()
+    saveRunpodSettings(req.body)
     res.json(await runpodStatus())
   })
   api.get("/runpod/gpus", async (_req, res) => {
@@ -763,9 +811,7 @@ export function createBoxYard(
     res.json(ttsSettings.info())
   })
   api.put("/tts/settings", (req, res) => {
-    const info = ttsSettings.update(req.body)
-    hub.broadcast({ type: "tts", info })
-    res.json(info)
+    res.json(saveTtsSettings(req.body))
   })
   const ttsFailed = (res: Response, err: unknown) => {
     if (!(err instanceof TtsError)) throw err
@@ -946,14 +992,7 @@ export function createBoxYard(
     res.json(settings.info())
   })
   api.put("/agent-settings", (req, res) => {
-    const info = settings.update(req.body)
-    hub.broadcast({ type: "settings", info })
-    applyPoolChange()
-    // A smaller notes budget can put projects over it: their Captains hear about it.
-    notes.checkAllBudgets()
-    // Turning the notes retro on picks up what finished while it was off.
-    retro.catchUp()
-    res.json(info)
+    res.json(saveSettings(req.body))
   })
   // No `keys`: forget every saved value. `?keys=slotsPerBox,maxResidentPerBox`: forget only those (unknown keys are a 400).
   api.delete("/agent-settings", (req, res) => {
@@ -1094,6 +1133,7 @@ export function createBoxYard(
     captains,
     scheduler,
     settings,
+    settingsTools,
     setup,
     ttsSettings,
     tts,

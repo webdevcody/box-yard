@@ -16,6 +16,7 @@ COPY --from=build /app /app
 ENV NODE_ENV=production \
     BOXYARD_DATA_DIR=/data \
     PORT=3000 \
+    HOST=0.0.0.0 \
     DISABLE_AUTOUPDATER=1
 VOLUME /data
 EXPOSE 3000

@@ -504,6 +504,7 @@ export function useCreateProject() {
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
           agentsPerBox: null,
+          wholeMachine: false,
           tasksPerBox: null,
           maxBoxes: null,
           gpuMaxHourlyUsd: null,
@@ -545,6 +546,7 @@ export function useUpdateProject() {
       depCache?: boolean | null
       runner?: Runner
       agentsPerBox?: number | null
+      wholeMachine?: boolean
       tasksPerBox?: number | null
       maxBoxes?: number | null
     }) =>
@@ -729,6 +731,7 @@ export function useCreateTask() {
           error: null,
           waitReason: null,
           waitBoxSize: null,
+          waitFor: [],
           turnCount: 0,
           pendingCount: 0,
           lastArchivedAt: null,

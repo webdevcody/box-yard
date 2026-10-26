@@ -88,6 +88,11 @@ describe("parseNotice", () => {
     expect(prune.title).toBeNull()
   })
 
+  it("reads the Coordinator's update_settings notice as a settings change", () => {
+    const n = parseNotice("⚙️ **Settings** changed by the Coordinator: maxBoxes 5 → 20, slotsPerBox 2 → 3. Reason: Cody asked for more boxes", { kind: "settings" })
+    expect(n).toEqual({ kind: "settings", title: "Settings", summary: [{ text: "maxBoxes 5 → 20, slotsPerBox 2 → 3. Reason: Cody asked for more boxes" }] })
+  })
+
   it("drops an empty status detail instead of showing a dangling colon", () => {
     expect(parseNotice("✅ **A** is done: ").summary).toEqual([{ text: "is done" }])
   })

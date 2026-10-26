@@ -4,6 +4,7 @@ import os from "node:os"
 import { fileURLToPath } from "node:url"
 import { BOX_CREATE_CONCURRENCY, EFFORTS, SIZE_DEFAULTS, WORKER_SIZES, type Effort, type WorkerSize } from "../shared/types.js"
 import { DEFAULT_NOTE_BUDGET } from "../shared/notes.js"
+import { defaultHost } from "./bind.js"
 
 /** Load a .env file into process.env without overriding real env vars. */
 function loadDotEnv(file: string) {
@@ -71,7 +72,10 @@ export type ProviderName = "upstash" | "local"
 
 export const config = {
   port: int("PORT", 3000),
-  host: env.HOST ?? "0.0.0.0",
+  /** HOST, or 127.0.0.1 with no password and 0.0.0.0 with one (server/bind.ts). */
+  host: defaultHost(env),
+  /** BOXYARD_ALLOW_OPEN=1: start on a non-loopback HOST even with no password. */
+  allowOpen: env.BOXYARD_ALLOW_OPEN === "1",
   dataDir: path.resolve(env.BOXYARD_DATA_DIR ?? "./data"),
   /**
    * Where agents of "Runs on: This computer" projects work, a folder per task. Not under the data folder: that's
@@ -79,7 +83,7 @@ export const config = {
    * Yard's own agent rules would reach every other project's agents.
    */
   localDir: homePath(env.BOXYARD_LOCAL_DIR?.trim() || "~/boxyard-workspaces"),
-  /** Shared password for the web UI. Empty means no login (fine on localhost). */
+  /** Shared password for the web UI. Empty means no login, so the server stays on localhost unless HOST and BOXYARD_ALLOW_OPEN say otherwise. */
   password: env.BOXYARD_PASSWORD ?? "",
   /** Public URL of this server, used in links handed to agents. */
   publicUrl: env.BOXYARD_PUBLIC_URL ?? "",

@@ -706,7 +706,7 @@ function LimitsPanel({
       <Row
         id={fid("spb")}
         label="Agents per box"
-        help={`Claude turns that may run at the same time inside one box. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
+        help={`Claude turns that may run at the same time inside one box, every project's together. A project's own Agents at once (project settings) limits only its own agents within this. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
         hint={hint("slotsPerBox")}
       >
         <BoxLimitInput id={fid("spb")} max={20} {...limitField("slotsPerBox")} />
@@ -717,7 +717,7 @@ function LimitsPanel({
       <Row
         id={fid("la")}
         label="Local agents"
-        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
+        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Agents at once limits only its own agents within this. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
         hint={hint("localAgents")}
       >
         <input

@@ -4,6 +4,7 @@ import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
+import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
@@ -37,6 +38,7 @@ import type {
   ScheduleRunStatus,
   ScheduleTarget,
   Task,
+  WaitFor,
   TaskCompactionRecord,
   TaskMessage,
   TaskMessageRole,
@@ -107,6 +109,7 @@ export interface TaskRow {
   error: string | null
   wait_reason: string | null
   wait_box_size: string | null
+  wait_for_json?: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -237,6 +240,8 @@ export interface CaptainNoticeEntry {
 /** A project's own box settings; null uses the global one (shared/types.ts Project). */
 export interface ProjectBoxLimits {
   agentsPerBox: number | null
+  /** Needs the whole machine (server/agentLimits.ts). */
+  wholeMachine: boolean
   tasksPerBox: number | null
   maxBoxes: number | null
 }
@@ -273,6 +278,7 @@ interface ProjectRow {
   runner?: string | null
   heavy_tasks: string | null
   agents_per_box?: number | null
+  whole_machine?: number | null
   tasks_per_box?: number | null
   max_boxes?: number | null
   gpu_max_hourly_usd?: number | null
@@ -381,6 +387,7 @@ type TaskPatch = Partial<{
   error: string | null
   waitReason: string | null
   waitBoxSize: BoxSize | null
+  waitFor: WaitFor[]
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -423,6 +430,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   error: "error",
   waitReason: "wait_reason",
   waitBoxSize: "wait_box_size",
+  waitFor: "wait_for_json",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -664,6 +672,7 @@ export class Store {
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
+      wholeMachine: row.whole_machine === 1,
       tasksPerBox: row.tasks_per_box ?? null,
       maxBoxes: row.max_boxes ?? null,
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
@@ -701,10 +710,10 @@ export class Store {
 
   /** The project's own box limits (null: the global one applies), without loading the rest (placement asks per box and running task). */
   projectBoxLimits(id: string): ProjectBoxLimits {
-    const row = this.db.prepare(`SELECT ${AGENTS_PER_BOX} AS agents, tasks_per_box AS tasks, max_boxes AS boxes FROM projects WHERE id = ?`).get(id) as
-      | { agents: number | null; tasks: number | null; boxes: number | null }
+    const row = this.db.prepare(`SELECT ${AGENTS_PER_BOX} AS agents, whole_machine AS whole, tasks_per_box AS tasks, max_boxes AS boxes FROM projects WHERE id = ?`).get(id) as
+      | { agents: number | null; whole: number | null; tasks: number | null; boxes: number | null }
       | undefined
-    return { agentsPerBox: row?.agents ?? null, tasksPerBox: row?.tasks ?? null, maxBoxes: row?.boxes ?? null }
+    return { agentsPerBox: row?.agents ?? null, wholeMachine: row?.whole === 1, tasksPerBox: row?.tasks ?? null, maxBoxes: row?.boxes ?? null }
   }
 
   /** A GPU project's own $/hr cap on its pods together, or null for Settings › RunPod GPU's (Project.gpuMaxHourlyUsd). */
@@ -754,6 +763,7 @@ export class Store {
     depCache?: boolean | null
     runner?: Runner
     agentsPerBox?: number | null
+    wholeMachine?: boolean
     tasksPerBox?: number | null
     maxBoxes?: number | null
     gpuMaxHourlyUsd?: number | null
@@ -809,6 +819,8 @@ export class Store {
       runner?: Runner
       /** null clears it (the box's own Agents per box applies). */
       agentsPerBox?: number | null
+      /** Run alone on this computer (server/agentLimits.ts). */
+      wholeMachine?: boolean
       /** null clears it (the box's own Resident tasks per box applies). */
       tasksPerBox?: number | null
       /** null clears it (only Settings › Max boxes applies). */
@@ -875,6 +887,7 @@ export class Store {
    */
   private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine> }) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
+    if (b.wholeMachine !== undefined) this.db.prepare("UPDATE projects SET whole_machine = ? WHERE id = ?").run(b.wholeMachine ? 1 : 0, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
     if (b.maxBoxes !== undefined) this.db.prepare("UPDATE projects SET max_boxes = ? WHERE id = ?").run(b.maxBoxes, id)
     if (b.gpuMaxHourlyUsd !== undefined) this.db.prepare("UPDATE projects SET gpu_max_hourly_usd = ? WHERE id = ?").run(b.gpuMaxHourlyUsd, id)
@@ -1045,6 +1058,7 @@ export class Store {
       error: row.error,
       waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
       waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
+      waitFor: row.status === "queued" && row.wait_reason ? json<WaitFor[]>(row.wait_for_json ?? null, []) : [],
       turnCount: row.turn_count,
       pendingCount: pending.n,
       queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",
@@ -1250,6 +1264,7 @@ export class Store {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)
       if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
+      else if (key === "waitFor") args.push((value as WaitFor[]).length ? JSON.stringify(value) : null)
       else if (key === "mergeRequest" || key === "pushState") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
       else args.push(value)
@@ -1286,32 +1301,45 @@ export class Store {
     return row.n
   }
 
-  /**
-   * The strictest Agents per box among the task's project and the projects with an agent on `boxId` (the same
-   * rule as slotsInUse), or null when none sets one.
-   */
-  projectSlotCap(boxId: string, taskId: string): number | null {
-    const row = this.db
+  /** The agents running on a box (or this computer), oldest task first, with their projects' limits (server/agentLimits.ts). */
+  boxAgents(boxId: string, except?: string): BoxAgent[] {
+    return this.boxAgentRows(
+      "t.box_id = ? AND t.id != ? AND (t.current_turn_id IS NOT NULL OR t.status IN ('starting', 'working')) ORDER BY t.created_at ASC, t.rowid ASC",
+      boxId,
+      except ?? "",
+    )
+  }
+
+  /** A task as server/agentLimits.ts weighs it, wherever it is now. */
+  boxAgent(taskId: string): BoxAgent | null {
+    return this.boxAgentRows("t.id = ?", taskId)[0] ?? null
+  }
+
+  private boxAgentRows(where: string, ...args: unknown[]): BoxAgent[] {
+    const rows = this.db
       .prepare(
-        `SELECT MIN(${AGENTS_PER_BOX}) AS cap FROM projects WHERE id IN (
-           SELECT project_id FROM tasks WHERE id = ?
-           UNION SELECT project_id FROM tasks WHERE box_id = ? AND id != ? AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working')))`,
+        `SELECT t.id, t.title, t.project_id, p.name, ${AGENTS_PER_BOX} AS agents, p.whole_machine AS whole
+         FROM tasks t JOIN projects p ON p.id = t.project_id WHERE ${where}`,
       )
-      .get(taskId, boxId, taskId) as { cap: number | null }
-    return row.cap
+      .all(...args) as { id: string; title: string; project_id: string; name: string; agents: number | null; whole: number | null }[]
+    return rows.map((r) => ({ taskId: r.id, title: r.title, projectId: r.project_id, projectName: r.name, agentsPerBox: r.agents ?? null, wholeMachine: r.whole === 1 }))
   }
 
   /**
-   * The one way a turn starts: check that `boxId` has a free slot (`slots`, or fewer when a project there or the
-   * task's own sets Agents per box: the stricter wins) and claim it, in one write transaction (BEGIN IMMEDIATE), so
-   * two starts in the same tick, or two servers on one database, can't both take the last slot. Refused (false)
-   * when the box is full or the task already has a turn; nothing changes then.
+   * The one way a turn starts: check that `boxId` has a free slot (`slots`) that the projects' own limits let the
+   * task take (its project's Agents at once, Needs the whole machine: server/agentLimits.ts) and claim it, in one
+   * write transaction (BEGIN IMMEDIATE), so two starts in the same tick, or two servers on one database, can't both
+   * take the last slot. Refused (false) when the box is full, a limit holds it back or the task already has a turn;
+   * nothing changes then.
    */
   claimTurnSlot(taskId: string, boxId: string, slots: number, patch: TaskPatch): boolean {
     return this.db.transaction(() => {
       const row = this.db.prepare("SELECT current_turn_id, status FROM tasks WHERE id = ?").get(taskId) as { current_turn_id: string | null; status: TaskStatus } | undefined
       if (!row || row.current_turn_id || row.status === "starting" || row.status === "working") return false
-      if (this.slotsInUse(boxId, taskId) >= Math.min(slots, this.projectSlotCap(boxId, taskId) ?? slots)) return false
+      // The box's slots (Settings › Local agents on this computer), and the projects' own limits (server/agentLimits.ts).
+      const agent = this.boxAgent(taskId)
+      const running = this.boxAgents(boxId, taskId)
+      if (!agent || running.length >= slots || limitBlock(agent, running)) return false
       this.updateTask(taskId, { ...patch, boxId })
       return true
     }).immediate()

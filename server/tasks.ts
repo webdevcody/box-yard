@@ -28,7 +28,8 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFor } from "../shared/types.js"
+import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
@@ -122,6 +123,15 @@ const SLEEP_WAKE_GRACE_MS = 15 * 60_000
 const RUNNER_SLEEP_MIN_MS = 20_000
 /** A local task waits with this while every Settings › Local agents slot is taken. */
 const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
+
+/** Why a task waits (the text, without "Waiting" for a box's) and the tasks it names as holding it back (Task.waitFor). */
+interface Wait {
+  text: string
+  by: WaitFor[]
+}
+const asWait = (text: string | null): Wait | null => (text ? { text, by: [] } : null)
+/** The tasks a reason names (agentRefs: the first two, then "and N more"). */
+const waitFor = (agents: BoxAgent[]): WaitFor[] => named(agents).map((a) => ({ taskId: a.taskId, title: a.title }))
 const GPU_SLOT_WAIT = "Waiting for a free agent slot on its project's GPU pod (Agents per box, or Settings › RunPod GPU › Agents per pod)"
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
@@ -1144,7 +1154,7 @@ export class TaskManager {
    * or the global setting it falls back to. Agents and task folders per box follow each box's size unless Settings
    * or env set one number for every box.
    */
-  projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes">) {
+  projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes"> & { wholeMachine?: boolean }) {
     const s = this.settings.get()
     const o = this.settings.boxLimitOverrides()
     const global = (k: "slotsPerBox" | "maxResidentPerBox", label: string) =>
@@ -1153,9 +1163,10 @@ export class TaskManager {
     const used = this.projectBoxCap(p.id)?.used.size ?? 0
     return {
       boxSize: p.boxSize ? own(p.boxSize) : `global: ${s.workerSize} (Settings › Worker size)`,
-      agentsPerBox: p.agentsPerBox !== null ? own(p.agentsPerBox === 1 ? "1: each agent alone on a box" : p.agentsPerBox) : global("slotsPerBox", "Agents per box"),
+      agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its agents at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Agents per box"),
       tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Resident tasks per box"),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
+      ...(p.wholeMachine ? { wholeMachine: "yes: no other project's agent starts on a box or this computer while one of its agents runs there" } : {}),
     }
   }
 
@@ -2401,7 +2412,8 @@ export class TaskManager {
       })
       if (!claimed) {
         if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
-        this.setWaitReason(row.id, isLocalRunnerBox(boxId) ? LOCAL_SLOT_WAIT : isGpuBox(boxId) ? GPU_SLOT_WAIT : `Waiting for a free slot on ${boxId}`)
+        const local = isLocalRunnerBox(boxId) ? (this.localWait(row) ?? { text: LOCAL_SLOT_WAIT, by: [] }) : null
+        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? GPU_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
         this.emitTask(row.id)
         continue
       }
@@ -2536,12 +2548,12 @@ export class TaskManager {
         }
         // Busy: no free slot, or a free one that a project's Agents per box or the box's memory rules out.
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
-        const busy = full ? null : (this.limitBlock(row, box.id) ?? (await this.memoryBlock(box.id, row.id)))
+        const busy = full ? null : (this.limitBlock(row, box.id) ?? asWait(await this.memoryBlock(box.id, row.id)))
         if (!full && !busy) return box.id
         // Its box is busy. Its workspace lives there, so it waits for a slot unless it can move without losing work.
         const noSlot = full ? `Waiting for a free slot on ${box.id}` : null
         if (!this.canMove(row)) {
-          this.setWaitReason(row.id, busy ? `Waiting: ${busy}` : noSlot)
+          this.setWaitReason(row.id, busy ? `Waiting: ${busy.text}` : noSlot, null, busy?.by)
           return null
         }
         const other = await this.pickBox(row.id, box.id, busy, noSlot)
@@ -2688,15 +2700,11 @@ export class TaskManager {
     return isLocalRunnerBox(row.box_id) ? LOCAL_BOX_ID : this.assign(row.id, LOCAL_BOX_ID)
   }
 
-  /** A free Local agents slot that the projects' Agents per box let this task take; else false, with the reason. */
+  /** A free Local agents slot that the projects' limits let this task take (`localWait`); else false, with the reason. */
   private localRoom(row: TaskRow): boolean {
-    if (this.runningOn(LOCAL_BOX_ID) >= this.slotsFor(LOCAL_BOX_ID)) {
-      this.setWaitReason(row.id, LOCAL_SLOT_WAIT)
-      return false
-    }
-    const limit = this.limitBlock(row, LOCAL_BOX_ID)
-    if (limit) this.setWaitReason(row.id, `Waiting: ${limit}`)
-    return !limit
+    const wait = this.localWait(row)
+    if (wait) this.setWaitReason(row.id, wait.text, null, wait.by)
+    return !wait
   }
 
   /**
@@ -2861,7 +2869,7 @@ export class TaskManager {
       return false
     }
     const limit = this.limitBlock(row, boxId)
-    if (limit) this.setWaitReason(row.id, `Waiting: ${limit}`)
+    if (limit) this.setWaitReason(row.id, `Waiting: ${limit.text}`, null, limit.by)
     return !limit
   }
 
@@ -3056,7 +3064,7 @@ export class TaskManager {
    * (or new one) can take it.
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
-  private async pickBox(taskId: string, exclude?: string, busyHere: string | null = null, waitHere: string | null = null): Promise<string | null> {
+  private async pickBox(taskId: string, exclude?: string, busyHere: Wait | null = null, waitHere: string | null = null): Promise<string | null> {
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -3081,7 +3089,7 @@ export class TaskManager {
       .sort((a, b) => a.rank - b.rank || a.running - b.running || a.residents - b.residents)
     const low: { boxId: string; state: "running" | "exhausted" }[] = []
     // Boxes with a free slot that a project's Agents per box or memory rule out, why (the first one is the wait reason).
-    const busy: string[] = busyHere ? [busyHere] : []
+    const busy: Wait[] = busyHere ? [busyHere] : []
     // A new box may be made for it: the pool has room, and so does its project (its own Max boxes).
     const canGrow = this.poolHasRoom() && !cap?.full
     for (const b of candidates) {
@@ -3092,7 +3100,7 @@ export class TaskManager {
         return null
       }
       if (b.residents >= b.maxResidentPerBox && !this.canEvict(b.id, taskId)) continue
-      const why = row ? (this.limitBlock(row, b.id) ?? (await this.memoryBlock(b.id, taskId))) : null
+      const why = row ? (this.limitBlock(row, b.id) ?? asWait(await this.memoryBlock(b.id, taskId))) : null
       if (why) {
         busy.push(why)
         continue
@@ -3234,10 +3242,10 @@ export class TaskManager {
    * Say on a queued task why it's waiting when that's about disk space (or else `busy`: Agents per box, memory; or
    * else `waitHere`: no free slot on the box its workspace is on), or clear it.
    */
-  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: string | null, waitHere?: string | null) {
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: Wait | null, waitHere?: string | null) {
     const first = low[0]
     let reason: string | null = null
-    if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy}` : `Waiting: ${busy}`
+    if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy.text}` : `Waiting: ${busy.text}`
     else if (!first && waitHere) reason = this.wantsBox.has(taskId) ? `${waitHere} or a new box` : waitHere
     if (first) {
       if (this.wantsBox.has(taskId)) reason = `Waiting for a new box: ${first.boxId} is low on disk`
@@ -3245,25 +3253,29 @@ export class TaskManager {
         reason = `Waiting for disk cleanup on ${low.find((l) => this.janitor.isRunning(l.boxId))?.boxId ?? first.boxId}`
       } else reason = `Waiting for disk space on ${first.boxId}: cleanup couldn't free enough room`
     }
-    this.setWaitReason(taskId, reason)
+    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [])
   }
 
-  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null) {
+  /** `by`: the tasks the reason names as holding it back, in its order (Task.waitFor), so the UI can link them. */
+  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null, by: WaitFor[] = []) {
     const row = this.store.getTaskRow(taskId)
-    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null))) return
-    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null }, { touch: false })
+    const waitFor = reason ? by : []
+    const same = (row?.wait_for_json ?? null) === (waitFor.length ? JSON.stringify(waitFor) : null)
+    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null) && same)) return
+    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null, waitFor }, { touch: false })
     if (reason) this.addEvent(taskId, `${reason}.`)
     this.emitTask(taskId)
   }
 
   /**
    * The box facts a worker's system prompt states (stable from turn to turn, so the prompt cache holds): agents
-   * that may share it are the box's slots, or fewer under its project's Agents per box.
+   * that may share it are the box's slots, or its project's Agents at once when it needs the whole machine.
    */
   private boxPromptInfo(boxId: string, project: Project): BoxPromptInfo {
     const box = this.slotsFor(boxId)
-    const slots = Math.min(box, project.agentsPerBox ?? box)
-    const alone = project.agentsPerBox === 1
+    // Other projects' agents may share the box up to its own limit, unless the project needs the whole machine.
+    const slots = project.wholeMachine ? Math.min(box, project.agentsPerBox ?? box) : box
+    const alone = project.wholeMachine && slots === 1
     if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots, alone, local: true }
     if (isGpuBox(boxId)) {
       const pod = this.gpu?.provider.cached(boxId)
@@ -3293,38 +3305,46 @@ export class TaskManager {
   }
 
   /**
-   * Why the projects' Agents per box keep this task off a box right now, or null. A box runs at most the strictest
-   * of the task's project's limit and those of the projects with an agent running there (1: alone), every project's
-   * agents counted; the box's own limit is checked apart. Store.claimTurnSlot holds the same rule when the turn
-   * claims its slot.
+   * Why the projects' own limits keep this task off a box or GPU pod right now, naming the running tasks that hold it
+   * back, or null: its project's Agents at once (its own agents only), or Needs the whole machine (server/agentLimits.ts).
+   * The box's own limit is checked apart. Store.claimTurnSlot holds the same rule when the turn claims its slot.
    */
-  private limitBlock(row: TaskRow, boxId: string): string | null {
-    const running = this.store.listTaskRows({ boxId }).filter((r) => holdsSlot(r) && r.id !== row.id)
-    if (!running.length) return null
-    const name = (projectId: string) => this.store.getProjectName(projectId) ?? projectId
-    const where = isLocalRunnerBox(boxId) ? "this computer" : isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : `box ${boxId}`
-    const mine = this.store.projectBoxLimits(row.project_id).agentsPerBox
-    if (mine !== null && running.length >= mine) {
-      const rule = mine === 1 ? "runs each of its agents alone on a box" : `runs at most ${mine} agents on a box`
-      return `${name(row.project_id)} ${rule}, and ${where} has ${running.length === 1 ? "an agent" : `${running.length} agents`} running`
-    }
-    for (const projectId of new Set(running.map((r) => r.project_id))) {
-      const cap = this.store.projectBoxLimits(projectId).agentsPerBox
-      if (cap === null || running.length < cap) continue
-      return `${where} is running an agent of ${name(projectId)}, which ${cap === 1 ? "runs its agents alone on a box" : `allows at most ${cap} agents on a box`}`
-    }
-    return null
+  private limitBlock(row: TaskRow, boxId: string): Wait | null {
+    const agent = this.store.boxAgent(row.id)
+    const block = agent ? limitBlock(agent, this.store.boxAgents(boxId, row.id)) : null
+    if (!agent || !block) return null
+    const where = isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : `box ${boxId}`
+    return { text: boxBlockReason(agent, block, where), by: waitFor(block.by) }
   }
 
-  /** The strictest Agents per box among the projects running agents on a box, when it's below the box's slots (BoxInfo). */
+  /**
+   * Why a task can't start on this computer right now, naming the agents there that hold it back, or null: Settings ›
+   * Local agents is full, or the projects' own limits keep it off (`limitBlock`'s rule). The reason comes whole,
+   * with no "Waiting:" before it. Store.claimTurnSlot holds the same rule when the turn claims its slot.
+   */
+  private localWait(row: TaskRow): Wait | null {
+    const running = this.store.boxAgents(LOCAL_BOX_ID, row.id)
+    const slots = this.slotsFor(LOCAL_BOX_ID)
+    if (running.length >= slots) {
+      if (!running.length) return { text: LOCAL_SLOT_WAIT, by: [] }
+      return { text: `Waiting for ${agentRefs(running)}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`, by: waitFor(running) }
+    }
+    const agent = this.store.boxAgent(row.id)
+    const block = agent ? limitBlock(agent, running) : null
+    return agent && block ? { text: localBlockReason(agent, block), by: waitFor(block.by) } : null
+  }
+
+  /**
+   * A project running on a box that needs the whole machine (BoxInfo): no other project's agents start there while it
+   * runs, and its own run up to its Agents at once.
+   */
   private projectLimitOn(boxId: string, residents: TaskRow[]): BoxInfo["projectLimit"] {
     const slots = this.slotsFor(boxId)
-    let out: BoxInfo["projectLimit"] = null
     for (const projectId of new Set(residents.filter(holdsSlot).map((r) => r.project_id))) {
-      const cap = this.store.projectBoxLimits(projectId).agentsPerBox
-      if (cap !== null && cap < (out?.slots ?? slots)) out = { slots: cap, project: this.store.getProjectName(projectId) ?? projectId }
+      const own = this.store.projectBoxLimits(projectId)
+      if (own.wholeMachine) return { slots: Math.min(slots, own.agentsPerBox ?? slots), project: this.store.getProjectName(projectId) ?? projectId }
     }
-    return out
+    return null
   }
 
   /**

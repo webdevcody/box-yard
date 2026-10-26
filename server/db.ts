@@ -695,6 +695,14 @@ export const MIGRATIONS: string[] = [
   -- An "agent" turn (only other agents' messages) is a quiet agent wake. NULL: turns from before this column.
   ALTER TABLE task_turns ADD COLUMN trigger TEXT;
   `,
+  `
+  -- Run alone on this computer (server/agentLimits.ts): 1 keeps every other agent off the local runner while one of
+  -- the project's runs. Off (0) for every project, those with Agents per box 1 included: on this computer that limit
+  -- now holds back only the project's own and other heavy agents.
+  ALTER TABLE projects ADD COLUMN whole_machine INTEGER NOT NULL DEFAULT 0;
+  -- The tasks a queued task's wait reason names as holding it back, [{"taskId","title"}] (Task.waitFor).
+  ALTER TABLE tasks ADD COLUMN wait_for_json TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

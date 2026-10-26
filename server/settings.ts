@@ -139,6 +139,16 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   notesMaxTokens: "BOXYARD_NOTES_MAX_TOKENS",
 }
 
+/** Every env var that can supply a setting. Saved settings still win over it (the Settings UI's "from env"). */
+export const SETTING_ENV_VARS: Partial<Record<keyof Settings, string>> = {
+  ownerName: "BOXYARD_OWNER_NAME",
+  orchestratorModel: "ORCHESTRATOR_MODEL",
+  agentModel: "WORKER_MODEL",
+  captainModel: "CAPTAIN_MODEL",
+  captainEffort: "CAPTAIN_EFFORT",
+  ...BOX_ENV,
+}
+
 const autoCompact = z
   .object({ enabled: z.boolean(), unit: z.enum(["percent", "tokens"]), value: z.number() })
   .superRefine((v, ctx) => {
@@ -146,6 +156,7 @@ const autoCompact = z
     if (v.unit === "tokens" && (v.value < AUTOCOMPACT_MIN_TOKENS || v.value > AUTOCOMPACT_MAX_TOKENS))
       ctx.addIssue({ code: "custom", message: `Tokens must be between ${AUTOCOMPACT_MIN_TOKENS} and ${AUTOCOMPACT_MAX_TOKENS}` })
   })
+  .describe(`value is a percent of the context window (10–95) or a token count (${AUTOCOMPACT_MIN_TOKENS}–${AUTOCOMPACT_MAX_TOKENS})`)
 const model = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
 const usd = z.number().min(0).max(1_000_000)
 const bySize = z.object(Object.fromEntries(BOX_SIZES.map((s) => [s, usd])) as Record<BoxSize, z.ZodNumber>).strict()
