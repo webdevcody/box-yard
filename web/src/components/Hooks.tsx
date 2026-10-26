@@ -56,6 +56,7 @@ import {
 } from "../../../shared/hooks"
 import { Button, Empty, Field, Select, TimeAgo, cx, inputClass } from "./ui"
 import { Modal } from "./Modal"
+import { useDraft } from "../lib/settingsDraft"
 import { withParam } from "./TaskFilters"
 import { confirmDialog } from "../lib/confirm"
 import { toast } from "../lib/toast"
@@ -76,6 +77,13 @@ export function HooksPanel({ projectId, intro = true }: { projectId: string | nu
   const [editing, setEditing] = useState<{ hook: Hook | null; draft: HookDraft } | null>(null)
   const list = hooks.data ?? []
   const shown = filterHooks(list, listFilter)
+  const toggle = useToggleHook(scope)
+  // On/off switches: in Settings a draft until its Save; on a project's Hooks tab they save at once.
+  const savedOn = Object.fromEntries(list.map((h) => [h.id, h.enabled]))
+  const [on, setOn] = useDraft<Record<string, boolean>>(`hooks-${scope}`, "hooks", savedOn, async (draft) => {
+    const saved = Object.fromEntries((hooks.data ?? []).map((h) => [h.id, h.enabled]))
+    await Promise.all(Object.entries(draft).filter(([id, v]) => id in saved && saved[id] !== v).map(([id, enabled]) => toggle.mutateAsync({ id, enabled })))
+  })
   const setView = (v: "list" | "runs") => setParams((p) => withParam(p, VIEW_PARAM, v === "runs" ? "runs" : null), { replace: true })
 
   const addTemplate = (t: HookTemplateView) =>
@@ -140,7 +148,13 @@ export function HooksPanel({ projectId, intro = true }: { projectId: string | nu
         ) : (
           <ul className="space-y-3">
             {shown.map((h) => (
-              <HookRow key={h.id} hook={h} scope={scope} onEdit={() => setEditing({ hook: h, draft: draftFromHook(h) })} />
+              <HookRow
+                key={h.id}
+                hook={h}
+                enabled={on[h.id] ?? h.enabled}
+                onEnabled={(enabled) => setOn((o) => ({ ...o, [h.id]: enabled }))}
+                onEdit={() => setEditing({ hook: h, draft: draftFromHook(h) })}
+              />
             ))}
           </ul>
         )
@@ -256,8 +270,7 @@ function TemplateCard({
   )
 }
 
-function HookRow({ hook: h, scope, onEdit }: { hook: HookWithLastRun; scope: string; onEdit: () => void }) {
-  const toggle = useToggleHook(scope)
+function HookRow({ hook: h, enabled, onEnabled, onEdit }: { hook: HookWithLastRun; enabled: boolean; onEnabled: (on: boolean) => void; onEdit: () => void }) {
   const remove = useDeleteHook()
   const projects = useProjects()
   const ownerName = useOwnerName()
@@ -265,17 +278,18 @@ function HookRow({ hook: h, scope, onEdit }: { hook: HookWithLastRun; scope: str
   const chips = filterChips(h.filters, projectName, ownerName)
   const last = h.lastRun
   return (
-    <li id={h.id} className={cx("rounded-xl border bg-zinc-900/40 p-3 sm:p-4", h.enabled ? "border-zinc-800/80" : "border-zinc-900 opacity-75")} data-testid="hook-row">
+    <li id={h.id} className={cx("rounded-xl border bg-zinc-900/40 p-3 sm:p-4", enabled ? "border-zinc-800/80" : "border-zinc-900 opacity-75")} data-testid="hook-row">
       <div className="flex items-start gap-2 sm:gap-3">
         <div className="-my-2 -ml-1 sm:-my-0.5">
-          <Switch checked={h.enabled} onChange={(enabled) => toggle.mutate({ id: h.id, enabled })} label={h.enabled ? `Turn off ${h.name}` : `Turn on ${h.name}`} />
+          <Switch checked={enabled} onChange={onEnabled} label={enabled ? `Turn off ${h.name}` : `Turn on ${h.name}`} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <button type="button" onClick={onEdit} className="min-w-0 truncate text-left font-medium text-zinc-100 hover:underline">
               {h.name}
             </button>
-            {!h.enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 uppercase">Off</span>}
+            {!enabled && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-400 uppercase">Off</span>}
+            {enabled !== h.enabled && <span className="rounded bg-amber-500/15 px-1.5 py-px text-[11px] text-amber-300">unsaved</span>}
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-400">
             <span className="text-zinc-300">{hookSummary(h)}</span>
