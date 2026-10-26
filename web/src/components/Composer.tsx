@@ -9,6 +9,7 @@ import { formatSize, isImage } from "./Attachments"
 import { DictationStatus, MicButton } from "./Dictation"
 import { insertTranscript } from "../lib/dictation"
 import { useDictation } from "../lib/useDictation"
+import { primeSendSound } from "../lib/sendSound"
 import type { Attachment } from "../../../shared/types"
 
 interface Pending {
@@ -175,6 +176,8 @@ export function Composer({
     // Still listening: stop, let the last words land, then send (dictation calls submit again).
     if (dictation.active) return dictation.stopAndSend()
     if (!canSend) return
+    // Inside the tap or key press, so the "sent" cue may play when the server accepts it.
+    primeSendSound()
     const text = value.trim()
     const sent = files
     const pending = onSubmit(text, ready)

@@ -28,7 +28,7 @@ import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
-import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
 import { QueuedChatMessage } from "./QueuedMessages"
 import { AttachmentList } from "./Attachments"
@@ -135,13 +135,11 @@ export function CaptainTab({ project }: { project: Project }) {
             <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
           ))}
           {busy && (
-            <div className="flex items-center gap-2 px-1 py-1 text-xs text-sky-400" aria-live="polite">
-              <span className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
-                ))}
-              </span>
-              Captain is working…
+            // Just the dots, like the Coordinator's: the header's robot says it's working.
+            <div data-testid="captain-working" className="flex gap-1 px-1 py-2">
+              {[0, 1, 2].map((i) => (
+                <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
+              ))}
             </div>
           )}
           {queued.map((m) => (
@@ -427,7 +425,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
   return (
     // Like the task header: name, status and a small context reading; model, last active and the full meter are in ⋯.
     <header className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
-      <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+      <AgentIcon busy={Boolean(state?.busy)} />
       <span className="text-sm font-semibold text-zinc-100">Captain</span>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">

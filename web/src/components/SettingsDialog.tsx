@@ -17,6 +17,8 @@ import { LEGACY_POOL_DEFAULTS, sizeCapacities } from "../lib/capacity"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
+import { SendSoundRow } from "./SendSoundSettings"
+import { setSendSound, useSendSound, type SendSoundSettings } from "../lib/sendSound"
 import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { RunPodPanel } from "./RunPodSettings"
@@ -196,6 +198,10 @@ export function SettingsDialog({
   // Box limits typed in while the size defaults apply: saved even when the number matches the default.
   const [pinned, setPinned] = useState<(keyof Settings)[]>([])
   const [savedAt, setSavedAt] = useState(0)
+  // Browser-only settings (saved in localStorage, not on the server) get their own draft; Save commits both.
+  const savedSound = useSendSound()
+  const [soundDraft, setSoundDraft] = useState<SendSoundSettings | null>(null)
+  const soundChanged = soundDraft !== null && (soundDraft.enabled !== savedSound.enabled || soundDraft.volume !== savedSound.volume)
   const ids = useId()
   const navRef = useRef<HTMLDivElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
@@ -203,8 +209,10 @@ export function SettingsDialog({
   const current = info.data
   const s = draft ?? current?.settings
   const changed = draft ? [...new Set([...changedKeys(draft, current?.settings), ...pinned])] : []
-  const dirty = changed.length > 0
+  const changeCount = changed.length + (soundChanged ? 1 : 0)
+  const dirty = changeCount > 0
   const dirtySections = changedSections(changed)
+  if (soundChanged) dirtySections.add("notifications")
 
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => s && setDraft({ ...s, [k]: v })
   const pin = (k: keyof Settings, on: boolean) => setPinned((p) => (on ? (p.includes(k) ? p : [...p, k]) : p.filter((x) => x !== k)))
@@ -256,7 +264,13 @@ export function SettingsDialog({
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!s || !dirty) return
+    if (!dirty) return
+    if (soundChanged) {
+      setSendSound(soundDraft)
+      setSoundDraft(null)
+      if (!changed.length) return setSavedAt(Date.now())
+    }
+    if (!s || !changed.length) return
     save.mutate(savePatch(s, current?.settings, pinned), {
       onSuccess: () => {
         setDraft(null)
@@ -303,7 +317,7 @@ export function SettingsDialog({
           <div className="flex flex-col-reverse gap-2 sm:ml-auto sm:flex-row sm:items-center sm:gap-3">
             {dirty ? (
               <span className="text-xs text-amber-300" role="status">
-                {changed.length === 1 ? "1 unsaved change" : `${changed.length} unsaved changes`}
+                {changeCount === 1 ? "1 unsaved change" : `${changeCount} unsaved changes`}
               </span>
             ) : savedAt ? (
               <span className="inline-flex items-center gap-1 text-xs text-emerald-400" role="status">
@@ -311,7 +325,14 @@ export function SettingsDialog({
               </span>
             ) : null}
             {dirty && (
-              <Button type="button" variant="ghost" onClick={() => setDraft(null)}>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setDraft(null)
+                  setSoundDraft(null)
+                }}
+              >
                 Discard
               </Button>
             )}
@@ -320,7 +341,7 @@ export function SettingsDialog({
                 Close
               </Button>
             )}
-            <Button type="submit" variant="primary" loading={save.isPending} disabled={!s || !dirty}>
+            <Button type="submit" variant="primary" loading={save.isPending} disabled={!dirty}>
               Save
             </Button>
           </div>
@@ -372,7 +393,7 @@ export function SettingsDialog({
         {section === "about" ? (
           <AboutPanel />
         ) : section === "notifications" ? (
-          <NotificationsPanel fid={fid} />
+          <NotificationsPanel fid={fid} sound={soundDraft ?? savedSound} onSound={setSoundDraft} />
         ) : section === "voice" ? (
           <VoicePanel fid={fid} />
         ) : section === "credentials" ? (
@@ -1102,7 +1123,7 @@ function CostsPanel({
   )
 }
 
-function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
+function NotificationsPanel({ fid, sound, onSound }: { fid: (k: string) => string; sound: SendSoundSettings; onSound: (v: SendSoundSettings) => void }) {
   const [on, setOn] = useState(browserNotificationsOn)
   const [denied, setDenied] = useState(false)
   const supported = browserNotificationsSupported()
@@ -1136,6 +1157,7 @@ function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
           {on ? "On" : "Off"}
         </label>
       </Row>
+      <SendSoundRow fid={fid} value={sound} onChange={onSound} />
     </Panel>
   )
 }
