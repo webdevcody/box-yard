@@ -48,6 +48,7 @@ import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/memory.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
+import { atRisk, deleteCheckScript, deleteVerdict, parseDeleteCheck, refusalLine, refusalsOf, type BoxDeleteResult, type WorkspaceGit } from "./boxDelete.js"
 import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
@@ -438,6 +439,8 @@ export class TaskManager {
   private readonly gpu: GpuRunner | null
   /** When each GPU pod's heartbeat was last touched by the idle sweep, and when the sweep last ran. */
   private gpuTouchedAt = new Map<string, number>()
+  /** Pods stopGpuPod is terminating, with the provider's own line about it once it came (one history row, not two). */
+  private gpuTerminating = new Map<string, string | null>()
   private lastGpuSweepAt = 0
   /** The pods as placement or the sweep last listed them, for list_projects (which doesn't call RunPod). */
   private gpuSeen: GpuPods = []
@@ -1200,38 +1203,75 @@ export class TaskManager {
     return reason === "clear" ? "clear" : "cleanup"
   }
 
-  /** What Clear box and Delete box would touch: each task with its status and uncommitted files, and the disk in use. */
+  /**
+   * What Clear box, Delete box and Terminate pod would touch: each task with its status, uncommitted files and its
+   * verdict in the delete safety check (server/boxDelete.ts), and the disk in use. One exec reads every workspace.
+   */
   async boxContents(boxId: string): Promise<BoxContents> {
-    const box = this.store.getBox(boxId)
-    if (!box) throw new NotFoundError(`Box ${boxId} not found`)
+    const pod = isGpuBox(boxId)
+    const box = pod ? null : this.store.getBox(boxId)
     const rows = this.store.listTaskRows({ boxId }).sort((a, b) => a.created_at - b.created_at)
-    const changed = new Map<string, number>()
-    if (box.status === "ready" && rows.length) {
-      // One exec for the whole box: "<taskId> <changed files>" per workspace that is a git repo.
-      const root = tasksRootOf(this.provider, boxId)
-      const script = rows
-        .map((r) => `[ -d ${q(`${root}/${r.id}/work/.git`)} ] && echo ${q(r.id)} $(git -C ${q(`${root}/${r.id}/work`)} status --porcelain 2>/dev/null | wc -l)`)
-        .join("; ")
-      const res = await this.provider.exec(boxId, `${script}; true`).catch(() => null)
-      for (const line of res?.stdout.split("\n") ?? []) {
-        const [id, n] = line.trim().split(/\s+/)
-        if (id && n && /^\d+$/.test(n)) changed.set(id, Number(n))
-      }
+    if (!box && !pod) throw new NotFoundError(`Box ${boxId} not found`)
+    let up = box?.status === "ready"
+    if (pod) {
+      if (!this.gpu) throw new NotFoundError(`Box ${boxId} not found`)
+      up = Boolean((await this.gpuPods())?.some((p) => p.boxId === boxId && p.pod.status === "RUNNING"))
+      if (!up && !rows.length) throw new NotFoundError(`GPU pod ${boxId} isn't running`)
     }
-    return {
-      boxId,
-      tasks: rows.map((r) => ({
+    let git = new Map<string, WorkspaceGit>()
+    let reachable = up
+    if (up && rows.length) {
+      const script = deleteCheckScript(rows.map((r) => ({ id: r.id, work: `${this.taskDir(boxId, r.id)}/work` })))
+      const res = await this.provider.exec(boxId, script).catch(() => null)
+      reachable = Boolean(res)
+      if (res) git = parseDeleteCheck(res.stdout)
+    }
+    const op = this.boxOperation(boxId)
+    const busy = op
+      ? busyMessage(boxId, op)
+      : pod
+        ? up
+          ? null
+          : `GPU pod ${boxId} isn't running, so there's no pod to terminate`
+        : box!.status === "ready"
+          ? null
+          : `Box ${boxId} is ${box!.status}`
+    const tasks = rows.map((r) => {
+      const archived = this.hasFreshArchive(r)
+      const v = up
+        ? deleteVerdict({
+            status: r.status,
+            running: Boolean(r.current_turn_id),
+            wantsTurn: this.wantsTurn(r),
+            prState: r.pr_state,
+            hasRepo: Boolean(this.store.getProject(r.project_id)?.repo),
+            reachable,
+            git: git.get(r.id) ?? null,
+            archived,
+          })
+        : { verdict: "ok" as const, detail: "no workspace to reach; it restores from its last archive" }
+      return {
         id: r.id,
         title: r.title,
         projectId: r.project_id,
         status: r.status,
         running: Boolean(r.current_turn_id),
-        uncommitted: changed.get(r.id) ?? null,
-        archived: this.hasFreshArchive(r),
-      })),
+        uncommitted: git.get(r.id)?.changed ?? null,
+        archived,
+        prState: r.pr_state,
+        ...v,
+      }
+    })
+    return {
+      boxId,
+      kind: pod ? "pod" : "box",
+      label: pod ? gpuPodLabel(boxId, this.store.getProjectName(gpuBoxProject(boxId))) : boxId,
+      tasks,
       running: rows.filter((r) => r.current_turn_id).length,
-      diskUsedBytes: box.disk_free_bytes != null && box.disk_total_bytes != null ? Math.max(0, box.disk_total_bytes - box.disk_free_bytes) : null,
-      diskBytes: box.disk_bytes ?? null,
+      diskUsedBytes: box?.disk_free_bytes != null && box.disk_total_bytes != null ? Math.max(0, box.disk_total_bytes - box.disk_free_bytes) : null,
+      diskBytes: box?.disk_bytes ?? null,
+      busy,
+      refusals: refusalsOf(busy, tasks),
     }
   }
 
@@ -1267,31 +1307,75 @@ export class TaskManager {
   }
 
   /**
-   * Delete a box at the provider. A reachable box first gets every workspace archived (the same archive a
-   * closed task gets); if one can't be archived nothing is deleted. Refuses while agents are running unless
-   * `stopAgents`. Its tasks go to other or new boxes on their next turn.
+   * Delete a box at the provider, or terminate a RunPod GPU pod (`runpod-*`; its network volume stays). Box Yard
+   * never deletes network volumes or project snapshots here. A reachable box first gets every workspace archived
+   * (the same archive a closed task gets; merged and fully pushed ones need none); if one can't be archived nothing
+   * is deleted. Its tasks restore from their archive on their next turn, on another box or a new pod.
+   *
+   * The Coordinator and Captains (`actor`) are held to the safety check (`boxContents`): any refusal stops it, and
+   * they can't stop agents. Cody (the default actor) can stop running agents (`stopAgents`) and delete past the
+   * rest of the check (`override`: queued tasks are placed again, unpushed work is only in the archive).
    */
-  async destroyBox(boxId: string, opts: { stopAgents?: boolean } = {}) {
-    const box = this.store.getBox(boxId)
-    if (!box) {
-      // Already deleted or lost: deleting it again is a no-op.
-      if (this.history.boxIds().includes(boxId)) return
-      throw new NotFoundError(`Box ${boxId} not found`)
+  async destroyBox(boxId: string, opts: { stopAgents?: boolean; override?: boolean; actor?: BoxActor; reason?: string | null } = {}): Promise<BoxDeleteResult> {
+    const actor = opts.actor ?? { kind: "owner" }
+    const owner = actor.kind === "owner"
+    const stopAgents = owner && Boolean(opts.stopAgents)
+    if (isLocalRunnerBox(boxId)) throw new BadRequestError("That's this computer, not a box: local tasks keep their folders until each task is deleted.")
+    const pod = isGpuBox(boxId)
+    const box = pod ? null : this.store.getBox(boxId)
+    const gone = (): BoxDeleteResult => ({ boxId, kind: pod ? "pod" : "box", label: boxId, archived: [], fromGitHub: [], alreadyGone: true })
+    if (!pod) {
+      if (!box) {
+        // Already deleted or lost: deleting it again is a no-op.
+        if (this.history.boxIds().includes(boxId)) return gone()
+        throw new NotFoundError(`Box ${boxId} not found`)
+      }
+      // Deleted outside Box Yard: there's nothing to archive or destroy, only records to drop.
+      if (box.status === "ready" && !this.boxOps.has(boxId) && (await this.goneAtProvider(boxId))) {
+        await this.loseGoneBox(boxId, "Delete box", actor)
+        return gone()
+      }
     }
-    // Deleted outside Box Yard: there's nothing to archive or destroy, only records to drop.
-    if (box.status === "ready" && !this.boxOps.has(boxId) && (await this.goneAtProvider(boxId))) return this.loseGoneBox(boxId, "Delete box")
-    if (box.status === "ready") {
-      this.claimBox(boxId, "delete", Boolean(opts.stopAgents))
+    const check = await this.boxContents(boxId)
+    const reachable = pod || box!.status === "ready"
+    if (!owner && check.refusals.length) throw new ConflictError(`${check.label} was not ${pod ? "terminated" : "deleted"}:\n- ${check.refusals.join("\n- ")}`)
+    if (pod && check.busy) throw new ConflictError(check.busy)
+    const risky = reachable ? atRisk(check) : []
+    if (risky.length && !opts.override) {
+      throw new ConflictError(`${check.label} was not ${pod ? "terminated" : "deleted"}: ${risky.map(refusalLine).join("; ")}. Choose ${pod ? "Terminate" : "Delete"} anyway to archive and ${pod ? "terminate" : "delete"} it.`)
+    }
+    const overridden = risky.length ? withOwner(` Cody chose ${pod ? "Terminate" : "Delete"} anyway past: ${risky.map(refusalLine).join("; ")}.`, this.owner()) : ""
+    const result: BoxDeleteResult = { boxId, kind: pod ? "pod" : "box", label: check.label, archived: [], fromGitHub: [] }
+    if (pod) {
+      this.claimBox(boxId, "delete", stopAgents)
       try {
-        if (opts.stopAgents) await this.stopAgentsOn(boxId)
+        if (stopAgents) await this.stopAgentsOn(boxId)
+        const reason = opts.reason?.trim() || (owner ? "Terminated from Settings › RunPod GPU." : "No reason given.")
+        await this.stopGpuPod(boxId, { actor, reason: `${reason}${overridden}` })
+        result.archived = this.store.listTaskRows({ boxId }).filter((r) => r.session_started).map((r) => r.id)
+        return result
+      } finally {
+        this.boxOps.delete(boxId)
+        this.emitBoxes()
+        this.schedule()
+      }
+    }
+    if (reachable) {
+      this.claimBox(boxId, "delete", stopAgents)
+      try {
+        if (stopAgents) await this.stopAgentsOn(boxId)
         // A cleanup may be parking workspaces right now; let it finish first.
         while (this.janitor.isRunning(boxId)) await new Promise((r) => setTimeout(r, 200))
         const kept: string[] = []
         for (const row of this.store.listTaskRows({ boxId })) {
-          if (await this.skipArchiveIfPushed(row.id, boxId, `delete box ${boxId}`)) continue
+          if (await this.skipArchiveIfPushed(row.id, boxId, `delete box ${boxId}`)) {
+            result.fromGitHub.push(row.id)
+            continue
+          }
           await this.archiveFresh(row.id)
           const fresh = this.store.getTaskRow(row.id)
           if (fresh?.box_id === boxId && fresh.session_started && !this.hasFreshArchive(fresh)) kept.push(fresh.id)
+          else if (fresh?.session_started) result.archived.push(row.id)
         }
         if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so ${boxId} was not deleted: ${this.archiveProblems(kept)}`)
       } catch (err) {
@@ -1307,15 +1391,26 @@ export class TaskManager {
       }
     }
     try {
-      await this.loseBox(boxId, withOwner("Box deleted by Cody.", this.owner()), false, {
+      const saved = [
+        result.archived.length ? `${result.archived.length} archived` : "",
+        result.fromGitHub.length ? `${result.fromGitHub.length} needed no archive (PR merged, nothing unpushed)` : "",
+      ].filter(Boolean)
+      const detail = owner
+        ? reachable
+          ? `Deleted from the Boxes page; every workspace was archived first.${overridden}`
+          : `Deleted from the Boxes page while ${box!.status}.`
+        : `Deleted with delete_box after the safety check passed${saved.length ? `: ${saved.join(", ")}` : ""}.`
+      await this.loseBox(boxId, owner ? withOwner("Box deleted by Cody.", this.owner()) : `Box deleted by ${actor.kind === "captain" ? "its project's Captain" : "the Coordinator"}.`, false, {
         type: "deleted",
-        actor: { kind: "owner" },
-        detail: box.status === "ready" ? "Deleted from the Boxes page; every workspace was archived first." : `Deleted from the Boxes page while ${box.status}.`,
+        actor,
+        reason: opts.reason?.trim() || null,
+        detail,
       })
       await this.provider.destroy(boxId).catch((err) => console.warn(`destroy ${boxId}: ${errorMessage(err)}`))
     } finally {
       this.boxOps.delete(boxId)
     }
+    return result
   }
 
   /** Mark a box for clear/delete/resize, or say why not: another operation on it, or agents running without `stopAgents`. */
@@ -2763,6 +2858,11 @@ export class TaskManager {
 
   /** A GPU pod started or was terminated (by RunPodProvider), for the box history. */
   gpuPodEvent(e: { boxId: string; kind: "started" | "terminated"; detail: string; actor?: BoxActor; reason?: string }) {
+    // Box Yard is terminating it (stopGpuPod): that one row, with who and why, takes the provider's detail.
+    if (e.kind === "terminated" && !e.actor && this.gpuTerminating.has(e.boxId)) {
+      this.gpuTerminating.set(e.boxId, e.detail)
+      return
+    }
     this.recordBoxEvent({
       boxId: e.boxId,
       boxName: gpuPodLabel(e.boxId, this.store.getProjectName(gpuBoxProject(e.boxId))),
@@ -2775,8 +2875,8 @@ export class TaskManager {
   }
 
   /**
-   * Stop the project's GPU pod now (Settings › RunPod GPU › Stop, or the idle sweep). Its workspaces must be in
-   * their archives: running turns are never stopped, and a task without a fresh archive is archived first.
+   * Terminate a GPU pod now (Terminate pod, delete_box, or the idle sweep); its network volume stays. Its workspaces
+   * must be in their archives: running turns are never stopped, and a task without a fresh archive is archived first.
    */
   async stopGpuPod(boxId: string, opts: { actor: BoxActor; reason: string; force?: boolean }): Promise<void> {
     if (!this.gpu) throw new BadRequestError("RunPod GPU isn't available on this Box Yard")
@@ -2785,9 +2885,16 @@ export class TaskManager {
     for (const r of residents) if (r.session_started && !this.archiveHoldsWorkspace(r)) await this.archiveFresh(r.id).catch(() => {})
     const unsaved = this.store.listTaskRows({ boxId }).filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
     if (unsaved.length && !opts.force) throw new ConflictError(`Couldn't archive ${unsaved.map((r) => r.id).join(", ")}; the pod stays up so nothing is lost`)
-    await this.gpu.provider.destroy(boxId)
+    this.gpuTerminating.set(boxId, null)
+    let detail: string | null = null
+    try {
+      await this.gpu.provider.destroy(boxId)
+    } finally {
+      detail = this.gpuTerminating.get(boxId) ?? null
+      this.gpuTerminating.delete(boxId)
+    }
     this.gpuTouchedAt.delete(boxId)
-    this.gpuPodEvent({ boxId, kind: "terminated", detail: "Its network volume stays.", actor: opts.actor, reason: opts.reason })
+    this.gpuPodEvent({ boxId, kind: "terminated", detail: `${detail ? `${detail}. ` : ""}Its network volume stays.`, actor: opts.actor, reason: opts.reason })
   }
 
   /**
