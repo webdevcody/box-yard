@@ -3,8 +3,10 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import { execSync } from "node:child_process"
 import { readFileSync } from "node:fs"
+import { selfUrl } from "./server/bind"
 
-const api = `http://localhost:${process.env.PORT ?? 3000}`
+// The API server listens on 127.0.0.1 with no password (server/bind.ts), so don't let "localhost" pick ::1.
+const api = selfUrl(process.env.HOST ?? "127.0.0.1", Number(process.env.PORT ?? 3000))
 
 // Shown in Settings > About. The commit is best effort: Docker builds may have no .git.
 const version = (JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as { version: string }).version

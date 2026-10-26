@@ -16,10 +16,11 @@ if [ -z "$TARGET" ]; then
 fi
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "Create .env first (cp .env.example .env)." >&2; exit 1; }
-if ! grep -q '^BOXYARD_PASSWORD=..*' .env; then
-  echo "⚠  BOXYARD_PASSWORD is empty in .env; anyone who finds the server can use it." >&2
-  read -r -p "Continue anyway? [y/N] " ok
-  [ "$ok" = "y" ] || exit 1
+# The container listens on 0.0.0.0, and with no password Box Yard refuses to start there (server/bind.ts).
+if ! grep -q '^BOXYARD_PASSWORD=..*' .env && ! grep -q '^BOXYARD_ALLOW_OPEN=1' .env; then
+  echo "✗ Set BOXYARD_PASSWORD in .env first: without it anyone who finds the server can use it, so Box Yard won't start." >&2
+  echo "  (Behind your own auth proxy? Set BOXYARD_ALLOW_OPEN=1 instead.)" >&2
+  exit 1
 fi
 
 PROFILE=""

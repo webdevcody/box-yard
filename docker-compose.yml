@@ -1,4 +1,4 @@
-# docker compose up -d            -> http://<host>:3000
+# docker compose up -d            -> http://<host>:3000 (needs BOXYARD_PASSWORD in .env, or BOXYARD_ALLOW_OPEN=1)
 # docker compose --profile https up -d   -> https://$BOXYARD_DOMAIN (Caddy gets a certificate)
 services:
   box-yard:
