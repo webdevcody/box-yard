@@ -254,6 +254,7 @@ export class HookEngine {
       prState: row.pr_state,
       prLabels: prLabels(row),
       quiet: isQuietRun(task),
+      agentWake: Boolean(event.agentWake),
     }
     const key = fireKey(event, row)
     if (!key) return []

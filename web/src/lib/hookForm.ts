@@ -45,6 +45,7 @@ export interface HookDraft {
   excludeLabels: string
   includeDrafts: boolean
   includeQuiet: boolean
+  includeAgentWakes: boolean
   template: HookTemplate | null
 }
 
@@ -65,6 +66,7 @@ export const emptyDraft = (): HookDraft => ({
   excludeLabels: "",
   includeDrafts: false,
   includeQuiet: false,
+  includeAgentWakes: false,
   template: null,
 })
 
@@ -77,6 +79,7 @@ const fromFilters = (f: HookFilters) => ({
   excludeLabels: (f.excludeLabels ?? []).join(", "),
   includeDrafts: Boolean(f.includeDrafts),
   includeQuiet: Boolean(f.includeQuiet),
+  includeAgentWakes: Boolean(f.includeAgentWakes),
 })
 
 export const draftFromHook = (h: Hook): HookDraft => ({
@@ -118,6 +121,7 @@ export function draftFilters(d: HookDraft, projectScoped: boolean): HookFilters 
     excludeLabels: splitLabels(d.excludeLabels),
     includeDrafts: d.includeDrafts,
     includeQuiet: d.includeQuiet,
+    includeAgentWakes: d.includeAgentWakes,
   })
 }
 
@@ -188,6 +192,7 @@ export function filterChips(f: HookFilters, projectName: (id: string) => string 
   if (f.excludeLabels?.length) out.push(`Not ${f.excludeLabels.join(", ")}`)
   if (f.includeDrafts) out.push("Drafts too")
   if (f.includeQuiet) out.push("Quiet runs too")
+  if (f.includeAgentWakes) out.push("Agent wakes too")
   return out
 }
 

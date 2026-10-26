@@ -7,6 +7,7 @@ import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
+import type { TurnTrigger } from "./turnTrigger.js"
 import type {
   AppNotification,
   Artifact,
@@ -79,6 +80,10 @@ export interface TurnFlags {
   hookIds?: string[]
   /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
   lastHookIds?: string[]
+  /** What started this turn (a retry keeps the retried turn's); "agent" turns can be quiet agent wakes. */
+  trigger?: TurnTrigger
+  /** The PR (url and state, prMark) as this turn started, to tell whether it changed during the turn. */
+  prBefore?: string
 }
 
 export interface TaskRow {
@@ -151,6 +156,8 @@ export interface TaskTurnRow {
   finished_at: number | null
   cost_usd: number | null
   error: string | null
+  /** What started the turn (server/turnTrigger.ts); null for turns from before it was recorded. */
+  trigger: TurnTrigger | null
 }
 
 interface ScheduleRunRow {
@@ -1181,19 +1188,21 @@ export class Store {
     routingRule: string | null
     routingReason: string | null
     status?: string
+    trigger?: TurnTrigger | null
   }) {
     this.db
       .prepare(
-        `INSERT INTO task_turns (id, task_id, turn_index, model, effort, routing_rule, routing_reason, status, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO task_turns (id, task_id, turn_index, model, effort, routing_rule, routing_reason, status, started_at, trigger)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            model = excluded.model,
            effort = excluded.effort,
            routing_rule = excluded.routing_rule,
            routing_reason = excluded.routing_reason,
-           status = excluded.status`,
+           status = excluded.status,
+           trigger = excluded.trigger`,
       )
-      .run(input.id, input.taskId, input.turnIndex, input.model, input.effort, input.routingRule, input.routingReason, input.status ?? "started", Date.now())
+      .run(input.id, input.taskId, input.turnIndex, input.model, input.effort, input.routingRule, input.routingReason, input.status ?? "started", Date.now(), input.trigger ?? null)
   }
 
   finishTaskTurn(id: string, patch: { status: string; costUsd?: number | null; error?: string | null }) {

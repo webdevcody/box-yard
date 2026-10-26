@@ -565,7 +565,7 @@ function HookEditor({
           <button type="button" onClick={() => setFiltersOpen((v) => !v)} className="flex min-h-11 w-full items-center gap-2 px-3 py-2 text-left text-sm text-zinc-300 sm:min-h-0" aria-expanded={filtersOpen}>
             {filtersOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
             Filters
-            <span className="text-xs text-zinc-500">{filterCount ? `${filterCount} set` : "every task"} · draft PRs{d.trigger === "schedule.run_finished" ? " and quiet runs" : ""} skipped unless included</span>
+            <span className="text-xs text-zinc-500">{filterCount ? `${filterCount} set` : "every task"} · draft PRs{d.trigger === "schedule.run_finished" ? " and quiet runs" : d.trigger === "task.finished" ? " and agent wakes" : ""} skipped unless included</span>
           </button>
           {filtersOpen && (
             <div className="space-y-4 border-t border-zinc-800/80 p-3">
@@ -613,6 +613,11 @@ function HookEditor({
                 {d.trigger === "schedule.run_finished" && (
                   <Check checked={d.includeQuiet} onChange={(v) => set("includeQuiet", v)}>
                     Include quiet no-op runs
+                  </Check>
+                )}
+                {d.trigger === "task.finished" && (
+                  <Check checked={d.includeAgentWakes} onChange={(v) => set("includeAgentWakes", v)}>
+                    Include turns another agent woke
                   </Check>
                 )}
               </div>

@@ -279,6 +279,22 @@ describe("the Hooks panel", () => {
     })
   })
 
+  it("lets a task.finished hook include turns another agent woke", async () => {
+    seed([hook({ id: "hook_b", name: "On finish", template: null, trigger: "task.finished", filters: {} })])
+    render(createElement(HooksPanel, { projectId: "prj_demo01" }))
+    click(button("On finish"))
+    const editor = document.querySelector('[data-testid="hook-editor"]')!
+    expect(editor.textContent).toContain("draft PRs and agent wakes skipped unless included")
+    click(button(/^Filters/, editor))
+    const box = [...editor.querySelectorAll("label")].find((l) => l.textContent?.includes("Include turns another agent woke"))!.querySelector("input")!
+    expect(box.checked).toBe(false)
+    click(box)
+    click(button("Save hook"))
+    await settle()
+    expect(requests.find((r) => r.method === "PATCH")?.body.filters).toEqual({ includeAgentWakes: true })
+    expect(filterChips({ includeAgentWakes: true })).toEqual(["Agent wakes too"])
+  })
+
   it("shows recent runs with status filters", () => {
     seed([hook()])
     location = memoryLocation({ path: "/projects/prj_demo01?tab=hooks&hooks=runs", record: true })

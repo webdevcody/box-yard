@@ -8,7 +8,7 @@ export const HOOK_TRIGGERS = ["task.finished", "task.pr_ready", "task.failed", "
 export type HookTrigger = (typeof HOOK_TRIGGERS)[number]
 
 export const TRIGGER_INFO: Record<HookTrigger, { label: string; description: string }> = {
-  "task.finished": { label: "Task finished", description: "A turn ended and the agent is resting: idle, PR ready, or done (mark_done)." },
+  "task.finished": { label: "Task finished", description: "A turn ended and the agent is resting: idle, PR ready, or done (mark_done). Turns only another agent's message started, that changed nothing, are skipped unless you include agent wakes." },
   "task.pr_ready": { label: "PR ready", description: "A turn ended with an open PR (fires once per head commit), whatever the status: PR ready, done or idle. Merged and closed PRs are skipped." },
   "task.failed": { label: "Task failed", description: "A turn failed, or the agent couldn't start." },
   "task.needs_input": { label: "Needs input", description: "The agent asked a question (ask_user) and is waiting for the answer." },
@@ -52,6 +52,11 @@ export interface HookFilters {
   includeDrafts?: boolean
   /** Quiet no-op schedule runs (shared/quiet.ts) are skipped unless this is on. */
   includeQuiet?: boolean
+  /**
+   * task.finished only: turns that only other agents' messages started (message_agent), and that changed nothing
+   * real (no new PR, merge, failure or question), are skipped unless this is on (server/turnTrigger.ts).
+   */
+  includeAgentWakes?: boolean
 }
 
 /** Built-in hooks you can create in one click. The server fills in their prompt. */
@@ -229,6 +234,8 @@ export interface HookSubject {
   prLabels: string[]
   /** A quiet no-op schedule run. */
   quiet: boolean
+  /** task.finished: a quiet agent wake (only other agents' messages started the turn, and nothing changed). */
+  agentWake?: boolean
 }
 
 export const MAX_REGEX_LENGTH = 300
@@ -247,7 +254,8 @@ const lower = (xs: string[] | undefined) => (xs ?? []).map((x) => x.trim().toLow
 
 /**
  * Why this hook ignores the event, or null when it should fire. Filters only narrow: an empty filter lets
- * everything through, except draft PRs and quiet runs, which need includeDrafts / includeQuiet.
+ * everything through, except draft PRs, quiet runs and quiet agent wakes, which need includeDrafts / includeQuiet /
+ * includeAgentWakes.
  */
 export function hookMismatch(hook: Pick<Hook, "enabled" | "trigger" | "projectId" | "filters">, s: HookSubject): string | null {
   const f = hook.filters
@@ -265,6 +273,7 @@ export function hookMismatch(hook: Pick<Hook, "enabled" | "trigger" | "projectId
   if (skip) return `the PR is labelled ${skip}`
   if (s.prState === "draft" && !f.includeDrafts && (PR_TRIGGERS.includes(s.trigger) || want.length)) return "the PR is a draft"
   if (s.quiet && !f.includeQuiet) return "it was a quiet no-op run"
+  if (s.agentWake && s.trigger === "task.finished" && !f.includeAgentWakes) return "only another agent's message started the turn"
   return null
 }
 
@@ -281,6 +290,7 @@ export function normalizeFilters(f: HookFilters | null | undefined): HookFilters
   if (list(f?.excludeLabels).length) out.excludeLabels = list(f?.excludeLabels)
   if (f?.includeDrafts) out.includeDrafts = true
   if (f?.includeQuiet) out.includeQuiet = true
+  if (f?.includeAgentWakes) out.includeAgentWakes = true
   return out
 }
 
