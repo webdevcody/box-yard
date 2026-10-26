@@ -40,6 +40,8 @@ let qc: QueryClient
 let requests: { method: string; url: string; body?: unknown }[]
 let section: SettingsSection
 let closed: number
+let spoken: string[]
+let played: number
 
 function render() {
   act(() =>
@@ -63,12 +65,23 @@ function render() {
 beforeEach(() => {
   requests = []
   closed = 0
+  spoken = []
+  played = 0
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => {
+    played++
+    return Promise.resolve()
+  })
   localStorage.clear()
   // A browser with speech, so the Voice controls are enabled.
-  vi.stubGlobal("SpeechSynthesisUtterance", class {})
+  vi.stubGlobal(
+    "SpeechSynthesisUtterance",
+    class {
+      constructor(readonly text = "") {}
+    },
+  )
   Object.defineProperty(window, "speechSynthesis", {
     configurable: true,
-    value: { speak() {}, cancel() {}, pause() {}, resume() {}, speaking: false, paused: false, getVoices: () => [], addEventListener() {}, removeEventListener() {} },
+    value: { speak: (u: { text?: string }) => void spoken.push(u.text ?? ""), cancel() {}, pause() {}, resume() {}, speaking: false, paused: false, getVoices: () => [], addEventListener() {}, removeEventListener() {} },
   })
   qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.agentSettings, settingsInfo())
@@ -98,6 +111,7 @@ afterEach(() => {
   host.remove()
   document.body.innerHTML = ""
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
   while (currentConfirm()) settleConfirm(currentConfirm()!.id, false)
 })
 
@@ -143,6 +157,22 @@ describe("Settings drafts", () => {
     expect(radio("openai").getAttribute("aria-checked")).toBe("true")
     expect(saveButton().disabled).toBe(true)
     expect(document.body.textContent).toContain("Saved")
+  })
+
+  it("changing the provider never speaks or plays anything, in the draft or on Save; only Test voice does", async () => {
+    expect(getVoiceSettings().enabled).toBe(true)
+    section = "voice"
+    render()
+    for (const p of ["openai", "elevenlabs", "openai"]) await click(radio(p))
+    await click(saveButton())
+    await click(radio("browser"))
+    await click(saveButton())
+    expect(writes().filter((r) => r.url === "/api/tts/settings")).toHaveLength(2)
+    // A silent unlock utterance ("") is fine; no line is read.
+    expect(spoken.filter(Boolean)).toEqual([])
+    expect(played).toBe(0)
+    await click(button("Test voice"))
+    expect(spoken.filter(Boolean)).toHaveLength(1)
   })
 
   it("browser-only voice choices stay out of localStorage until Save", async () => {
