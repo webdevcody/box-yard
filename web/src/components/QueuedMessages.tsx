@@ -155,14 +155,15 @@ const QueuedRow = memo(function QueuedRow({
     <div
       role="listitem"
       data-testid="queued-message"
-      className={cx("rounded-lg border border-dashed border-zinc-800 bg-zinc-900/30 px-3 py-2", delivering && "opacity-70")}
+      className={cx("@container rounded-lg border border-dashed border-zinc-800 bg-zinc-900/30 px-3 py-2", delivering && "opacity-70")}
     >
       <div className="flex min-h-6 items-center gap-1.5 text-[11px] text-zinc-500">
         <LineIcon icon={delivering ? Loader2 : Clock} className={cx("h-3 w-3", delivering && "animate-spin")} />
         <span className="font-semibold text-zinc-400">{delivering ? "Delivering" : "Queued"}</span>
         <span aria-hidden>·</span>
         <span className="min-w-0 truncate">{m.sender || ownerName}</span>
-        <span className="shrink-0 text-[10px] text-zinc-600">
+        {/* Too narrow for the time next to three 44px buttons (a 320px phone): it goes, so nothing overflows. */}
+        <span className="hidden shrink-0 text-[10px] text-zinc-600 @min-[17rem]:inline">
           <TimeAgo ts={m.createdAt} />
         </span>
         {!delivering && settled && !editing && (
