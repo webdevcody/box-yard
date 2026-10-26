@@ -56,14 +56,16 @@ function setup(o: { settings?: Partial<SendSoundSettings>; ctx?: FakeCtx | null;
   const settings = { ...DEFAULT_SEND_SOUND, ...o.settings }
   const vibrate = vi.fn()
   const state = { speaking: o.speaking ?? false }
+  const unlock = vi.fn()
   const sound = createSendSound({
     context: () => ctx as unknown as ToneContext,
+    unlock,
     settings: () => settings,
     speaking: () => state.speaking,
     now: () => clock.now,
     vibrate,
   })
-  return { sound, ctx: ctx!, clock, settings, vibrate, state }
+  return { sound, ctx: ctx!, clock, settings, vibrate, state, unlock }
 }
 
 describe("send sound: settings", () => {
@@ -120,10 +122,11 @@ describe("send sound: when it plays", () => {
   })
 
   it("is silent with the setting off, and doesn't even prime", () => {
-    const { sound, ctx, vibrate } = setup({ settings: { enabled: false } })
+    const { sound, ctx, vibrate, unlock } = setup({ settings: { enabled: false } })
     ctx.state = "suspended"
     sound.prime()
     expect(ctx.resumes).toBe(0)
+    expect(unlock).not.toHaveBeenCalled()
     ctx.state = "running"
     expect(sound.play("sent")).toBe(false)
     expect(sound.play("failed")).toBe(false)
@@ -178,10 +181,11 @@ describe("send sound: locked audio (phones, first visit)", () => {
     expect(ctx.tones).toEqual([])
   })
 
-  it("prime() inside the tap resumes the context; the answer then plays", async () => {
-    const { sound, ctx, clock } = setup()
+  it("prime() inside the tap runs the page's audio unlock and resumes the context; the answer then plays", async () => {
+    const { sound, ctx, clock, unlock } = setup()
     ctx.state = "suspended"
     sound.prime()
+    expect(unlock).toHaveBeenCalledOnce()
     expect(ctx.resumes).toBe(1)
     await Promise.resolve()
     clock.now += 120
