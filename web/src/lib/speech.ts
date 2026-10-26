@@ -18,6 +18,7 @@ import {
 import { CloudSynth, clipVoice, fetchTts, getTtsInfo, knownProvider, loadTtsInfo, logVoice, reportFailure, subscribeTtsInfo } from "./tts"
 import { PcmPlayer, audioContext } from "./pcm"
 import { audioElement, noteAudioBlocked, noteAudioPlayed, onActivation, unlockAudio } from "./audioUnlock"
+import { setSpeakingProbe } from "./sendSound"
 
 // ------------------------------------------------------------------ speech queue
 
@@ -474,6 +475,8 @@ export const useVoiceStatus = () => useSyncExternalStore(subscribeStatus, getSta
 let queueInstance: SpeechQueue | null = null
 let cloudSynth: CloudSynth | null = null
 let player: PcmPlayer | null = null
+// The send sound plays quieter under a voice line (lib/sendSound.ts).
+setSpeakingProbe(() => Boolean(queueInstance?.speaking))
 const pcmPlayer = () => (audioContext() ? (player ??= new PcmPlayer(audioContext)) : null)
 function queue(): SpeechQueue | null {
   if (!voiceSupported()) return null
