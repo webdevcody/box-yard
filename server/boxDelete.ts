@@ -4,7 +4,7 @@
 
 import { q } from "./providers/types.js"
 import { pushedCheck, pushedVerdict } from "./janitor.js"
-import type { BoxContents, BoxDeleteVerdict, PrState, TaskStatus } from "../shared/types.js"
+import { deleteAtRisk, type BoxContents, type BoxDeleteVerdict, type PrState, type TaskStatus } from "../shared/types.js"
 
 const TASK_MARK = "boxyard-task="
 const CHANGED_MARK = "boxyard-changed="
@@ -127,7 +127,7 @@ export function refusalsOf(busy: string | null, tasks: Pick<CheckedTask, "id" | 
 }
 
 /** Tasks Cody can delete past with "Delete anyway" (running agents are stopped instead, never overridden). */
-export const atRisk = (c: Pick<BoxContents, "tasks">) => c.tasks.filter((t) => t.verdict !== "ok" && t.verdict !== "running")
+export const atRisk = (c: Pick<BoxContents, "tasks">) => deleteAtRisk(c.tasks)
 
 /** "box_x · tiny-town" or "GPU pod #1 · vision · runpod-prj_x · vision": what a box is and whose work is on it. */
 export function boxHead(c: Pick<BoxContents, "boxId" | "label" | "tasks">, projectName: (id: string) => string): string {

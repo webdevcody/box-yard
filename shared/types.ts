@@ -437,6 +437,9 @@ export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot
  */
 export type BoxDeleteVerdict = "ok" | "running" | "queued" | "unpushed" | "dirty" | "unchecked"
 
+/** Tasks Cody can delete past with "Delete anyway": all but "ok", and running agents (those are stopped instead). */
+export const deleteAtRisk = <T extends { verdict: BoxDeleteVerdict }>(tasks: T[]): T[] => tasks.filter((t) => t.verdict !== "ok" && t.verdict !== "running")
+
 /** What Clear box and Delete box would touch, for their confirmations, and the safety check delete_box runs. */
 export interface BoxContents {
   boxId: string
