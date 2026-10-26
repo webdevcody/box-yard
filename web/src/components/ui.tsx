@@ -3,7 +3,7 @@ import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
+import { Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
@@ -41,6 +41,22 @@ export function LineIcon({ icon: Icon, className, box, label }: { icon: LucideIc
   return (
     <span className={cx("flex h-lh shrink-0 items-center", box)}>
       <Icon className={className} aria-label={label} aria-hidden={label ? undefined : true} />
+    </span>
+  )
+}
+
+/**
+ * The robot at the top left of the Coordinator and Captain chats. While the agent works it breathes (`.agent-working`
+ * in styles.css, a soft fade under prefers-reduced-motion) instead of showing a "thinking…" label; screen readers get
+ * "Working…" through the live region.
+ */
+export function AgentIcon({ busy }: { busy: boolean }) {
+  return (
+    <span className="flex shrink-0" title={busy ? "Working…" : undefined}>
+      <Bot data-testid="agent-icon" data-busy={busy || undefined} className={cx("h-4 w-4 text-yard-400", busy && "agent-working")} aria-hidden />
+      <span className="sr-only" aria-live="polite">
+        {busy ? "Working…" : ""}
+      </span>
     </span>
   )
 }

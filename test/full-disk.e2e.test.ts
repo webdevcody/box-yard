@@ -380,7 +380,8 @@ describe("archiving on a full disk", () => {
     git(work, "add", "-A")
     git(work, "commit", "-qm", "assets")
     stale(r, t.id)
-    const res = await fetch(`${r.base}/api/boxes/${t.boxId}`, { method: "DELETE" })
+    // Delete anyway, past the safety check's unpushed commit: it's the archive that refuses.
+    const res = await fetch(`${r.base}/api/boxes/${t.boxId}?override=1`, { method: "DELETE" })
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toBe(
       `Couldn't archive ${t.id}, so ${t.boxId} was not deleted: archive ${t.id}: workspace is too large to archive even without its files and the history GitHub has (Claude session, log, unpushed commits and uncommitted work are over 1 MB compressed; BOXYARD_ARCHIVE_MAX_MB raises the limit)`,

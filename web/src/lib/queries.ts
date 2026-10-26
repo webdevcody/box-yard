@@ -424,7 +424,7 @@ export const useRunPod = (o: { enabled?: boolean; poll?: boolean } = {}) =>
 /** GPU types RunPod offers on Secure Cloud, cheapest first. */
 export const useRunPodGpus = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.runpodGpus, queryFn: () => api<RunPodGpuOption[]>("/api/runpod/gpus"), enabled: o.enabled, staleTime: 5 * 60_000 })
-/** A RunPod action: save settings, build the image, stop a pod, keep it warm, delete a volume. */
+/** A RunPod action: save settings, build the image, keep a pod warm, delete a volume. */
 export function useRunPodAction<T>(title: string, call: (input: T) => Promise<RunPodStatus | RunPodImageBuild>) {
   const qc = useQueryClient()
   return useMutation({
@@ -1037,19 +1037,26 @@ export function useClearSnapshot() {
   })
 }
 
-/** Archive every workspace, then destroy the box at the provider. */
+/**
+ * Archive every workspace, then destroy the box at the provider, or terminate a RunPod GPU pod (its volume stays).
+ * `stopAgents` stops running agents first; `override` deletes past the safety check (Delete anyway).
+ */
 export function useDeleteBox() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { boxId: string; stopAgents: boolean }) =>
-      api<{ ok: true }>(`/api/boxes/${encodeURIComponent(input.boxId)}${input.stopAgents ? "?stopAgents=1" : ""}`, { method: "DELETE" }),
-    onSuccess: (_res, input) => {
+    mutationFn: (input: { boxId: string; stopAgents: boolean; override?: boolean }) => {
+      const query = new URLSearchParams({ ...(input.stopAgents ? { stopAgents: "1" } : {}), ...(input.override ? { override: "1" } : {}) }).toString()
+      return api<{ ok: true; kind: "box" | "pod"; label: string }>(`/api/boxes/${encodeURIComponent(input.boxId)}${query ? `?${query}` : ""}`, { method: "DELETE" })
+    },
+    onSuccess: (res, input) => {
       qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => list?.filter((b) => b.id !== input.boxId))
-      toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
+      if (res.kind === "pod") toast.info(`Terminated ${res.label}`, "Every workspace was archived first and its network volume stays. Its tasks start a new pod on their next message.")
+      else toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: keys.boxes })
       void qc.invalidateQueries({ queryKey: keys.tasks })
+      void qc.invalidateQueries({ queryKey: keys.runpod })
     },
   })
 }
