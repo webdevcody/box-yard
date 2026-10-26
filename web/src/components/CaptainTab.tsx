@@ -36,6 +36,8 @@ import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll } from "./StickyScroll"
+import { SelectionToTask } from "./SelectionToTask"
+import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
 import { PublishedRow, SLIM_TITLE_LINK } from "./PublishedNotices"
@@ -86,6 +88,8 @@ export function CaptainTab({ project }: { project: Project }) {
   }, [rows, hidden, index])
 
   const busy = Boolean(state.data?.busy)
+  // Selected Captain output becomes a task request to this Captain.
+  const selectionSource = useMemo<SelectionTaskSource>(() => ({ kind: "captain", project: { id: project.id, name: project.name } }), [project.id, project.name])
   const lastActive = Math.max(list.at(-1)?.createdAt ?? 0, state.data?.usage.updatedAt ?? 0) || null
 
   return (
@@ -103,33 +107,35 @@ export function CaptainTab({ project }: { project: Project }) {
         </div>
       )}
 
-      <StickyScroll
-        count={list.length}
-        resetKey={project.id}
-        restoreKey="captain"
-        hidden={tail.hidden}
-        onLoadEarlier={tail.loadEarlier}
-        className="px-3 py-4 sm:px-4"
-        contentClassName="mx-auto max-w-3xl space-y-3"
-      >
-        {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
-        {tail.visible.map((row) => (
-          <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={submit} />
-        ))}
-        {busy && (
-          <div className="flex items-center gap-2 px-1 py-1 text-xs text-sky-400" aria-live="polite">
-            <span className="flex gap-1">
-              {[0, 1, 2].map((i) => (
-                <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
-              ))}
-            </span>
-            Captain is working…
-          </div>
-        )}
-        {queued.map((m) => (
-          <InboundMessage key={m.id} m={m} />
-        ))}
-      </StickyScroll>
+      <SelectionToTask source={selectionSource} onPrompt={submit}>
+        <StickyScroll
+          count={list.length}
+          resetKey={project.id}
+          restoreKey="captain"
+          hidden={tail.hidden}
+          onLoadEarlier={tail.loadEarlier}
+          className="px-3 py-4 sm:px-4"
+          contentClassName="mx-auto max-w-3xl space-y-3"
+        >
+          {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
+          {tail.visible.map((row) => (
+            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={submit} />
+          ))}
+          {busy && (
+            <div className="flex items-center gap-2 px-1 py-1 text-xs text-sky-400" aria-live="polite">
+              <span className="flex gap-1">
+                {[0, 1, 2].map((i) => (
+                  <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
+                ))}
+              </span>
+              Captain is working…
+            </div>
+          )}
+          {queued.map((m) => (
+            <InboundMessage key={m.id} m={m} />
+          ))}
+        </StickyScroll>
+      </SelectionToTask>
 
       <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} />
     </section>
