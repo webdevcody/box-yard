@@ -80,10 +80,24 @@ const TASKS = [
 
 const contentsFor = (boxId: string, running: number): BoxContents => ({
   boxId,
-  tasks: TASKS.filter((t) => t.boxId === boxId).map((t) => ({ id: t.id, title: t.title, projectId: t.projectId, status: t.status, running: t.status === "working", uncommitted: t.status === "done" ? 3 : 0, archived: t.status === "done" })),
+  kind: "box",
+  label: boxId,
+  tasks: TASKS.filter((t) => t.boxId === boxId).map((t) => ({
+    id: t.id,
+    title: t.title,
+    projectId: t.projectId,
+    status: t.status,
+    running: t.status === "working",
+    uncommitted: t.status === "done" ? 3 : 0,
+    archived: t.status === "done",
+    prState: null,
+    ...(t.status === "working" ? { verdict: "running" as const, detail: "an agent is running on it" } : { verdict: "ok" as const, detail: "no repo, so its folder only lives on the box; its archive is up to date" }),
+  })),
   running,
   diskUsedBytes: 4.5 * GB,
   diskBytes: 2.9 * GB,
+  busy: null,
+  refusals: [],
 })
 const CONTENTS: Record<string, BoxContents> = { "low-box": contentsFor("low-box", 1), "idle-box": contentsFor("idle-box", 0), "busy-box": contentsFor("busy-box", 2) }
 let REPLY: Record<string, unknown> = { ok: true }
@@ -400,6 +414,50 @@ describe("Clear box and Delete box", () => {
     await submit()
     expect(requests).toContainEqual({ url: "/api/boxes/idle-box", method: "DELETE" })
     expect(dialog()!.querySelector("[role=alert]")!.textContent).toBe("Couldn't archive task_x, so idle-box was not deleted.")
+  })
+
+  it("shows each task's safety check, and asks before deleting past it", async () => {
+    const before = CONTENTS["idle-box"]!
+    CONTENTS["idle-box"] = {
+      ...before,
+      tasks: [
+        { id: "task_ok", title: "Merged work", projectId: "prj_a", status: "done", running: false, uncommitted: 0, archived: false, prState: "merged", verdict: "ok", detail: "PR merged and nothing unpushed: needs no archive" },
+        { id: "task_wip", title: "Half done", projectId: "prj_a", status: "done", running: false, uncommitted: 2, archived: false, prState: "open", verdict: "dirty", detail: "uncommitted changes (2 files) and its PR is open" },
+      ],
+      refusals: ['task_wip "Half done": uncommitted changes (2 files) and its PR is open'],
+    }
+    try {
+      render()
+      await menuItem("idle-box", "Delete box…")
+      const d = dialog()!
+      const checks = [...d.querySelectorAll("[data-testid=safety-check] li")].map((li) => [li.getAttribute("data-verdict"), li.textContent])
+      expect(checks).toEqual([
+        ["ok", "Merged work · done · PR merged and nothing unpushed: needs no archive"],
+        ["dirty", "Half done · done · uncommitted changes (2 files) and its PR is open"],
+      ])
+      expect(d.querySelector("[data-testid=safety-failed]")!.textContent).toContain("Coordinator and Captains can't delete this box")
+      const input = d.querySelector<HTMLInputElement>("input[aria-label='Box name']")!
+      await act(async () => {
+        const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!
+        set.call(input, "idle-box")
+        input.dispatchEvent(new Event("input", { bubbles: true }))
+      })
+      expect(confirmButton().textContent).toBe("Delete anyway…")
+      await submit()
+      // The first press only lists what's at risk; nothing was sent.
+      expect(requests.some((r) => r.method === "DELETE")).toBe(false)
+      const risk = d.querySelector("[data-testid=risk-confirm]")!.textContent!
+      expect(risk).toContain("Delete anyway? This task doesn't pass the safety check")
+      expect(risk).toContain("Half done · uncommitted changes (2 files) and its PR is open")
+      expect(risk).not.toContain("Merged work")
+      expect(confirmButton().textContent).toBe("Delete anyway")
+      await submit()
+      expect(requests).toContainEqual({ url: "/api/boxes/idle-box?override=1", method: "DELETE" })
+      expect(dialog()).toBeNull()
+    } finally {
+      CONTENTS["idle-box"] = before
+      for (const t of currentToasts()) dismiss(t.id)
+    }
   })
 
   it("disables the actions with a reason while an operation runs", () => {
