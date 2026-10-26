@@ -2145,7 +2145,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   /** A box id or GPU pod id this caller may delete. */
   const deletableBox = (ref: string): string => {
     const id = ref.trim()
-    if (!isGpuBox(id) && !store.getBox(id)) throw new Error(`No box "${ref}". Use pool_status.`)
+    if (!isGpuBox(id) && !store.getBox(id) && !tasks.history.boxIds().includes(id)) throw new Error(`No box "${ref}". Use pool_status.`)
     if (scopeId && !tasks.onlyProjectOn(id, scopeId)) {
       const on = tasks.projectsOnBox(id).map(projectName)
       throw outOfScope(`box ${id} ${on.length ? `holds work of ${on.join(", ")}` : "holds no work of your project"}, and a Captain can only delete a box that holds nothing but its own project's`)
@@ -2174,7 +2174,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { box: string; reason: string }) => {
       const id = deletableBox(a.box)
       const r = await tasks.destroyBox(id, { actor: deleter, reason: a.reason })
-      if (r.alreadyGone) return ok(`${id} was already gone at the provider; Box Yard dropped its records.`)
+      if (r.alreadyGone) return ok(`${id} is already gone (deleted earlier, or at the provider): nothing left to delete. box_history has what happened to it.`)
       return ok({
         [r.kind === "pod" ? "terminated" : "deleted"]: r.label === id ? id : `${r.label} (${id})`,
         ...(r.kind === "pod" ? { volume: "kept" } : {}),
