@@ -2,7 +2,7 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, u
 import { createPortal, flushSync } from "react-dom"
 import { AlertTriangle, FileText, Loader2, Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
-import { composerMaxHeight } from "../lib/composer"
+import { composerMaxHeight, isTouchDevice } from "../lib/composer"
 import { useSettings } from "../lib/queries"
 import { Button, cx } from "./ui"
 import { formatSize, isImage } from "./Attachments"
@@ -42,6 +42,8 @@ export const COMPOSER_FOOTER =
  * The message box shared by the orchestrator chat and task threads: Enter
  * sends, Shift+Enter adds a line, files can be picked, dropped or pasted.
  * `onSubmit` gets the text and the uploaded files; the box then clears itself.
+ * If it returns the send's promise, a failed send puts the text and files back (focus
+ * never left), and a successful one on a touch device blurs the box to close the keyboard.
  * The draft lives here, not in the parent, so typing re-renders only this box
  * and never the (long) message list next to it.
  */
@@ -53,7 +55,7 @@ export function Composer({
   panelRef,
   handleRef,
 }: {
-  onSubmit: (text: string, attachments: Attachment[]) => void
+  onSubmit: (text: string, attachments: Attachment[]) => void | Promise<unknown>
   placeholder: string
   className?: string
   textareaRef?: Ref<HTMLTextAreaElement>
@@ -173,10 +175,26 @@ export function Composer({
     // Still listening: stop, let the last words land, then send (dictation calls submit again).
     if (dictation.active) return dictation.stopAndSend()
     if (!canSend) return
-    onSubmit(value.trim(), ready)
+    const text = value.trim()
+    const sent = files
+    const pending = onSubmit(text, ready)
     setValue("")
-    files.forEach((f) => f.preview && URL.revokeObjectURL(f.preview))
     setFiles([])
+    const done = () => sent.forEach((f) => f.preview && URL.revokeObjectURL(f.preview))
+    if (!pending) return done()
+    pending.then(
+      () => {
+        done()
+        // The on-screen keyboard closes; the list (pinned by the send) follows the viewport as it grows.
+        if (isTouchDevice() && input.current && document.activeElement === input.current) input.current.blur()
+      },
+      // Back in the box, unless something new was typed meanwhile.
+      () => {
+        setValue((v) => v || text)
+        if (filesRef.current.length) done()
+        else setFiles(sent)
+      },
+    )
   }
   const submitRef = useRef(submit)
   submitRef.current = submit
