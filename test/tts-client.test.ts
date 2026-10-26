@@ -230,6 +230,32 @@ describe("CloudSynth under the speech queue", () => {
     expect(r.fallbacks).toEqual([])
   })
 
+  it("a finished line leaves nothing on the shared element: a later error there (the tap-to-unlock clip) doesn't read it again", async () => {
+    const r = rig()
+    r.q.say("Last reply.", OPTS)
+    await flush()
+    r.audio.finish()
+    await flush()
+    expect(r.q.speaking).toBe(false)
+    expect([r.audio.onplaying, r.audio.onended, r.audio.onerror]).toEqual([null, null, null])
+    // What a tap did before: swap in the silent unlock clip, which some phones fail to play.
+    r.audio.onerror?.({})
+    await flush()
+    expect(r.os.spoken).toEqual([])
+    expect(r.fallbacks).toEqual([])
+    expect(r.requests.map((x) => x.text)).toEqual(["Last reply."])
+  })
+
+  it("stopping a line doesn't take a preview's handlers off the shared element", async () => {
+    const r = rig()
+    r.q.say("Line.", OPTS)
+    await flush()
+    const previewEnded = () => {}
+    r.audio.onended = previewEnded // a voice preview took the element over
+    r.q.stop()
+    expect(r.audio.onended).toBe(previewEnded)
+  })
+
   it("speaks with the browser voice when the provider is Browser / OS", () => {
     const r = rig("browser")
     r.q.say("Hello.", OPTS)
