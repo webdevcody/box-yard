@@ -380,7 +380,7 @@ describe("SpeechQueue", () => {
     expect(q.pending).toBe(2)
     // Nothing is tried while blocked, and the watchdog doesn't fire on the line that was put back.
     q.say("c", OPTS)
-    vi.advanceTimersByTime(60_000)
+    vi.advanceTimersByTime(30_000)
     expect(synth.spoken).toHaveLength(1)
     q.unblock()
     expect(synth.spoken.map((u) => u.text)).toEqual(["a", "a"])

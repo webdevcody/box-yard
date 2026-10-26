@@ -269,14 +269,14 @@ describe("CloudSynth under the speech queue", () => {
     expect(r.q.speaking).toBe(false)
   })
 
-  it("drops lines that waited for a tap longer than five minutes", async () => {
+  it("drops lines that waited for a tap longer than a minute", async () => {
     vi.useFakeTimers()
     const r = rig()
     r.audio.playError = { name: "NotAllowedError" }
     r.q.say("old", OPTS)
     await vi.advanceTimersByTimeAsync(0)
     expect(r.q.isBlocked).toBe(true)
-    vi.advanceTimersByTime(6 * 60_000)
+    vi.advanceTimersByTime(2 * 60_000)
     r.q.say("new", OPTS)
     r.audio.playError = null
     r.q.unblock()

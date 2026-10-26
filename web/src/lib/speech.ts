@@ -15,7 +15,7 @@ import {
   voiceAllowed,
   type VoiceSettings,
 } from "./voice"
-import { CloudSynth, clipVoice, fetchTts, knownProvider, loadTtsInfo, logVoice, reportFailure, subscribeTtsInfo } from "./tts"
+import { CloudSynth, clipVoice, fetchTts, getTtsInfo, knownProvider, loadTtsInfo, logVoice, reportFailure, subscribeTtsInfo } from "./tts"
 import { PcmPlayer, audioContext } from "./pcm"
 import { audioElement, noteAudioBlocked, noteAudioPlayed, onActivation, unlockAudio } from "./audioUnlock"
 
@@ -65,8 +65,11 @@ interface Timers {
 export const MAX_QUEUE = 3
 /** Chrome drops `onend` now and then; give up on an utterance after its expected length plus this. */
 const WATCHDOG_SLACK_MS = 4000
-/** Lines waiting for a tap (audio blocked) are still said after it, unless they're older than this. */
-export const BLOCKED_MAX_AGE_MS = 5 * 60_000
+/**
+ * Lines waiting for a tap (audio blocked) are still said after it, unless they're older than this: any
+ * tap unlocks, and a tap minutes later (a radio in Settings) shouldn't read out an old reply.
+ */
+export const BLOCKED_MAX_AGE_MS = 60_000
 
 type Item = { chunks: string[]; opts: SpeakOptions; at: number }
 
@@ -446,6 +449,20 @@ function refreshStatus() {
 settingsListeners.add(refreshStatus)
 // Switching to or from a cloud voice changes whether this browser can speak at all.
 subscribeTtsInfo(refreshStatus)
+// Lines that waited for a tap were made for the voice that was saved then: a new provider or voice drops them.
+const savedVoice = () => {
+  const i = getTtsInfo()
+  const p = knownProvider()
+  return !i || !p ? null : p === "elevenlabs" ? `elevenlabs:${i.settings.elevenlabs.voiceId}` : p === "openai" ? `openai:${i.settings.openai.voice}` : p
+}
+let lastVoice = savedVoice()
+subscribeTtsInfo(() => {
+  const v = savedVoice()
+  if (v === lastVoice) return
+  const was = lastVoice
+  lastVoice = v
+  if (was !== null && queueInstance?.isBlocked) queueInstance.stop()
+})
 
 const subscribeStatus = (l: Listener) => {
   statusListeners.add(l)

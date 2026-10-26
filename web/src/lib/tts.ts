@@ -492,6 +492,8 @@ export class CloudSynth implements SynthLike {
 
   cancel() {
     this.seq++
+    // The queue forgot the line (stop(), a new voice): a clip kept for the tap goes with it.
+    this.kept = null
     this.ctl?.abort()
     this.stream?.stop()
     this.release()

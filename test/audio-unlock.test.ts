@@ -156,6 +156,39 @@ describe("voice on a phone (live wiring)", () => {
     expect(tts.getVoiceLog().at(-1)).toMatchObject({ path: "elevenlabs", outcome: "played", voice: "A9evEp8yGjv4c3WsIKuY" })
   })
 
+  it("a new voice saved while a line waits for a tap drops the line, so the tap doesn't read it in the old one", async () => {
+    const { speech, tts, bodies, tap } = await phone()
+    await tts.loadTtsInfo()
+    speech.voiceChatMessage({ id: "m1", role: "assistant", content: "PR 30 merged.", createdAt: 1 } as never)
+    speech.voiceChatTurn({ startedAt: 0, replyId: "m1" })
+    await flush()
+    await flush()
+    expect(tts.getVoiceLog().map((e) => e.outcome)).toEqual(["blocked"])
+    tts.setTtsInfo({ ...elevenlabs, settings: { ...elevenlabs.settings, elevenlabs: { ...elevenlabs.settings.elevenlabs, voiceId: "JBFqnCBsd6RMkjVDRZzb" } } })
+    tap("pointerup", "touch")
+    await flush()
+    const el = PhoneAudio.all[0]!
+    expect(el.played.filter((s) => s.startsWith("blob:"))).toEqual([])
+    expect(bodies).toHaveLength(1)
+  })
+
+  it("a line that waited more than a minute isn't read out by a later tap", async () => {
+    const { speech, tts, bodies, tap } = await phone()
+    await tts.loadTtsInfo()
+    const now = vi.spyOn(Date, "now")
+    now.mockReturnValue(1_000_000)
+    speech.voiceChatMessage({ id: "m1", role: "assistant", content: "PR 30 merged.", createdAt: 1 } as never)
+    speech.voiceChatTurn({ startedAt: 0, replyId: "m1" })
+    await flush()
+    await flush()
+    now.mockReturnValue(1_000_000 + 61_000)
+    tap("pointerup", "touch")
+    await flush()
+    expect(PhoneAudio.all[0]!.played.filter((s) => s.startsWith("blob:"))).toEqual([])
+    expect(bodies).toHaveLength(1)
+    now.mockRestore()
+  })
+
   it("a line before the settings have loaded waits for them instead of using the browser voice", async () => {
     const { speech, bodies, spoken, tap } = await phone()
     tap("pointerup", "touch")
