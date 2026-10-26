@@ -132,6 +132,7 @@ export function NewTaskPopover({
   quote,
   placeholder = "What should the agent do?",
   scope: scopeProp,
+  align = "end",
   onStart,
   onClose,
   onMore,
@@ -147,6 +148,8 @@ export function NewTaskPopover({
   placeholder?: string
   /** Where the draft is kept; defaults to the project's. */
   scope?: string
+  /** "end": its right edge on the trigger's (a header button); "center": centred under it (a selection). */
+  align?: Align
   /** Takes the (possibly empty) text instead of creating a task; there's no project picker then. */
   onStart?: (text: string) => void
   /** `refocus`: put focus back on the trigger (Esc, the close button); not after a click elsewhere. */
@@ -194,7 +197,7 @@ export function NewTaskPopover({
     return () => document.removeEventListener("pointerdown", down, true)
   }, [narrow, trigger])
 
-  const pos = useAnchor(trigger, panel, !narrow)
+  const pos = useAnchor(trigger, panel, !narrow, align)
 
   // Focus the text with the caret after a kept draft.
   useLayoutEffect(() => {
@@ -335,17 +338,19 @@ function trapKeys(e: ReactKeyboardEvent, root: HTMLElement | null, close: () => 
   }
 }
 
+type Align = "end" | "center"
+
 /**
  * Fixed-position style that puts the panel under the trigger, its right edge on the trigger's (or its left edge
- * on the trigger's when there's no room to the left), inside the window, and above the trigger when there's more
- * room there. Follows scrolling and resizes.
+ * on the trigger's when there's no room to the left; or centred on it), inside the window, and above the trigger
+ * when there's more room there. Follows scrolling and resizes.
  */
-function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean): CSSProperties {
+function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, align: Align): CSSProperties {
   // Placed from the first render: a hidden panel couldn't take focus.
-  const [style, setStyle] = useState<CSSProperties>(() => anchorStyle(trigger.current, 0))
+  const [style, setStyle] = useState<CSSProperties>(() => anchorStyle(trigger.current, 0, align))
   useLayoutEffect(() => {
     if (!on) return
-    const place = () => setStyle(anchorStyle(trigger.current, panel.current?.offsetHeight ?? 0))
+    const place = () => setStyle(anchorStyle(trigger.current, panel.current?.offsetHeight ?? 0, align))
     place()
     window.addEventListener("resize", place)
     window.addEventListener("scroll", place, true)
@@ -353,17 +358,17 @@ function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTML
       window.removeEventListener("resize", place)
       window.removeEventListener("scroll", place, true)
     }
-  }, [on, trigger, panel])
+  }, [on, trigger, panel, align])
   return style
 }
 
-function anchorStyle(trigger: HTMLElement | null, height: number): CSSProperties {
+function anchorStyle(trigger: HTMLElement | null, height: number, align: Align): CSSProperties {
   const vw = document.documentElement.clientWidth || window.innerWidth
   const vh = window.innerHeight
   const width = Math.min(WIDTH, vw - 2 * EDGE)
   const t = trigger?.getBoundingClientRect() ?? { left: vw - EDGE - width, right: vw - EDGE, top: EDGE, bottom: EDGE }
-  let left = t.right - width
-  if (left < EDGE) left = t.left
+  let left = align === "center" ? t.left + (t.right - t.left - width) / 2 : t.right - width
+  if (left < EDGE && align === "end") left = t.left
   left = Math.max(EDGE, Math.min(left, vw - EDGE - width))
   const below = vh - t.bottom - GAP - EDGE
   const above = t.top - GAP - EDGE

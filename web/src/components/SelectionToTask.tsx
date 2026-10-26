@@ -120,6 +120,7 @@ export function SelectionToTask({
             quote={draft.text}
             placeholder="Additional instructions (optional)"
             scope={selectionScope(draft.text)}
+            align="center"
             defaultProjectId={source.project?.id}
             onStart={(instructions) => {
               onPrompt(buildSelectionTaskPrompt({ source, selectedText: draft.text, instructions, ownerName }))
