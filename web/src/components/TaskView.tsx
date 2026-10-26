@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, type Ref } from "react"
 import { Link } from "wouter"
 import { Bot, MessageCircleQuestion, Users, Webhook } from "lucide-react"
 import {
@@ -14,7 +14,7 @@ import {
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
 import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown, WaitIcon } from "./ui"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
@@ -41,11 +41,21 @@ export function TaskView({ id }: { id: string }) {
   const sendChat = useSendChat()
   const [showTools, setShowTools] = useStoredFlag("boxyard:show-tool-calls")
   const panel = useRef<HTMLDivElement>(null)
+  const thread = useRef<StickyScrollHandle>(null)
   const task = tasks.data
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
-  const submit = useCallback((content: string, attachments: Attachment[]) => send.mutate({ content, attachments }), [send.mutate])
-  const sendFollowUp = useCallback((content: string) => send.mutate({ content, attachments: [] }), [send.mutate])
+  // A message to a busy task shows as a queued row at the end of the transcript: either way, scroll to it.
+  const submit = useCallback(
+    (content: string, attachments: Attachment[]) => {
+      const sending = send.mutateAsync({ content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      thread.current?.scrollToEnd()
+      return sending
+    },
+    [send.mutateAsync],
+  )
+  const sendFollowUp = useCallback((content: string) => submit(content, []), [submit])
   const startFromSelection = useCallback(
     (content: string) => sendChat.mutate({ id: newClientId("chat"), content, attachments: [] }),
     [sendChat.mutate],
@@ -86,6 +96,7 @@ export function TaskView({ id }: { id: string }) {
       )}
 
       <TaskThread
+        handle={thread}
         id={id}
         showTools={showTools}
         working={running ? (task.status === "starting" ? "Preparing the box…" : "Agent is working…") : null}
@@ -112,6 +123,7 @@ export function TaskView({ id }: { id: string }) {
 
 /** The transcript. Its own component so header updates (status, context meter) don't re-render it. */
 const TaskThread = memo(function TaskThread({
+  handle,
   id,
   showTools,
   working,
@@ -119,6 +131,7 @@ const TaskThread = memo(function TaskThread({
   onStartFromSelection,
   onFollowUp,
 }: {
+  handle: Ref<StickyScrollHandle>
   id: string
   showTools: boolean
   working: string | null
@@ -141,6 +154,7 @@ const TaskThread = memo(function TaskThread({
   return (
     <SelectionToTask source={selectionSource} onPrompt={onStartFromSelection}>
       <StickyScroll
+        handle={handle}
         count={shown.length}
         resetKey={id}
         restoreKey="task"

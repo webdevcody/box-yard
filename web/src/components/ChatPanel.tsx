@@ -7,7 +7,7 @@ import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
 import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
@@ -51,6 +51,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const box = useRef<HTMLTextAreaElement>(null)
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
+  const list = useRef<StickyScrollHandle>(null)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
@@ -66,11 +67,14 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
-      send.mutate({ id: newClientId("chat"), content, attachments })
+      const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      list.current?.scrollToEnd()
       markTryFirstDone()
       box.current?.focus()
+      return sending
     },
-    [send.mutate],
+    [send.mutateAsync],
   )
 
   const messages = chat.data ?? NO_MESSAGES
@@ -177,7 +181,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
       <div className={showSetup ? "hidden" : "contents"}>
         <SelectionToTask source={selectionSource} onPrompt={submit}>
-          <StickyScroll count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+          <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
             {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
               <TryFirst
                 ready={!setup.needed}

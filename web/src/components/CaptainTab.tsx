@@ -35,7 +35,7 @@ import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { SelectionToTask } from "./SelectionToTask"
 import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
@@ -52,6 +52,7 @@ export function CaptainTab({ project }: { project: Project }) {
   const send = useSendCaptainMessage(project.id)
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
+  const thread = useRef<StickyScrollHandle>(null)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
@@ -59,10 +60,13 @@ export function CaptainTab({ project }: { project: Project }) {
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
-      send.mutate({ id: newClientId("chat"), content, attachments })
+      const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      thread.current?.scrollToEnd()
       box.current?.focus()
+      return sending
     },
-    [send.mutate],
+    [send.mutateAsync],
   )
   const toggleGroup = useCallback(
     (id: string) =>
@@ -109,6 +113,7 @@ export function CaptainTab({ project }: { project: Project }) {
 
       <SelectionToTask source={selectionSource} onPrompt={submit}>
         <StickyScroll
+          handle={thread}
           count={list.length}
           resetKey={project.id}
           restoreKey="captain"
