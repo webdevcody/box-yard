@@ -1788,7 +1788,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             "API keys and tokens (group credentials, voice.*ApiKey) show only as set / not set.",
           inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
         },
-        safe(async (a: { group?: SettingsGroup }) => ok({ settings: settingsTools.list(a.group) })),
+        safe(async (a: { group?: SettingsGroup }) => okCompact({ settings: settingsTools.list(a.group) })),
       ),
     )
     coordinatorOnly(

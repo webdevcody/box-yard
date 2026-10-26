@@ -11,6 +11,7 @@ import {
   Minimize2,
   NotebookPen,
   Paperclip,
+  SlidersHorizontal,
   Webhook,
   XCircle,
   type LucideIcon,
@@ -29,5 +30,6 @@ export const NOTICE_ICON: Record<NoticeKind, { icon: LucideIcon; className: stri
   warning: { icon: AlertTriangle, className: "text-amber-400", label: "Warning" },
   compaction: { icon: Minimize2, className: "text-zinc-500", label: "Compacted" },
   notes: { icon: NotebookPen, className: "text-amber-300", label: "Project notes" },
+  settings: { icon: SlidersHorizontal, className: "text-sky-300", label: "Settings changed" },
   info: { icon: Info, className: "text-zinc-500", label: "Notice" },
 }

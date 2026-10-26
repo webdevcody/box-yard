@@ -9,6 +9,7 @@ import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { CREDENTIAL_INFO, CREDENTIAL_KEYS, type CredentialKey, type CredentialStatus } from "../shared/setup.js"
 import { TTS_DEFAULTS, TTS_KEY_ENV, type CloudProvider } from "../shared/tts.js"
 import type { Settings } from "../shared/types.js"
+import { withOwner } from "../shared/owner.js"
 
 export const SETTINGS_GROUPS = ["settings", "runpod", "voice", "runner", "credentials", "server"] as const
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number]
@@ -54,6 +55,7 @@ export interface SettingView {
   /** An API key or token: the value is only "set" / "not set". */
   secret?: true
   writable: boolean
+  note?: string
 }
 
 export interface SettingChange {
@@ -174,7 +176,7 @@ export class SettingsTools {
       rows.push({ key: `voice.${p}ApiKey`, group: "voice", value: keys[p].state === "set" ? "set" : "not set", source: keys[p].source, envVar: TTS_KEY_ENV[p], secret: true, writable: false })
     }
     for (const [k, s] of Object.entries(this.d.server())) {
-      rows.push({ key: `server.${k}`, group: "server", value: s.value, source: "env", envVar: s.envVar, envLocked: true, writable: false, ...(s.note ? { allowed: s.note } : {}) })
+      rows.push({ key: `server.${k}`, group: "server", value: s.value, source: "env", envVar: s.envVar, envLocked: true, writable: false, ...(s.note ? { note: s.note } : {}) })
     }
     return rows
   }
@@ -209,7 +211,7 @@ export class SettingsTools {
    * (a new workerSize moves the size-default box limits).
    */
   async update(patch: Record<string, unknown>): Promise<SettingChange[]> {
-    if (!isPlainObject(patch) || !Object.keys(patch).length) throw new Error("The patch is empty: pass at least one setting, e.g. { \"maxBoxes\": 10 }.")
+    if (!isPlainObject(patch) || !Object.keys(patch).length) throw new Error('The patch is empty: pass at least one setting, e.g. { "maxBoxes": 10 }.')
     const entries = this.entries()
     const locked = new Map(this.readOnly().map((r) => [r.key, r]))
     const errors: string[] = []
@@ -274,7 +276,10 @@ export class SettingsTools {
         if (!parsed.success) errors.push(`${name}: ${parsed.error.issues.map((i) => i.message).join("; ")}`)
       }
     }
-    if (errors.length) throw new Error(`Nothing was changed. ${errors.length === 1 ? "Problem" : `${errors.length} problems`}:\n- ${errors.join("\n- ")}`)
+    if (errors.length) {
+      const text = `Nothing was changed. ${errors.length === 1 ? "Problem" : `${errors.length} problems`}:\n- ${errors.join("\n- ")}`
+      throw new Error(withOwner(text, this.d.settings.get().ownerName))
+    }
 
     const before = this.snapshot()
     if (Object.keys(groups.settings).length) this.d.save.settings(groups.settings as Partial<Settings>)
@@ -282,8 +287,15 @@ export class SettingsTools {
     if (Object.keys(groups.voice).length) this.d.save.voice(groups.voice as z.infer<typeof ttsPatch>)
     if (groups.runner) await this.d.save.runner(groups.runner)
     const after = this.snapshot()
+    // The keys asked for first, in the patch's order, then the ones that followed from them.
+    const asked = [...next.keys()]
+    const rank = (k: string) => {
+      const i = asked.findIndex((a) => k === a || k.startsWith(`${a}.`))
+      return i < 0 ? asked.length : i
+    }
     return Object.keys(after)
       .filter((k) => !same(before[k], after[k]))
+      .sort((a, b) => rank(a) - rank(b))
       .map((k) => ({ key: k, before: before[k], after: after[k] }))
   }
 }
