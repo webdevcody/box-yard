@@ -167,9 +167,9 @@ const finished = (r: Running, projectId: string) =>
     const j = r.yard.tasks.snapshotJob(projectId)
     return j && j.status !== "running" ? j : null
   }, `the snapshot for ${projectId} to finish`)
-/** Delete a project's box so its next task needs a new one. */
+/** Delete a project's box so its next task needs a new one (Delete anyway: its workspaces hold uncommitted files). */
 const dropBox = async (r: Running, boxId: string) => {
-  await call(r, "DELETE", `/api/boxes/${boxId}`)
+  await call(r, "DELETE", `/api/boxes/${boxId}?override=1`)
   await waitFor(() => !r.yard.store.getBox(boxId), `box ${boxId} to go`)
 }
 

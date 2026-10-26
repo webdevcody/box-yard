@@ -10,7 +10,8 @@ import type { BoxCleanup, BoxContents, BoxInfo, Project, Task } from "../shared/
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Clear box and Delete box from the Boxes page: every workspace is archived before anything is removed,
-// both refuse while agents are running, and "stop agents and …" stops them first.
+// both refuse while agents are running, and "stop agents and …" stops them first. Delete box also refuses work the
+// safety check flags until Cody chooses Delete anyway (override=1).
 
 interface Running {
   yard: BoxYard
@@ -98,8 +99,15 @@ describe("delete box", () => {
     expect(contents.running).toBe(0)
     expect(contents.tasks.map((x) => [x.id, x.status, x.archived])).toEqual([[t.id, "done", false]])
     expect(contents.tasks[0]!.uncommitted).toBe(1)
+    // A commit no remote has, plus an uncommitted file: the safety check holds the box until Cody deletes anyway.
+    expect(contents.tasks.map((x) => [x.verdict, x.detail])).toEqual([["unpushed", "1 unpushed commit and uncommitted changes"]])
+    expect(contents.refusals).toEqual([`${t.id} "first": 1 unpushed commit and uncommitted changes`])
+    const refused = await send(r, "DELETE", `/api/boxes/${boxId}`)
+    expect(refused.status).toBe(409)
+    expect(refused.data.error).toBe(`${boxId} was not deleted: ${t.id} "first": 1 unpushed commit and uncommitted changes. Choose Delete anyway to archive and delete it.`)
+    expect((await boxes(r)).map((b) => b.id)).toContain(boxId)
 
-    await call(r, "DELETE", `/api/boxes/${boxId}`)
+    await call(r, "DELETE", `/api/boxes/${boxId}?override=1`)
     expect((await boxes(r)).map((b) => b.id)).not.toContain(boxId)
     expect(fs.existsSync(r.provider.root(boxId))).toBe(false)
     const after = await getTask(r, t.id)
