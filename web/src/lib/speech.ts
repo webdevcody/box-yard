@@ -576,6 +576,26 @@ export function speakNow(text: string) {
   q.say(text, options(getVoiceSettings()))
 }
 
+/**
+ * Say a line in the browser's own voice with these (possibly unsaved) settings, whatever provider is saved: Settings ›
+ * Voice's Test while the draft picks the browser voice.
+ */
+export function speakBrowserPreview(text: string, s: VoiceSettings) {
+  const sy = synth()
+  if (!sy || typeof SpeechSynthesisUtterance === "undefined") return
+  unlockVoice()
+  queue()?.stop()
+  const o = options(s)
+  const u = new SpeechSynthesisUtterance(text)
+  if (o.voice) u.voice = o.voice
+  if (o.lang) u.lang = o.lang
+  u.rate = o.rate
+  u.pitch = o.pitch
+  u.volume = o.volume
+  sy.cancel()
+  sy.speak(u as unknown as UtteranceLike)
+}
+
 export function stopSpeech() {
   queueInstance?.stop()
 }

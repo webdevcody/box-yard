@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, createElement } from "react"
+import { act, createElement, useMemo } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { SpeechQueue, type SynthLike, type UtteranceLike } from "../web/src/lib/speech.js"
@@ -9,7 +9,8 @@ import { filterVoices, voiceMeta } from "../web/src/lib/ttsVoices.js"
 import { PcmPlayer, pcm16ToFloat, pcmRate, pcmToWav, type AudioContextLike, type PcmCallbacks, type PcmPlayerLike, type PcmStream } from "../web/src/lib/pcm.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { keys } from "../web/src/lib/queries.js"
-import { TtsSection } from "../web/src/components/TtsSettings.js"
+import { TtsSection, ttsPatch, useTtsDraft } from "../web/src/components/TtsSettings.js"
+import { SettingsDraftContext, updateParts, type DraftPart, type DraftRegistry } from "../web/src/lib/settingsDraft.js"
 import { OPENAI_SPEED, TTS_DEFAULTS, type TtsInfo, type TtsProvider } from "../shared/tts.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -338,6 +339,32 @@ describe("CloudSynth under the speech queue", () => {
     r.setProvider("browser")
     r.q.say("Local.", OPTS)
     expect(r.log.at(-1)).toMatchObject({ path: "browser", outcome: "played", text: "Local." })
+  })
+
+  it("a finished line leaves nothing on the shared element: a later error there (the tap-to-unlock clip) doesn't read it again", async () => {
+    const r = rig()
+    r.q.say("Last reply.", OPTS)
+    await flush()
+    r.audio.finish()
+    await flush()
+    expect(r.q.speaking).toBe(false)
+    expect([r.audio.onplaying, r.audio.onended, r.audio.onerror]).toEqual([null, null, null])
+    // What a tap did before: swap in the silent unlock clip, which some phones fail to play.
+    r.audio.onerror?.({})
+    await flush()
+    expect(r.os.spoken).toEqual([])
+    expect(r.fallbacks).toEqual([])
+    expect(r.requests.map((x) => x.text)).toEqual(["Last reply."])
+  })
+
+  it("stopping a line doesn't take a preview's handlers off the shared element", async () => {
+    const r = rig()
+    r.q.say("Line.", OPTS)
+    await flush()
+    const previewEnded = () => {}
+    r.audio.onended = previewEnded // a voice preview took the element over
+    r.q.stop()
+    expect(r.audio.onended).toBe(previewEnded)
   })
 
   it("speaks with the browser voice when the provider is Browser / OS", () => {
@@ -737,11 +764,23 @@ describe("Settings › Voice provider section", () => {
     act(() => root.unmount())
     host.remove()
   })
+  // The section as the Settings dialog hosts it: its draft registers here, and the test plays the dialog's Save.
+  let parts: Record<string, DraftPart> = {}
+  const Section = () => createElement(TtsSection, { fid: (k: string) => `t-${k}`, draft: useTtsDraft(), volume: 1 })
+  const Dialog = () => {
+    const registry = useMemo<DraftRegistry>(() => ({ update: (id, part) => void (parts = updateParts(parts, id, part)) }), [])
+    return createElement(SettingsDraftContext.Provider, { value: registry }, createElement(Section))
+  }
   const render = async (i: TtsInfo) => {
     qc.setQueryData(keys.tts, i)
-    await act(async () => root.render(createElement(QueryClientProvider, { client: qc }, createElement(TtsSection, { fid: (k: string) => `t-${k}` }))))
+    await act(async () => root.render(createElement(QueryClientProvider, { client: qc }, createElement(Dialog))))
     await act(flush)
   }
+  const click = async (el: Element | null | undefined) => {
+    await act(async () => void (el as HTMLButtonElement).click())
+    await act(flush)
+  }
+  const saveAll = () => act(async () => void (await Promise.all(Object.values(parts).map((p) => p.save()))))
 
   it("shows a set key masked with Replace / Remove / Test, and never the key itself", async () => {
     await render(info({ provider: "elevenlabs" }, { elevenlabs: { state: "set", source: "ui" } }))
@@ -781,15 +820,59 @@ describe("Settings › Voice provider section", () => {
     expect(host.textContent).toContain("0.25× to 1.5×")
   })
 
-  it("picking a provider or a voice saves it", async () => {
+  it("picking a provider or a voice is a draft: nothing is saved until Save", async () => {
+    parts = {}
     await render(info({ provider: "browser" }, { elevenlabs: { state: "set", source: "ui" } }))
-    await act(async () => void host.querySelector<HTMLButtonElement>('[data-provider="elevenlabs"]')!.click())
-    await act(flush)
-    expect(puts).toEqual([{ provider: "elevenlabs" }])
-    await render(info({ provider: "elevenlabs" }, { elevenlabs: { state: "set", source: "ui" } }))
+    const radio = (p: string) => host.querySelector<HTMLButtonElement>(`[data-provider="${p}"]`)!
+    await click(radio("elevenlabs"))
+    // The radio moves (and the ElevenLabs rows open), but nothing went to the server.
+    expect(radio("elevenlabs").getAttribute("aria-checked")).toBe("true")
+    expect(host.querySelector('[data-voice-picker="elevenlabs"]')).not.toBeNull()
+    expect(puts).toEqual([])
+    expect(parts.tts?.count).toBe(1)
+    expect(parts.tts?.section).toBe("voice")
+    // Picking it again is no change; going back to the saved one makes the draft clean.
+    await click(radio("elevenlabs"))
+    expect(parts.tts?.count).toBe(1)
+    await click(radio("browser"))
+    expect(parts.tts).toBeUndefined()
+
+    await click(radio("elevenlabs"))
     const clone = [...host.querySelectorAll('[data-voice-picker] [role="radio"]')].find((b) => b.textContent?.includes("My clone"))!
-    await act(async () => void (clone as HTMLButtonElement).click())
-    await act(flush)
-    expect(puts.at(-1)).toEqual({ elevenlabs: { voiceId: "own1", voiceName: "My clone" } })
+    await click(clone)
+    expect(puts).toEqual([])
+    expect(parts.tts?.count).toBe(3)
+    await saveAll()
+    expect(puts).toEqual([{ provider: "elevenlabs", elevenlabs: { voiceId: "own1", voiceName: "My clone" } }])
+  })
+
+  it("a typed key and a Remove wait for Save too, sent with the rest", async () => {
+    parts = {}
+    await render(info({ provider: "openai" }, { elevenlabs: { state: "set", source: "ui" } }))
+    const input = host.querySelector<HTMLInputElement>('input[type="password"]')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!
+    await act(async () => {
+      setter.call(input, " sk-new ")
+      input.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    expect(puts).toEqual([])
+    expect(parts.tts?.count).toBe(1)
+    await click(host.querySelector('[data-provider="elevenlabs"]'))
+    // ElevenLabs' saved key: Remove marks it, Keep it undoes that.
+    const button = (label: string) => [...host.querySelectorAll("button")].find((b) => b.textContent?.trim() === label)
+    await click(button("Remove"))
+    expect(host.querySelector("[data-key-removing]")).not.toBeNull()
+    await click(button("Keep it"))
+    expect(host.querySelector("[data-key-masked]")).not.toBeNull()
+    await click(button("Remove"))
+    expect(puts).toEqual([])
+    await saveAll()
+    expect(puts).toEqual([{ provider: "elevenlabs", openaiApiKey: "sk-new", elevenlabsApiKey: null }])
+  })
+
+  it("ttsPatch sends only what changed", () => {
+    const saved = TTS_DEFAULTS
+    expect(ttsPatch({ settings: saved, keys: {} }, saved)).toEqual({})
+    expect(ttsPatch({ settings: { ...saved, openai: { ...saved.openai, speed: 1.25 } }, keys: { openai: "  " } }, saved)).toEqual({ openai: { speed: 1.25 } })
   })
 })

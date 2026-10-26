@@ -364,6 +364,12 @@ describe("first-run setup: This computer", () => {
     routes["PUT /api/setup/runner"] = () => ({ ...setup(), runner: { choice: "box", default: "box" } })
     act(() => dialog.querySelector<HTMLButtonElement>("[data-runner-choice=box]")!.click())
     await settle()
+    // A draft until the dialog's Save.
+    expect(dialog.querySelector<HTMLElement>("[data-runner-choice=box]")!.getAttribute("aria-pressed")).toBe("true")
+    expect(calls.find((c) => c.url === "/api/setup/runner")).toBeUndefined()
+    for (const f of dialog.querySelectorAll("form")) f.noValidate = true
+    act(() => byText("Save", dialog)!.click())
+    await settle()
     expect(calls.find((c) => c.url === "/api/setup/runner")).toMatchObject({ method: "PUT", body: { runner: "box" } })
     expect(dialog.querySelector("[data-testid=local-prereqs]")).toBeNull()
   })

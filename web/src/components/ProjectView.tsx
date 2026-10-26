@@ -689,12 +689,22 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
+  // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, notesMax, notesTokens])
+  const [opened] = useState(snapshot)
+  const dirty = snapshot !== opened
+  const cancel = async () => {
+    if (dirty && !(await confirmDialog({ title: "Discard unsaved changes?", body: `Your edits to ${project.name}'s settings haven't been saved.`, confirmLabel: "Discard", cancelLabel: "Keep editing", danger: true })))
+      return
+    onDone()
+  }
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={async (e) => {
         e.preventDefault()
+        if (!dirty) return
         if (runner === "local" && project.runner !== "local") {
           const ok = await confirmDialog({
             title: "Run agents on this computer?",
@@ -899,10 +909,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <Trash2 className="h-4 w-4" /> Delete project
         </Button>
         <div className="flex gap-2 max-sm:flex-col-reverse sm:ml-auto">
-          <Button type="button" variant="ghost" onClick={onDone}>
+          {dirty && (
+            <span className="self-center text-xs text-amber-300" role="status">
+              Unsaved changes
+            </span>
+          )}
+          <Button type="button" variant="ghost" onClick={() => void cancel()}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary">
+          <Button type="submit" variant="primary" disabled={!dirty} data-testid="project-settings-save">
             Save
           </Button>
         </div>
