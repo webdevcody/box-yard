@@ -18,6 +18,8 @@ import { LEGACY_POOL_DEFAULTS, sizeCapacities } from "../lib/capacity"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
+import { SendSoundRow } from "./SendSoundSettings"
+import { setSendSound, useSendSound } from "../lib/sendSound"
 import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { RunPodPanel } from "./RunPodSettings"
@@ -1176,6 +1178,8 @@ function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
     setSaved(now)
     setDenied(want && !now)
   })
+  // Sound on send is saved in this browser; the row previews the draft.
+  const [sound, setSound] = useDraft("send-sound", "notifications", useSendSound(), setSendSound)
   return (
     <Panel section="notifications">
       <Row
@@ -1204,6 +1208,7 @@ function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
           {on ? "On" : "Off"}
         </label>
       </Row>
+      <SendSoundRow fid={fid} value={sound} onChange={setSound} />
     </Panel>
   )
 }

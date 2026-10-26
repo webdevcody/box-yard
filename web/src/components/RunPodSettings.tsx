@@ -9,7 +9,8 @@ import { confirmDialog } from "../lib/confirm"
 import { useRunPod, useRunPodAction, useSetup } from "../lib/queries"
 import { useDraft } from "../lib/settingsDraft"
 import { CREDENTIAL_INFO } from "../../../shared/setup"
-import { RUNPOD_CLOUDS, RUNPOD_STOCK_IMAGE, type RunPodCloud, type RunPodImageBuild, type RunPodSettings, type RunPodStatus } from "../../../shared/runpod"
+import { RUNPOD_CLOUDS, RUNPOD_STOCK_IMAGE, type RunPodCloud, type RunPodImageBuild, type RunPodPodInfo, type RunPodSettings, type RunPodStatus } from "../../../shared/runpod"
+import { BoxActionDialog } from "./BoxActionDialog"
 import { GpuTypePicker } from "./GpuTypePicker"
 import { CredentialField } from "./Setup"
 import { Panel, Row } from "./SettingsDialog"
@@ -236,9 +237,9 @@ function NumbersRows({ fid, form, set }: { fid: (k: string) => string; form: Run
 
 const numbersOf = (s: RunPodSettings) => Object.fromEntries(NUMBERS.map((n) => [n.key, String(s[n.key])])) as Record<Numeric, string>
 
-/** This Box Yard's pods at RunPod now, with Stop and Keep warm. */
+/** This Box Yard's pods at RunPod now, with Terminate and Keep warm. */
 function PodsRow({ status }: { status: RunPodStatus }) {
-  const stop = useRunPodAction<string>("Couldn't stop the pod", (boxId) => api<RunPodStatus>(`/api/runpod/pods/${encodeURIComponent(boxId)}/stop`, { body: {} }))
+  const [terminating, setTerminating] = useState<RunPodPodInfo | null>(null)
   const warm = useRunPodAction<{ boxId: string; minutes: number | null }>("Couldn't keep the pod warm", ({ boxId, minutes }) =>
     api<RunPodStatus>(`/api/runpod/pods/${encodeURIComponent(boxId)}/keep-warm`, { body: { minutes } }),
   )
@@ -246,7 +247,7 @@ function PodsRow({ status }: { status: RunPodStatus }) {
   return (
     <Row
       label="Pods"
-      help={`Running now, at ${usd(total)}/hr together. A project gets up to its Max boxes pods, within the caps; only its pod #1 mounts its network volume. Each pod stops after ${status.settings.idleMinutes} idle minutes; Keep warm holds it up between follow-ups. Stopping archives every workspace first and never stops a running agent.`}
+      help={`Running now, at ${usd(total)}/hr together. A project gets up to its Max boxes pods, within the caps; only its pod #1 mounts its network volume. Each pod stops after ${status.settings.idleMinutes} idle minutes; Keep warm holds it up between follow-ups. Terminate runs the delete safety check, archives every workspace first and keeps the network volume; it asks before stopping a running agent.`}
     >
       {!status.pods.length ? (
         <p className="text-xs text-zinc-500">No pods running.</p>
@@ -286,28 +287,15 @@ function PodsRow({ status }: { status: RunPodStatus }) {
                     Don't keep warm
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={p.running > 0}
-                  loading={stop.isPending && stop.variables === p.boxId}
-                  onClick={async () => {
-                    const ok = await confirmDialog({
-                      title: `Stop ${p.projectName ?? p.projectId}'s GPU pod #${p.index}?`,
-                      body: `Its workspaces are archived first${p.index === 1 ? ", and the project's network volume stays" : ""}. The next task that needs it starts a new pod.`,
-                      confirmLabel: "Stop pod",
-                      danger: true,
-                    })
-                    if (ok) stop.mutate(p.boxId)
-                  }}
-                >
-                  <Power className="h-3 w-3" /> Stop
+                <Button size="sm" variant="danger" onClick={() => setTerminating(p)}>
+                  <Power className="h-3 w-3" /> Terminate…
                 </Button>
               </div>
             </li>
           ))}
         </ul>
       )}
+      {terminating && <BoxActionDialog pod={terminating} action="delete" onClose={() => setTerminating(null)} />}
     </Row>
   )
 }

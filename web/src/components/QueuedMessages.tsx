@@ -10,6 +10,7 @@ import { Clock, Loader2, Pencil, SendHorizontal, Trash2 } from "lucide-react"
 import type { CaptainMessage, ChatMessage, QueuedMessage } from "../../../shared/types"
 import { keys, useOwnerName, useQueuedChatActions, useQueuedMessageActions, useSendNowState, useSendQueuedNow, useTaskQueue } from "../lib/queries"
 import { isQueued } from "../lib/queued"
+import { primeSendSound } from "../lib/sendSound"
 import { UNDO_MS } from "../lib/inbox"
 import { navigate } from "wouter/use-browser-location"
 import { QUEUE_HASH, REVEAL_QUEUE_EVENT, revealTaskQueue } from "../lib/reveal"
@@ -87,6 +88,7 @@ export const TaskQueue = memo(function TaskQueue({ taskId }: { taskId: string })
   const mergingPr = sendNowState?.mergingPr ?? null
   const onSendNow = useCallback(
     (m: QueuedMessage) => {
+      primeSendSound()
       if (interrupts) setConfirming(m.id)
       else sendNow.mutate({})
     },
@@ -94,6 +96,7 @@ export const TaskQueue = memo(function TaskQueue({ taskId }: { taskId: string })
   )
   const onConfirmSendNow = useCallback(() => {
     setConfirming(null)
+    primeSendSound()
     sendNow.mutate({ allowMergeInterrupt: mergingPr !== null })
   }, [mergingPr, sendNow.mutate])
   const onCancelSendNow = useCallback(() => setConfirming(null), [])

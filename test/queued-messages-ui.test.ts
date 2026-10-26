@@ -189,7 +189,7 @@ describe("Captain tab: a message sent mid-turn", () => {
   const cap = (id: string, role: CaptainMessage["role"], content: string, createdAt: number, meta: Record<string, unknown> | null = null): CaptainMessage => ({ id, projectId: project.id, role, content, meta, createdAt })
   const state = (busy: boolean): CaptainState => ({ projectId: project.id, busy, usage: { tokens: null, window: null, updatedAt: null }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
 
-  it("waits under 'Captain is working…', labelled queued, then sits after the reply it was typed over", async () => {
+  it("waits under the working dots, labelled queued, then sits after the reply it was typed over", async () => {
     qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
     for (const k of [keys.tasks, keys.schedules, keys.artifacts, keys.boxes]) qc.setQueryData(k, [])
     qc.setQueryData(keys.projects, [project])
@@ -202,7 +202,7 @@ describe("Captain tab: a message sent mid-turn", () => {
     const inbound = () => [...host.querySelectorAll<HTMLElement>('[data-testid="captain-inbound"]')]
     const list = host.querySelector("[data-testid=captain-chat] .space-y-3")!
     const texts = () => [...list.children].map((el) => el.textContent!)
-    expect(texts().at(-2)).toContain("Captain is working…")
+    expect(list.children[list.children.length - 2].getAttribute("data-testid")).toBe("captain-working")
     expect(texts().at(-1)).toContain("also check the docs")
     expect(inbound().at(-1)!.querySelector("[data-testid=queued-label]")).not.toBeNull()
 

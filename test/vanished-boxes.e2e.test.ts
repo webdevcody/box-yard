@@ -208,7 +208,8 @@ describe("Delete, Clear and Clean up on a box the provider no longer has", () =>
     const { t, boxId } = await idleOnBox(r)
     r.provider.deleteInConsole(boxId)
 
-    expect(await send(r, "DELETE", `/api/boxes/${boxId}`)).toEqual({ status: 200, data: { ok: true } })
+    const gone = { ok: true, boxId, kind: "box", label: boxId, archived: [], fromGitHub: [], alreadyGone: true }
+    expect(await send(r, "DELETE", `/api/boxes/${boxId}`)).toEqual({ status: 200, data: gone })
     expect(boxIds(r)).not.toContain(boxId)
     expect(r.yard.store.getBox(boxId)).toBeNull()
     expect((await getTask(r, t.id)).boxId).toBeNull()
@@ -218,7 +219,7 @@ describe("Delete, Clear and Clean up on a box the provider no longer has", () =>
 
     // Again: nothing left to delete, still fine, and no new history row.
     const rows = r.yard.tasks.history.list({ boxId }).length
-    expect(await send(r, "DELETE", `/api/boxes/${boxId}`)).toEqual({ status: 200, data: { ok: true } })
+    expect(await send(r, "DELETE", `/api/boxes/${boxId}`)).toEqual({ status: 200, data: gone })
     expect(r.yard.tasks.history.list({ boxId })).toHaveLength(rows)
     // A box Box Yard never had is still a 404.
     expect((await send(r, "DELETE", "/api/boxes/never-was-12345")).status).toBe(404)

@@ -15,6 +15,7 @@ import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
+import { playSendSound } from "./sendSound"
 import type {
   BoxCleanup,
   BoxContents,
@@ -221,13 +222,17 @@ export function useSendQueuedNow(taskId: string) {
     mutationFn: (o: { allowMergeInterrupt?: boolean }) =>
       api<{ task: Task; delivery: SendNowDelivery; queued: number }>(`/api/tasks/${taskId}/queue/send-now`, { method: "POST", body: o }),
     onSuccess: ({ delivery, queued }) => {
+      playSendSound()
       const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
       if (delivery === "interrupted") toast.info("Sending now", `Stopping the current step. The next turn gets ${them}, in order.`)
       else if (delivery === "after_compaction") toast.info("Sending after compaction", `The agent is compacting its context; ${them} go out right after.`)
       else if (delivery === "already_delivered") toast.info("Already on their way", "A turn has taken the queued messages.")
       else toast.info("Sending", `No step to stop: ${them} go out as the agent's next turn starts.`)
     },
-    onError: fail("Couldn't send now"),
+    onError: (err) => {
+      playSendSound("failed")
+      fail("Couldn't send now")(err)
+    },
     onSettled: () => void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) }),
   })
 }
@@ -419,7 +424,7 @@ export const useRunPod = (o: { enabled?: boolean; poll?: boolean } = {}) =>
 /** GPU types RunPod offers on Secure Cloud, cheapest first. */
 export const useRunPodGpus = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.runpodGpus, queryFn: () => api<RunPodGpuOption[]>("/api/runpod/gpus"), enabled: o.enabled, staleTime: 5 * 60_000 })
-/** A RunPod action: save settings, build the image, stop a pod, keep it warm, delete a volume. */
+/** A RunPod action: save settings, build the image, keep a pod warm, delete a volume. */
 export function useRunPodAction<T>(title: string, call: (input: T) => Promise<RunPodStatus | RunPodImageBuild>) {
   const qc = useQueryClient()
   return useMutation({
@@ -756,9 +761,13 @@ export function useCreateTask() {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't start the task")(err)
     },
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (task) => {
+      playSendSound()
+      qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+    },
   })
 }
 
@@ -783,9 +792,11 @@ export function useSendTaskMessage(taskId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't send the message")(err)
     },
     onSuccess: (task) => {
+      playSendSound()
       qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
       void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) })
     },
@@ -1026,19 +1037,26 @@ export function useClearSnapshot() {
   })
 }
 
-/** Archive every workspace, then destroy the box at the provider. */
+/**
+ * Archive every workspace, then destroy the box at the provider, or terminate a RunPod GPU pod (its volume stays).
+ * `stopAgents` stops running agents first; `override` deletes past the safety check (Delete anyway).
+ */
 export function useDeleteBox() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { boxId: string; stopAgents: boolean }) =>
-      api<{ ok: true }>(`/api/boxes/${encodeURIComponent(input.boxId)}${input.stopAgents ? "?stopAgents=1" : ""}`, { method: "DELETE" }),
-    onSuccess: (_res, input) => {
+    mutationFn: (input: { boxId: string; stopAgents: boolean; override?: boolean }) => {
+      const query = new URLSearchParams({ ...(input.stopAgents ? { stopAgents: "1" } : {}), ...(input.override ? { override: "1" } : {}) }).toString()
+      return api<{ ok: true; kind: "box" | "pod"; label: string }>(`/api/boxes/${encodeURIComponent(input.boxId)}${query ? `?${query}` : ""}`, { method: "DELETE" })
+    },
+    onSuccess: (res, input) => {
       qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => list?.filter((b) => b.id !== input.boxId))
-      toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
+      if (res.kind === "pod") toast.info(`Terminated ${res.label}`, "Every workspace was archived first and its network volume stays. Its tasks start a new pod on their next message.")
+      else toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: keys.boxes })
       void qc.invalidateQueries({ queryKey: keys.tasks })
+      void qc.invalidateQueries({ queryKey: keys.runpod })
     },
   })
 }
@@ -1068,9 +1086,13 @@ export function useSendChat() {
     onError: (err, _v, ctx) => {
       ctx?.undo()
       qc.setQueryData(keys.chatBusy, false)
+      playSendSound("failed")
       fail("Couldn't send to the Coordinator")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<ChatMessage[]>(keys.chat, (list) => settleOptimistic(list, msg)),
+    onSuccess: (msg) => {
+      playSendSound()
+      qc.setQueryData<ChatMessage[]>(keys.chat, (list) => settleOptimistic(list, msg))
+    },
   })
 }
 
@@ -1097,9 +1119,13 @@ export function useSendCaptainMessage(projectId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      playSendSound("failed")
       fail("Couldn't message the Captain")(err)
     },
-    onSuccess: (msg) => qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => settleOptimistic(list, msg)),
+    onSuccess: (msg) => {
+      playSendSound()
+      qc.setQueryData<CaptainMessage[]>(keys.captainMessages(projectId), (list) => settleOptimistic(list, msg))
+    },
   })
 }
 

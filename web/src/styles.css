@@ -150,3 +150,34 @@ body.resizing {
 body.resizing iframe {
   pointer-events: none;
 }
+
+/* An agent's header icon while it works (AgentIcon in ui.tsx): a slow breathe with a soft amber glow. */
+@keyframes agent-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgb(251 191 36 / 0));
+  }
+  50% {
+    transform: scale(1.15);
+    filter: drop-shadow(0 0 4px rgb(251 191 36 / 0.7));
+  }
+}
+@keyframes agent-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.agent-working {
+  animation: agent-breathe 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No movement: just a soft fade. */
+  .agent-working {
+    animation: agent-fade 2.4s ease-in-out infinite;
+  }
+}
