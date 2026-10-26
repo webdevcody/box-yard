@@ -315,6 +315,14 @@ export interface QueuedMessage {
   updatedAt: number
 }
 
+/**
+ * What "Send now" did (POST /api/tasks/:id/queue/send-now, deliver_queued_now, send_to_task interrupt):
+ * "interrupted": the current turn is being stopped and the next one delivers the queue; "next_turn": no turn
+ * had to be stopped (none was running, or one is starting and takes them all); "after_compaction": a /compact
+ * turn runs first; "already_delivered": a turn already took them (nothing was queued any more).
+ */
+export type SendNowDelivery = "interrupted" | "next_turn" | "after_compaction" | "already_delivered"
+
 export type TaskMessageRole = "user" | "assistant" | "tool" | "event" | "agent"
 
 export interface TaskMessage {

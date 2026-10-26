@@ -141,6 +141,7 @@ const schemas = {
   }),
   message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds, runsOn: z.enum(RUNNERS).optional() }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
+  sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
@@ -606,6 +607,12 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/queue/:inputId/restore", (req, res) => {
     res.json(tasks.restoreQueued(req.params.id!, req.params.inputId!))
+  })
+  // Send now: stop the current turn (like Stop) so the next one delivers every queued message. 409 mid-merge
+  // unless allowMergeInterrupt.
+  api.post("/tasks/:id/queue/send-now", async (req, res) => {
+    const body = parse(schemas.sendNow, req.body ?? {})
+    res.json(await tasks.sendQueuedNow(req.params.id!, { by: "cody", allowMergeInterrupt: body.allowMergeInterrupt }))
   })
   api.post("/tasks/:id/compact", (req, res) => {
     res.json(tasks.compactTask(req.params.id!))
