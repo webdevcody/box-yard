@@ -71,7 +71,18 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 | `UPSTASH_BOX_API_KEY` | Worker boxes. Without it, agents run in folders on this machine (`BOX_PROVIDER=local`). |
 | `GITHUB_TOKEN` | Clone private repos, push branches, open PRs. A fine-grained token with Contents and Pull requests (read/write) is enough. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and Box Yard. |
-| `BOXYARD_PASSWORD` | Web UI password. Leave it empty on localhost, and always set it when the app is public. |
+| `BOXYARD_PASSWORD` | Web UI password. Leave it empty to keep Box Yard on this computer; set it to open it to your phone, LAN or Tailscale (see below). |
+
+**Who can reach it.** With no `BOXYARD_PASSWORD` there's no login, so Box Yard listens on `127.0.0.1` and only this computer can open it. Set a password and it listens on `0.0.0.0`, and the startup log lists every URL it answers on, LAN and Tailscale (`100.64.0.0/10`) included:
+
+```
+  Box Yard is running on:
+    Local:      http://localhost:3000
+    LAN:        http://192.168.1.20:3000
+    Tailscale:  http://100.101.102.103:3000
+```
+
+`HOST` picks the address yourself (e.g. `HOST=100.101.102.103` for Tailscale only). A `HOST` other devices can reach with no password refuses to start, unless you set `BOXYARD_ALLOW_OPEN=1` (only behind your own auth, since anyone who reaches it can drive your agents). The dev server (`./yard dev`, port 5173) stays on localhost either way. Changes to these take a restart.
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
 
@@ -89,7 +100,7 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 - On a paid Upstash plan the box is keep-alive. On the free plan keep-alive isn't allowed, so it falls back to a normal box: while agents are running or queued, the server holds its own box awake, and when the yard is idle it lets go. Opening the URL wakes a paused box, and the init command restarts the server, which picks running agents back up.
 - Talk to a deployed yard from the terminal with `YARD_URL=<url> YARD_PASSWORD=<password> npx tsx scripts/yardctl.ts say "..."` (also `status`, `wait`, `task <id>`, `chat`).
 
-**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume.
+**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume. It needs `BOXYARD_PASSWORD` in `.env`: the container listens on `0.0.0.0` (the image sets `HOST=0.0.0.0`), so without a password it won't start (or set `BOXYARD_ALLOW_OPEN=1`). `deploy-box` always sets a password (yours from `.env`, the last deploy's, or a generated one).
 
 ## How it works
 
