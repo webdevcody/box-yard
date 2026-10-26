@@ -89,10 +89,18 @@ body {
 .prose-chat code {
   @apply rounded bg-zinc-800 px-1 py-0.5 font-mono text-[0.85em];
 }
+/* A fenced code block (CodeBlock in ui.tsx): the code scrolls sideways on its own, and the copy button has a
+   gutter at the right, outside the scroller, so it never covers a line however far it's scrolled. */
+.prose-chat .code-block {
+  @apply my-2 flex max-w-full rounded-lg bg-zinc-900;
+}
 .prose-chat pre {
   @apply my-2 max-w-full overflow-x-auto rounded-lg bg-zinc-900 p-3 text-xs;
   scrollbar-width: thin;
   scrollbar-color: rgb(63 63 70) transparent;
+}
+.prose-chat .code-block > pre {
+  @apply my-0 min-w-0 flex-1 bg-transparent pr-1.5;
 }
 .prose-chat pre code {
   @apply bg-transparent p-0;

@@ -1,12 +1,14 @@
-import { memo, useSyncExternalStore, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
+import { memo, useEffect, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
 import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQueryClient } from "@tanstack/react-query"
-import { Box, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
+import { Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { copyText } from "../lib/clipboard"
+import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
 import type { BoxSize, PrState, TaskStatus } from "../../../shared/types"
 
@@ -245,7 +247,74 @@ const MARKDOWN_COMPONENTS: Components = {
       {children}
     </AppLink>
   ),
+  pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
 }
+
+/** A code block's text as written: markdown adds one newline after a fenced block's last line, which isn't the code's. */
+export const codeBlockText = (pre: HTMLElement) => (pre.textContent ?? "").replace(/\n$/, "")
+
+/**
+ * A fenced code block with a copy button in a gutter of its own at the top right, so the button never covers the code,
+ * however narrow the panel or far the block is scrolled sideways. The button shows on hover and focus, always on touch.
+ */
+function CodeBlock(props: ComponentProps<"pre">) {
+  const pre = useRef<HTMLPreElement>(null)
+  return (
+    <div className="code-block group/code">
+      <pre ref={pre} {...props} />
+      <CopyButton label="Copy code" text={() => (pre.current ? codeBlockText(pre.current) : "")} className="mt-2 mr-1.5 ml-0.5" />
+    </div>
+  )
+}
+
+/**
+ * A small copy icon that flashes "Copied". Its icon box is one 16px line tall (`leading-4`) with 4px above, so with
+ * `mt-2` it sits on the first line of a `p-3` code block. Hidden until its `group/code` is hovered, unless focused,
+ * just used, or on a touch screen. `text` is read on click, so the copied text is what's on screen then.
+ */
+export function CopyButton({ text, label, className }: { text: string | (() => string); label: string; className?: string }) {
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={copied ? "Copied" : label}
+      data-copied={copied || undefined}
+      onClick={async () => {
+        if (!(await copyText(typeof text === "function" ? text() : text))) {
+          toast.error("Couldn't copy", "The browser blocked clipboard access.")
+          return
+        }
+        setCopied(true)
+        clearTimeout(timer.current)
+        timer.current = setTimeout(() => setCopied(false), COPIED_MS)
+      }}
+      className={cx(
+        "relative flex shrink-0 self-start rounded-md px-1.5 py-1 text-xs leading-4 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-yard-500/60 focus-visible:outline-none pointer-coarse:opacity-100",
+        copied ? "opacity-100" : "opacity-0 group-hover/code:opacity-100",
+        className,
+      )}
+    >
+      <LineIcon icon={copied ? Check : Copy} className={cx("h-3.5 w-3.5", copied && "text-emerald-400")} />
+      {/* Announced, and shown beside the icon while the user's eyes are on it. */}
+      <span
+        role="status"
+        className={
+          copied
+            ? "pointer-events-none absolute top-1/2 right-full mr-1 -translate-y-1/2 rounded-md bg-zinc-800 px-1.5 py-0.5 font-sans text-[11px] font-medium whitespace-nowrap text-zinc-100 shadow"
+            : "sr-only"
+        }
+      >
+        {copied ? "Copied" : ""}
+      </span>
+    </button>
+  )
+}
+
+/** How long a copy button says "Copied". */
+export const COPIED_MS = 1500
 
 /**
  * A link to another site (a GitHub PR, a preview, docs): always opens in a new tab without access to this one.
