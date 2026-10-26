@@ -3138,7 +3138,7 @@ export class TaskManager {
     const slots = this.slotsFor(LOCAL_BOX_ID)
     if (running.length >= slots) {
       if (!running.length) return { text: LOCAL_SLOT_WAIT, by: [] }
-      return { text: `This computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents); waiting for ${agentRefs(running)}`, by: waitFor(running) }
+      return { text: `Waiting for ${agentRefs(running)}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`, by: waitFor(running) }
     }
     const agent = this.store.boxAgent(row.id)
     const block = agent ? limitBlock(agent, running) : null

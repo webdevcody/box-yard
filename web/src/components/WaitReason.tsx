@@ -21,8 +21,8 @@ export function waitReasonParts(reason: string, waitFor: WaitFor[]): (string | W
 const LINK = "rounded text-amber-100 underline decoration-amber-300/50 underline-offset-2 hover:decoration-amber-200 focus-visible:ring-2 focus-visible:ring-yard-500 focus-visible:outline-none"
 
 /**
- * A queued task's wait reason with the tasks holding it back linked: "survive-the-night allows 1 of its agents at a
- * time on this computer; waiting for [Merge PR #78]". `inLink`: it sits inside a card or row that is a link itself,
+ * A queued task's wait reason with the tasks holding it back linked: "Waiting for [Merge PR #78]: survive-the-night
+ * allows 1 of its agents at a time on this computer". `inLink`: it sits inside a card or row that is a link itself,
  * so each blocker is a button (no nested anchors) that opens the task, like QueuedLink.
  */
 export function WaitReason({ task, inLink, className }: { task: Pick<Task, "waitReason" | "waitFor">; inLink?: boolean; className?: string }) {

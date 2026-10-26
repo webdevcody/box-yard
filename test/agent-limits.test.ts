@@ -30,7 +30,7 @@ describe("limitBlock", () => {
     const second = heavy("Perf lane 1")
     const block = limitBlock(second, [merge, agent("box-yard")])
     expect(block).toEqual({ kind: "own", cap: 1, by: [merge] })
-    expect(localBlockReason(second, block!)).toBe("survive-the-night allows 1 of its agents at a time on this computer; waiting for Merge PR #78")
+    expect(localBlockReason(second, block!)).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer")
     expect(boxBlockReason(second, block!, "box box-1")).toBe("survive-the-night allows 1 of its agents at a time on a box, and Merge PR #78 is running on box box-1")
     // Below its limit it runs.
     expect(limitBlock(agent("survive-the-night", { agentsPerBox: 2 }), [merge])).toBeNull()
@@ -41,7 +41,7 @@ describe("limitBlock", () => {
     const light = agent("notes", { title: "Tidy notes" })
     const held = limitBlock(light, [bench])
     expect(held).toMatchObject({ kind: "whole", project: { projectName: "bench" }, by: [bench] })
-    expect(localBlockReason(light, held!)).toBe("bench needs the whole machine; waiting for Frame-time run on this computer")
+    expect(localBlockReason(light, held!)).toBe("Waiting for Frame-time run: bench needs the whole machine")
     // Its own agents aren't held back by it (only by its Agents per box).
     expect(limitBlock(agent("bench", { wholeMachine: true }), [bench])).toBeNull()
     expect(limitBlock(agent("bench", { wholeMachine: true, agentsPerBox: 1 }), [bench])?.kind).toBe("own")

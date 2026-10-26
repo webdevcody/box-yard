@@ -94,7 +94,7 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
 
 const HANG = "keep going [hang]"
 /** Settings › Local agents is full: the reason names the running tasks (`by`: "a (mac)"). */
-const localSlotWait = (slots: number, by: string) => `This computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents); waiting for ${by}`
+const localSlotWait = (slots: number, by: string) => `Waiting for ${by}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`
 const getTask = (r: Running, id: string) => r.yard.store.getTask(id)!
 const newTask = (r: Running, projectId: string, title: string, prompt = "write a haiku") => r.yard.tasks.createTask({ projectId, title, prompt })
 const project = (r: Running, name: string, runner: "box" | "local") => call<Project>(r, "POST", "/api/projects", { name, runner })
@@ -260,7 +260,7 @@ describe("local runner", () => {
     // A second agent of the same project waits, and its reason names (and links) the one running.
     const b = newTask(r, heavy.id, "Perf lane 1", HANG)
     const held = await status(r, b.id, (t) => t.status === "queued" && t.waitReason !== null, "the project's second task to wait")
-    expect(held.waitReason).toBe("survive-the-night allows 1 of its agents at a time on this computer; waiting for Merge PR #78")
+    expect(held.waitReason).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer")
     expect(held.waitFor).toEqual([{ taskId: a.id, title: "Merge PR #78" }])
     expect(r.yard.store.listTaskMessages(b.id, 50).some((m) => m.role === "event" && m.content === `${held.waitReason}.`)).toBe(true)
     // Another project's task runs beside it, within Settings › Local agents.
@@ -289,7 +289,7 @@ describe("local runner", () => {
     await working(r, a.id)
     const c = newTask(r, other.id, "c", HANG)
     const held = await status(r, c.id, (t) => t.status === "queued" && t.waitReason !== null, "the other project's task to wait")
-    expect(held.waitReason).toBe("bench needs the whole machine; waiting for Frame-time run on this computer")
+    expect(held.waitReason).toBe("Waiting for Frame-time run: bench needs the whole machine")
     expect(held.waitFor).toEqual([{ taskId: a.id, title: "Frame-time run" }])
     // With no Agents at once of its own, the project's own agents still share the computer.
     const b = newTask(r, bench.id, "Second run", HANG)
@@ -306,7 +306,7 @@ describe("local runner", () => {
     await waitFor(() => r.yard.store.slotsInUse(LOCAL_BOX_ID) === 1, "the bench turns to stop")
     const e = newTask(r, bench.id, "Third run", HANG)
     const waits = await status(r, e.id, (t) => t.status === "queued" && t.waitReason !== null, "the whole-machine task to wait")
-    expect(waits.waitReason).toBe("bench needs the whole machine; waiting for c (notes) on this computer")
+    expect(waits.waitReason).toBe("Waiting for c (notes): bench needs the whole machine")
     expect(waits.waitFor).toEqual([{ taskId: c.id, title: "c" }])
   })
 })

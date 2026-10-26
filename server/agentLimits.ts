@@ -57,12 +57,12 @@ export const named = <T>(agents: T[]): T[] => agents.slice(0, 2)
 const ofIts = (n: number) => `${n} of its agents`
 
 /**
- * The wait reason for a block on this computer, which comes with no "Waiting:" before it:
- * "survive-the-night allows 1 of its agents at a time on this computer; waiting for Merge PR #78".
+ * The wait reason for a block on this computer. It names the blocking tasks first, so a task card's two lines show
+ * them: "Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer".
  */
 export function localBlockReason(agent: BoxAgent, b: LimitBlock): string {
-  if (b.kind === "own") return `${agent.projectName} allows ${ofIts(b.cap)} at a time on this computer; waiting for ${agentRefs(b.by, agent.projectName)}`
-  return `${b.project.projectName} needs the whole machine; waiting for ${agentRefs(b.by, b.project.projectName)} on this computer`
+  if (b.kind === "own") return `Waiting for ${agentRefs(b.by, agent.projectName)}: ${agent.projectName} allows ${ofIts(b.cap)} at a time on this computer`
+  return `Waiting for ${agentRefs(b.by, b.project.projectName)}: ${b.project.projectName} needs the whole machine`
 }
 
 /**
