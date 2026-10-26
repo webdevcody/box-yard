@@ -145,6 +145,12 @@ function silentWav(): string {
   return `data:audio/wav;base64,${btoa(String.fromCharCode(...bytes))}`
 }
 
+/** Drop a finished line's handlers from the shared element. */
+function detach(a: Pick<AudioLike, "onplaying" | "onended" | "onerror"> | null) {
+  if (!a) return
+  a.onplaying = a.onended = a.onerror = null
+}
+
 let primed = false
 /** Call from inside a click or key press. Harmless to call again; only the first one plays. */
 export function primeAudio() {
@@ -158,6 +164,7 @@ export function primeAudio() {
   // Already playing, so already allowed to: don't cut it off.
   if (!a.paused) return
   try {
+    detach(a)
     a.src = silentWav()
     a.volume = 0
     void a.play().catch(() => {
@@ -236,6 +243,8 @@ export class CloudSynth implements SynthLike {
   private url: string | null = null
   private stream: PcmPlayback | null = null
   private playing = false
+  /** The line's `ended` handler on the shared element, to know the handlers there are still ours. */
+  private ended: AudioLike["onended"] = null
   private readonly urls: NonNullable<CloudDeps["objectUrl"]>
 
   constructor(private readonly d: CloudDeps) {
@@ -287,6 +296,7 @@ export class CloudSynth implements SynthLike {
         u.onend?.({})
       }
       audio.onerror = () => fallback("This browser couldn't play the audio it got back.")
+      this.ended = audio.onended
       audio.src = this.url
       audio.volume = u.volume
       audio.play().catch((err: { name?: string; message?: string }) => {
@@ -363,6 +373,11 @@ export class CloudSynth implements SynthLike {
     this.playing = false
     this.ctl = null
     this.stream = null
+    // The element is shared (previews, the tap-to-unlock clip): once a line is over, nothing it does may reach it, or
+    // the unlock clip failing on a tap would "fall back" and read the finished line again.
+    const a = this.d.audio()
+    if (a && this.ended && a.onended === this.ended) detach(a)
+    this.ended = null
   }
 
   cancel() {

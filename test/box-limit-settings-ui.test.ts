@@ -79,7 +79,7 @@ describe("box limit fields", () => {
     expect(envNote("slotsPerBox")).toBeNull()
   })
 
-  it("offer \"Use size default\" for a saved value, which resets only that key", async () => {
+  it("offer \"Use size default\" for a saved value, which resets only that key on Save", async () => {
     render(info({ slotsPerBox: 2, maxResidentPerBox: 6 }, { slotsPerBox: "ui", maxResidentPerBox: "ui" }))
     expect(field("slotsPerBox").value).toBe("2")
     expect(button("slotsPerBox")).not.toBeNull()
@@ -88,7 +88,15 @@ describe("box limit fields", () => {
     replies["DELETE /api/agent-settings?keys=slotsPerBox"] = info({ maxResidentPerBox: 6 }, { maxResidentPerBox: "ui" })
     act(() => button("slotsPerBox")!.click())
     await settle()
+    // A draft like any other change: the size defaults show, marked unsaved, and nothing is sent yet.
+    expect(requests).toEqual([])
+    expect(field("slotsPerBox").value).toBe("")
+    expect(field("slotsPerBox").placeholder).toBe("small 1 · medium 2 · large 4")
+    expect(saveButton().disabled).toBe(false)
+    act(() => saveButton().click())
+    await settle()
     expect(requests.map((r) => `${r.method} ${r.url}`)).toEqual(["DELETE /api/agent-settings?keys=slotsPerBox"])
+    expect(saveButton().disabled).toBe(true)
     expect(button("slotsPerBox")).toBeNull()
     expect(field("slotsPerBox").value).toBe("")
     expect(field("slotsPerBox").placeholder).toBe("small 1 · medium 2 · large 4")

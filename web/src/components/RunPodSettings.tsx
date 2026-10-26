@@ -1,11 +1,13 @@
 // Settings › RunPod GPU: the RunPod key, the pod image (built with this computer's Docker and pushed to the owner's
 // own registry, or RunPod's stock image), which GPUs to try, idle stop and spending caps, and the pods and network
-// volumes this Box Yard has at RunPod right now. docs/runpod.md explains the runner.
+// volumes this Box Yard has at RunPod right now. docs/runpod.md explains the runner. The settings here are a draft
+// until the dialog's Save; Build & push and the pod and volume buttons are actions and run at once.
 import { useEffect, useState } from "react"
 import { Flame, Hammer, Power, Trash2 } from "lucide-react"
 import { api } from "../lib/api"
 import { confirmDialog } from "../lib/confirm"
 import { useRunPod, useRunPodAction, useSetup } from "../lib/queries"
+import { useDraft } from "../lib/settingsDraft"
 import { CREDENTIAL_INFO } from "../../../shared/setup"
 import { RUNPOD_CLOUDS, RUNPOD_STOCK_IMAGE, type RunPodCloud, type RunPodImageBuild, type RunPodPodInfo, type RunPodSettings, type RunPodStatus } from "../../../shared/runpod"
 import { BoxActionDialog } from "./BoxActionDialog"
@@ -49,11 +51,36 @@ const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit:
   { key: "watchdogMinutes", label: "Watchdog", unit: "min", help: "Each pod terminates itself when this Box Yard hasn't been in touch for this long (this computer slept or went offline), so a pod never runs up a bill on its own." },
 ]
 
-export function RunPodPanel({ fid }: { fid: (k: string) => string }) {
+/** The settings as the form edits them: numbers as typed, "" for no datacenter. */
+type RunPodForm = Pick<RunPodSettings, "image" | "gpuTypes" | "cloud"> & { dataCenter: string } & Record<Numeric, string>
+
+const formOf = (s: RunPodSettings): RunPodForm => ({ image: s.image, gpuTypes: s.gpuTypes, cloud: s.cloud, dataCenter: s.dataCenter ?? "", ...numbersOf(s) })
+
+/** What Save sends: the fields that changed. A number that isn't one stops the save with a message. */
+export function runPodPatch(form: RunPodForm, saved: RunPodSettings): Partial<RunPodSettings> {
+  const patch: Partial<RunPodSettings> = {}
+  if (form.image !== saved.image) patch.image = form.image
+  if (JSON.stringify(form.gpuTypes) !== JSON.stringify(saved.gpuTypes)) patch.gpuTypes = form.gpuTypes
+  if (form.cloud !== saved.cloud) patch.cloud = form.cloud
+  if (form.dataCenter.trim() !== (saved.dataCenter ?? "")) patch.dataCenter = form.dataCenter.trim() || null
+  for (const n of NUMBERS) {
+    const v = Number(form[n.key])
+    if (form[n.key].trim() === "" || !Number.isFinite(v)) throw new Error(`RunPod GPU › ${n.label} needs a number.`)
+    if (v !== saved[n.key]) patch[n.key] = v
+  }
+  return patch
+}
+
+export function RunPodPanel({ fid, active = true }: { fid: (k: string) => string; active?: boolean }) {
   const setup = useSetup()
   const key = setup.data?.credentials.runpodApiKey
-  const status = useRunPod({ poll: true })
+  const status = useRunPod({ poll: active })
   const s = status.data
+  const save = useSaveRunPod()
+  const [form, setForm] = useDraft("runpod", "runpod", s ? formOf(s.settings) : null, async (f) => {
+    if (f && s) await save.mutateAsync(runPodPatch(f, s.settings))
+  })
+  const set = (patch: Partial<RunPodForm>) => setForm((f) => f && { ...f, ...patch })
   return (
     <Panel section="runpod">
       <Row
@@ -69,16 +96,16 @@ export function RunPodPanel({ fid }: { fid: (k: string) => string }) {
           </>
         }
       >
-        {key ? <CredentialField k="runpodApiKey" status={key} id={fid("runpod-key")} /> : <p className="text-sm text-zinc-500">Loading…</p>}
+        {key ? <CredentialField k="runpodApiKey" status={key} id={fid("runpod-key")} section="runpod" /> : <p className="text-sm text-zinc-500">Loading…</p>}
       </Row>
-      {!s ? (
+      {!s || !form ? (
         <p className="text-sm text-zinc-500">{status.error ? `Couldn't load: ${status.error.message}` : "Loading…"}</p>
       ) : (
         <>
           {s.error && <p className="mb-4 rounded-lg border border-red-900/40 bg-red-950/30 px-3 py-2 text-xs text-red-200">RunPod: {s.error}</p>}
-          <ImageRow fid={fid} status={s} />
-          <GpuRow fid={fid} status={s} />
-          <NumbersRows fid={fid} settings={s.settings} />
+          <ImageRow fid={fid} status={s} form={form} set={set} />
+          <GpuRow fid={fid} status={s} form={form} set={set} />
+          <NumbersRows fid={fid} form={form} set={set} />
           <PodsRow status={s} />
           <VolumesRow status={s} />
         </>
@@ -88,12 +115,11 @@ export function RunPodPanel({ fid }: { fid: (k: string) => string }) {
 }
 
 /** The image pods start from: the stock one (no Docker needed) or one built here and pushed to the owner's registry. */
-function ImageRow({ fid, status }: { fid: (k: string) => string; status: RunPodStatus }) {
+function ImageRow({ fid, status, form, set }: { fid: (k: string) => string; status: RunPodStatus; form: RunPodForm; set: (patch: Partial<RunPodForm>) => void }) {
   const { settings, docker, build, currentTag } = status
   const [repo, setRepo] = useState(settings.imageRepo ?? "")
   useEffect(() => setRepo(settings.imageRepo ?? ""), [settings.imageRepo])
   const start = useRunPodAction<string>("Couldn't start the image build", (r) => api<RunPodImageBuild>("/api/runpod/image/build", { body: { repo: r } }))
-  const save = useSaveRunPod()
   const stale = Boolean(settings.image && settings.imageRepo && settings.image.startsWith(`${settings.imageRepo}:`) && !settings.image.endsWith(`:${currentTag}`))
   const running = build.state === "running"
   return (
@@ -109,7 +135,8 @@ function ImageRow({ fid, status }: { fid: (k: string) => string; status: RunPodS
       }
     >
       <p className="text-xs text-zinc-400">
-        Using: <span className="break-all font-mono text-zinc-200">{settings.image ?? `${RUNPOD_STOCK_IMAGE} (stock)`}</span>
+        Using: <span className="break-all font-mono text-zinc-200">{form.image ?? `${RUNPOD_STOCK_IMAGE} (stock)`}</span>
+        {form.image !== settings.image && <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-px text-[11px] text-amber-300">unsaved</span>}
       </p>
       {stale && <p className="text-xs text-amber-300">Box Yard's pod scripts changed since this build. Pods still get the new scripts, but build again to bake them in.</p>}
       <input
@@ -125,10 +152,16 @@ function ImageRow({ fid, status }: { fid: (k: string) => string; status: RunPodS
         <Button size="sm" variant="primary" disabled={!repo.trim() || !docker.running || running} loading={running || start.isPending} onClick={() => start.mutate(repo.trim())}>
           <Hammer className="h-3.5 w-3.5" /> {running ? "Building…" : "Build & push"}
         </Button>
-        {settings.image && (
-          <Button size="sm" variant="ghost" onClick={() => save.mutate({ image: null })}>
+        {form.image ? (
+          <Button size="sm" variant="ghost" onClick={() => set({ image: null })}>
             Use the stock image
           </Button>
+        ) : (
+          settings.image && (
+            <Button size="sm" variant="ghost" onClick={() => set({ image: settings.image })}>
+              Keep {settings.image.split("/").at(-1)}
+            </Button>
+          )
         )}
       </div>
       {build.state !== "idle" && (
@@ -149,11 +182,7 @@ function useSaveRunPod() {
 }
 
 /** GPU types to try, in order (the first one in stock and under the caps wins), and the cloud they run on. */
-function GpuRow({ fid, status }: { fid: (k: string) => string; status: RunPodStatus }) {
-  const { settings } = status
-  const save = useSaveRunPod()
-  const [dc, setDc] = useState(settings.dataCenter ?? "")
-  useEffect(() => setDc(settings.dataCenter ?? ""), [settings.dataCenter])
+function GpuRow({ fid, status, form, set }: { fid: (k: string) => string; status: RunPodStatus; form: RunPodForm; set: (patch: Partial<RunPodForm>) => void }) {
   return (
     <>
       <Row
@@ -161,17 +190,17 @@ function GpuRow({ fid, status }: { fid: (k: string) => string; status: RunPodSta
         label="GPU types"
         help="Tried in this order when a pod starts; the first one in stock within the caps wins. A project can pick its own (Project › Settings › Boxes). For browser and WebGL game testing an RTX A4000, RTX 4000 Ada or (Community) RTX 3070 is plenty. The datacenter is picked for the best stock of these, unless you name one (a project's volume pins its pod #1 to the volume's datacenter)."
       >
-        <GpuTypePicker id={fid("runpod-gpus")} value={settings.gpuTypes} onChange={(gpuTypes) => save.mutate({ gpuTypes })} cloud={settings.cloud} enabled={status.apiKey} />
+        <GpuTypePicker id={fid("runpod-gpus")} value={form.gpuTypes} onChange={(gpuTypes) => set({ gpuTypes })} cloud={form.cloud} enabled={status.apiKey} />
         <input
           className={cx(inputClass, "font-mono text-xs")}
           placeholder="Datacenter: best stock (e.g. CA-MTL-1)"
-          value={dc}
-          onChange={(e) => setDc(e.target.value)}
-          onBlur={() => dc.trim() !== (settings.dataCenter ?? "") && save.mutate({ dataCenter: dc.trim() || null })}
+          aria-label="Datacenter"
+          value={form.dataCenter}
+          onChange={(e) => set({ dataCenter: e.target.value })}
         />
       </Row>
       <Row id={fid("runpod-cloud")} label="Cloud" help={CLOUD_HELP}>
-        <Select id={fid("runpod-cloud")} className="w-full sm:w-80" value={settings.cloud} onChange={(e) => save.mutate({ cloud: e.target.value as RunPodCloud })}>
+        <Select id={fid("runpod-cloud")} className="w-full sm:w-80" value={form.cloud} onChange={(e) => set({ cloud: e.target.value as RunPodCloud })}>
           {RUNPOD_CLOUDS.map((c) => (
             <option key={c} value={c}>
               {CLOUD_OPTION[c]}
@@ -183,15 +212,7 @@ function GpuRow({ fid, status }: { fid: (k: string) => string; status: RunPodSta
   )
 }
 
-function NumbersRows({ fid, settings }: { fid: (k: string) => string; settings: RunPodSettings }) {
-  const save = useSaveRunPod()
-  const [draft, setDraft] = useState<Record<Numeric, string>>(() => numbersOf(settings))
-  useEffect(() => setDraft(numbersOf(settings)), [settings])
-  const commit = (k: Numeric) => {
-    const v = Number(draft[k])
-    if (draft[k].trim() === "" || !Number.isFinite(v) || v === settings[k]) return setDraft(numbersOf(settings))
-    save.mutate({ [k]: v })
-  }
+function NumbersRows({ fid, form, set }: { fid: (k: string) => string; form: RunPodForm; set: (patch: Partial<RunPodForm>) => void }) {
   return (
     <>
       {NUMBERS.map((n) => (
@@ -203,10 +224,8 @@ function NumbersRows({ fid, settings }: { fid: (k: string) => string; settings: 
               min={0}
               step={n.step ?? 1}
               className={cx(inputClass, "w-28")}
-              value={draft[n.key]}
-              onChange={(e) => setDraft({ ...draft, [n.key]: e.target.value })}
-              onBlur={() => commit(n.key)}
-              onKeyDown={(e) => e.key === "Enter" && commit(n.key)}
+              value={form[n.key]}
+              onChange={(e) => set({ [n.key]: e.target.value })}
             />
             <span className="text-xs text-zinc-500">{n.unit}</span>
           </div>
