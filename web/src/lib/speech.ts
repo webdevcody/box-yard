@@ -15,8 +15,9 @@ import {
   voiceAllowed,
   type VoiceSettings,
 } from "./voice"
-import { CloudSynth, activeProvider, audioElement, fetchTts, primeAudio, reportFallback, subscribeTtsInfo } from "./tts"
+import { CloudSynth, clipVoice, fetchTts, knownProvider, loadTtsInfo, logVoice, reportFailure, subscribeTtsInfo } from "./tts"
 import { PcmPlayer, audioContext } from "./pcm"
+import { audioElement, noteAudioBlocked, noteAudioPlayed, onActivation, unlockAudio } from "./audioUnlock"
 
 // ------------------------------------------------------------------ speech queue
 
@@ -64,17 +65,24 @@ interface Timers {
 export const MAX_QUEUE = 3
 /** Chrome drops `onend` now and then; give up on an utterance after its expected length plus this. */
 const WATCHDOG_SLACK_MS = 4000
+/** Lines waiting for a tap (audio blocked) are still said after it, unless they're older than this. */
+export const BLOCKED_MAX_AGE_MS = 5 * 60_000
+
+type Item = { chunks: string[]; opts: SpeakOptions; at: number }
 
 /**
  * One line at a time, never overlapping. Lines are split into short chunks (Chrome cuts long
  * utterances off after ~15 s), and a keep-alive resumes speech that Chrome paused in a background tab.
+ * When the browser refuses to play (`not-allowed`: no tap yet, as on phones), the queue keeps the
+ * line and waits; unblock(), called inside the tap, carries on from it.
  */
 export class SpeechQueue {
-  private items: { chunks: string[]; opts: SpeakOptions }[] = []
-  private current: { chunks: string[]; opts: SpeakOptions } | null = null
+  private items: Item[] = []
+  private current: Item | null = null
   /** The chunk being spoken, so hold() can put it back. */
   private chunk: string | null = null
   private held = false
+  private blocked = false
   private token = 0
   private watchdog: any = null
   private keepAlive: any = null
@@ -92,14 +100,18 @@ export class SpeechQueue {
   get pending() {
     return this.items.length
   }
+  /** Waiting for a tap. */
+  get isBlocked() {
+    return this.blocked
+  }
 
   say(text: string, opts: SpeakOptions) {
     // Slower speech fits fewer characters into Chrome's ~15 s limit.
     const chunks = chunkForSpeech(text, this.synth.chunkMax ?? Math.max(60, Math.round(160 * Math.min(1, opts.rate))))
     if (!chunks.length) return
-    this.items.push({ chunks, opts })
+    this.items.push({ chunks, opts, at: Date.now() })
     while (this.items.length > MAX_QUEUE) this.items.shift()
-    if (!this.current && !this.held) this.next()
+    if (!this.current && !this.held && !this.blocked) this.next()
     else this.hooks.onChange?.()
   }
 
@@ -110,14 +122,7 @@ export class SpeechQueue {
   hold() {
     if (this.held) return
     this.held = true
-    const cur = this.current
-    if (!cur) return
-    this.items.unshift({ chunks: this.chunk ? [this.chunk, ...cur.chunks] : cur.chunks, opts: cur.opts })
-    while (this.items.length > MAX_QUEUE) this.items.pop()
-    this.current = null
-    this.chunk = null
-    this.token++
-    this.clearTimers()
+    if (!this.putBack()) return
     try {
       this.synth.cancel()
     } catch {}
@@ -128,7 +133,30 @@ export class SpeechQueue {
   release() {
     if (!this.held) return
     this.held = false
-    if (!this.current) this.next()
+    if (!this.current && !this.blocked) this.next()
+  }
+
+  /** The line being spoken goes back to the front of the queue, from the chunk it was on. */
+  private putBack(): boolean {
+    const cur = this.current
+    if (!cur) return false
+    this.items.unshift({ ...cur, chunks: this.chunk ? [this.chunk, ...cur.chunks] : cur.chunks })
+    while (this.items.length > MAX_QUEUE) this.items.pop()
+    this.current = null
+    this.chunk = null
+    this.token++
+    this.clearTimers()
+    return true
+  }
+
+  /** Audio is allowed now (call inside the tap): say what waited, minus lines gone stale. */
+  unblock() {
+    if (!this.blocked) return
+    this.blocked = false
+    const now = Date.now()
+    this.items = this.items.filter((i) => now - i.at <= BLOCKED_MAX_AGE_MS)
+    if (!this.current && !this.held) this.next()
+    else this.hooks.onChange?.()
   }
 
   /** Stop at once and forget everything queued. */
@@ -181,10 +209,12 @@ export class SpeechQueue {
     u.onend = done
     u.onerror = (ev: { error?: string } | undefined) => {
       if (token !== this.token) return
-      // No user gesture yet: everything else would fail too.
+      // No user gesture yet: everything else would fail too, so wait for one with the queue intact.
       if (ev?.error === "not-allowed") {
-        this.stop()
+        this.putBack()
+        this.blocked = true
         this.hooks.onBlocked?.()
+        this.hooks.onChange?.()
         return
       }
       done()
@@ -364,7 +394,7 @@ const synth = (): (SynthLike & { getVoices(): SpeechSynthesisVoice[] }) | null =
   browser && "speechSynthesis" in window && typeof SpeechSynthesisUtterance !== "undefined" ? window.speechSynthesis : null
 
 /** Something can speak: the browser's engine, or a cloud voice played through an <audio> element. */
-export const voiceSupported = () => synth() !== null || (activeProvider() !== "browser" && audioElement() !== null)
+export const voiceSupported = () => synth() !== null || (knownProvider() !== "browser" && audioElement() !== null)
 
 // Settings: one cached copy, shared by every component and kept in sync across tabs.
 type Listener = () => void
@@ -431,15 +461,20 @@ const pcmPlayer = () => (audioContext() ? (player ??= new PcmPlayer(audioContext
 function queue(): SpeechQueue | null {
   if (!voiceSupported()) return null
   const sy = synth()
-  // One queue for every engine: CloudSynth plays cloud lines itself and hands the rest to speechSynthesis.
+  // One queue for every engine: CloudSynth plays cloud lines itself, and hands them to speechSynthesis
+  // only when the server is set to Browser / OS. Only the text is sent: the server's saved voice speaks.
   cloudSynth ??= new CloudSynth({
-    provider: () => activeProvider(),
+    provider: knownProvider,
+    ready: () => loadTtsInfo(),
     os: sy,
     osUtter: (text) => new SpeechSynthesisUtterance(text) as unknown as UtteranceLike,
     audio: audioElement,
     fetchAudio: (text, signal) => fetchTts({ text }, signal),
     pcm: pcmPlayer,
-    onFallback: reportFallback,
+    onFailure: reportFailure,
+    log: logVoice,
+    voiceOf: clipVoice,
+    onPlayed: noteAudioPlayed,
   })
   const utter = (text: string): UtteranceLike => ({ text, voice: null, lang: "", rate: 1, pitch: 1, volume: 1, onstart: null, onend: null, onerror: null })
   queueInstance ??= new SpeechQueue(cloudSynth, utter, globalThis, {
@@ -451,6 +486,7 @@ function queue(): SpeechQueue | null {
     onBlocked: () => {
       blocked = true
       activated = false
+      noteAudioBlocked()
       refreshStatus()
     },
   })
@@ -464,38 +500,44 @@ function options(s: VoiceSettings): SpeakOptions {
 }
 
 /**
- * Unlock speech from inside a user gesture: speaking anything (even silence) during a click lets the
- * page speak later. Safari needs this; Chrome only needs the click itself.
+ * Unlock speech from inside a user gesture (audioUnlock.ts's isActivationEvent): playing anything,
+ * even silence, during a tap lets the page play later. Then whatever waited for the tap is said.
  */
 export function unlockVoice() {
   activated = true
   blocked = false
-  primeAudio()
+  const provider = knownProvider()
+  if (provider !== "browser") unlockAudio()
   const sy = synth()
-  if (sy && !sy.speaking) {
+  // Safari's speechSynthesis wants the same treatment, but only when it's the voice that speaks.
+  if (provider === "browser" && sy && !sy.speaking) {
     try {
       const u = new SpeechSynthesisUtterance("")
       u.volume = 0
       sy.speak(u)
     } catch {}
   }
+  queueInstance?.unblock()
   refreshStatus()
 }
 
 if (browser) {
-  // Any click or key press unlocks speech. This runs before the "Click to enable voice" chip's own
+  // A tap or key press unlocks speech. A touch's pointerdown doesn't count (onActivation skips it): on
+  // a phone that's the pointerup/touchend/click. This runs before the "Tap to enable voice" chip's own
   // handler (which unmounts once unlocked), so the chip's "Voice on." is said from here.
-  const onGesture = (e: Event) => {
+  onActivation((e) => {
     // Mobile browsers and PWAs only let an <audio> element play later if it played inside a tap.
-    if (getVoiceSettings().enabled && activeProvider() !== "browser") primeAudio()
+    if (getVoiceSettings().enabled && knownProvider() !== "browser") unlockAudio()
     if (activated && !blocked) return
     if (!getVoiceSettings().enabled) activated = true
-    else if ((e.target as Element | null)?.closest?.("[data-voice-unlock]")) speakNow("Voice on.")
-    else unlockVoice()
+    else {
+      const waiting = Boolean(queueInstance?.pending)
+      unlockVoice()
+      // The chip says "Voice on." unless the tap is about to say the lines that waited for it.
+      if (!waiting && (e.target as Element | null)?.closest?.("[data-voice-unlock]")) speakNow("Voice on.")
+    }
     refreshStatus()
-  }
-  window.addEventListener("pointerdown", onGesture, true)
-  window.addEventListener("keydown", onGesture, true)
+  })
   window.addEventListener("storage", (e) => {
     if (e.key !== VOICE_KEY) return
     settingsCache = null
