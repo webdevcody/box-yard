@@ -6,6 +6,7 @@
 // like Voice: a phone and a desktop may want different answers.
 import { useSyncExternalStore } from "react"
 import { audioContext } from "./pcm"
+import { unlockAudio } from "./audioUnlock"
 
 // ------------------------------------------------------------------ settings (localStorage)
 
@@ -136,6 +137,8 @@ export interface SendSoundDeps {
   now(): number
   /** Android's light tap; missing where unsupported (iOS, desktops). */
   vibrate?: (ms: number) => void
+  /** The page's audio unlock (lib/audioUnlock.ts), run inside the tap: older iOS also wants a buffer started then. */
+  unlock?: () => void
 }
 
 export interface PlayOptions {
@@ -183,6 +186,8 @@ export function createSendSound(d: SendSoundDeps) {
       const ctx = d.context()
       if (!ctx || ctx.state === "running") return
       primedAt = d.now()
+      d.unlock?.()
+      // unlock() resumes the context too, but doesn't say when that's done: this promise does.
       resuming = ctx.resume().catch(() => {})
     },
 
@@ -228,6 +233,7 @@ const canVibrate = browser && typeof navigator.vibrate === "function" && Boolean
 
 const sendSound = createSendSound({
   context: () => audioContext() as unknown as ToneContext | null,
+  unlock: unlockAudio,
   settings: getSendSound,
   speaking: () => speakingProbe(),
   now: () => (typeof performance !== "undefined" ? performance.now() : Date.now()),

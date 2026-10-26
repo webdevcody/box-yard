@@ -4,7 +4,7 @@ import { act, createElement, useMemo } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { SpeechQueue, type SynthLike, type UtteranceLike } from "../web/src/lib/speech.js"
-import { CloudSynth, activeProvider, fetchTts, reportFallback, resetFallbackToasts, type AudioLike, type CloudDeps } from "../web/src/lib/tts.js"
+import { CloudSynth, activeProvider, anySignal, clipVoice, fetchTts, reportFailure, resetFailureToasts, type AudioLike, type CloudDeps, type VoiceLogEntry } from "../web/src/lib/tts.js"
 import { filterVoices, voiceMeta } from "../web/src/lib/ttsVoices.js"
 import { PcmPlayer, pcm16ToFloat, pcmRate, pcmToWav, type AudioContextLike, type PcmCallbacks, type PcmPlayerLike, type PcmStream } from "../web/src/lib/pcm.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
@@ -105,11 +105,12 @@ class FakePcm implements PcmPlayerLike {
   }
 }
 
-function rig(provider: TtsProvider = "elevenlabs", fetchAudio?: CloudDeps["fetchAudio"], pcm?: PcmPlayerLike | null) {
+function rig(provider: TtsProvider | null = "elevenlabs", fetchAudio?: CloudDeps["fetchAudio"], pcm?: PcmPlayerLike | null, extra: Partial<CloudDeps> = {}) {
   const os = new FakeOs()
   const audio = new FakeAudio()
   const requests: { text: string; signal: AbortSignal }[] = []
   const fallbacks: string[] = []
+  const log: Omit<VoiceLogEntry, "at">[] = []
   let p = provider
   const synth = new CloudSynth({
     provider: () => p,
@@ -124,18 +125,21 @@ function rig(provider: TtsProvider = "elevenlabs", fetchAudio?: CloudDeps["fetch
       }),
     objectUrl: { create: (b) => `blob:${(b as Blob).type}:${(b as Blob).size}`, revoke: () => {} },
     pcm: () => pcm ?? null,
-    onFallback: (prov, msg) => fallbacks.push(`${prov}: ${msg}`),
+    onFailure: (prov, msg) => fallbacks.push(`${prov}: ${msg}`),
+    log: (e) => log.push(e),
+    retryMs: 0,
+    ...extra,
   })
   const onBlocked = vi.fn()
   const q = new SpeechQueue(synth, utter, globalThis, { onBlocked })
-  return { os, audio, requests, fallbacks, synth, q, onBlocked, setProvider: (next: TtsProvider) => (p = next) }
+  return { os, audio, requests, fallbacks, log, synth, q, onBlocked, setProvider: (next: TtsProvider | null) => (p = next) }
 }
 
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
   for (const t of currentToasts()) dismiss(t.id)
-  resetFallbackToasts()
+  resetFailureToasts()
 })
 
 describe("CloudSynth under the speech queue", () => {
@@ -194,40 +198,147 @@ describe("CloudSynth under the speech queue", () => {
     expect(r.requests.map((x) => x.text)).toEqual(["Held line.", "Held line."])
   })
 
-  it("falls back to the browser voice with the provider's exact error, then carries on", async () => {
-    let fail = true
-    const r = rig("openai", (text) => (fail ? Promise.reject(new Error("OpenAI: You exceeded your current quota. (HTTP 429)")) : Promise.resolve(new Blob([text]))))
+  it("never switches to the browser voice: a failed line is reported with the exact error and skipped", async () => {
+    let calls = 0
+    const r = rig("openai", (text) => (++calls === 1 ? Promise.reject(new Error("OpenAI: You exceeded your current quota. (HTTP 429)")) : Promise.resolve(new Blob([text]))))
     r.q.say("Voice on.", OPTS)
     r.q.say("Next.", OPTS)
     await flush()
     expect(r.fallbacks).toEqual(["openai: OpenAI: You exceeded your current quota. (HTTP 429)"])
-    expect(r.os.spoken.map((u) => u.text)).toEqual(["Voice on."])
-    expect(r.os.spoken[0]!.volume).toBe(0.8)
-    fail = false
-    r.os.end()
-    await flush()
-    // The next line tries the cloud voice again.
+    expect(r.log[0]).toMatchObject({ path: "openai", outcome: "failed", text: "Voice on." })
+    // The next line tries the cloud voice again; nothing ever went to speechSynthesis.
     expect(r.audio.played).toHaveLength(1)
+    expect(r.os.spoken).toHaveLength(0)
   })
 
-  it("falls back when the audio can't be played", async () => {
+  it("reports audio it can't play (a decode error, or the element's error event after play) and moves on", async () => {
     const r = rig()
     r.audio.playError = { name: "NotSupportedError", message: "no decoder" }
     r.q.say("Hi.", OPTS)
     await flush()
     expect(r.fallbacks).toEqual(["elevenlabs: no decoder"])
-    expect(r.os.spoken.map((u) => u.text)).toEqual(["Hi."])
+    expect(r.os.spoken).toHaveLength(0)
+    expect(r.q.speaking).toBe(false)
+    r.audio.playError = null
+    r.q.say("Next.", OPTS)
+    await flush()
+    expect(r.requests.map((x) => x.text)).toEqual(["Hi.", "Next."])
+    r.audio.onerror?.({})
+    expect(r.fallbacks).toEqual(["elevenlabs: no decoder", "elevenlabs: This browser couldn't play the audio it got back."])
+    expect(r.q.speaking).toBe(false)
   })
 
-  it("treats an autoplay block like speechSynthesis's not-allowed: stop and ask for a tap", async () => {
+  it("a late error event from a finished line doesn't touch the next one (or speak it twice)", async () => {
+    const r = rig()
+    r.q.say("one", OPTS)
+    await flush()
+    r.audio.finish()
+    expect(r.q.speaking).toBe(false)
+    // iOS reloading the element after the page wakes up, a preview, a primed silent clip...
+    expect(r.audio.onerror).toBeNull()
+    expect(r.fallbacks).toEqual([])
+    expect(r.os.spoken).toHaveLength(0)
+  })
+
+  it("an autoplay block keeps the queue and the clip: unblock() inside the tap plays it at once, then the rest", async () => {
     const r = rig()
     r.audio.playError = { name: "NotAllowedError" }
     r.q.say("one", OPTS)
     r.q.say("two", OPTS)
     await flush()
     expect(r.onBlocked).toHaveBeenCalledOnce()
-    expect(r.q.pending).toBe(0)
+    expect(r.q.isBlocked).toBe(true)
+    expect(r.q.pending).toBe(2)
     expect(r.fallbacks).toEqual([])
+    expect(r.log.map((e) => e.outcome)).toEqual(["blocked"])
+    // More lines arriving before the tap wait too, without new requests.
+    r.q.say("three", OPTS)
+    await flush()
+    expect(r.requests).toHaveLength(1)
+    // The tap: the kept clip plays synchronously (inside the gesture), with no second request.
+    r.audio.playError = null
+    r.q.unblock()
+    expect(r.audio.played).toEqual(["blob::3"])
+    expect(r.requests).toHaveLength(1)
+    r.audio.finish()
+    await flush()
+    expect(r.requests.map((x) => x.text)).toEqual(["one", "two"])
+    r.audio.finish()
+    await flush()
+    r.audio.finish()
+    expect(r.requests.map((x) => x.text)).toEqual(["one", "two", "three"])
+    expect(r.q.speaking).toBe(false)
+  })
+
+  it("drops lines that waited for a tap longer than a minute", async () => {
+    vi.useFakeTimers()
+    const r = rig()
+    r.audio.playError = { name: "NotAllowedError" }
+    r.q.say("old", OPTS)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(r.q.isBlocked).toBe(true)
+    vi.advanceTimersByTime(2 * 60_000)
+    r.q.say("new", OPTS)
+    r.audio.playError = null
+    r.q.unblock()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(r.requests.map((x) => x.text)).toEqual(["old", "new"])
+    expect(r.audio.played).toHaveLength(1)
+  })
+
+  it("waits for the server's settings instead of guessing the browser voice", async () => {
+    let ready!: () => void
+    const r = rig(null, undefined, null, { ready: () => new Promise<void>((res) => (ready = res)) })
+    r.q.say("Reply.", OPTS)
+    await flush()
+    expect(r.os.spoken).toHaveLength(0)
+    expect(r.requests).toHaveLength(0)
+    expect(r.q.speaking).toBe(true)
+    r.setProvider("elevenlabs")
+    ready()
+    await flush()
+    expect(r.requests.map((x) => x.text)).toEqual(["Reply."])
+    expect(r.os.spoken).toHaveLength(0)
+  })
+
+  it("settings that never load: the line is skipped, not read by the browser voice", async () => {
+    const r = rig(null, undefined, null, { ready: () => Promise.resolve() })
+    r.q.say("Reply.", OPTS)
+    await flush()
+    expect(r.os.spoken).toHaveLength(0)
+    expect(r.q.speaking).toBe(false)
+    expect(r.log[0]).toMatchObject({ outcome: "failed", detail: "Couldn't load the voice settings from the server." })
+  })
+
+  it("retries once when the request never reached the server (a phone waking up)", async () => {
+    let calls = 0
+    const net = Object.assign(new Error("Can't reach the Box Yard server."), { network: true })
+    const r = rig("elevenlabs", (text) => (++calls === 1 ? Promise.reject(net) : Promise.resolve(new Blob([text]))))
+    r.q.say("Hi.", OPTS)
+    await flush()
+    await flush()
+    expect(calls).toBe(2)
+    expect(r.audio.played).toHaveLength(1)
+    expect(r.fallbacks).toEqual([])
+    expect(r.log.map((e) => e.outcome)).toEqual(["retrying", "played"])
+
+    // Twice in a row is a real failure.
+    const r2 = rig("elevenlabs", () => Promise.reject(net))
+    r2.q.say("Hi.", OPTS)
+    await flush()
+    await flush()
+    expect(r2.fallbacks).toEqual(["elevenlabs: Can't reach the Box Yard server."])
+  })
+
+  it("logs the path and the voice the server used", async () => {
+    const r = rig("elevenlabs", undefined, null, { voiceOf: () => "A9evEp8yGjv4c3WsIKuY" })
+    r.q.say("Hi.", OPTS)
+    await flush()
+    expect(r.log).toEqual([{ path: "elevenlabs", outcome: "played", text: "Hi.", voice: "A9evEp8yGjv4c3WsIKuY" }])
+    r.audio.finish()
+    r.setProvider("browser")
+    r.q.say("Local.", OPTS)
+    expect(r.log.at(-1)).toMatchObject({ path: "browser", outcome: "played", text: "Local." })
   })
 
   it("a finished line leaves nothing on the shared element: a later error there (the tap-to-unlock clip) doesn't read it again", async () => {
@@ -303,7 +414,7 @@ describe("CloudSynth with OpenAI's streamed PCM", () => {
     expect(r.os.spoken).toHaveLength(0)
   })
 
-  it("stop() stops the playback; a stream error falls back to the browser voice", async () => {
+  it("stop() stops the playback; a stream error is reported and the line skipped", async () => {
     const r = pcmRig()
     r.q.say("one", OPTS)
     await flush()
@@ -317,18 +428,23 @@ describe("CloudSynth with OpenAI's streamed PCM", () => {
     await flush()
     r.player.last.cb.onerror("network error")
     expect(r.fallbacks).toEqual(["openai: network error"])
-    expect(r.os.spoken.map((u) => u.text)).toEqual(["two"])
+    expect(r.os.spoken).toHaveLength(0)
+    expect(r.q.speaking).toBe(false)
   })
 
-  it("an autoplay block stops the queue and asks for a tap", async () => {
+  it("an autoplay block keeps the queue and asks for a tap; after it the line is fetched again", async () => {
     const r = pcmRig()
     r.q.say("one", OPTS)
     r.q.say("two", OPTS)
     await flush()
     r.player.last.cb.onblocked()
     expect(r.onBlocked).toHaveBeenCalledOnce()
-    expect(r.q.pending).toBe(0)
+    expect(r.q.pending).toBe(2)
     expect(r.fallbacks).toEqual([])
+    r.q.unblock()
+    await flush()
+    expect(r.player.plays).toHaveLength(2)
+    expect(r.streams).toHaveLength(2)
   })
 
   it("cancels a stream that arrives after the line was stopped", async () => {
@@ -522,15 +638,15 @@ describe("PcmPlayer", () => {
   })
 })
 
-describe("fallback toast", () => {
+describe("failure toast", () => {
   it("shows each exact error once", () => {
-    reportFallback("elevenlabs", "ElevenLabs: Invalid API key (HTTP 401)")
-    reportFallback("elevenlabs", "ElevenLabs: Invalid API key (HTTP 401)")
+    reportFailure("elevenlabs", "ElevenLabs: Invalid API key (HTTP 401)")
+    reportFailure("elevenlabs", "ElevenLabs: Invalid API key (HTTP 401)")
     const toasts = currentToasts()
     expect(toasts).toHaveLength(1)
-    expect(toasts[0]).toMatchObject({ kind: "error", title: "ElevenLabs voice failed: using the browser voice", body: "ElevenLabs: Invalid API key (HTTP 401)" })
+    expect(toasts[0]).toMatchObject({ kind: "error", title: "ElevenLabs voice failed", body: "ElevenLabs: Invalid API key (HTTP 401)" })
     expect(toasts[0]!.action?.label).toBe("Voice settings")
-    reportFallback("elevenlabs", "Can't reach ElevenLabs: ENOTFOUND")
+    reportFailure("elevenlabs", "Can't reach ElevenLabs: ENOTFOUND")
     expect(currentToasts()).toHaveLength(2)
   })
 })
@@ -546,7 +662,30 @@ describe("fetchTts", () => {
     })
     expect(await ((await fetchTts({ text: "Hi." })) as Blob).text()).toBe("MP3")
     expect(calls[0]).toEqual({ url: "/api/tts", body: { text: "Hi." } })
+    // A failed request (offline, a phone waking up) is marked for CloudSynth's one retry.
     await expect(fetchTts({ text: "Hi.", provider: "openai", voice: "ash" })).rejects.toThrow("ElevenLabs: Invalid API key (HTTP 401)")
+  })
+
+  it("marks network errors, records the voice the server used, and works without AbortSignal.any", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new TypeError("Load failed")
+    })
+    await expect(fetchTts({ text: "Hi." }, new AbortController().signal)).rejects.toMatchObject({ message: "Can't reach the Box Yard server.", network: true })
+    vi.stubGlobal("fetch", async () => new Response("MP3", { status: 200, headers: { "Content-Type": "audio/mpeg", "X-TTS-Voice": "A9evEp8yGjv4c3WsIKuY" } }))
+    // iOS Safari before 17.4 has no AbortSignal.any.
+    const any = AbortSignal.any
+    ;(AbortSignal as { any?: unknown }).any = undefined
+    try {
+      const clip = await fetchTts({ text: "Hi." }, new AbortController().signal)
+      expect(clipVoice(clip)).toBe("A9evEp8yGjv4c3WsIKuY")
+      const a = new AbortController()
+      const both = anySignal([a.signal, new AbortController().signal])
+      expect(both.aborted).toBe(false)
+      a.abort()
+      expect(both.aborted).toBe(true)
+    } finally {
+      AbortSignal.any = any
+    }
   })
 
   it("hands back OpenAI's PCM as a stream, as soon as the headers arrive", async () => {

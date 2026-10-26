@@ -2,13 +2,17 @@
 // kept fresh by the `tts` event), and CloudSynth, a SynthLike that the existing SpeechQueue drives
 // exactly like window.speechSynthesis. It fetches each line from POST /api/tts and plays it: mp3
 // (ElevenLabs) through one shared <audio> element, OpenAI's streamed PCM through Web Audio as it
-// arrives (pcm.ts). On any failure it says the line with the browser's own voice instead and shows
-// the error once.
+// arrives (pcm.ts). The server's provider and voice are the only source of truth: a line never
+// switches to the browser's own voice. When the browser blocks playback (no tap yet, as on phones)
+// the line waits for the tap; when it really fails, the error shows once and the line is skipped.
 import { useEffect, useState, useSyncExternalStore } from "react"
 import { TTS_PROVIDER_LABEL, type CloudProvider, type TtsInfo, type TtsProvider, type TtsRequest } from "../../../shared/tts"
 import type { SynthLike, UtteranceLike } from "./speech"
-import { audioContext, isPcm, pcmRate, pcmToWav, type PcmPlayback, type PcmPlayerLike, type PcmStream } from "./pcm"
+import { isPcm, pcmToWav, pcmRate, type PcmPlayback, type PcmPlayerLike, type PcmStream } from "./pcm"
+import { audioElement, unlockAudio } from "./audioUnlock"
 import { toast } from "./toast"
+
+export { audioElement } from "./audioUnlock"
 
 const browser = typeof window !== "undefined"
 
@@ -26,15 +30,22 @@ export function setTtsInfo(next: TtsInfo | null) {
   listeners.forEach((l) => l())
 }
 
-/** Fetch the settings once (again with `force`); failures leave the browser voice in charge. */
+/** Fetch the settings once (again with `force`, or after a failure). Lines wait for them (CloudSynth). */
 export function loadTtsInfo(force = false): Promise<void> {
   if (!browser || typeof fetch === "undefined") return Promise.resolve()
   if (loading && !force) return loading
-  loading = fetch("/api/tts/settings", { credentials: "same-origin" })
+  const load: Promise<void> = fetch("/api/tts/settings", { credentials: "same-origin" })
     .then((r) => (r.ok ? r.json() : null))
-    .then((data) => data && setTtsInfo(data as TtsInfo))
-    .catch(() => {})
-  return loading
+    .then((data) => {
+      if (!data) throw new Error("no settings")
+      setTtsInfo(data as TtsInfo)
+    })
+    // Not loaded (offline, a phone waking up): the next call tries again.
+    .catch(() => {
+      if (loading === load) loading = null
+    })
+  loading = load
+  return load
 }
 
 export const subscribeTtsInfo = (l: Listener) => {
@@ -49,12 +60,17 @@ export function activeProvider(i: TtsInfo | null = info): TtsProvider {
   return p !== "browser" && i?.keys[p].state === "set" ? p : "browser"
 }
 
+/** activeProvider(), or null while the server's settings haven't loaded: then nobody knows yet. */
+export const knownProvider = (): TtsProvider | null => (info ? activeProvider(info) : null)
+
 // ------------------------------------------------------------------ fetching audio
 
 export class TtsFetchError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The request never reached the server (offline, or a phone suspending the page): worth one retry. */
+    readonly network = false,
   ) {
     super(message)
   }
@@ -63,14 +79,33 @@ export class TtsFetchError extends Error {
 /** Covers the server's own 20 s provider timeout plus the download. */
 export const CLIENT_TIMEOUT_MS = 25_000
 
+/** AbortSignal.any, which iOS Safari only has from 17.4 (and Chrome from 116). */
+export function anySignal(signals: AbortSignal[]): AbortSignal {
+  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals)
+  const ctl = new AbortController()
+  for (const s of signals) {
+    if (s.aborted) {
+      ctl.abort(s.reason)
+      break
+    }
+    s.addEventListener("abort", () => ctl.abort(s.reason), { once: true })
+  }
+  return ctl.signal
+}
+
+/** The voice id the server says it used (X-TTS-Voice), for the playback log. */
+const clipVoices = new WeakMap<object, string>()
+export const clipVoice = (clip: Blob | PcmStream): string | undefined => clipVoices.get(clip)
+
 /**
  * POST /api/tts → the mp3, or OpenAI's PCM still streaming (resolves at the first bytes). Errors
- * carry the server's (and so the provider's) exact message.
+ * carry the server's (and so the provider's) exact message. Announcements send only the text, so
+ * the voice saved in Settings › Voice on the server is the one that speaks, on every device.
  */
 export async function fetchTts(req: TtsRequest, signal?: AbortSignal): Promise<Blob | PcmStream> {
   const timeout = new AbortController()
   const timer = setTimeout(() => timeout.abort(), CLIENT_TIMEOUT_MS)
-  const both = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal
+  const both = signal ? anySignal([signal, timeout.signal]) : timeout.signal
   let res: Response
   try {
     res = await fetch("/api/tts", {
@@ -84,20 +119,25 @@ export async function fetchTts(req: TtsRequest, signal?: AbortSignal): Promise<B
     clearTimeout(timer)
     if (signal?.aborted) throw err
     if (timeout.signal.aborted) throw new TtsFetchError("Box Yard's text-to-speech didn't answer in time.", 0)
-    throw new TtsFetchError("Can't reach the Box Yard server.", 0)
+    throw new TtsFetchError("Can't reach the Box Yard server.", 0, true)
   }
   if (!res.ok) {
     clearTimeout(timer)
     const data = (await res.json().catch(() => null)) as { error?: string } | null
     throw new TtsFetchError(data?.error ?? `Text-to-speech failed (HTTP ${res.status})`, res.status)
   }
+  const voice = res.headers.get("x-tts-voice") ?? ""
   const rate = pcmRate(res.headers.get("content-type"))
   // A stream may outlast the timeout (a long line); the server stops it if OpenAI goes quiet.
   if (rate && res.body) {
     clearTimeout(timer)
-    return { kind: "pcm", sampleRate: rate, body: res.body }
+    const pcm: PcmStream = { kind: "pcm", sampleRate: rate, body: res.body }
+    if (voice) clipVoices.set(pcm, voice)
+    return pcm
   }
-  return res.blob().finally(() => clearTimeout(timer))
+  const blob = await res.blob().finally(() => clearTimeout(timer))
+  if (voice) clipVoices.set(blob, voice)
+  return blob
 }
 
 // ------------------------------------------------------------------ the shared audio element
@@ -113,93 +153,36 @@ export interface AudioLike {
   onerror: ((ev: any) => void) | null
 }
 
-let sharedAudio: HTMLAudioElement | null = null
-/** One element for everything Box Yard plays, so unlocking it once (mobile, PWA) unlocks it for good. */
-export function audioElement(): HTMLAudioElement | null {
-  if (!browser || typeof Audio === "undefined") return null
-  if (!sharedAudio) {
-    sharedAudio = new Audio()
-    sharedAudio.preload = "auto"
-    sharedAudio.setAttribute("playsinline", "")
-  }
-  return sharedAudio
-}
-
-/** A 1-sample silent WAV: played inside a tap, it lets iOS Safari and PWAs play this element later. */
-function silentWav(): string {
-  const bytes = new Uint8Array(46)
-  const view = new DataView(bytes.buffer)
-  const str = (at: number, s: string) => [...s].forEach((ch, i) => view.setUint8(at + i, ch.charCodeAt(0)))
-  str(0, "RIFF")
-  view.setUint32(4, 38, true)
-  str(8, "WAVEfmt ")
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true) // PCM
-  view.setUint16(22, 1, true) // mono
-  view.setUint32(24, 8000, true)
-  view.setUint32(28, 16000, true)
-  view.setUint16(32, 2, true)
-  view.setUint16(34, 16, true)
-  str(36, "data")
-  view.setUint32(40, 2, true)
-  return `data:audio/wav;base64,${btoa(String.fromCharCode(...bytes))}`
-}
-
-/** Drop a finished line's handlers from the shared element. */
-function detach(a: Pick<AudioLike, "onplaying" | "onended" | "onerror"> | null) {
-  if (!a) return
-  a.onplaying = a.onended = a.onerror = null
-}
-
-let primed = false
-/** Call from inside a click or key press. Harmless to call again; only the first one plays. */
+/** Call from inside a click or key press (audioUnlock.ts). Harmless to call again. */
 export function primeAudio() {
-  if (primed) return
-  const a = audioElement()
-  if (!a) return
-  primed = true
-  // Web Audio (OpenAI's streamed voice) needs its own unlock, also inside the tap.
-  const ctx = audioContext()
-  if (ctx && ctx.state !== "running") void ctx.resume().catch(() => {})
-  // Already playing, so already allowed to: don't cut it off.
-  if (!a.paused) return
-  try {
-    detach(a)
-    a.src = silentWav()
-    a.volume = 0
-    void a.play().catch(() => {
-      primed = false
-    })
-  } catch {
-    primed = false
-  }
+  unlockAudio()
 }
 
-// ------------------------------------------------------------------ fallback toast
+// ------------------------------------------------------------------ failure toast and playback log
 
 const shown = new Set<string>()
-const fallbackListeners = new Set<Listener>()
-let lastFallback: { provider: CloudProvider; message: string; at: number } | null = null
+const failureListeners = new Set<Listener>()
+let lastFailure: { provider: CloudProvider; message: string; at: number } | null = null
 
-/** The latest fallback, for Settings › Voice (toasts sit under the settings dialog). */
-export const useLastFallback = () =>
+/** The latest failure, for Settings › Voice (toasts sit under the settings dialog). */
+export const useLastFailure = () =>
   useSyncExternalStore(
     (l) => {
-      fallbackListeners.add(l)
-      return () => fallbackListeners.delete(l)
+      failureListeners.add(l)
+      return () => failureListeners.delete(l)
     },
-    () => lastFallback,
-    () => lastFallback,
+    () => lastFailure,
+    () => lastFailure,
   )
 
-/** Tell Cody once per error (per page load) that the cloud voice failed and the browser voice took over. */
-export function reportFallback(provider: CloudProvider, message: string) {
-  lastFallback = { provider, message, at: Date.now() }
-  fallbackListeners.forEach((l) => l())
+/** Tell Cody once per error (per page load) that the cloud voice couldn't say a line. */
+export function reportFailure(provider: CloudProvider, message: string) {
+  lastFailure = { provider, message, at: Date.now() }
+  failureListeners.forEach((l) => l())
   const key = `${provider}:${message}`
   if (shown.has(key)) return
   shown.add(key)
-  toast.error(`${TTS_PROVIDER_LABEL[provider]} voice failed: using the browser voice`, message, {
+  toast.error(`${TTS_PROVIDER_LABEL[provider]} voice failed`, message, {
     duration: 12_000,
     action: {
       label: "Voice settings",
@@ -212,17 +195,56 @@ export function reportFallback(provider: CloudProvider, message: string) {
   })
 }
 
+/** How each line was (or wasn't) spoken. */
+export interface VoiceLogEntry {
+  at: number
+  /** The engine: a cloud provider, or the browser's own voice (only when the server is set to Browser / OS). */
+  path: TtsProvider
+  outcome: "played" | "blocked" | "failed" | "retrying"
+  text: string
+  /** The provider's voice id the server used. */
+  voice?: string
+  detail?: string
+}
+
+const LOG_MAX = 20
+let voiceLog: VoiceLogEntry[] = []
+const logListeners = new Set<Listener>()
+
+/** Every line's path goes to the console as `[voice] …` and to the last few in Settings › Voice. */
+export function logVoice(e: Omit<VoiceLogEntry, "at">) {
+  voiceLog = [...voiceLog.slice(-(LOG_MAX - 1)), { ...e, at: Date.now() }]
+  logListeners.forEach((l) => l())
+  const extra = [e.voice && `voice ${e.voice}`, e.detail].filter(Boolean).join(", ")
+  console.info(`[voice] ${e.path} ${e.outcome}: “${e.text.slice(0, 80)}”${extra ? ` (${extra})` : ""}`)
+}
+
+export const getVoiceLog = () => voiceLog
+export const useVoiceLog = () =>
+  useSyncExternalStore(
+    (l) => {
+      logListeners.add(l)
+      return () => logListeners.delete(l)
+    },
+    () => voiceLog,
+    () => voiceLog,
+  )
+
 /** Tests only. */
-export const resetFallbackToasts = () => {
+export const resetFailureToasts = () => {
   shown.clear()
-  lastFallback = null
+  lastFailure = null
+  voiceLog = []
 }
 
 // ------------------------------------------------------------------ CloudSynth
 
 export interface CloudDeps {
-  provider: () => TtsProvider
-  /** The browser's speech engine: used when the provider is Browser / OS, and as the fallback. */
+  /** The server's provider, or null while its settings haven't loaded (a line then waits for `ready`). */
+  provider: () => TtsProvider | null
+  /** Loads the server's settings. */
+  ready?: () => Promise<unknown>
+  /** The browser's speech engine: used only when the server is set to Browser / OS. */
   os: SynthLike | null
   osUtter: (text: string) => UtteranceLike
   audio: () => AudioLike | null
@@ -230,12 +252,23 @@ export interface CloudDeps {
   /** Plays streamed PCM as it arrives; without one, PCM is buffered into a WAV for `audio`. */
   pcm?: () => PcmPlayerLike | null
   objectUrl?: { create(b: Blob): string; revoke(url: string): void }
-  onFallback: (provider: CloudProvider, message: string) => void
+  /** The cloud voice couldn't say a line (the line is skipped, never read by another voice). */
+  onFailure: (provider: CloudProvider, message: string) => void
+  log?: (entry: Omit<VoiceLogEntry, "at">) => void
+  voiceOf?: (clip: Blob | PcmStream) => string | undefined
+  /** Wait before the one retry of a request that never reached the server. */
+  retryMs?: number
+  /** The <audio> element played: it's unlocked for good (audioUnlock.ts). */
+  onPlayed?: () => void
 }
+
+type Handlers = Pick<AudioLike, "onplaying" | "onended" | "onerror">
 
 /**
  * window.speechSynthesis's shape over the cloud providers, so SpeechQueue keeps its queueing,
  * hold/release, stop and watchdog rules unchanged. One line plays at a time; cancel() cuts it off.
+ * A line the browser refused to play (no tap yet) ends with `not-allowed`, like speechSynthesis; its
+ * clip is kept, so when the queue says it again inside the tap it plays at once, without a request.
  */
 export class CloudSynth implements SynthLike {
   private seq = 0
@@ -243,8 +276,8 @@ export class CloudSynth implements SynthLike {
   private url: string | null = null
   private stream: PcmPlayback | null = null
   private playing = false
-  /** The line's `ended` handler on the shared element, to know the handlers there are still ours. */
-  private ended: AudioLike["onended"] = null
+  private handlers: Handlers | null = null
+  private kept: { text: string; provider: CloudProvider; blob: Blob } | null = null
   private readonly urls: NonNullable<CloudDeps["objectUrl"]>
 
   constructor(private readonly d: CloudDeps) {
@@ -253,7 +286,7 @@ export class CloudSynth implements SynthLike {
 
   private get cloud(): CloudProvider | null {
     const p = this.d.provider()
-    return p !== "browser" && this.d.audio() ? p : null
+    return p && p !== "browser" && this.d.audio() ? p : null
   }
 
   get speaking() {
@@ -266,67 +299,111 @@ export class CloudSynth implements SynthLike {
   get chunkMax(): number | undefined {
     return this.cloud ? 600 : undefined
   }
-  /** The watchdog waits for the request too. */
+  /** The watchdog waits for the request (or the settings) too. */
   get latencyMs(): number {
-    return this.cloud ? CLIENT_TIMEOUT_MS : 0
+    return this.cloud || this.d.provider() === null ? CLIENT_TIMEOUT_MS : 0
+  }
+
+  private log(entry: Omit<VoiceLogEntry, "at">) {
+    this.d.log?.(entry)
   }
 
   speak(u: UtteranceLike) {
-    const provider = this.cloud
-    if (!provider) return this.speakOs(u)
+    const p = this.d.provider()
+    if (p === null) return this.whenReady(u)
+    if (p === "browser") return this.speakOs(u)
+    if (!this.d.audio()) {
+      this.log({ path: p, outcome: "failed", text: u.text, detail: "This browser can't play audio." })
+      u.onerror?.({ error: "audio-hardware" })
+      return
+    }
+    this.speakCloud(u, p, 0)
+  }
+
+  /** The settings aren't here yet (the page just opened): wait for them rather than guess the browser voice. */
+  private whenReady(u: UtteranceLike) {
+    const id = ++this.seq
+    this.playing = true
+    const go = () => {
+      if (id !== this.seq) return
+      this.playing = false
+      if (this.d.provider() !== null) return this.speak(u)
+      this.log({ path: "browser", outcome: "failed", text: u.text, detail: "Couldn't load the voice settings from the server." })
+      u.onerror?.({ error: "synthesis-failed" })
+    }
+    ;(this.d.ready?.() ?? Promise.resolve()).then(go, go)
+  }
+
+  private speakCloud(u: UtteranceLike, provider: CloudProvider, attempt: number) {
     const audio = this.d.audio()!
     const id = ++this.seq
     const ctl = new AbortController()
     this.ctl = ctl
     this.playing = true
-    const fallback = (message: string) => {
+    let voice: string | undefined
+    const fail = (message: string) => {
       if (id !== this.seq) return
       this.release()
-      this.d.onFallback(provider, message)
-      this.speakOs(u)
+      this.log({ path: provider, outcome: "failed", text: u.text, voice, detail: message })
+      this.d.onFailure(provider, message)
+      u.onerror?.({ error: "synthesis-failed" })
+    }
+    // No tap yet: the queue keeps the line and the "Tap to enable voice" chip appears, as with speechSynthesis.
+    const blocked = (blob?: Blob) => {
+      if (id !== this.seq) return
+      this.release()
+      this.kept = blob ? { text: u.text, provider, blob } : null
+      this.log({ path: provider, outcome: "blocked", text: u.text, voice, detail: "waiting for a tap" })
+      u.onerror?.({ error: "not-allowed" })
+    }
+    const started = () => {
+      if (id !== this.seq) return
+      this.log({ path: provider, outcome: "played", text: u.text, voice })
+      u.onstart?.({})
+    }
+    const ended = () => {
+      if (id !== this.seq) return
+      this.release()
+      u.onend?.({})
     }
     const playBlob = (blob: Blob) => {
       if (id !== this.seq) return
       this.revoke()
       this.url = this.urls.create(blob)
-      audio.onplaying = () => id === this.seq && u.onstart?.({})
-      audio.onended = () => {
-        if (id !== this.seq) return
-        this.release()
-        u.onend?.({})
-      }
-      audio.onerror = () => fallback("This browser couldn't play the audio it got back.")
-      this.ended = audio.onended
+      this.attach(audio, {
+        onplaying: () => {
+          if (id !== this.seq) return
+          this.d.onPlayed?.()
+          started()
+        },
+        onended: ended,
+        onerror: () => fail("This browser couldn't play the audio it got back."),
+      })
       audio.src = this.url
       audio.volume = u.volume
       audio.play().catch((err: { name?: string; message?: string }) => {
         if (id !== this.seq) return
-        if (err?.name === "NotAllowedError") {
-          // No tap yet: the queue stops and the "Click to enable voice" chip appears, as with speechSynthesis.
-          this.release()
-          u.onerror?.({ error: "not-allowed" })
-          return
-        }
+        if (err?.name === "NotAllowedError") return blocked(blob)
         if (err?.name === "AbortError") return
-        fallback(err?.message || "This browser couldn't play the audio it got back.")
+        fail(err?.message || "This browser couldn't play the audio it got back.")
       })
     }
     const playPcm = (pcm: PcmStream, player: PcmPlayerLike) => {
       this.stream = player.play(pcm, {
         volume: u.volume,
-        onstart: () => id === this.seq && u.onstart?.({}),
-        onend: () => {
-          if (id !== this.seq) return
-          this.release()
-          u.onend?.({})
-        },
-        onblocked: () => {
-          if (id !== this.seq) return
-          this.release()
-          u.onerror?.({ error: "not-allowed" })
-        },
-        onerror: (message) => fallback(message),
+        onstart: started,
+        onend: ended,
+        onblocked: () => blocked(),
+        onerror: (message) => fail(message),
       })
+    }
+
+    const kept = this.kept
+    if (kept && kept.text === u.text && kept.provider === provider) {
+      // Said again inside the tap that unlocked audio: play the clip we already have, right now.
+      this.kept = null
+      voice = this.d.voiceOf?.(kept.blob)
+      return playBlob(kept.blob)
     }
     this.d.fetchAudio(u.text, ctl.signal).then(
       (clip) => {
@@ -334,21 +411,30 @@ export class CloudSynth implements SynthLike {
           if (isPcm(clip)) void clip.body.cancel().catch(() => {})
           return
         }
+        voice = this.d.voiceOf?.(clip)
         if (!isPcm(clip)) return playBlob(clip)
         const player = this.d.pcm?.()
         if (player) return playPcm(clip, player)
-        pcmToWav(clip).then(playBlob, (err: Error) => id === this.seq && fallback(err?.message || String(err)))
+        pcmToWav(clip).then(playBlob, (err: Error) => fail(err?.message || String(err)))
       },
-      (err: Error) => {
-        if (ctl.signal.aborted && id !== this.seq) return
-        fallback(err?.message || String(err))
+      (err: Error & { network?: boolean }) => {
+        if (id !== this.seq) return
+        // A phone waking up drops requests made while it slept: try once more before saying anything.
+        if (err?.network && attempt === 0) {
+          this.log({ path: provider, outcome: "retrying", text: u.text, detail: err.message })
+          setTimeout(() => id === this.seq && this.speakCloud(u, provider, 1), this.d.retryMs ?? 1500)
+          return
+        }
+        fail(err?.message || String(err))
       },
     )
   }
 
+  /** Browser / OS: the server says the browser speaks for itself. */
   private speakOs(u: UtteranceLike) {
     const os = this.d.os
     if (!os) {
+      this.log({ path: "browser", outcome: "failed", text: u.text, detail: "This browser has no speech engine." })
       u.onerror?.({ error: "synthesis-unavailable" })
       return
     }
@@ -358,10 +444,38 @@ export class CloudSynth implements SynthLike {
     real.rate = u.rate
     real.pitch = u.pitch
     real.volume = u.volume
-    real.onstart = (e) => u.onstart?.(e)
+    real.onstart = (e) => {
+      this.log({ path: "browser", outcome: "played", text: u.text, voice: u.voice?.name })
+      u.onstart?.(e)
+    }
     real.onend = (e) => u.onend?.(e)
-    real.onerror = (e) => u.onerror?.(e)
+    real.onerror = (e) => {
+      const error = (e as { error?: string } | undefined)?.error
+      if (error !== "interrupted" && error !== "canceled")
+        this.log({ path: "browser", outcome: error === "not-allowed" ? "blocked" : "failed", text: u.text, detail: error })
+      u.onerror?.(e)
+    }
     os.speak(real)
+  }
+
+  private attach(audio: AudioLike, h: Handlers) {
+    this.detach()
+    this.handlers = h
+    audio.onplaying = h.onplaying
+    audio.onended = h.onended
+    audio.onerror = h.onerror
+  }
+
+  /** Our handlers off the shared element, so a late event (or a preview's) can't touch a finished line. */
+  private detach() {
+    const h = this.handlers
+    const audio = h && this.d.audio()
+    if (audio) {
+      if (audio.onplaying === h.onplaying) audio.onplaying = null
+      if (audio.onended === h.onended) audio.onended = null
+      if (audio.onerror === h.onerror) audio.onerror = null
+    }
+    this.handlers = null
   }
 
   private revoke() {
@@ -373,15 +487,13 @@ export class CloudSynth implements SynthLike {
     this.playing = false
     this.ctl = null
     this.stream = null
-    // The element is shared (previews, the tap-to-unlock clip): once a line is over, nothing it does may reach it, or
-    // the unlock clip failing on a tap would "fall back" and read the finished line again.
-    const a = this.d.audio()
-    if (a && this.ended && a.onended === this.ended) detach(a)
-    this.ended = null
+    this.detach()
   }
 
   cancel() {
     this.seq++
+    // The queue forgot the line (stop(), a new voice): a clip kept for the tap goes with it.
+    this.kept = null
     this.ctl?.abort()
     this.stream?.stop()
     this.release()

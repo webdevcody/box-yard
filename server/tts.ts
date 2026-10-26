@@ -39,6 +39,8 @@ export class TtsError extends Error {
 export interface TtsAudio {
   contentType: string
   cache: "hit" | "miss"
+  /** The provider's voice id this clip was made with (sent as X-TTS-Voice, so the browser can log it). */
+  voice: string
   chunks: AsyncIterable<Uint8Array>
   /** The browser went away: stop the upstream request (nothing is cached). */
   cancel(): void
@@ -120,6 +122,7 @@ interface HttpCall {
   provider: CloudProvider
   url: string
   init: RequestInit
+  voice: string
   cacheKey: string
 }
 
@@ -130,6 +133,7 @@ interface RealtimeCall {
   key: string
   /** Client events sent once the socket opens, in order. */
   events: object[]
+  voice: string
   cacheKey: string
 }
 
@@ -211,6 +215,7 @@ export class TtsService {
         provider,
         url: `${this.o.baseUrls.elevenlabs}/v1/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=${ELEVENLABS_FORMAT}`,
         init: { method: "POST", headers: { "xi-api-key": key, "Content-Type": "application/json", Accept: MP3 }, body: JSON.stringify(body) },
+        voice,
         cacheKey: sha(JSON.stringify([provider, keyId, voice, model, speed, ELEVENLABS_FORMAT, text])),
       }
     }
@@ -241,6 +246,7 @@ export class TtsService {
         { type: "conversation.item.create", item: { type: "message", role: "user", content: [{ type: "input_text", text }] } },
         { type: "response.create", response: { output_modalities: ["audio"] } },
       ],
+      voice,
       cacheKey: sha(JSON.stringify([provider, keyId, voice, model, speed, instructions, "pcm24k", text])),
     }
   }
@@ -253,6 +259,7 @@ export class TtsService {
       return {
         contentType: call.kind === "realtime" ? PCM_CONTENT_TYPE : MP3,
         cache: "hit",
+        voice: call.voice,
         chunks: (async function* () {
           yield hit
         })(),
@@ -313,6 +320,7 @@ export class TtsService {
     return {
       contentType: res.headers.get("content-type")?.startsWith("audio/") ? res.headers.get("content-type")! : MP3,
       cache: "miss",
+      voice: call.voice,
       chunks: chunks(),
       cancel: () => {
         cancelled = true
@@ -427,6 +435,7 @@ export class TtsService {
     return first.then(() => ({
       contentType: PCM_CONTENT_TYPE,
       cache: "miss" as const,
+      voice: call.voice,
       chunks: chunks(),
       cancel: () => {
         cancelled = true

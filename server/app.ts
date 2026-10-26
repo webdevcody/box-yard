@@ -817,6 +817,7 @@ export function createBoxYard(
     if (!(err instanceof TtsError)) throw err
     res.removeHeader("Content-Type")
     res.removeHeader("X-TTS-Cache")
+    res.removeHeader("X-TTS-Voice")
     res.status(err.status).json({ error: err.message, provider: err.provider, upstreamStatus: err.upstreamStatus })
   }
   api.get("/tts/voices", async (req, res) => {
@@ -843,6 +844,7 @@ export function createBoxYard(
     res.setHeader("Content-Type", audio.contentType)
     res.setHeader("Cache-Control", "no-store")
     res.setHeader("X-TTS-Cache", audio.cache)
+    res.setHeader("X-TTS-Voice", audio.voice)
     try {
       for await (const chunk of audio.chunks) {
         if (res.destroyed) break

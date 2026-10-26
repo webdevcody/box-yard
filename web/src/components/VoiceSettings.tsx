@@ -7,7 +7,8 @@ import { dictationSupported, isMac, setDictationSettings, useDictationSettings }
 import type { DictationSettings } from "../lib/dictation"
 import { Panel, Row } from "./SettingsDialog"
 import { TtsSection, draftRequest, useTtsDraft } from "./TtsSettings"
-import { playPreview, useLastFallback } from "../lib/tts"
+import { useTtsSettings } from "../lib/queries"
+import { playPreview, useLastFailure, useVoiceLog, type VoiceLogEntry } from "../lib/tts"
 import { useDraft } from "../lib/settingsDraft"
 import { TTS_PROVIDER_LABEL } from "../../../shared/tts"
 import { Button, Select, cx, inputClass } from "./ui"
@@ -65,7 +66,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
   const tts = useTtsDraft()
   const voices = useVoices()
   const cloud = tts.settings.provider
-  const fallback = useLastFallback()
+  const failure = useLastFailure()
   const [testError, setTestError] = useState<string | null>(null)
   const supported = voiceSupported()
   const set = (patch: Partial<VoiceSettings>) => setDraft((d) => ({ ...d, ...patch }))
@@ -120,29 +121,24 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
         </div>
       </Row>
       <TtsSection fid={fid} draft={tts} volume={s.volume} />
-      <Row
-        id={fid("vv")}
-        label={cloud === "browser" ? "Browser voice" : "Fallback voice"}
-        help={
-          cloud === "browser"
-            ? "The browser's voices. Local voices work offline and sound the same every time."
-            : `The browser voice that speaks if ${TTS_PROVIDER_LABEL[cloud]} fails (bad key, quota, no network).`
-        }
-      >
-        <Select id={fid("vv")} className="w-full" disabled={off} value={s.voiceURI} onChange={(e) => set({ voiceURI: e.target.value })}>
-          <option value="">Default{auto ? ` (${auto.name})` : ""}</option>
-          {sorted.map((v) => (
-            <option key={v.voiceURI} value={v.voiceURI}>
-              {v.name} · {v.lang}
-              {v.localService ? "" : " · online"}
-            </option>
-          ))}
-        </Select>
-      </Row>
+      {/* A cloud voice never hands a line to the browser's voice, so its picker only matters for Browser / OS. */}
+      {cloud === "browser" && (
+        <Row id={fid("vv")} label="Browser voice" help="The browser's voices. Local voices work offline and sound the same every time.">
+          <Select id={fid("vv")} className="w-full" disabled={off} value={s.voiceURI} onChange={(e) => set({ voiceURI: e.target.value })}>
+            <option value="">Default{auto ? ` (${auto.name})` : ""}</option>
+            {sorted.map((v) => (
+              <option key={v.voiceURI} value={v.voiceURI}>
+                {v.name} · {v.lang}
+                {v.localService ? "" : " · online"}
+              </option>
+            ))}
+          </Select>
+        </Row>
+      )}
       <Row
         id={fid("vr")}
         label="Rate, pitch and volume"
-        help={cloud === "browser" ? "How fast, how high and how loud." : `Rate and pitch shape the browser voice; ${TTS_PROVIDER_LABEL[cloud]} uses its own Speed above. Volume applies to every voice.`}
+        help={cloud === "browser" ? "How fast, how high and how loud." : `${TTS_PROVIDER_LABEL[cloud]} uses its own Speed above, so only Volume applies to it.`}
       >
         <div className="space-y-2">
           <Slider id={fid("vr")} label="Rate" value={s.rate} min={0.5} max={2} step={0.1} disabled={off} onChange={(rate) => set({ rate })} format={x} />
@@ -191,7 +187,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           </div>
         </div>
       </Row>
-      <Row label="Test" help="Say a sample line with these settings, saved or not. This also unlocks audio, which browsers block until you click.">
+      <Row label="Test" help="Say a sample line with these settings, saved or not. This also unlocks audio, which browsers block until you tap or click.">
         <Button type="button" variant="subtle" disabled={!supported} onClick={test} data-testid="test-voice">
           <Volume2 className="h-4 w-4" /> Test voice
         </Button>
@@ -200,11 +196,12 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
             {testError}
           </p>
         )}
-        {!testError && fallback && cloud === fallback.provider && (
-          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-fallback>
-            {TTS_PROVIDER_LABEL[fallback.provider]} failed, so the browser voice spoke instead: {fallback.message}
+        {!testError && failure && cloud === failure.provider && (
+          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-failure>
+            {TTS_PROVIDER_LABEL[failure.provider]} couldn't say a line: {failure.message}
           </p>
         )}
+        <RecentLines />
       </Row>
       <p className="mt-2 text-xs text-zinc-500">
         The provider, its voice and keys are saved on the server for every browser; everything else is saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
@@ -212,6 +209,34 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
       </p>
       <DictationSection fid={fid} />
     </Panel>
+  )
+}
+
+const OUTCOME_LABEL: Record<VoiceLogEntry["outcome"], string> = { played: "played", blocked: "waiting for a tap", failed: "failed", retrying: "retrying" }
+
+/** The last lines and which voice said them (also in the console as `[voice] …`), for "why did it sound different?". */
+function RecentLines() {
+  const log = useVoiceLog()
+  const saved = useTtsSettings().data?.settings.elevenlabs
+  // The saved voice by name, so "the default voice" (another id) stands out.
+  const voice = (id: string) => (saved && id === saved.voiceId ? `${saved.voiceName || "saved voice"}, ${id}` : id)
+  if (!log.length) return null
+  return (
+    <details className="mt-2 text-xs text-zinc-400" data-voice-log>
+      <summary className="cursor-pointer select-none text-zinc-500">Recent lines ({log.length})</summary>
+      <ul className="mt-1 space-y-1">
+        {log
+          .slice(-8)
+          .reverse()
+          .map((e, i) => (
+            <li key={`${e.at}-${i}`} className="wrap-anywhere">
+              <span className="text-zinc-500">{new Date(e.at).toLocaleTimeString()}</span> {TTS_PROVIDER_LABEL[e.path]}
+              {e.voice ? ` (${e.path === "elevenlabs" ? voice(e.voice) : e.voice})` : ""}, <span className={e.outcome === "failed" ? "text-red-300" : undefined}>{OUTCOME_LABEL[e.outcome]}</span>: “{e.text}”
+              {e.detail && e.outcome !== "blocked" ? ` · ${e.detail}` : ""}
+            </li>
+          ))}
+      </ul>
+    </details>
   )
 }
 

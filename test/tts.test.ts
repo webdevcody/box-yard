@@ -399,7 +399,7 @@ describe("TTS HTTP routes", () => {
     yard = null
   })
 
-  async function boot(fetch: typeof globalThis.fetch, env: { elevenlabsApiKey?: string; openaiBaseUrl?: string } = {}) {
+  async function boot(fetch: typeof globalThis.fetch, env: { elevenlabsApiKey?: string; openaiBaseUrl?: string; ttsProvider?: string } = {}) {
     const port = await freePort()
     yard = createBoxYard(testConfig({ port, ...env }), { webDir: "/nonexistent", tts: { fetch } })
     server = await new Promise<Server>((resolve) => {
@@ -465,6 +465,22 @@ describe("TTS HTTP routes", () => {
     expect(res.status).toBe(400)
     res = await call("POST", "/api/tts", { text: "Hi.", provider: "polly" })
     expect(res.status).toBe(400)
+  })
+
+  it("POST /api/tts with only the text (what every browser sends) speaks the server's saved voice, and says which", async () => {
+    const p = fakeProviders(() => audio("ID3-AUDIO"))
+    const call = await boot(p.fetch, { elevenlabsApiKey: EL_KEY, ttsProvider: "elevenlabs" })
+    await call("PUT", "/api/tts/settings", { elevenlabs: { voiceId: "A9evEp8yGjv4c3WsIKuY", voiceName: "Ralf Eisend" } })
+    let res = await call("POST", "/api/tts", { text: "PR 30 merged." })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("x-tts-voice")).toBe("A9evEp8yGjv4c3WsIKuY")
+    expect(p.calls.at(-1)!.url).toContain("/v1/text-to-speech/A9evEp8yGjv4c3WsIKuY/stream")
+    // A cache hit says the same voice; a preview's own voice (Settings › Voice picker) is the only override.
+    res = await call("POST", "/api/tts", { text: "PR 30 merged." })
+    expect(res.headers.get("x-tts-cache")).toBe("hit")
+    expect(res.headers.get("x-tts-voice")).toBe("A9evEp8yGjv4c3WsIKuY")
+    res = await call("POST", "/api/tts", { text: "Sample.", voice: "JBFqnCBsd6RMkjVDRZzb" })
+    expect(res.headers.get("x-tts-voice")).toBe("JBFqnCBsd6RMkjVDRZzb")
   })
 
   it("POST /api/tts streams OpenAI's Realtime PCM as it arrives; errors are JSON; the key is never in a response", async () => {
