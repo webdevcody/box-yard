@@ -10,6 +10,7 @@ import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
 import { QueuedLink } from "./QueuedMessages"
+import { WaitReason } from "./WaitReason"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
@@ -63,7 +64,7 @@ export const TaskCard = memo(function TaskCard({
         ) : task.status === "queued" && task.waitReason ? (
           <p className="line-clamp-2 break-words text-amber-200/80" data-testid="wait-reason">
             <WaitIcon task={task} className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px" />
-            {task.waitReason}
+            <WaitReason task={task} inLink />
           </p>
         ) : task.status === "failed" && task.error ? (
           <p className="line-clamp-2 break-words text-red-300/80">{task.error}</p>

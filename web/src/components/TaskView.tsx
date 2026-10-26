@@ -29,6 +29,7 @@ import { projectContext, taskContext, type SelectionTaskSource } from "../lib/se
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
 import { useOwnerName } from "../lib/queries"
+import { WaitReason } from "./WaitReason"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -76,7 +77,7 @@ export function TaskView({ id }: { id: string }) {
         <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
           <WaitIcon task={task} className="h-4 w-4 shrink-0 text-amber-300" />
           <span>
-            {task.waitReason}. It starts on its own once there is room{task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.
+            <WaitReason task={task} />. It starts on its own once there is room{task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.
           </span>
         </div>
       )}

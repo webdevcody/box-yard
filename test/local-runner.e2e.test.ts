@@ -93,7 +93,8 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
 }
 
 const HANG = "keep going [hang]"
-const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
+/** Settings › Local agents is full: the reason names the running tasks (`by`: "a (mac)"). */
+const localSlotWait = (slots: number, by: string) => `Waiting for ${by}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`
 const getTask = (r: Running, id: string) => r.yard.store.getTask(id)!
 const newTask = (r: Running, projectId: string, title: string, prompt = "write a haiku") => r.yard.tasks.createTask({ projectId, title, prompt })
 const project = (r: Running, name: string, runner: "box" | "local") => call<Project>(r, "POST", "/api/projects", { name, runner })
@@ -228,7 +229,8 @@ describe("local runner", () => {
     // The box task runs though a local agent does (Max agents counts boxes only)...
     await working(r, c.id)
     // ...and the second local task waits for a Local agents slot, not a box.
-    await status(r, b.id, (t) => t.status === "queued" && t.waitReason === LOCAL_SLOT_WAIT, "the second local task to wait for a local slot")
+    const waiting = await status(r, b.id, (t) => t.status === "queued" && t.waitReason === localSlotWait(1, "a (mac)"), "the second local task to wait for a local slot")
+    expect(waiting.waitFor).toEqual([{ taskId: a.id, title: "a" }])
     expect(getTask(r, b.id).boxId).toBeNull()
     expect(r.yard.tasks.runningTotal()).toBe(1)
     expect(r.yard.tasks.poolLimits()).toMatchObject({ maxAgents: 1, agentsRunning: 1, localAgents: 1, localAgentsRunning: 1 })
@@ -238,7 +240,7 @@ describe("local runner", () => {
     const d = newTask(r, cloud.id, "d", HANG)
     await new Promise((res) => setTimeout(res, 800))
     expect(getTask(r, d.id).status).toBe("queued")
-    expect(getTask(r, d.id).waitReason).not.toBe(LOCAL_SLOT_WAIT)
+    expect(getTask(r, d.id).waitReason ?? "").not.toMatch(/Local agents/)
 
     // Raising Local agents starts the waiting local task.
     await call(r, "PUT", "/api/agent-settings", { localAgents: 2 })
@@ -247,18 +249,65 @@ describe("local runner", () => {
     expect(getTask(r, d.id).status).toBe("queued")
   })
 
-  it("respects the project's Agents per box on this computer", async () => {
-    const r = await start({ localAgents: 3 })
-    const mac = await call<Project>(r, "POST", "/api/projects", { name: "gpu", runner: "local", agentsPerBox: 1 })
-    const other = await call<Project>(r, "POST", "/api/projects", { name: "notes", runner: "local" })
-    const a = newTask(r, mac.id, "a", HANG)
+  // Cody: a project's Agents per box (Agents at once) limits only its own agents. One set to 1 on this computer
+  // used to hold back every project's agents.
+  it("limits only the project's own agents on this computer, and names the task it waits for", async () => {
+    const r = await start({ localAgents: 2 })
+    const heavy = await call<Project>(r, "POST", "/api/projects", { name: "survive-the-night", runner: "local", agentsPerBox: 1 })
+    const other = await call<Project>(r, "POST", "/api/projects", { name: "box-yard", runner: "local" })
+    const a = newTask(r, heavy.id, "Merge PR #78", HANG)
     await working(r, a.id)
-    const b = newTask(r, mac.id, "b", HANG)
-    await status(r, b.id, (t) => t.status === "queued" && t.waitReason === "Waiting: gpu runs each of its agents alone on a box, and this computer has an agent running", "the task to wait")
-    // Nor does another project's agent join it, though Local agents has room.
+    // A second agent of the same project waits, and its reason names (and links) the one running.
+    const b = newTask(r, heavy.id, "Perf lane 1", HANG)
+    const held = await status(r, b.id, (t) => t.status === "queued" && t.waitReason !== null, "the project's second task to wait")
+    expect(held.waitReason).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer")
+    expect(held.waitFor).toEqual([{ taskId: a.id, title: "Merge PR #78" }])
+    expect(r.yard.store.listTaskMessages(b.id, 50).some((m) => m.role === "event" && m.content === `${held.waitReason}.`)).toBe(true)
+    // Another project's task runs beside it, within Settings › Local agents.
+    const c = newTask(r, other.id, "Delete idle tiny-town boxes", HANG)
+    expect((await working(r, c.id)).boxId).toBe(LOCAL_BOX_ID)
+    expect(r.yard.store.slotsInUse(LOCAL_BOX_ID)).toBe(2)
+    // Local agents is full now: the next one waits for a slot, naming both running tasks.
+    const d = newTask(r, other.id, "Another light task", HANG)
+    const full = await status(r, d.id, (t) => t.status === "queued" && t.waitReason === localSlotWait(2, "Merge PR #78 (survive-the-night) and Delete idle tiny-town boxes (box-yard)"), "the third task to wait for a slot")
+    expect(full.waitFor.map((w) => w.taskId)).toEqual([a.id, c.id])
+    expect(getTask(r, b.id).status).toBe("queued")
+    expect(r.yard.store.slotsInUse(LOCAL_BOX_ID)).toBe(2)
+    // The heavy project's agent finishing lets its next one start (a slot is free too).
+    await r.yard.tasks.stopTask(a.id)
+    await working(r, b.id)
+    expect(getTask(r, d.id).status).toBe("queued")
+  })
+
+  it("keeps other projects' agents off this computer only when the project needs the whole machine", async () => {
+    const r = await start({ localAgents: 3 })
+    const bench = await call<Project>(r, "POST", "/api/projects", { name: "bench", runner: "local" })
+    const other = await call<Project>(r, "POST", "/api/projects", { name: "notes", runner: "local" })
+    expect(bench.wholeMachine).toBe(false)
+    expect((await call<Project>(r, "PATCH", `/api/projects/${bench.id}`, { wholeMachine: true })).wholeMachine).toBe(true)
+    const a = newTask(r, bench.id, "Frame-time run", HANG)
+    await working(r, a.id)
     const c = newTask(r, other.id, "c", HANG)
-    await status(r, c.id, (t) => t.status === "queued" && t.waitReason === "Waiting: this computer is running an agent of gpu, which runs its agents alone on a box", "the other project's task to wait")
-    expect(r.yard.store.slotsInUse(LOCAL_BOX_ID)).toBe(1)
+    const held = await status(r, c.id, (t) => t.status === "queued" && t.waitReason !== null, "the other project's task to wait")
+    expect(held.waitReason).toBe("Waiting for Frame-time run: bench needs the whole machine")
+    expect(held.waitFor).toEqual([{ taskId: a.id, title: "Frame-time run" }])
+    // With no Agents at once of its own, the project's own agents still share the computer.
+    const b = newTask(r, bench.id, "Second run", HANG)
+    await working(r, b.id)
+    expect(getTask(r, c.id).status).toBe("queued")
+    // Turned off, the other project's task starts.
+    await call(r, "PATCH", `/api/projects/${bench.id}`, { wholeMachine: false })
+    await working(r, c.id)
+
+    // The other way round: it waits for the other projects' agents to finish before it takes the machine.
+    await call(r, "PATCH", `/api/projects/${bench.id}`, { wholeMachine: true })
+    await r.yard.tasks.stopTask(a.id)
+    await r.yard.tasks.stopTask(b.id)
+    await waitFor(() => r.yard.store.slotsInUse(LOCAL_BOX_ID) === 1, "the bench turns to stop")
+    const e = newTask(r, bench.id, "Third run", HANG)
+    const waits = await status(r, e.id, (t) => t.status === "queued" && t.waitReason !== null, "the whole-machine task to wait")
+    expect(waits.waitReason).toBe("Waiting for c (notes): bench needs the whole machine")
+    expect(waits.waitFor).toEqual([{ taskId: c.id, title: "c" }])
   })
 })
 
@@ -444,7 +493,7 @@ describe("per-task runs_on", () => {
     const hog = await create(r, cloud.id, "hog", "local", HANG)
     await working(r, hog.id)
     await call(r, "POST", `/api/tasks/${t.id}/retry`)
-    await status(r, t.id, (x) => x.status === "queued" && x.waitReason === LOCAL_SLOT_WAIT, "the retry to wait for a local slot")
+    await status(r, t.id, (x) => x.status === "queued" && x.waitReason === localSlotWait(1, "hog (cloud)"), "the retry to wait for a local slot")
     await r.yard.tasks.stopTask(hog.id)
     const again = await status(r, t.id, (x) => x.turnCount >= 2 && !x.currentTurnId && x.status !== "queued", "the retry to run")
     expect(again.boxId).toBe(LOCAL_BOX_ID)
