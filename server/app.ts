@@ -741,11 +741,6 @@ export function createBoxYard(
       throw new BadRequestError((err as Error).message)
     }
   })
-  api.post("/runpod/pods/:boxId/stop", async (req, res) => {
-    const boxId = String(req.params.boxId)
-    await tasks.stopGpuPod(boxId, { actor: { kind: "owner" }, reason: "Stopped from Settings › RunPod GPU." })
-    res.json(await runpodStatus())
-  })
   api.post("/runpod/pods/:boxId/keep-warm", async (req, res) => {
     const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
     await runpod.keepWarm(String(req.params.boxId), minutes)
