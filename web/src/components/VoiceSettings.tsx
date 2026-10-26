@@ -178,7 +178,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           </div>
         </div>
       </Row>
-      <Row label="Test" help="Say a sample line with these settings. This also unlocks audio, which browsers block until you click.">
+      <Row label="Test" help="Say a sample line with these settings. This also unlocks audio, which browsers block until you tap or click.">
         <Button type="button" variant="subtle" disabled={!supported} onClick={() => speakNow(TEST_LINE)}>
           <Volume2 className="h-4 w-4" /> Test voice
         </Button>
@@ -203,6 +203,9 @@ const OUTCOME_LABEL: Record<VoiceLogEntry["outcome"], string> = { played: "playe
 /** The last lines and which voice said them (also in the console as `[voice] …`), for "why did it sound different?". */
 function RecentLines() {
   const log = useVoiceLog()
+  const saved = useTtsSettings().data?.settings.elevenlabs
+  // The saved voice by name, so "the default voice" (another id) stands out.
+  const voice = (id: string) => (saved && id === saved.voiceId ? `${saved.voiceName || "saved voice"}, ${id}` : id)
   if (!log.length) return null
   return (
     <details className="mt-2 text-xs text-zinc-400" data-voice-log>
@@ -214,7 +217,7 @@ function RecentLines() {
           .map((e, i) => (
             <li key={`${e.at}-${i}`} className="wrap-anywhere">
               <span className="text-zinc-500">{new Date(e.at).toLocaleTimeString()}</span> {TTS_PROVIDER_LABEL[e.path]}
-              {e.voice ? ` (${e.voice})` : ""}, <span className={e.outcome === "failed" ? "text-red-300" : undefined}>{OUTCOME_LABEL[e.outcome]}</span>: “{e.text}”
+              {e.voice ? ` (${e.path === "elevenlabs" ? voice(e.voice) : e.voice})` : ""}, <span className={e.outcome === "failed" ? "text-red-300" : undefined}>{OUTCOME_LABEL[e.outcome]}</span>: “{e.text}”
               {e.detail && e.outcome !== "blocked" ? ` · ${e.detail}` : ""}
             </li>
           ))}
