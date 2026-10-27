@@ -15,11 +15,11 @@ export const dockerLabel = (id: string, projectName: string | null) => `Docker �
 
 /**
  * Why a Docker container's agents have no Claude sign-in: they can't use this computer's own `claude` login (macOS
- * keeps it in the keychain, and no host folder is mounted), only a Claude key from Settings › Credentials or the
- * project's env.
+ * keeps it in the keychain, and no host folder is mounted), only a Claude key their turns get (TaskManager's
+ * turnCredentials): the task's or project's env, the project identity's Claude login, or Settings › Credentials.
  */
 export const DOCKER_NEEDS_CLAUDE_KEY =
-  "a Docker container can't use this computer's own `claude` login: add a Claude key in Settings › Credentials (`claude setup-token` makes one)"
+  "a Docker container can't use this computer's own `claude` login: add a Claude key in Settings › Credentials or on the project's identity (`claude setup-token` makes one)"
 
 /**
  * Task folders one container holds. Each one's $PORT (4000, 4010, …) is published on this computer's 127.0.0.1, so a

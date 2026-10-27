@@ -110,9 +110,11 @@ export class Setup {
    * Why a task asked to run on `runner` (a per-task runs_on) can't, in plain words, or null when it can. "local" needs
    * this computer's `claude`, signed in or with a Claude key in Settings; "box" needs Upstash boxes (a key, or
    * BOX_PROVIDER=local); "docker" needs Docker running and a Claude key (a container can't use this computer's
-   * login). Mock mode needs none. Never a reason to run it somewhere else instead.
+   * login). Mock mode needs none. Never a reason to run it somewhere else instead. `claudeKey` says whether the task's
+   * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
+   * whether Settings › Credentials has one.
    */
-  async runnerProblem(runner: Runner): Promise<string | null> {
+  async runnerProblem(runner: Runner, claudeKey?: boolean): Promise<string | null> {
     const { c, credentials } = this.d
     // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
     const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
@@ -124,7 +126,7 @@ export class Setup {
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
     }
-    const keySet = creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set"
+    const keySet = claudeKey ?? (creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set")
     if (runner === "docker") return keySet ? null : DOCKER_NEEDS_CLAUDE_KEY
     await this.refreshLocal()
     const local = this.local?.result.check

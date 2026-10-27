@@ -331,6 +331,7 @@ export function createBoxYard(
   const dockerService = new DockerService({
     store,
     credentials: settings.credentials,
+    secrets: secretValues,
     install,
     git: { name: c.gitUserName, email: c.gitUserEmail },
     bin: c.dockerBin || null,
@@ -372,7 +373,7 @@ export function createBoxYard(
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
-  tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
+  tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
@@ -808,7 +809,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(body.runsOn)
+    await tasks.requireRunner(body.runsOn, body.projectId, body.env)
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -821,7 +822,8 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
-    await tasks.requireRunner(body.runsOn)
+    const t = store.getTask(req.params.id!)
+    await tasks.requireRunner(body.runsOn, t?.projectId, t ? store.taskEnv(t.id) : {})
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
     res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
