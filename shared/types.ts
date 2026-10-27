@@ -9,7 +9,7 @@ import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
-import type { ProjectDocker } from "./docker.js"
+import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -541,6 +541,8 @@ export type UiEvent =
   | { type: "setup"; status: SetupStatus }
   /** Settings › RunPod GPU's image build moved on (state and the log's tail; never a secret). */
   | { type: "runpod.build"; build: RunPodImageBuild }
+  /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
+  | { type: "docker.build"; build: DockerImageBuild }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

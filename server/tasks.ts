@@ -55,7 +55,7 @@ import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
-import { DOCKER_MAX_TASKS, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
+import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
@@ -1278,6 +1278,12 @@ export class TaskManager {
     }
   }
 
+  /** List the Docker containers again (pool_status) unless Docker is down, when the last list stays. */
+  async refreshDockerContainers(): Promise<void> {
+    if (!this.docker || (await this.docker.problem())) return
+    await this.docker.provider.list(true).catch(() => {})
+  }
+
   /** Box creation for pool_status: how many are on their way, how many may be at once, and any backoff. */
   private boxCreation() {
     const wait = this.boxCreate.retryAt - Date.now()
@@ -2146,6 +2152,7 @@ export class TaskManager {
 
   /** A project being deleted: its snapshot goes too. A job still running for it drops its own when it sees the project gone. */
   async projectDeleted(projectId: string) {
+    await this.dropDockerContainer(projectId, { kind: "owner" }, "Its project was deleted.")
     const snap = this.store.getProject(projectId)?.snapshot
     if (!snap) return
     this.store.setProjectSnapshot(projectId, null)
@@ -3092,7 +3099,7 @@ export class TaskManager {
       this.setWaitReason(row.id, "Waiting: Docker containers aren't available on this Box Yard")
       return null
     }
-    const problem = await this.docker.problem()
+    const problem = (await this.docker.problem()) ?? this.dockerClaudeProblem(row.project_id)
     if (problem) {
       this.dockerWait(row, problem)
       return null
@@ -3108,6 +3115,13 @@ export class TaskManager {
       return null
     }
     return target
+  }
+
+  /** A Docker project's agents need a Claude key (Settings › Credentials, or the project's env): a container can't use this computer's login. */
+  private dockerClaudeProblem(projectId: string): string | null {
+    if (this.c.mock || Object.keys(this.settings.credentials.claudeEnv()).length) return null
+    const env = this.store.projectEnv(projectId)
+    return env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY ? null : DOCKER_NEEDS_CLAUDE_KEY
   }
 
   /** Put a task in its project's container. A full one (DOCKER_MAX_TASKS folders, one preview port each) parks an archived, resting one. */
@@ -3193,14 +3207,36 @@ export class TaskManager {
   }
 
   /**
+   * Remove a Docker container and its volume with nothing to keep: its project was deleted (with its tasks). When
+   * Docker can't be asked now, the minute sweep removes it later.
+   */
+  private async dropDockerContainer(projectId: string, actor: BoxActor, reason: string, known?: DockerContainerState) {
+    if (!this.docker) return
+    const boxId = dockerBoxId(projectId)
+    const c = known ?? (await this.docker.provider.list(true).catch(() => [])).find((x) => x.boxId === boxId)
+    if (!c) return
+    try {
+      await this.docker.provider.destroy(boxId)
+    } catch (err) {
+      console.warn(`[box-yard] delete Docker container ${c.name}: ${errorMessage(err)}`)
+      return
+    }
+    this.dockerEvent({ boxId, kind: "deleted", detail: `Deleted ${c.name} and its volume; the image stays.`, actor, reason })
+  }
+
+  /**
    * Once a minute: stop Docker containers with no turn running, starting or waiting for Settings › Docker › Stop when
-   * idle. Nothing needs archiving first: the volume keeps every workspace, and the next turn starts it again.
+   * idle, and remove ones whose project was deleted. Nothing needs archiving first: the volume keeps every
+   * workspace, and the next turn starts it again. Docker isn't asked at all while nothing uses it (after a first look).
    */
   private async sweepDocker(now: number) {
     if (!this.docker || now - this.lastDockerSweepAt < 60_000) return
+    const first = this.lastDockerSweepAt === 0
     this.lastDockerSweepAt = now
+    const used = this.docker.provider.cached().length > 0 || this.store.dockerBoxesInUse().length > 0 || this.store.listProjects().some((p) => p.runner === "docker")
+    if (!first && !used) return
     const s = this.docker.settings()
-    if (s.idleMinutes <= 0 || (await this.docker.problem())) return
+    if (await this.docker.problem()) return
     let containers: DockerContainerState[]
     try {
       containers = await this.docker.provider.list(true)
@@ -3209,7 +3245,11 @@ export class TaskManager {
       return
     }
     for (const c of containers) {
-      if (c.state !== "running") continue
+      if (!this.store.getProject(c.projectId)) {
+        await this.dropDockerContainer(c.projectId, { kind: "orphan-sweep" }, "Its project no longer exists.", c)
+        continue
+      }
+      if (c.state !== "running" || s.idleMinutes <= 0) continue
       const residents = this.store.listTaskRows({ boxId: c.boxId })
       if (residents.some((r) => r.current_turn_id || r.status === "starting")) continue
       if (this.store.listTaskRows({ projectId: c.projectId }).some((r) => this.wantsTurn(r) && this.store.taskRunner(r) === "docker")) continue

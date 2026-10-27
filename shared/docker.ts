@@ -14,6 +14,14 @@ export const dockerBoxProject = (id: string) => id.slice(DOCKER_BOX_PREFIX.lengt
 export const dockerLabel = (id: string, projectName: string | null) => `Docker · ${projectName ?? dockerBoxProject(id)}`
 
 /**
+ * Why a Docker container's agents have no Claude sign-in: they can't use this computer's own `claude` login (macOS
+ * keeps it in the keychain, and no host folder is mounted), only a Claude key from Settings › Credentials or the
+ * project's env.
+ */
+export const DOCKER_NEEDS_CLAUDE_KEY =
+  "a Docker container can't use this computer's own `claude` login: add a Claude key in Settings › Credentials (`claude setup-token` makes one)"
+
+/**
  * Task folders one container holds. Each one's $PORT (4000, 4010, …) is published on this computer's 127.0.0.1, so a
  * container publishes at most this many ports; a full container parks an archived, resting folder for room.
  */
