@@ -6,6 +6,7 @@
 #   ./yard dev                   hot-reloading dev servers (web on :5173)
 #   ./yard deploy-box            run it inside an Upstash Box (keeps going when your laptop sleeps)
 #   ./yard deploy-vps user@host  run it on your own server with Docker
+#   ./yard password              put a strong random BOXYARD_PASSWORD in .env (`./yard password check` tests yours)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -57,10 +58,15 @@ case "$cmd" in
     exec npx tsx scripts/deploy-box.ts "$@"
     ;;
   deploy-vps)
+    need_node; install_deps
     exec bash scripts/deploy-vps.sh "$@"
     ;;
+  password)
+    need_node; install_deps
+    exec npx tsx scripts/password.ts "$@"
+    ;;
   *)
-    sed -n '2,9p' "$0"
+    sed -n '2,10p' "$0"
     exit 1
     ;;
 esac

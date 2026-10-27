@@ -7,6 +7,7 @@ import { createPortal } from "react-dom"
 import { Check, Copy, MessageSquarePlus, MoreHorizontal, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
 import { useQuoteToTask } from "./SelectionToTask"
 import { toast } from "../lib/toast"
+import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
 
 /** The classes for the element a MessageActions sits in (a bubble, a reply, a notice card): the hover group and the toolbar's positioning box. */
@@ -52,6 +53,17 @@ export const MessageActions = memo(function MessageActions({ text, className }: 
     document.addEventListener("pointerdown", away, true)
     return () => document.removeEventListener("pointerdown", away, true)
   }, [tapped])
+
+  // The app going to the background (a phone's home-screen app is frozen, not closed): put the toolbar and its menu
+  // away, so a thaw doesn't bring back a toolbar or a menu whose press never finished. Only while one is shown.
+  useEffect(() => {
+    if (!tapped && !menu) return
+    const off = onSuspend(() => {
+      setTapped(false)
+      setMenu(false)
+    })
+    return () => void off()
+  }, [tapped, menu])
 
   useEffect(() => {
     if (!copied) return
