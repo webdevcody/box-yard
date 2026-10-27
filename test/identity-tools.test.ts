@@ -9,6 +9,8 @@ import { IdentityDetector } from "../server/identity/detect.js"
 import { buildMcpServer, type McpCaller } from "../server/mcp.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import { DEFAULT_IDENTITY_ID, type Identity } from "../shared/identities.js"
+import { withOwner } from "../shared/owner.js"
+import { ORCHESTRATOR_PROMPT, captainPrompt } from "../server/prompts.js"
 import { freePort, testConfig } from "./helpers.js"
 import { TOKENS, computer, github } from "./identityFixtures.js"
 
@@ -196,5 +198,17 @@ describe("identity tools, as a Captain", () => {
     expect(tested.lines).toContain("acme-corp/app: octo-acme can push.")
     expect(r.yard.identities.find("Acme")!.lastCheck).toBeNull()
     r.noSecrets()
+  })
+})
+
+describe("identity guidance in the prompts", () => {
+  it("tells the Coordinator and Captains to detect on a 401/403/404, propose in one message and import only after a yes", async () => {
+    const r = await start()
+    for (const text of [withOwner(ORCHESTRATOR_PROMPT, "Ada"), captainPrompt(r.projects.app, "Ada")]) {
+      expect(text).toMatch(/401, 403 or 404[\s\S]*detect_identities/)
+      expect(text).toMatch(/in one message[\s\S]*(after Ada says yes|for each one Ada says yes to)/)
+      expect(text).toMatch(/by reference only \(gh:<login>, file:~\/\.ssh\/<key>, agent:<fingerprint>\)/)
+      expect(text).not.toMatch(/Cody/)
+    }
   })
 })
