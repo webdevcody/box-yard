@@ -434,13 +434,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        "Agents at once: how many of this project's own agents may run at the same time on one box, GPU pod or this computer. Other projects' agents never wait for it (only the box's own limit, Settings › Agents per box or Local agents, bounds them). 1: one at a time, for game engines, big builds, test suites and headless browsers that run a box out of memory. null: only the box's own limit.",
+        "Tasks running at once: how many of this project's own tasks may run at the same time on one box, GPU pod or this computer. Other projects' tasks never wait for it (only the box's own limit, Settings › Tasks running at once per box or on this computer, bounds them). 1: one at a time, for game engines, big builds, test suites and headless browsers that run a box out of memory. null: only the box's own limit.",
       ),
     whole_machine: z
       .boolean()
       .optional()
       .describe(
-        "Needs the whole machine: while one of this project's agents runs on a box or this computer, no other project's agent starts there, and its agents wait for the others' to finish. For heavy benchmarks that need the machine to themselves. Off by default.",
+        "Needs the whole machine: while one of this project's tasks runs on a box or this computer, no other project's task starts there, and its tasks wait for the others' to finish. For heavy benchmarks that need the machine to themselves. Off by default.",
       ),
     tasks_per_box: z
       .number()
@@ -449,7 +449,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .max(PROJECT_BOX_LIMITS.tasksPerBox.max)
       .nullable()
       .optional()
-      .describe("Most task folders on a box that holds one of this project's (fewer for a big repo); older archived ones are parked. Where projects share a box the stricter limit wins. null: Settings › Resident tasks per box."),
+      .describe("Most task folders on a box that holds one of this project's (fewer for a big repo); older archived ones are parked. Where projects share a box the stricter limit wins. null: Settings › Task folders kept per box."),
     max_boxes: z
       .number()
       .int()
@@ -458,7 +458,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        "Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes. On RunPod GPU it's the most pods the project has at once (each runs agents_per_box agents).",
+        "Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes. On RunPod GPU it's the most pods the project has at once (each runs agents_per_box tasks at once).",
       ),
     gpu_max_hourly_usd: z
       .number()
@@ -622,8 +622,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "update_project",
     {
       description: scopeId
-        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running agents are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, whole_machine, tasks_per_box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
+        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -1737,7 +1737,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own agents on a box; wholeMachine keeps other projects' agents off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1749,7 +1749,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           size: `${b.size} (${sizeSpecLine(b.size)})`,
           projects: b.projects,
           running: `${b.runningTurns}/${b.slots}`,
-          ...(b.projectLimit ? { limit: `${b.projectLimit.slots} while ${b.projectLimit.project} runs here (its Agents per box)` } : {}),
+          ...(b.projectLimit ? { limit: `${b.projectLimit.slots} while ${b.projectLimit.project} runs here (its Tasks running at once)` } : {}),
           tasks: b.residentTasks.length,
           disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
           ...(b.unreachableSince ? { unreachable: `stopped answering ${ago(b.unreachableSince)}; disk and memory are from the last check that worked` } : {}),
@@ -1758,7 +1758,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
               : null,
           ...(b.memUsedBytes != null && b.memTotalBytes != null
-            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new agents go elsewhere)" : ""}` }
+            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new tasks go elsewhere)" : ""}` }
             : {}),
           ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
@@ -1799,10 +1799,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         "get_settings",
         {
           description:
-            "Read Box Yard's global Settings, everything the Settings dialog shows: each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
+            "Read Box Yard's global Settings, everything the Settings dialog shows (slotsPerBox = tasks running at once per box, maxAgents = max tasks running at once, localAgents = tasks running at once on this computer, maxResidentPerBox = task folders kept per box): each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
             "An env var only seeds a value: saving one here overrides it, as in the Settings UI. Rows with envLocked (group server) come only from env vars on the server. " +
             "API keys and tokens (group credentials, voice.*ApiKey) show only as set / not set.",
-          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
+          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, box agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
         },
         safe(async (a: { group?: SettingsGroup }) => okCompact({ settings: settingsTools.list(a.group) })),
       ),
@@ -1813,13 +1813,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         {
           description:
             "Change global Settings for Cody, through the same checks and save path as the Settings UI (the pool re-reads its limits right away). " +
-            'Pass a partial patch keyed like get_settings: { "slotsPerBox": 3, "maxBoxes": 20, "localAgents": 3, "agentModel": "claude-opus-5-5", "runpod.maxHourlyUsd": 2, "runner": "local" }. ' +
+            'Pass a partial patch keyed like get_settings: { "slotsPerBox": 3, "maxBoxes": 20, "localAgents": 3, "agentModel": "claude-opus-5-5", "runpod.maxHourlyUsd": 2, "runner": "local" } (slotsPerBox is tasks running at once per box, localAgents tasks running at once on this computer, maxAgents max tasks running at once). ' +
             'An object setting takes only the fields that change ({ "budget": { "dailyUsd": 5 } }). ' +
             "The whole patch is checked first: an unknown key, an out-of-range value, a server env-only key or any API key or token fails the call and nothing changes. " +
             "Returns before → after for every value that changed (a new workerSize also moves the size-default box limits), and Cody gets a notice with your reason.",
           inputSchema: {
             patch: z.record(z.string(), z.unknown()).describe("Settings to change, by get_settings key."),
-            reason: z.string().trim().min(3).max(500).describe('Why, in one line for Cody (e.g. "Cody asked for 3 agents per box").'),
+            reason: z.string().trim().min(3).max(500).describe('Why, in one line for Cody (e.g. "Cody asked for 3 tasks running at once per box").'),
           },
         },
         safe(async (a: { patch: Record<string, unknown>; reason: string }) => {

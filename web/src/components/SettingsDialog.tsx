@@ -706,7 +706,7 @@ function LimitsPanel({
       <Row
         id={fid("are")}
         label="Allow the Coordinator to resize boxes automatically"
-        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running agents for it, and every resize they make sends you a notice with their reason."
+        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running tasks for it, and every resize they make sends you a notice with their reason."
         hint={hint("autoResizeEnabled")}
       >
         <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
