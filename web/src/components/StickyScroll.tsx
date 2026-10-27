@@ -39,7 +39,8 @@ export type StickyScrollHandle = { scrollToEnd: () => void }
 // press "Jump to latest". Our own scrollTop writes never count as the user scrolling.
 // `count` is the number of items; `resetKey` changes when the content is swapped (e.g. another task).
 // With `hidden` > 0 (older items not rendered yet), scrolling near the top calls `onLoadEarlier`,
-// and the view stays on the same content while they are added above it.
+// and the view stays on the same content while they are added above it. `onTrim` is called when items arrive
+// while the view is pinned to the bottom, so the list can stop rendering old items again (useTail's `trim`).
 // With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
 // (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
 // `handle.scrollToEnd()` (after a send) re-pins it and smooth-scrolls to the bottom, even from far up.
@@ -50,6 +51,7 @@ export function StickyScroll({
   restoreKey,
   hidden = 0,
   onLoadEarlier,
+  onTrim,
   className,
   contentClassName,
   children,
@@ -60,6 +62,7 @@ export function StickyScroll({
   restoreKey?: string
   hidden?: number
   onLoadEarlier?: () => void
+  onTrim?: () => void
   className?: string
   contentClassName?: string
   children: ReactNode
@@ -84,8 +87,8 @@ export function StickyScroll({
   const restoring = useRef<{ spot: LiveSpot; since: number; found: number } | null>(null)
   // Gliding to the bottom after a send: growth follows with a smooth scroll until the bottom is reached.
   const gliding = useRef(false)
-  const latest = useRef({ hidden, onLoadEarlier })
-  latest.current = { hidden, onLoadEarlier }
+  const latest = useRef({ hidden, onLoadEarlier, onTrim })
+  latest.current = { hidden, onLoadEarlier, onTrim }
 
   // Write scrollTop ourselves, remembering where it landed so the scroll event it fires is ignored.
   const setTop = (el: HTMLElement, top: number) => {
@@ -352,6 +355,8 @@ export function StickyScroll({
     const added = count - lastCount.current
     lastCount.current = count
     if (added > 0 && !stuck.current) setUnread((n) => n + added)
+    // Pinned to the bottom, rows dropped from the top don't move anything on screen.
+    if (added > 0 && stuck.current && !restoring.current) latest.current.onTrim?.()
   }, [count])
 
   const loadEarlier = useCallback(() => {

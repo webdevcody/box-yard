@@ -172,8 +172,9 @@ export function seedHeavy(db: DB, store: Store): boolean {
 
 /**
  * Dev-only routes for measuring live-update cost. `POST /api/dev/pulse` with
- * `{ kind: "task" | "task.message" | "chat.delta" | "chat.message", count?, intervalMs? }`
- * broadcasts that many synthetic events.
+ * `{ kind: "task" | "task.message" | "chat.delta" | "chat.message" | "chat.reply", count?, intervalMs? }`
+ * broadcasts that many synthetic events. "chat.reply" is a Coordinator reply in Markdown that links every task,
+ * like the yard summaries a long-lived phone tab piles up.
  */
 export function heavyDevRoutes(store: Store, hub: Hub) {
   const router = express.Router()
@@ -192,6 +193,9 @@ export function heavyDevRoutes(store: Store, hub: Hub) {
         hub.broadcast({ type: "chat.delta", text: `word${i} ` })
       } else if (kind === "chat.message") {
         hub.broadcast({ type: "chat.message", message: { id: `chat_pulse${i}`, role: "tool", content: "mcp__boxyard__list_tasks", meta: null, createdAt: Date.now() } })
+      } else if (kind === "chat.reply") {
+        const lines = store.listTasks().map((t) => `- [${t.title}](/tasks/${t.id}): ${t.status}`)
+        hub.broadcast({ type: "chat.message", message: { id: `chat_reply${i}`, role: "assistant", content: `Yard check ${i}:\n${lines.join("\n")}`, meta: null, createdAt: Date.now() } })
       }
     }
     if (!intervalMs) for (let i = 0; i < n; i++) fire()
