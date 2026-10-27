@@ -9,14 +9,12 @@ import {
   CheckCircle2,
   CircleStop,
   Copy,
-  ExternalLink,
   Globe,
   Loader2,
   Minimize2,
   MoreHorizontal,
   Plug,
   RefreshCcw,
-  ShieldAlert,
   Trash2,
   Wrench,
 } from "lucide-react"
@@ -24,18 +22,19 @@ import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask 
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, LineIcon, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
+import { Button, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
 import { FilesChip } from "./TaskFiles"
 import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
 import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
-import { LOCAL_UNSANDBOXED, RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
+import { RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
 import { gpuBoxIndex, isGpuBox } from "../../../shared/runpod"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
+import { PlacementHeaderChip } from "./PlacementChip"
 
 /** A boolean saved in localStorage, so a toggle keeps its state across tasks and reloads. */
 export function useStoredFlag(key: string): [boolean, (v: boolean) => void] {
@@ -97,74 +96,43 @@ export function TaskHeader({
           <TaskMenu task={task} project={project} schedule={schedule} primary={primary} showTools={showTools} onShowTools={onShowTools} />
         </div>
       </div>
-      <TaskMetaRow task={task} files={files} local={runsLocally(task, project)} />
+      <TaskMetaRow task={task} project={project} files={files} />
     </header>
   )
 }
 
 /**
  * The one meta row, always in this order so nothing jumps as the task moves along: status · PR · files ·
- * previews, and the context reading at the far right. On phones it is two lines at most: status and context,
- * then the chips, which scroll sideways inside their line. Everything else (model, times, box, branch, id, full
- * context numbers) is in the ⋯ details.
+ * previews, then where it runs and the context reading at the far right. Placement is right-aligned beside the
+ * context, so its text changing (queued → placed → archived) never moves the chips, and chips appearing never move
+ * it. On phones it is two lines at most: status, placement and context, then the chips, which scroll sideways
+ * inside their line. Everything else (model, times, branch, id, full context numbers) is in the ⋯ details.
  */
-export function TaskMetaRow({ task, files, local = false }: { task: Task; files: Artifact[]; local?: boolean }) {
-  const hasChips = local || Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
-  const [why, setWhy] = useState(false)
+export function TaskMetaRow({ task, project, files }: { task: Task; project: Project | undefined; files: Artifact[] }) {
+  const hasChips = Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
   return (
-    <>
-      <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
-        <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
-          {task.pendingCount > 0 && (
-            <span className="font-normal text-zinc-500">
-              · <QueuedLink taskId={task.id} count={task.pendingCount} />
-            </span>
-          )}
-        </StatusDot>
-        {hasChips && (
-          <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
-            {local && <LocalChip open={why} onToggle={() => setWhy((v) => !v)} />}
-            <MergePrChip task={task} className={META_CHIP} />
-            <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
-            {task.previews.map((p) => (
-              <PreviewChip key={p.port} preview={p} />
-            ))}
-          </div>
+    <div data-testid="task-meta" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-zinc-500">
+      <StatusDot status={badgeStatus(task)} title={`Active ${timeAgo(task.updatedAt)}`} className="min-h-7 sm:mr-1">
+        {task.pendingCount > 0 && (
+          <span className="font-normal text-zinc-500">
+            · <QueuedLink taskId={task.id} count={task.pendingCount} />
+          </span>
         )}
-        <ContextSlot task={task} />
-      </div>
-      {local && why && (
-        <div id="local-warning-note" role="note" className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 sm:max-w-xl">
-          <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
-          <span>{LOCAL_UNSANDBOXED}</span>
+      </StatusDot>
+      {hasChips && (
+        <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
+          <MergePrChip task={task} className={META_CHIP} />
+          <FilesChip taskId={task.id} projectId={task.projectId} files={files} />
+          {task.previews.map((p) => (
+            <PreviewChip key={p.port} preview={p} />
+          ))}
         </div>
       )}
-    </>
-  )
-}
-
-/**
- * Its agent runs on this computer (the local runner): on it now, or there next turn because the task was asked to
- * run here (its own runs_on) or, without one, its project runs locally.
- */
-export function runsLocally(task: Task, project: Project | undefined): boolean {
-  return isLocalRunnerBox(task.boxId) || (!task.boxId && (task.runsOn ?? project?.runner) === "local")
-}
-
-/** The unsandboxed warning on a local task's header; a tap shows it in full under the row (phones have no hover title). */
-function LocalChip({ open, onToggle }: { open: boolean; onToggle: () => void }) {
-  return (
-    <button
-      type="button"
-      title={LOCAL_UNSANDBOXED}
-      aria-expanded={open}
-      aria-controls="local-warning-note"
-      onClick={onToggle}
-      className={cx(META_CHIP, "border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20")}
-      data-testid="local-warning"
-    >
-      <ShieldAlert className="h-3 w-3 shrink-0" /> This computer · unsandboxed
-    </button>
+      <span className="ml-auto inline-flex min-w-0 items-center gap-2">
+        <PlacementHeaderChip task={task} project={project} />
+        <ContextSlot task={task} />
+      </span>
+    </div>
   )
 }
 
@@ -176,7 +144,7 @@ function ContextSlot({ task }: { task: Task }) {
   const busy = task.compacting || task.compactPending
   if (pct === null && !busy) return null
   return (
-    <span className="ml-auto inline-flex shrink-0 items-center gap-1">
+    <span className="inline-flex shrink-0 items-center gap-1">
       <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." />
       {busy ? (
         <span className="inline-flex items-center gap-1 whitespace-nowrap">
@@ -252,9 +220,10 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
     <NewTabLink
       href={preview.url}
       title={preview.label}
+      mark="end"
       className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100")}
     >
-      <Globe className="h-3 w-3 text-sky-400" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-60" />
+      <Globe className="h-3 w-3 text-sky-400" /> Preview :{preview.port}
     </NewTabLink>
   )
 }

@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react"
 import { Link } from "wouter"
 import { Archive, FileJson, FileText, GitBranch } from "lucide-react"
 import { useCompaction, useCompactions } from "../lib/queries"
-import { Empty, Markdown, NewTabLink, StatusBadge, TimeAgo, cx } from "./ui"
+import { AppLink, Empty, Markdown, StatusBadge, TimeAgo, cx } from "./ui"
+import { shortGithubLabel } from "../lib/linkify"
+import { stripTruncation } from "../lib/truncated"
 
 function shortDate(ts: number) {
   return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
@@ -111,12 +113,12 @@ export function CompactionsView() {
                         </span>
                       )}
                       {t.prUrl && (
-                        <NewTabLink href={t.prUrl} className="text-emerald-400 hover:underline">
-                          PR
-                        </NewTabLink>
+                        <AppLink href={t.prUrl} className="hover:underline">
+                          {shortGithubLabel(t.prUrl) ?? "PR"}
+                        </AppLink>
                       )}
                     </div>
-                    {t.summary && <div className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{t.summary}</div>}
+                    {t.summary && <div className="mt-2 whitespace-pre-wrap text-sm text-zinc-300">{stripTruncation(t.summary).text}</div>}
                   </div>
                 ))}
               </div>

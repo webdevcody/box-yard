@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { captainRows, captainToolView, groupLabel, isLongMessage, linkLabel, parseNotice, plainText, segments, splitNotice } from "../web/src/lib/captainTranscript"
+import { stripTruncation } from "../web/src/lib/truncated"
 import type { CaptainMessage } from "../shared/types"
 
 let n = 0
@@ -14,16 +15,17 @@ const msg = (role: CaptainMessage["role"], content = "x", meta: Record<string, u
 
 describe("splitNotice", () => {
   it("splits a notice into its kind, the task title and the rest as markdown", () => {
-    expect(splitNotice("✅ **Fix login** is done: Fixed the `redirect`.\n\n- one\n- two")).toEqual({ kind: "done", title: "Fix login", event: "is done: Fixed the `redirect`.\n\n- one\n- two" })
+    expect(splitNotice("✅ **Fix login** is done: Fixed the `redirect`.\n\n- one\n- two")).toEqual({ kind: "done", title: "Fix login", event: "is done: Fixed the `redirect`.\n\n- one\n- two", truncated: false })
     expect(splitNotice("📎 **Brief** published Recent PRs: briefing: https://yard.example.com/artifacts/art_1/b.md")).toEqual({
       kind: "artifact",
       title: "Brief",
       event: "published Recent PRs: briefing: https://yard.example.com/artifacts/art_1/b.md",
+      truncated: false,
     })
   })
 
   it("shortens a PR notice's URL to a PR #N link", () => {
-    expect(splitNotice("🔀 **Inbox** opened a pull request: https://github.com/o/r/pull/16")).toEqual({ kind: "pr", title: "Inbox", event: "opened [PR #16](https://github.com/o/r/pull/16)" })
+    expect(splitNotice("🔀 **Inbox** opened a pull request: https://github.com/o/r/pull/16")).toEqual({ kind: "pr", title: "Inbox", event: "opened [PR #16](https://github.com/o/r/pull/16)", truncated: false })
   })
 
   it("moves a merge request's task up to the title and links its PR", () => {
@@ -31,14 +33,40 @@ describe("splitNotice", () => {
       kind: "merge",
       title: "Fix login",
       event: "Cody asked it to merge [PR #12](https://github.com/o/r/pull/12) (Merge button)",
+      truncated: false,
     })
     expect(splitNotice("🚢 The Captain asked **Fix login** to merge PR #12: https://github.com/o/r/pull/12").event).toBe("The Captain asked it to merge [PR #12](https://github.com/o/r/pull/12)")
   })
 
   it("keeps a hook's name with its colon, and a notice without a title whole", () => {
     expect(splitNotice('🪝 **Ship** hook "box-yard: auto-merge" (PR ready) sent to the agent: Please merge').event).toBe('hook "box-yard: auto-merge" (PR ready) sent to the agent: Please merge')
-    expect(splitNotice("⚠️ Box box_1 is low on disk.")).toEqual({ kind: "warning", title: null, event: "Box box_1 is low on disk." })
-    expect(splitNotice('Schedule "Nightly" started a run: task task_1.')).toEqual({ kind: "info", title: null, event: 'Schedule "Nightly" started a run: task task_1.' })
+    expect(splitNotice("⚠️ Box box_1 is low on disk.")).toEqual({ kind: "warning", title: null, event: "Box box_1 is low on disk.", truncated: false })
+    expect(splitNotice('Schedule "Nightly" started a run: task task_1.')).toEqual({ kind: "info", title: null, event: 'Schedule "Nightly" started a run: task task_1.', truncated: false })
+  })
+})
+
+describe("truncated notices", () => {
+  // What server/tasks.ts writes for a long reply (preview() in server/replies.ts): the hint is for the model.
+  const long = "💬 **PR tracker** finished its turn: I opened the PR: https://github.com/o/r/pull/154. A 403 fro [truncated: 2821 more chars — full reply: call wait_for_tasks or get_task]"
+
+  it("drops the model's marker from a notice card and says it was shortened", () => {
+    const n = splitNotice(long)
+    expect(n.truncated).toBe(true)
+    expect(n.event).toBe("finished its turn: I opened the PR: https://github.com/o/r/pull/154. A 403 fro…")
+    expect(n.event).not.toContain("truncated")
+    expect(n.event).not.toContain("get_task")
+  })
+
+  it("drops it from a Captain notice row too", () => {
+    const p = parseNotice(long)
+    expect(p.truncated).toBe(true)
+    expect(JSON.stringify(p.summary)).not.toContain("truncated")
+    expect(p.summary.at(-1)).toEqual({ text: ". A 403 fro…" })
+  })
+
+  it("drops capReply's marker on its own line, and leaves other brackets alone", () => {
+    expect(stripTruncation("abc\n[truncated: 12 more chars — call get_task with full_reply and offset=20000 to read the rest]")).toEqual({ text: "abc…", truncated: true })
+    expect(stripTruncation("see [the docs] and [truncated] here")).toEqual({ text: "see [the docs] and [truncated] here", truncated: false })
   })
 })
 
@@ -82,7 +110,7 @@ describe("parseNotice", () => {
       "📝 **Notes retro**: 1 finished task left 2 note suggestions to curate.\nNotes now: 3 of 25 notes, ~120 of 4k tokens.\n\n**[Fix login](/tasks/task_1)** (task_1) · done, no PR\n- `sug_1`: Use pnpm",
       { kind: "retro" },
     )
-    expect(retro).toEqual({ kind: "notes", title: "Notes retro", summary: [{ text: "1 finished task left 2 note suggestions to curate." }] })
+    expect(retro).toEqual({ kind: "notes", title: "Notes retro", summary: [{ text: "1 finished task left 2 note suggestions to curate." }], truncated: false })
     const prune = parseNotice("📝 Project notes are over budget (30 of 25 notes, ~3k of 4k tokens). Prune them.")
     expect(prune.kind).toBe("notes")
     expect(prune.title).toBeNull()
@@ -90,7 +118,7 @@ describe("parseNotice", () => {
 
   it("reads the Coordinator's update_settings notice as a settings change", () => {
     const n = parseNotice("⚙️ **Settings** changed by the Coordinator: maxBoxes 5 → 20, slotsPerBox 2 → 3. Reason: Cody asked for more boxes", { kind: "settings" })
-    expect(n).toEqual({ kind: "settings", title: "Settings", summary: [{ text: "maxBoxes 5 → 20, slotsPerBox 2 → 3. Reason: Cody asked for more boxes" }] })
+    expect(n).toEqual({ kind: "settings", title: "Settings", summary: [{ text: "maxBoxes 5 → 20, slotsPerBox 2 → 3. Reason: Cody asked for more boxes" }], truncated: false })
   })
 
   it("drops an empty status detail instead of showing a dangling colon", () => {

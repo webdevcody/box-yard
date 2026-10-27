@@ -246,6 +246,21 @@ const NoticeEvent = memo(function NoticeEvent({ children }: { children: string }
 })
 
 /**
+ * Where a shortened notice's text goes on: the task's page, which has the agent's whole reply. Stands in for the
+ * server's "[truncated: … call get_task]" marker, which is meant for the model (splitNotice drops it).
+ */
+export function FullReplyLink({ taskId }: { taskId: string }) {
+  return (
+    <>
+      {" "}
+      <AppLink href={routes.task(taskId)} className="font-medium whitespace-nowrap text-zinc-300 hover:text-zinc-100 hover:underline">
+        Read the full reply
+      </AppLink>
+    </>
+  )
+}
+
+/**
  * A task notice: clicking it opens the task (Cmd/Ctrl or middle click in a new tab). Not an <a>: the notice's
  * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
  * and buttons (a "Show all" toggle) keep their clicks.
@@ -288,7 +303,12 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
       title={n.title}
       taskId={taskId}
       project={taskId && <NoticeProject taskId={taskId} projectId={projectId} />}
-      meta={<NoticeEvent>{n.event}</NoticeEvent>}
+      meta={
+        <>
+          <NoticeEvent>{n.event}</NoticeEvent>
+          {n.truncated && taskId && <FullReplyLink taskId={taskId} />}
+        </>
+      }
     />
   )
   return taskId ? <NoticeCard taskId={taskId}>{body}</NoticeCard> : <div className={NOTICE_CLASS}>{body}</div>
