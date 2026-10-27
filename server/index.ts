@@ -1,6 +1,7 @@
 import { config, configProblems } from "./config.js"
 import { createBoxYard } from "./app.js"
 import { bindProblem, isLoopback, listenUrls } from "./bind.js"
+import { lockDataDir } from "./dataLock.js"
 import { passwordProblems, passwordRefusal } from "./password.js"
 
 const weak = config.password ? passwordProblems(config.password) : []
@@ -9,6 +10,13 @@ if (refused) {
   console.error(`\n[box-yard] Not starting.\n${refused.replace(/^/gm, "  ")}\n`)
   process.exit(1)
 }
+
+// One Box Yard per data folder: a second one would run every task twice. On a restart, waits for the old one to go.
+const lock = await lockDataDir(config.dataDir, { host: config.host, port: config.port }).catch((err: unknown) => {
+  console.error(`\n[box-yard] Not starting. ${err instanceof Error ? err.message : String(err)}\n`)
+  process.exit(1)
+})
+process.on("exit", () => lock.release())
 
 const yard = createBoxYard(config)
 
@@ -32,7 +40,7 @@ let shuttingDown = false
 const shutdown = (signal: string) => {
   if (shuttingDown) return
   shuttingDown = true
-  console.log(`[box-yard] ${signal}: shutting down. Running agents keep working in their boxes and are picked up on restart.`)
+  console.log(`[box-yard] ${signal}: shutting down. Running agents keep working, in their boxes and on this computer, and are picked up on restart.`)
   server.close()
   yard.stop()
   setTimeout(() => process.exit(0), 500).unref()

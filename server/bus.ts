@@ -1,4 +1,4 @@
-import type { BoxProvider } from "./providers/types.js"
+import { q, type BoxProvider } from "./providers/types.js"
 import type { Redis } from "./redis.js"
 
 /** One event written by the worker runner (see runner/box-runner.mjs). */
@@ -15,15 +15,17 @@ export interface Cursor {
   seq: number
   offset: number
   rid: string | null
+  /** The inode of the events.jsonl `offset` is in: a different one means the file was replaced. */
+  ino: string | null
 }
 
-export const emptyCursor = (): Cursor => ({ seq: 0, offset: 0, rid: null })
+export const emptyCursor = (): Cursor => ({ seq: 0, offset: 0, rid: null, ino: null })
 
 export function parseCursor(raw: string | null): Cursor {
   if (!raw) return emptyCursor()
   try {
     const c = JSON.parse(raw) as Partial<Cursor>
-    return { seq: c.seq ?? 0, offset: c.offset ?? 0, rid: c.rid ?? null }
+    return { seq: c.seq ?? 0, offset: c.offset ?? 0, rid: c.rid ?? null, ino: c.ino ?? null }
   } catch {
     return emptyCursor()
   }
@@ -52,6 +54,31 @@ export function parseJsonl(chunk: string): { events: WorkerEvent[]; consumed: nu
     }
   }
   return { events, consumed: Buffer.byteLength(complete, "utf8") }
+}
+
+/**
+ * Shell that prints "<offset> <inode>" and then up to `max` bytes of `file` from that offset: the cursor's own, or 0
+ * when the file is now shorter than it or isn't the same file. Prints nothing when there is no file yet.
+ */
+export function readEventsScript(file: string, cursor: Pick<Cursor, "offset" | "ino">, max: number): string {
+  const ino = cursor.ino && /^\d+$/.test(cursor.ino) ? cursor.ino : ""
+  return [
+    `f=${q(file)}; [ -f "$f" ] || exit 0`,
+    `s=$(wc -c < "$f" | tr -d ' '); i=$(ls -i "$f" | awk '{print $1}'); o=${Math.max(0, Math.floor(cursor.offset))}`,
+    `if [ "$s" -lt "$o" ] || { [ -n "${ino}" ] && [ "$i" != "${ino}" ]; }; then o=0; fi`,
+    `printf '%s %s\\n' "$o" "$i"`,
+    `tail -c +$((o + 1)) "$f" | head -c ${max}`,
+  ].join("\n")
+}
+
+/** readEventsScript's output: where the chunk starts, the file's inode, and the chunk. Null: no file yet. */
+export function parseEventsRead(stdout: string): { offset: number; ino: string | null; chunk: string } | null {
+  const nl = stdout.indexOf("\n")
+  if (nl < 0) return null
+  const [offset, ino] = stdout.slice(0, nl).trim().split(/\s+/)
+  const at = Number(offset)
+  if (!Number.isFinite(at)) return null
+  return { offset: at, ino: ino || null, chunk: stdout.slice(nl + 1) }
 }
 
 /** Reads worker events from Redis (fast) or from the box's events.jsonl (no Redis needed). */
@@ -86,16 +113,17 @@ export class EventReader {
     return this.dedupe(events, { ...cursor, rid })
   }
 
-  /** Read new lines from events.jsonl by byte offset. */
+  /**
+   * Read new lines from events.jsonl by byte offset. A file shorter than the offset (truncated) or a different file
+   * (rotated: another inode) is read again from its start; seq numbers keep what was already applied from coming back.
+   */
   async readFile(boxId: string, taskDir: string, cursor: Cursor) {
-    const file = `${taskDir}/events.jsonl`
-    const res = await this.provider.exec(
-      boxId,
-      `[ -f '${file}' ] && tail -c +${cursor.offset + 1} '${file}' | head -c ${MAX_READ} || true`,
-    )
+    const res = await this.provider.exec(boxId, readEventsScript(`${taskDir}/events.jsonl`, cursor, MAX_READ))
     if (res.exitCode !== 0) throw new Error(`reading events failed: ${res.stderr.slice(-500)}`)
-    const { events, consumed } = parseJsonl(res.stdout)
-    return this.dedupe(events, { ...cursor, offset: cursor.offset + consumed })
+    const read = parseEventsRead(res.stdout)
+    if (!read) return { events: [], cursor }
+    const { events, consumed } = parseJsonl(read.chunk)
+    return this.dedupe(events, { ...cursor, offset: read.offset + consumed, ino: read.ino })
   }
 
   /**

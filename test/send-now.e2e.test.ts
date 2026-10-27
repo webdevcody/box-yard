@@ -157,7 +157,8 @@ describe("Send now", () => {
     const exec = provider.exec.bind(provider)
     let killed: string | null = null
     provider.exec = async (boxId, cmd, ...rest) => {
-      if (killed === null && cmd.includes("kill -TERM") && cmd.includes("turn.pid")) {
+      // The stop itself (server/turnProcess.ts turnKillScript), not the liveness probe before it.
+      if (killed === null && /by_turn_kill '[^']*' TERM; true$/m.test(cmd)) {
         killed = cmd
         await waitFor(async () => {
           const x = await getTask(r, t.id)
