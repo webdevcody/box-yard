@@ -586,7 +586,6 @@ export class TaskManager {
         continue
       }
       this.lastEventAt.set(row.id, Date.now())
-      this.holdOpen(row.id, row.box_id)
       running.push(row)
     }
     for (const box of this.store.listBoxes()) {
@@ -601,20 +600,19 @@ export class TaskManager {
    * names): Box Yard picks it back up, polling from the saved cursor, and the turn ends as usual. Its process gone (it
    * died or finished while Box Yard was down, or the machine or box restarted): what it wrote is read, and a turn
    * still open after that is interrupted, queued to carry on in the same session. A box that can't be asked right
-   * now (paused, unreachable) is left to maintain(), as for any quiet turn.
+   * now (paused, unreachable) is held open and left to maintain(), as for any quiet turn.
    */
   private async reattach(row: TaskRow) {
     const { box_id: boxId, current_turn_id: turnId } = row
     if (!boxId || !turnId) return
-    if (!isLocalRunnerBox(boxId) && (await this.provider.health(boxId).catch(() => "unknown" as const)) !== "running") return
-    const probe = await this.turnProcess(boxId, row.id).catch(() => null)
+    const health = isLocalRunnerBox(boxId) ? "running" : await this.provider.health(boxId).catch(() => "unknown" as const)
+    const probe = health === "running" ? await this.turnProcess(boxId, row.id).catch(() => null) : null
     const fresh = this.store.getTaskRow(row.id)
-    if (!probe || this.stopped || fresh?.current_turn_id !== turnId) return
-    if (probe.alive) {
-      this.addEvent(row.id, "Box Yard restarted and picked this turn back up; the agent kept working.", { kind: "reattached" })
-      return
-    }
-    await this.turnGone(fresh, "Box Yard restarted and the agent's process had stopped meanwhile (this computer or its box may have restarted)")
+    if (this.stopped || !fresh || fresh.current_turn_id !== turnId) return
+    // Settled here, not by the hold stream (which would end at once and call it a crash).
+    if (probe && !probe.alive) return this.turnGone(fresh, "Box Yard restarted and the agent's process had stopped meanwhile (this computer or its box may have restarted)")
+    this.holdOpen(row.id, boxId)
+    if (probe?.alive) this.addEvent(row.id, "Box Yard restarted and picked this turn back up; the agent kept working.", { kind: "reattached" })
   }
 
   private async cleanupOrphanBoxes() {
