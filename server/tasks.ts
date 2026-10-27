@@ -3193,7 +3193,7 @@ export class TaskManager {
         fromGitHub.push(row.id)
         continue
       }
-      if (!this.archiveHoldsWorkspace(row)) await this.archiveFresh(row.id).catch(() => {})
+      await this.archiveUnlessHeld(row.id).catch(() => {})
       const fresh = this.store.getTaskRow(row.id)
       if (fresh && !this.archiveHoldsWorkspace(fresh)) kept.push(fresh.id)
       else archived.push(row.id)
@@ -3301,7 +3301,7 @@ export class TaskManager {
     if (!this.gpu) throw new BadRequestError("RunPod GPU isn't available on this Box Yard")
     const residents = this.store.listTaskRows({ boxId })
     if (!opts.force && residents.some((r) => r.current_turn_id || r.status === "starting")) throw new ConflictError("An agent is running on that pod; stop it first")
-    for (const r of residents) if (r.session_started && !this.archiveHoldsWorkspace(r)) await this.archiveFresh(r.id).catch(() => {})
+    for (const r of residents) if (r.session_started) await this.archiveUnlessHeld(r.id).catch(() => {})
     const unsaved = this.store.listTaskRows({ boxId }).filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
     if (unsaved.length && !opts.force) throw new ConflictError(`Couldn't archive ${unsaved.map((r) => r.id).join(", ")}; the pod stays up so nothing is lost`)
     this.gpuTerminating.set(boxId, null)
@@ -5380,6 +5380,17 @@ export class TaskManager {
     return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - slack && fs.existsSync(row.archive_path))
   }
 
+  /**
+   * Archive a task unless its archive already holds its workspace, before its folder is destroyed. One being written
+   * right now (its last turn's, which starts as the turn ends) is waited for first: until it lands, the one before
+   * can pass for current within `hasFreshArchive`'s slack, and the folder would go while it's still being read.
+   */
+  private async archiveUnlessHeld(taskId: string) {
+    while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
+    const row = this.store.getTaskRow(taskId)
+    if (row && !this.archiveHoldsWorkspace(row)) await this.archiveFresh(taskId)
+  }
+
   /** Archive a task unless its archive is already fresh, waiting for one that's being written right now. */
   private async archiveFresh(taskId: string) {
     while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
@@ -5409,6 +5420,7 @@ export class TaskManager {
     const keep = this.c.archiveWorkspaces && (!isLocalRunnerBox(row.box_id) || Boolean(opts.forMove))
     if (!keep && !push) return
     this.archiving.add(taskId)
+    const began = Date.now()
     const boxId = row.box_id
     const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
     const part = `${file}.part`
@@ -5462,7 +5474,11 @@ export class TaskManager {
       fs.renameSync(part, file)
       this.archiveErrors.delete(taskId)
       if (this.store.getTaskRow(taskId)) {
-        this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: Date.now() })
+        // A turn that started while this ran (the next one starts as soon as a turn ends) may have changed the
+        // folder after it was read, so the archive is only as new as its start: else it would pass for one from
+        // after that turn, and a delete or move would skip archiving it again.
+        const ranSince = (this.store.lastTurnStartedAt(taskId) ?? 0) >= began
+        this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: ranSince ? began : Date.now() })
         if (kind === "thin") {
           const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work comes back as uncommitted changes"
           this.addEvent(

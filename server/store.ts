@@ -1284,7 +1284,13 @@ export class Store {
     return row.at ?? null
   }
 
-    getTaskTurn(id: string): TaskTurnRow | null {
+  /** When the task's last turn started (null before its first). */
+  lastTurnStartedAt(taskId: string): number | null {
+    const row = this.db.prepare("SELECT MAX(started_at) AS at FROM task_turns WHERE task_id = ?").get(taskId) as { at: number | null }
+    return row.at ?? null
+  }
+
+  getTaskTurn(id: string): TaskTurnRow | null {
     return (this.db.prepare("SELECT * FROM task_turns WHERE id = ?").get(id) as TaskTurnRow | undefined) ?? null
   }
 
