@@ -2727,10 +2727,12 @@ export class TaskManager {
     )
   }
 
-  /** A held task's wait reason (fanoutHeld). */
+  /**
+   * A held task's wait reason (fanoutHeld). No counts or $/h: they change as the queue does, and each change would be
+   * another line in the task's log. The meter's sheet and the Coordinator's notice carry them.
+   */
   private fanoutWait(): string {
-    const { wanted, upToHourlyUsd } = this.fanout
-    return `Waiting for a new box: the queue wants ${boxCount(wanted)} more than the ${this.boxCreateTuning.freePerHour} an hour Box Yard makes without asking (up to ${usd(upToHourlyUsd)}/h if every core is busy); allow them for an hour`
+    return `Waiting for a new box: the queue wants more than the ${this.boxCreateTuning.freePerHour} an hour Box Yard makes without asking; allow more for an hour`
   }
 
   /**

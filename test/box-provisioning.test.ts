@@ -256,15 +256,15 @@ describe("pace and the fan-out question", () => {
     const p = r.yard.store.createProject({ name: "town" })
     const tasks = queue(r, p.id, 5)
     await waitFor(() => r.provider.starts.length === 2, "the 2 free creates")
-    // The three tasks those boxes won't take wait for the OK, with the fix; what they'd cost at most is in the reason.
+    // The three tasks those boxes won't take wait for the OK, with the fix. The reason has no counts, so it doesn't
+    // change (and add a log line) as the queue does; how many and what they'd cost at most are on the meter.
     const held = () => r.yard.store.listTasks().filter((t) => t.waitFix === "allow-boxes")
     await waitFor(() => held().length === 3, "3 tasks held for the OK")
+    expect(held()[0]!.waitReason).toBe("Waiting for a new box: the queue wants more than the 2 an hour Box Yard makes without asking; allow more for an hour")
     const rate = r.yard.settings.get().costRates.boxActiveCpuHourlyUsd.small * 2 // 2 cores
-    expect(held()[0]!.waitReason).toBe(
-      `Waiting for a new box: the queue wants 3 boxes more than the 2 an hour Box Yard makes without asking (up to $${(3 * rate).toFixed(2)}/h if every core is busy); allow them for an hour`,
-    )
     const status = await r.yard.tasks.cloudStatus()
     expect(status.fanout).toMatchObject({ freePerHour: 2, wanted: 3, allowedUntil: null })
+    expect(status.fanout.upToHourlyUsd).toBeCloseTo(3 * rate)
     // One question for the Coordinator, not one per pass.
     await pause(300)
     expect(notices(r).filter((n) => n.startsWith("🙋 **New boxes** need"))).toHaveLength(1)
