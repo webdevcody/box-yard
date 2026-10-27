@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "credentials" | "runpod" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "credentials" | "runpod" | "docker" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -36,6 +36,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "RunPod GPU",
     description:
       "GPU machines for projects that need one (a WebGL game, ML work): a project whose Runs on is RunPod GPU gets a pod of its own that starts when a task needs it and stops when idle.",
+    fields: [],
+  },
+  {
+    key: "docker",
+    label: "Docker",
+    description:
+      "Isolated containers on this computer for projects whose Runs on is Docker container: one per project, from an image built here, with its own CPU and memory limits. It stops when idle and keeps its workspaces in a volume.",
     fields: [],
   },
   {
@@ -103,7 +110,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod" }
+const ALIASES: Record<string, SettingsSection> = { keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", container: "docker", containers: "docker" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

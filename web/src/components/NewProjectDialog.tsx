@@ -75,7 +75,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
               {RUNNERS.map((r) => (
                 <option key={r} value={r} disabled={(r === "box" && noUpstash) || (r === "gpu" && noRunPod)}>
                   {RUNNER_LABEL[r]}
-                  {r === "local" ? " (not sandboxed)" : r === "gpu" ? (noRunPod ? " (add a RunPod key in Settings first)" : "") : noUpstash ? " (add an Upstash key in Settings first)" : ""}
+                  {r === "local" ? " (not sandboxed)" : r === "gpu" ? (noRunPod ? " (add a RunPod key in Settings first)" : "") : r === "docker" ? " (isolated, on this computer)" : noUpstash ? " (add an Upstash key in Settings first)" : ""}
                 </option>
               ))}
             </Select>

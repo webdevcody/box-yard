@@ -22,14 +22,16 @@ export function ProjectSnapshotPanel({ project }: { project: Project }) {
   const failed = job?.status === "failed" && (!snap || snap.takenAt < job.startedAt) ? job : null
   const mismatch = snap && project.boxSize ? snapshotSkipReason(snap, project.boxSize, snap.provider) : null
 
-  if (project.runner === "local" || project.runner === "gpu") {
+  if (project.runner === "local" || project.runner === "gpu" || project.runner === "docker") {
     return (
       <section className="space-y-1 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4" data-testid="project-snapshot">
         <h3 className="text-xs font-medium tracking-wide text-zinc-400 uppercase">Box snapshot</h3>
         <p className="text-sm text-zinc-400">
           {project.runner === "gpu"
             ? "This project runs on RunPod GPU pods, so it doesn't use box snapshots: pod #1's network volume keeps caches between its runs."
-            : "This project runs on this computer, so it doesn't use box snapshots."}
+            : project.runner === "docker"
+              ? "This project runs in a Docker container, so it doesn't use box snapshots: its volume keeps workspaces and caches between runs, and a Dockerfile of its own (Runs on) bakes in what it needs."
+              : "This project runs on this computer, so it doesn't use box snapshots."}
         </p>
       </section>
     )

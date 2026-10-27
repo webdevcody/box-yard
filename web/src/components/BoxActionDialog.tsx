@@ -1,4 +1,4 @@
-// Clear box / Delete box / Terminate pod confirmations: what's on the box, the delete safety check for each task, and
+// Clear box / Delete box / Terminate pod / Delete container confirmations: what's on the box, the delete safety check for each task, and
 // second confirms to stop running agents and to delete past the check ("Delete anyway").
 import { useState, type FormEvent } from "react"
 import { AlertTriangle, Archive, CheckCircle2, Eraser, HardDrive, Loader2, Play, Power, Trash2 } from "lucide-react"
@@ -7,6 +7,7 @@ import { boxBusyReason, statusCounts } from "../lib/boxOverview"
 import { formatBytes } from "../../../shared/disk"
 import { deleteAtRisk, type BoxContents, type BoxDeleteVerdict, type BoxInfo } from "../../../shared/types"
 import type { RunPodPodInfo } from "../../../shared/runpod"
+import type { DockerContainerInfo } from "../../../shared/docker"
 import { Modal } from "./Modal"
 import { Button, LineIcon, STATUS, cx, inputClass } from "./ui"
 
@@ -43,12 +44,22 @@ const COPY = {
     ],
     confirm: "Terminate pod",
   },
+  container: {
+    title: "Delete",
+    verb: "delete",
+    steps: [
+      "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included. If one can't be archived, nothing is deleted.",
+      "Removes the container and its workspace volume from Docker. The image stays.",
+      "Its tasks start a new container on their next message, restoring from the archive.",
+    ],
+    confirm: "Delete container",
+  },
 } as const
 
-/** What the dialog acts on: a worker box from the Boxes page, or a RunPod GPU pod from Settings › RunPod GPU. */
+/** What the dialog acts on: a worker box from the Boxes page, a RunPod GPU pod from Settings › RunPod GPU, or a Docker container from Settings › Docker. */
 interface Target {
   id: string
-  kind: "box" | "pod"
+  kind: "box" | "pod" | "container"
   name: string
   description: string
   reachable: boolean
@@ -76,12 +87,37 @@ const podTarget = (p: RunPodPodInfo): Target => ({
   busy: p.status === "RUNNING" ? null : `The pod is ${p.status.toLowerCase()}`,
 })
 
+const containerTarget = (c: DockerContainerInfo): Target => ({
+  id: c.boxId,
+  kind: "container",
+  name: `${c.projectName ?? c.projectId}'s Docker container`,
+  description: `Docker · ${c.name} · ${c.state}${c.image ? ` · ${c.image}` : ""}`,
+  // A stopped container starts again to archive what's on its volume.
+  reachable: c.state !== "missing",
+  running: c.running,
+  busy: null,
+})
+
 type Step = "confirm" | "stop" | "risk"
 
-export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: BoxInfo; pod?: RunPodPodInfo; action: BoxAction; onClose: () => void; onDone?: () => void }) {
-  const target = box ? boxTarget(box) : podTarget(pod!)
+export function BoxActionDialog({
+  box,
+  pod,
+  container,
+  action,
+  onClose,
+  onDone,
+}: {
+  box?: BoxInfo
+  pod?: RunPodPodInfo
+  container?: DockerContainerInfo
+  action: BoxAction
+  onClose: () => void
+  onDone?: () => void
+}) {
+  const target = box ? boxTarget(box) : pod ? podTarget(pod) : containerTarget(container!)
   const removing = action === "delete"
-  const copy = removing ? (target.kind === "pod" ? COPY.terminate : COPY.delete) : COPY.clear
+  const copy = removing ? (target.kind === "pod" ? COPY.terminate : target.kind === "container" ? COPY.container : COPY.delete) : COPY.clear
   const contents = useBoxContents(target.id)
   const clear = useClearBox()
   const del = useDeleteBox()
@@ -92,7 +128,7 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
   // Delete past the safety check: queued tasks and work GitHub doesn't have (running agents are stopped instead).
   const risky = removing && contents.data ? deleteAtRisk(contents.data.tasks) : []
   const busy = target.busy
-  const nameOk = !removing || target.kind === "pod" || typed.trim() === target.id
+  const nameOk = !removing || target.kind !== "box" || typed.trim() === target.id
   const blocked = busy ?? (contents.isLoading ? "Checking what's on the box" : !nameOk ? "Type the box name to confirm" : null)
   const canGo = !blocked && !mutation.isPending
   const steps: Step[] = ["confirm", ...(running > 0 ? (["stop"] as const) : []), ...(risky.length ? (["risk"] as const) : [])]
@@ -192,7 +228,7 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
           </ul>
           <p className="text-xs text-red-200/80">
             Every workspace is still archived first, uncommitted files included, so that work lives on only in Box Yard's archive, not on GitHub.
-            {risky.some((t) => t.verdict === "queued") && ` Queued tasks go to another ${target.kind === "pod" ? "pod" : "box"}.`} If a workspace can't be archived, nothing is{" "}
+            {risky.some((t) => t.verdict === "queued") && (target.kind === "container" ? " Queued tasks start a new container." : ` Queued tasks go to another ${target.kind === "pod" ? "pod" : "box"}.`)} If a workspace can't be archived, nothing is{" "}
             {target.kind === "pod" ? "terminated" : "deleted"}. Agents can't do this; only you can.
           </p>
         </div>
