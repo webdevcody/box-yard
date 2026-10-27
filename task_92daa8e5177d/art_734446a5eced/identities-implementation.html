@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Project identities: implementation design</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1f2328; --mute:#59636e; --bg:#fff; --card:#f6f8fa; --line:#d1d9e0; --acc:#0969da; --warn:#9a6700; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e6edf3; --mute:#9198a1; --bg:#0d1117; --card:#151b23; --line:#3d444d; --acc:#4493f8; --warn:#d29922; } }
+  body { font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--fg); background: var(--bg); margin: 0; }
+  main { max-width: 980px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; } h2 { font-size: 19px; margin: 34px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  h3 { font-size: 15px; margin: 18px 0 6px; }
+  .sub { color: var(--mute); margin: 0 0 18px; }
+  code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  pre { font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow-x: auto; }
+  pre code { border: 0; padding: 0; background: none; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 14px; font-size: 14px; }
+  th, td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--card); }
+  .box { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 12px 0; }
+  .warn { border-left: 4px solid var(--warn); }
+  nav ol { columns: 2; margin: 6px 0 0; padding-left: 20px; }
+  nav a { color: var(--acc); text-decoration: none; }
+  li { margin: 2px 0; }
+</style>
+</head>
+<body>
+<main>
+<h1>Project identities: implementation design</h1>
+<p class="sub">Task task_92daa8e5177d · 27 Oct 2026 · builds on the research report (option A: identities inside one Box Yard). This is the plan the PRs follow.</p>
+
+<div class="box">
+<b>In one paragraph.</b> An <i>identity</i> answers "who is acting?": a GitHub login with one or more tokens, the owners it serves, a git author, an optional signing key, an optional Claude credential, the runners it may use and how much the Coordinator may see. Each project has exactly one. Every credential a turn, a clone, a push, a PR check or a Captain uses comes from one resolver, <code>turnCredentials()</code>, and every runner injects its result the same way, through <code>task.json</code>. Existing projects move to a <b>Default</b> identity that <i>is</i> today's global credentials, so nothing changes until Cody assigns another one. Secrets are AES-256-GCM encrypted at rest, never returned by the API or MCP, never seen by the model (detection and import work by reference), and redacted from transcripts.
+</div>
+
+<nav><b>Contents</b><ol>
+<li><a href="#model">Data model</a></li>
+<li><a href="#resolve">Resolution order</a></li>
+<li><a href="#inject">Injection per runner</a></li>
+<li><a href="#sign">Signing and requireSigned</a></li>
+<li><a href="#mcp">MCP tools</a></li>
+<li><a href="#detect">Detection and import</a></li>
+<li><a href="#secrets">Secrets: storage, API, redaction</a></li>
+<li><a href="#migrate">Migration</a></li>
+<li><a href="#ui">UI</a></li>
+<li><a href="#prs">PR plan</a></li>
+<li><a href="#later">Not in this round</a></li>
+</ol></nav>
+
+<h2 id="model">1. Data model</h2>
+<p>Two new tables and two keys. Migrations are appended, as AGENTS.md requires.</p>
+<pre><code>identities
+  id TEXT PK                 idn_default for the Default identity
+  name TEXT UNIQUE NOCASE, color TEXT
+  is_default INTEGER         exactly one row: its missing parts fall back to the global credentials
+  github_login, github_id    proved by GET /user when a token is saved (every token must prove the same login)
+  owners_json                ["acme-corp","acme-platform"]: owners/orgs it serves, for auto-matching
+  author_name, author_email  git author; email_check = verified | unverified | unknown (token can't read emails)
+  signing_json               {format:"ssh"|"openpgp", kind:"file"|"agent", publicKey, fingerprint, program?, sourcePath?}
+                             no private key here; requireSigned lives here too
+  claude_kind                null = the global one | "api_key" | "oauth_token"
+  runners_json               null = every runner; else ["local","docker"], …
+  coordinator_sees           "everything" | "status"
+  checked_json               the last test_identity result (no secrets)
+  created_at, updated_at
+
+identity_secrets             write-only; one row per secret
+  identity_id FK, kind       github_token | claude | signing_key
+  owner TEXT                 a GitHub token's owner, '' = all owners
+  ciphertext                 AES-256-GCM (v1:iv:tag:data, base64)
+  fingerprint                sha256 of the value, first 12 hex (tokens) / SHA256:… (keys)
+  login, scopes, expires_at  what GitHub said about a token
+  source                     "pasted" | "gh:github.com:&lt;login&gt;" | "file:~/.ssh/id_ed25519" (provenance only)
+
+projects.identity_id         NOT NULL after the migration, idn_default for every existing project
+box identity                 kv box_identity:&lt;boxId&gt; (missing = idn_default), set at create, never changed</code></pre>
+
+<h2 id="resolve">2. Resolution order</h2>
+<p>One function, <code>turnCredentials(project, task, boxId)</code> in <code>server/identity/</code>, used by <code>taskJson()</code>, <code>mirrorSpec()</code> (clone, fetch, restore, turn-end push, WIP cleanup), the PR tracker, and the Captain's env. Nothing else reads a credential.</p>
+<table>
+<tr><th>What</th><th>Order (first one set wins)</th></tr>
+<tr><td>GitHub token</td><td>task env › project env › identity token for the repo's owner › identity token for all owners › <i>Default only:</i> Settings › Credentials / env var / <code>gh auth token</code> (today's chain)</td></tr>
+<tr><td>Claude credential</td><td>task env › project env › identity's own (API key or long-lived token) › global. <b>Exactly one</b> Claude variable reaches the turn; the others are unset (fixes F2: a project's key used to lose to the global token).</td></tr>
+<tr><td>Git author</td><td>task/project env <code>GIT_AUTHOR_*</code> › identity author › <code>GIT_USER_NAME/EMAIL</code>. Set as <code>GIT_AUTHOR_*</code> and <code>GIT_COMMITTER_*</code> env, so no stray config can change it.</td></tr>
+<tr><td>Signing</td><td>identity's signing config only (none for Default unless Cody adds one)</td></tr>
+<tr><td>Box</td><td>a box hosts one identity key: <code>identityId</code>, or <code>identityId+env:&lt;hash&gt;</code> when the project's env overrides a token, so a project with its own token never shares a box with others either</td></tr>
+</table>
+
+<h2 id="inject">3. Injection per runner</h2>
+<p><b>One interface for every runner</b> (agreed with the Docker runner task, task_c1617edfb468): the server writes the resolved credentials into <code>task.json</code> each turn; the runner (<code>box-runner.mjs</code>) applies them. Providers only say where secrets may live.</p>
+<pre><code>task.json (new fields)
+  env        GITHUB_TOKEN, GH_TOKEN, GIT_AUTHOR_*, GIT_COMMITTER_*, one Claude var (as today, plus GH_TOKEN and the author)
+  unsetEnv   ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GH_ENTERPRISE_TOKEN", …]   removed from what the runner inherits
+  git        { helperOnly, author, signing: null | { format, key: {kind:"file", data} | {kind:"agent", publicKey, program}, requireSigned } }
+  secretsDir where the runner may write the key (tmpfs where the provider has one)
+
+BoxProvider (optional)
+  secretsDir?(boxId)    Docker: /run/boxyard (tmpfs) · Linux boxes and pods: /dev/shm · this computer: $TMPDIR
+  agentSigning?(boxId)  true where a key that can't be copied (1Password, a hardware key) can sign: this computer</code></pre>
+<table>
+<tr><th></th><th>Upstash box</th><th>This computer (local)</th><th>RunPod pod</th><th>Docker container</th></tr>
+<tr><td>Token</td><td colspan="4">per turn in <code>task.json</code> env (<code>GITHUB_TOKEN</code> + <code>GH_TOKEN</code>), repo-local helper with <code>credential.helper=</code> reset first, the same on the mirror's <code>git -c</code></td></tr>
+<tr><td>Box-level creds</td><td><b>none any more:</b> no <code>git</code>/<code>GITHUB_TOKEN</code>/Claude env at <code>Box.create</code> (F1); old boxes' <code>~/.git-credentials</code> removed</td><td>n/a</td><td>none (already)</td><td>none; task.json on tmpfs</td></tr>
+<tr><td>Isolation from other identities</td><td>a box pool per identity key</td><td>env only: for a non-default identity, <code>GIT_CONFIG_GLOBAL</code> → Box Yard's own gitconfig, <code>GIT_CONFIG_NOSYSTEM=1</code> (drops osxkeychain), <code>GH_TOKEN</code> from the shell stripped, <code>GH_CONFIG_DIR</code> per identity</td><td>pod per project</td><td>container per project</td></tr>
+<tr><td>Signing key</td><td>file key only, 0600 in /dev/shm, removed at turn end</td><td>file key in $TMPDIR (0600), or the agent via <code>gpg.ssh.program</code> (1Password <code>op-ssh-sign</code>, <code>ssh-keygen</code> + agent)</td><td>file key only</td><td>file key on the tmpfs; agent signing is the Docker task's call (off in v1)</td></tr>
+</table>
+<p>An identity whose key can only sign through an agent lists only the runners that can: Upstash and RunPod refuse it with "this identity signs through 1Password on this computer, so it can't run on Upstash boxes".</p>
+
+<h2 id="sign">4. Signing and requireSigned</h2>
+<ul>
+<li>Per repo, each turn: <code>gpg.format=ssh</code> (or openpgp), <code>user.signingkey=&lt;secretsDir&gt;/&lt;task&gt;.sign</code> (or <code>key::ssh-ed25519 …</code> for an agent), <code>commit.gpgsign=true</code>, <code>tag.gpgsign=true</code>, and <code>gpg.ssh.program</code> for agents.</li>
+<li>The runner writes the key 0600, strips it from <code>task.json</code> at once, and deletes it when the turn ends (and the server removes it again after the turn, in case the runner died).</li>
+<li><b>requireSigned:</b> before <code>create_pull_request</code> pushes, and before the turn-end branch push (<code>gitPrepScript</code>), Box Yard runs <code>git log --show-signature</code> / <code>%G?</code> over the commits origin lacks. Any unsigned commit stops the push with a loud error that lists them ("3 commits aren't signed: abc1234 …; re-sign with <code>git rebase --exec 'git commit --amend --no-edit -S'</code>"). Box Yard's own WIP snapshot ref (<code>refs/boxyard/wip/*</code>, never a branch) still goes up, so no work is lost.</li>
+<li>Verification uses an <code>allowed_signers</code> file Box Yard writes for the identity, so a commit signed by some other key shows as bad, not good.</li>
+</ul>
+
+<h2 id="mcp">5. MCP tools (Coordinator and Captains)</h2>
+<table>
+<tr><th>Tool</th><th>Does</th><th>Captain scope</th></tr>
+<tr><td><code>list_identities</code></td><td>name, colour, login, owners, author, email check, signing fingerprint, Claude kind, runners, sees, projects, last test. Never a secret.</td><td>all identities (names and logins only are not project data); marks its own</td></tr>
+<tr><td><code>create_identity</code></td><td>name, colour, owners, author, runners, sees, requireSigned, plus <b>references</b>: <code>github_token_ref</code> (<code>gh:&lt;login&gt;</code>), <code>signing_key_ref</code> (<code>file:~/.ssh/x</code> or <code>agent:&lt;fingerprint&gt;</code>). Pasted values go through Settings, not the model.</td><td>yes</td></tr>
+<tr><td><code>update_identity</code> / <code>delete_identity</code></td><td>edit fields and refs; delete refuses while projects use it (or moves them to Default with <code>move_projects_to_default</code>)</td><td>only identities no other project uses</td></tr>
+<tr><td><code>assign_identity</code></td><td>sets a project's identity; checks runners; resting tasks move to the identity's boxes on their next turn; refused while a task of the project is working</td><td>own project only (<code>project()</code>)</td></tr>
+<tr><td><code>test_identity</code></td><td>GET /user per token (login, scopes, expiry) · each project repo: read / push / 404 / SSO / 401 · author email vs the account's verified emails (or its noreply) · signing key vs <code>/users/&lt;login&gt;/ssh_signing_keys</code> (or gpg_keys) · optional Claude one-word check</td><td>repos of its own project</td></tr>
+<tr><td><code>detect_identities</code></td><td>reads this computer and proposes identities with evidence (below), and maps every project to one by repo owner and push access</td><td>maps its own project only</td></tr>
+<tr><td><code>import_detected_identity</code></td><td>turns a proposal into an identity: the server re-reads the token / key by reference, verifies, encrypts, optionally assigns projects</td><td>may assign only its own project</td></tr>
+</table>
+<p>Prompts: the Coordinator and Captain prompts gain a short "Identities" section: when a clone, fetch or push fails with 401/403/404, or Cody asks about accounts, run <code>detect_identities</code>, propose a setup in one message, and import only after Cody says yes.</p>
+
+<h2 id="detect">6. Detection and import</h2>
+<table>
+<tr><th>Source</th><th>Read with</th><th>Evidence it gives</th></tr>
+<tr><td>gh accounts</td><td><code>gh auth status</code> (token lines dropped, <code>GH_TOKEN</code>/<code>GITHUB_TOKEN</code> removed from its env so keyring accounts show), then server-side <code>gh auth token --user X</code></td><td>logins, active account, git protocol; with the token: GET /user (id, name), /user/orgs, /user/emails when the scope allows, push access to each project's repo</td></tr>
+<tr><td><code>~/.gitconfig</code></td><td><code>git config --global --list</code> filtered to user.*, gpg.*, commit.gpgsign, credential.*helper names, includeIf</td><td>default author; each <code>includeIf "gitdir:…"</code> block's author and signing, and the owners of repos under that folder (their <code>remote.origin.url</code>)</td></tr>
+<tr><td><code>~/.ssh/config</code></td><td>parsed in Node</td><td><code>Host github-work</code> aliases with HostName github.com, IdentityFile, IdentityAgent (1Password)</td></tr>
+<tr><td>Signing</td><td><code>gpg.format</code>, <code>user.signingkey</code>, <code>gpg.ssh.program</code>, <code>allowed_signers</code></td><td>key fingerprint, whether the private key is passphrase-free (copyable) or agent-only (1Password, hardware), which emails <code>allowed_signers</code> ties to it</td></tr>
+</table>
+<p>Each proposal names its <b>references</b>, never values: <code>github_token_ref: "gh:codyseibert"</code>, <code>signing_key_ref: "file:~/.ssh/id_ed25519"</code>. Tool results show logins, emails, owners, fingerprints and paths only. <code>import_detected_identity</code> resolves the reference again on the server. An opt-in e2e test runs detection against the real Mac (read-only, prints no secrets).</p>
+
+<h2 id="secrets">7. Secrets: storage, API, redaction</h2>
+<ul>
+<li><b>At rest:</b> AES-256-GCM. The key comes from <code>BOXYARD_SECRET_KEY</code>, else a 0600 <code>&lt;data&gt;/secret.key</code> made on first use (kept out of the database, so a copied DB or backup holds no usable token). Settings › Credentials' saved values move to the same encryption (read old plaintext, write encrypted).</li>
+<li><b>Write-only:</b> REST and MCP return <code>{ set, fingerprint, login, scopes, expiresAt, source }</code>. Replace and Remove are the only actions.</li>
+<li><b>Redaction:</b> every task event, Captain and Coordinator reply and notice passes <code>redact()</code> with every identity's and every global secret (cached, refreshed on change), plus the shape patterns that already exist (<code>ghp_</code>, <code>github_pat_</code>, <code>sk-ant-</code>, …) and private-key blocks.</li>
+</ul>
+
+<h2 id="migrate">8. Migration</h2>
+<ul>
+<li>One appended migration: the two tables, the Default identity (<code>idn_default</code>, empty: it <i>is</i> the global credentials), <code>projects.identity_id = 'idn_default'</code> for every project. Boxes without a key count as Default.</li>
+<li>Projects whose env has <code>GITHUB_TOKEN</code> or a Claude key keep them and keep winning (now for git too, which is the F1 fix: their pushes now really use that token). The first PR's notice lists any such project so Cody can test it.</li>
+<li>Rollback-safe: columns are additive; the global credentials row stays readable.</li>
+</ul>
+
+<h2 id="ui">9. UI</h2>
+<ul>
+<li><b>Settings › Identities</b> (new section after Credentials): cards per identity (login, owners, author, signing fingerprint, Claude kind, runners, projects, last test), Add, Edit, Test, and "Import from this computer" (runs detection, shows proposals with evidence, imports on click). All edits are a draft until Save; tokens are write-only fields.</li>
+<li><b>Project settings:</b> an Identity picker (draft until Save).</li>
+<li><b>Badge:</b> a small colour dot + name in the sidebar project row, project settings and the task ⋯ details. Not in the project header (#83). Container queries for narrow panels.</li>
+<li>A composite mock-mode screenshot (desktop and mobile) goes in the UI PR.</li>
+</ul>
+
+<h2 id="prs">10. PR plan (each <code>no-automerge</code>, merge in order)</h2>
+<table>
+<tr><th>#</th><th>PR</th><th>Contents</th></tr>
+<tr><td>1</td><td>Fix the known leaks (F1, F2) and wall boxes</td><td><code>credential.helper=</code> reset (same helpers as #159), no credentials at <code>Box.create</code>, old <code>~/.git-credentials</code> cleaned, project Claude credential wins and exactly one is set, <code>GH_TOKEN</code> set per turn and stripped from the local shell, a box hosts one identity key</td></tr>
+<tr><td>2</td><td>Identities: model, encryption, resolution</td><td>tables + migration, <code>turnCredentials()</code> at every call site, encryption at rest, write-only REST API, transcript redaction, runner allowlist</td></tr>
+<tr><td>3</td><td>Signing and the local runner's walls</td><td>signing key per turn (file or agent), repo config, requireSigned before every push, local <code>GIT_CONFIG_GLOBAL</code> / <code>GIT_CONFIG_NOSYSTEM</code> / <code>GH_CONFIG_DIR</code></td></tr>
+<tr><td>4</td><td>MCP: manage, test, detect, import</td><td>the seven tools, detection parsers with fixtures, prompts, opt-in e2e on the Mac</td></tr>
+<tr><td>5</td><td>UI</td><td>Settings › Identities, project picker, badges, screenshots</td></tr>
+<tr><td>6</td><td>Coordinator sees: status only</td><td>a <code>sealed()</code> check in the MCP scope helpers for content-returning tools</td></tr>
+</table>
+
+<h2 id="later">11. Not in this round</h2>
+<ul>
+<li>Claude "Signed in" identities (per-identity <code>CLAUDE_CONFIG_DIR</code> login), the repo lens for Captains, <code>@project</code> in the Coordinator composer, GitHub App tokens, and encrypting project <code>env_json</code> values.</li>
+<li>Agent signing inside Docker (needs SSH agent forwarding into the container, which weakens its isolation): the Docker task decides.</li>
+<li>macOS Keychain for the encryption key: a file is used so tests and headless installs behave the same; can be added behind the same interface.</li>
+</ul>
+</main>
+</body>
+</html>
