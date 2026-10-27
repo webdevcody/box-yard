@@ -118,7 +118,7 @@ describe("parallel box creation", () => {
     expect(r.yard.store.listBoxes()).toHaveLength(5)
     const queued = r.yard.store.listTasks().filter((t) => t.status === "queued")
     expect(queued).toHaveLength(3)
-    for (const t of queued) expect(t.waitReason).toBe("Waiting for a free slot: every box is full and the pool is at its limit")
+    for (const t of queued) expect(t).toMatchObject({ waitReason: "Waiting for a free slot: every box is full and the pool is at its limit", waitFix: "box-settings" })
 
     // Every new box is in the box history, with who made it and why.
     const created = r.yard.tasks.history.list().filter((e) => e.type === "created")
@@ -237,7 +237,7 @@ describe("parallel box creation", () => {
 })
 
 describe("pace and the fan-out question", () => {
-  const notices = (r: Running) => (r.yard.store.db.prepare("SELECT content FROM chat_messages WHERE role = 'notice' ORDER BY id").all() as { content: string }[]).map((n) => n.content)
+  const notices = (r: Running) => (r.yard.store.db.prepare("SELECT content FROM chat_messages WHERE role = 'notice' ORDER BY created_at, rowid").all() as { content: string }[]).map((n) => n.content)
 
   it("starts at most the pace's creates in its window, then the rest as it allows", async () => {
     const r = await start({ maxBoxes: 10, boxCreateConcurrency: 10 }, { paceCreates: 2, paceWindowMs: 800 })

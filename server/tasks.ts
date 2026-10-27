@@ -3748,7 +3748,9 @@ export class TaskManager {
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
     const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : walled && !candidates.length ? this.walledReason(creds) : this.noNewBoxReason()) : null
-    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, !canGrow && !cap?.full ? this.noNewBox() : null)
+    // A cloud limit is named on any wait it causes; the ceiling's fix only goes with the reason that says the pool is full.
+    const noBox = !canGrow && !cap?.full ? (this.cloudBlock() ?? (!busy[0] && !low.length && !waitHere ? this.noNewBox() : null)) : null
+    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, noBox)
     return null
   }
 
