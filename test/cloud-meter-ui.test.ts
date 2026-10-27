@@ -88,11 +88,12 @@ describe("cloud meter words", () => {
 
 describe("cloud meter", () => {
   it("reads boxes, $/h and today against the limit, and opens a sheet with every box", () => {
-    render(createElement(CloudMeter), status())
+    render(createElement(CloudMeter, { variant: "inline" }), status())
     expect(chip().dataset.state).toBe("ok")
     expect(chip().getAttribute("aria-label")).toBe(meterLabel(status()))
     expect(chip().getAttribute("aria-label")).toBe("Cloud boxes: 1 running · 1 idle · $0.42/h now · $3.10 of $10 today's cloud limit")
-    expect(chip().textContent).toContain("1 running · 1 idle · $0.42/h · $3.10 of $10")
+    // Every tier is in the DOM; the header's width (a container query) shows one.
+    expect([...chip().querySelectorAll("span")].map((e) => e.textContent)).toEqual(["$3.10 of $10 · 2 boxes · $0.42/h", "$3.10 of $10 · 2 boxes", "$3.10/$10 · 2"])
     act(() => chip().click())
     expect(sheet()).not.toBeNull()
     const rows = [...document.querySelectorAll("[data-testid=cloud-box]")].map((r) => r.textContent)
@@ -106,7 +107,7 @@ describe("cloud meter", () => {
 
   it("at the limit says new boxes wait and raises today's limit in one click", async () => {
     const reached = status({ todayUsd: 10.02, state: "reached", blockedReason: "today's cloud spend is $10.02 of its $10 limit", raiseToUsd: 20.02 })
-    render(createElement(CloudMeter), reached)
+    render(createElement(CloudMeter, { variant: "inline" }), reached)
     expect(chip().dataset.state).toBe("reached")
     expect(chip().getAttribute("aria-label")).toContain("New boxes wait")
     act(() => chip().click())
@@ -121,15 +122,15 @@ describe("cloud meter", () => {
   })
 
   it("offers the monthly limit's settings, not a raise, when the 30-day limit holds new boxes", () => {
-    render(createElement(CloudMeter), status({ monthUsd: 40, monthlyLimitUsd: 40, state: "reached", blockedReason: "cloud spend over the last 30 days is $40 of its $40 monthly limit" }))
+    render(createElement(CloudMeter, { variant: "inline" }), status({ monthUsd: 40, monthlyLimitUsd: 40, state: "reached", blockedReason: "cloud spend over the last 30 days is $40 of its $40 monthly limit" }))
     act(() => chip().click())
     expect(raiseButton()).toBeNull()
     expect(document.querySelector("[data-testid=cloud-reached]")!.textContent).toContain("Change the monthly limit")
   })
 
   it("without a daily limit shows today's spend and says so", () => {
-    render(createElement(CloudMeter), status({ dailyLimitUsd: 0, raiseToUsd: null }, []))
-    expect(chip().textContent).toContain("$3.10 today")
+    render(createElement(CloudMeter, { variant: "inline" }), status({ dailyLimitUsd: 0, raiseToUsd: null }, []))
+    expect(chip().textContent).toContain("$3.10 today · 2 boxes")
     act(() => chip().click())
     expect(sheet()!.textContent).toContain("No daily cloud limit")
     expect(sheet()!.textContent).toContain("No boxes right now")

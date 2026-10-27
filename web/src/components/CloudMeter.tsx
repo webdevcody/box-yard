@@ -2,45 +2,62 @@
 // spend against the daily cloud limit. It opens a sheet with the limits, "Raise today's limit" and every box.
 import { memo, useState } from "react"
 import { Link } from "wouter"
-import { Boxes, Cpu, Settings as SettingsIcon } from "lucide-react"
+import { Boxes, ChevronRight, Cpu, Settings as SettingsIcon } from "lucide-react"
 import type { CloudStatus } from "../../../shared/types"
 import { useCloud, useRaiseCloudLimit } from "../lib/queries"
 import { BAR_TONE, METER_TONE, boxState, countsLine, dollars, limitPct, meterLabel, perHour, todayLine } from "../lib/cloud"
 import { useOpenSettings } from "./SettingsDialog"
 import { Modal } from "./Modal"
-import { Button, META_CHIP, cx } from "./ui"
+import { Button, cx } from "./ui"
+
+/** The chip's look; `inline` has META_CHIP's sizes but may shrink (its text truncates before the header's buttons overflow). */
+const CHIP = "inline-flex min-w-0 items-center gap-1 rounded-md border text-xs font-medium whitespace-nowrap tabular-nums transition"
+const VARIANT = { inline: "min-h-11 px-2 sm:h-6 sm:min-h-0 sm:px-1.5 @max-[26rem]:hidden", strip: "mb-2 h-8 w-full px-2.5 @min-[26rem]:hidden" }
 
 /**
- * The chip. It reads by the header's width (the header is a container): wide, "2 running · 1 idle · $0.42/h ·
- * $3.10 of $10"; mid, "$3.10/$10"; narrow, the percent of today's limit. Calm, then amber from 80%, rose at the limit.
+ * The meter, read by the header's width (the header is a container). `inline` sits beside the title from 26rem:
+ * "$8.50 of $10 · 3 boxes · $0.49/h" from 56rem, "$8.50 of $10 · 3 boxes" from 30rem (Zen's column is 48rem),
+ * "$8.50/$10 · 3" below, its text truncating when the header is full. `strip` is the full reading as a row under the
+ * header below 26rem (phones), where the header's buttons leave no room. Calm, then amber from 80% of a limit, rose at
+ * it. Either opens the sheet.
  */
-export const CloudMeter = memo(function CloudMeter() {
+export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inline" | "strip" }) {
   const cloud = useCloud()
   const [open, setOpen] = useState(false)
   const s = cloud.data
   if (!s) return null
-  const pct = limitPct(s.spend)
   const label = meterLabel(s)
+  const boxes = s.boxes.total === 1 ? "1 box" : `${s.boxes.total} boxes`
+  // Today against the limit first: it's what stays when the text truncates.
+  const full = `${todayLine(s.spend)} · ${boxes} · ${perHour(s.hourlyUsd)}`
+  const short = `${s.spend.dailyLimitUsd > 0 ? `${dollars(s.spend.todayUsd)}/${dollars(s.spend.dailyLimitUsd)}` : dollars(s.spend.todayUsd)} · ${s.boxes.total}`
   return (
     <>
       <button
         type="button"
-        data-testid="cloud-meter"
+        data-testid={variant === "inline" ? "cloud-meter" : "cloud-meter-strip"}
         data-state={s.spend.state}
         onClick={() => setOpen(true)}
         title={label}
         aria-label={label}
         aria-haspopup="dialog"
-        className={cx(META_CHIP, "mr-1 tabular-nums", METER_TONE[s.spend.state])}
+        className={cx(CHIP, VARIANT[variant], METER_TONE[s.spend.state])}
       >
         <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        <span className="@max-[44rem]:hidden">
-          {countsLine(s.boxes)} · {perHour(s.hourlyUsd)} · {todayLine(s.spend)}
-        </span>
-        <span className="@max-[26rem]:hidden @min-[44rem]:hidden">
-          {s.spend.dailyLimitUsd > 0 ? `${dollars(s.spend.todayUsd)}/${dollars(s.spend.dailyLimitUsd)}` : dollars(s.spend.todayUsd)}
-        </span>
-        <span className="@min-[26rem]:hidden">{pct !== null ? `${pct}%` : dollars(s.spend.todayUsd)}</span>
+        {variant === "inline" ? (
+          <>
+            <span className="truncate @max-[56rem]:hidden">{full}</span>
+            <span className="truncate @max-[30rem]:hidden @min-[56rem]:hidden">
+              {todayLine(s.spend)} · {boxes}
+            </span>
+            <span className="truncate @min-[30rem]:hidden">{short}</span>
+          </>
+        ) : (
+          <>
+            <span className="truncate">{full}</span>
+            <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" aria-hidden />
+          </>
+        )}
       </button>
       {open && <CloudSheet status={s} onClose={() => setOpen(false)} />}
     </>
