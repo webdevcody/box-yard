@@ -1,9 +1,8 @@
 // A hidden check for "the app froze and nothing takes a tap" on phones, where there's no console: hold two
-// fingers still on the screen for a second and a toast says what is on top under them, and how long the main
-// thread was last blocked. If no toast comes at all, the page's script is stuck (a busy main thread); if one
+// fingers still on the screen for a second and a panel says what is on top under them, and how long the main
+// thread was last blocked. If no panel comes at all, the page's script is stuck (a busy main thread); if it
 // names something unexpected, that element is catching the taps. Also callable from Web Inspector as
 // `__boxyardTapDebug()`.
-import { toast } from "./toast"
 
 /** How long two fingers rest before the report shows. */
 export const HOLD_MS = 1000
@@ -14,6 +13,8 @@ export const STALL_MS = 1000
 const HEARTBEAT_MS = 250
 /** Stalls are remembered this long. */
 const STALL_WINDOW_MS = 10 * 60_000
+/** The panel closes itself after this long. */
+const PANEL_MS = 30_000
 
 type Stall = { at: number; ms: number }
 const stalls: Stall[] = []
@@ -54,11 +55,35 @@ export function tapReport(points: { x: number; y: number }[]): string[] {
   ]
 }
 
+/**
+ * Shows the report in a plain DOM panel, not a React toast or Modal: it has to show while React is the thing
+ * that's stuck, and a toast cuts it to one line. A tap on it closes it, and so does time.
+ */
+export function showReport(lines: string[]): HTMLElement {
+  document.getElementById("boxyard-tap-debug")?.remove()
+  const panel = document.createElement("pre")
+  panel.id = "boxyard-tap-debug"
+  panel.textContent = `Tap debug (tap to close)\n${lines.join("\n")}`
+  panel.style.cssText =
+    "position:fixed;z-index:2147483647;left:8px;right:8px;top:calc(env(safe-area-inset-top) + 8px);margin:0;padding:10px;" +
+    "max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-all;font:11px/1.4 ui-monospace,monospace;" +
+    "color:#fde68a;background:#18181b;border:1px solid #a16207;border-radius:8px;-webkit-user-select:text;user-select:text"
+  const close = () => {
+    clearTimeout(timer)
+    panel.remove()
+  }
+  const timer = setTimeout(close, PANEL_MS)
+  panel.addEventListener("click", close)
+  document.body.append(panel)
+  return panel
+}
+
 function report(points: { x: number; y: number }[]) {
+  // An open panel would be what's on top.
+  document.getElementById("boxyard-tap-debug")?.remove()
   const lines = tapReport(points)
   console.info("[box-yard] tap debug\n" + lines.join("\n"))
-  // An error toast: the only kind Zen shows.
-  toast.error("Tap debug", lines.join(" · "), { duration: 20_000 })
+  showReport(lines)
 }
 
 /** Mounted once (main.tsx). Returns an uninstall. */

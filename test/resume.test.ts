@@ -8,7 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { installPageGuards, onResume, onSuspend, resetDocumentScroll, resetResumeState } from "../web/src/lib/resume.js"
 import { STALE_STREAM_MS, useServerEvents } from "../web/src/lib/stream.js"
 import { keys } from "../web/src/lib/queries.js"
-import { clearStalls, recordStall, tapReport } from "../web/src/lib/tapDebug.js"
+import { clearStalls, recordStall, showReport, tapReport } from "../web/src/lib/tapDebug.js"
 import { trimmedStart } from "../web/src/lib/tail.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -211,5 +211,15 @@ describe("tap debug report", () => {
     recordStall(9000, Date.now() - 11 * 60_000)
     expect(tapReport([]).at(-1)).toBe("main thread blocked 2× in 10 min, longest 4.2 s")
     clearStalls()
+  })
+
+  it("shows every line of the report in a panel that a tap closes", () => {
+    const panel = showReport(["(10,20) div.a", "dialogs: 0", "main thread: no stalls in 10 min"])
+    expect(document.getElementById("boxyard-tap-debug")).toBe(panel)
+    expect(panel.textContent).toContain("dialogs: 0\nmain thread: no stalls in 10 min")
+    showReport(["again"])
+    expect(document.querySelectorAll("#boxyard-tap-debug")).toHaveLength(1)
+    document.getElementById("boxyard-tap-debug")!.click()
+    expect(document.getElementById("boxyard-tap-debug")).toBeNull()
   })
 })
