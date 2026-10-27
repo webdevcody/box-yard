@@ -19,9 +19,9 @@ import {
   type IdentitySigning,
   type IdentityToken,
 } from "../../shared/identities.js"
-import { GithubTokenError, githubTokenInfo, githubVerifiedEmails, noreplyEmails, type GithubFetch } from "./github.js"
+import { GithubTokenError, githubRepoAccess, githubTokenInfo, githubUserKeys, githubVerifiedEmails, noreplyEmails, type GithubFetch, type GithubTokenInfo } from "./github.js"
 import { tokenFingerprint, type SecretBox } from "./secretBox.js"
-import { SshKeyError, privateKeyInfo, publicKeyInfo } from "./sshKeys.js"
+import { SshKeyError, normalizePublicKey, privateKeyInfo, publicKeyInfo } from "./sshKeys.js"
 
 interface IdentityRow {
   id: string
@@ -431,6 +431,107 @@ export class Identities {
     this.d.db.prepare("UPDATE identities SET signing_json = NULL, updated_at = ? WHERE id = ?").run(Date.now(), id)
     this.changed()
     return this.require(id)
+  }
+
+  /**
+   * test_identity: what GitHub says about each token, each repo `repos` names (the identity's projects; a Captain
+   * passes its own only), the author email and the signing key. Lines never hold a secret. Saved as the identity's
+   * last check unless `save` is false.
+   */
+  async test(id: string, repos: { name: string; repo: string | null; ownToken: boolean }[], o: { save?: boolean } = {}): Promise<IdentityCheckResult> {
+    const identity = this.require(id)
+    const lines: string[] = []
+    let ok = true
+    const bad = (line: string) => {
+      ok = false
+      lines.push(line)
+    }
+    if (this.offline) return { at: Date.now(), ok, lines: ["Mock mode: GitHub isn't asked."] }
+    const tokens: { owner: string; value: string; label: string }[] = []
+    if (identity.isDefault) {
+      const value = this.d.credentials.get("githubToken")
+      if (value) tokens.push({ owner: "", value, label: "Settings › Credentials' GitHub token" })
+      else bad("No GitHub token: Settings › Credentials has none, and gh isn't signed in here.")
+    } else {
+      for (const t of identity.tokens) {
+        const label = t.owner ? `The token for ${t.owner}` : "The token for every owner"
+        if (t.readable) tokens.push({ owner: t.owner, value: this.secret(id, "github_token", t.owner), label })
+        else bad(`${label} can't be opened with this server's secret key (it changed): save it again.`)
+      }
+      if (!identity.tokens.length) bad("No GitHub token: its projects' turns get none. Save one in Settings › Identities.")
+    }
+    const accounts = new Map<string, GithubTokenInfo>()
+    for (const t of tokens) {
+      let info: GithubTokenInfo
+      try {
+        info = await githubTokenInfo(t.value, this.d.github)
+      } catch (err) {
+        bad(`${t.label}: ${err instanceof GithubTokenError ? err.message : "couldn't be checked with GitHub."}`)
+        continue
+      }
+      accounts.set(t.owner, info)
+      const scopes = info.scopes === null ? "fine-grained" : info.scopes.length ? `scopes ${info.scopes.join(", ")}` : "no scopes"
+      lines.push(`${t.label}: ${info.login}, ${scopes}${info.expiresAt ? `, expires ${new Date(info.expiresAt).toISOString().slice(0, 10)}` : ""}.`)
+      if (!identity.isDefault && identity.githubLogin && info.login.toLowerCase() !== identity.githubLogin.toLowerCase()) bad(`${t.label} is ${info.login}'s now, not ${identity.githubLogin}'s: save it again.`)
+      if (info.scopes && !info.scopes.includes("repo")) bad(`${t.label} has no repo scope, so it can't push to private repos or open pull requests: make one with repo.`)
+      if (info.expiresAt && info.expiresAt - Date.now() < 7 * 86_400_000) lines.push(`Warning: ${t.label.toLowerCase()} expires in ${Math.max(0, Math.ceil((info.expiresAt - Date.now()) / 86_400_000))} days.`)
+    }
+    for (const r of repos) {
+      const slug = githubSlug(r.repo)
+      if (!slug) continue
+      if (r.ownToken) {
+        lines.push(`${slug}: ${r.name} uses the GITHUB_TOKEN in its own env vars, not this identity's.`)
+        continue
+      }
+      const owner = slug.split("/")[0]!.toLowerCase()
+      const t = tokens.find((x) => x.owner === owner) ?? tokens.find((x) => x.owner === "")
+      if (!t) {
+        bad(`${slug}: no token of this identity serves ${owner}.`)
+        continue
+      }
+      const login = accounts.get(t.owner)?.login ?? "its account"
+      const a = await githubRepoAccess(t.value, slug, this.d.github)
+      if (a.kind === "push" && !a.archived) lines.push(`${slug}: ${login} can push.`)
+      else if (a.kind === "push") bad(`${slug}: ${login} can push, but the repo is archived, so pushes fail.`)
+      else if (a.kind === "read") bad(`${slug}: ${login} can only read it, so pushes and pull requests fail. Give ${login} write access, or use another identity.`)
+      else if (a.kind === "missing") bad(`${slug}: not found with this token (404): it's private and ${login} can't see it, or it doesn't exist.`)
+      else if (a.kind === "sso") bad(`${slug}: ${owner} uses SAML single sign-on, and the token isn't authorized for it${a.url ? `: authorize it at ${a.url}` : " (github.com/settings/tokens › Configure SSO)"}.`)
+      else if (a.kind === "unauthorized") bad(`${slug}: GitHub refused the token (401).`)
+      else if (a.kind === "unreachable") bad(`${slug}: GitHub couldn't be reached.`)
+      else if (a.kind === "refused") bad(`${slug}: GitHub answered ${a.message}.`)
+    }
+    const first = tokens.find((t) => accounts.has(t.owner))
+    const login = first ? accounts.get(first.owner)! : null
+    if (identity.author) {
+      if (first && login) await this.checkEmail(id, first.value, login).catch(() => {})
+      const check = this.row(id)?.email_check
+      const who = `${identity.author.name} <${identity.author.email}>`
+      if (check === "verified") lines.push(`Author ${who}: verified on ${login?.login ?? "the account"}.`)
+      else if (check === "unverified") lines.push(`Warning: author email ${identity.author.email} isn't one of ${login?.login ?? "the account"}'s verified emails, so GitHub won't link its commits to the account.`)
+      else lines.push(`Author ${who}: not checked (the token can't read the account's emails: that needs the user:email scope).`)
+    } else lines.push(identity.isDefault ? "Author: Settings' (GIT_USER_NAME / GIT_USER_EMAIL), else each repo's." : "Author: none of its own, so Settings' (GIT_USER_NAME / GIT_USER_EMAIL).")
+    const s = identity.signing
+    if (s) {
+      if (s.kind === "file" && !s.readable) bad(`Signing key ${s.fingerprint} can't be opened with this server's secret key (it changed): save it again.`)
+      const keys = first && login ? await githubUserKeys(first.value, login.login, "ssh_signing_keys", this.d.github) : null
+      if (!login) lines.push(`Signing key ${s.fingerprint}: not checked with GitHub (no working token).`)
+      else if (keys === null) lines.push(`Signing key ${s.fingerprint}: GitHub didn't list ${login.login}'s signing keys.`)
+      else if (keys.some((k) => normalizePublicKey(k) === s.publicKey)) lines.push(`Signing key ${s.fingerprint}: on GitHub as ${login.login}'s signing key, so its commits show Verified.`)
+      else lines.push(`Warning: signing key ${s.fingerprint} isn't one of ${login.login}'s signing keys on GitHub, so its commits show Unverified. Add it at https://github.com/settings/ssh/new as a Signing Key.`)
+      if (s.kind === "agent") lines.push(`It signs through this computer's SSH agent${s.program ? ` (${path.basename(s.program)})` : ""}, so its projects run only here.`)
+      if (s.requireSigned) lines.push("requireSigned: a push with an unsigned commit is stopped.")
+    }
+    if (identity.claude) lines.push(`Claude login: its own ${identity.claude.kind === "api_key" ? "API key" : "OAuth token"}${identity.claude.readable ? "" : ", which this server's secret key can't open: save it again"} (not checked).`)
+    const result: IdentityCheckResult = { at: Date.now(), ok, lines }
+    if (o.save !== false) this.setCheck(id, result)
+    return result
+  }
+
+  /** The GitHub login the Default identity's token (Settings › Credentials) is; null without one, or when GitHub can't say. */
+  async defaultLogin(): Promise<string | null> {
+    const token = this.d.credentials.get("githubToken")
+    if (!token || this.offline) return null
+    return (await githubTokenInfo(token, this.d.github).catch(() => null))?.login ?? null
   }
 
   /** Record a test_identity result (no secrets in it). */
