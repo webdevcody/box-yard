@@ -50,6 +50,23 @@ export interface MirrorSpec {
   git: string
 }
 
+/** Box Yard's GitHub credential helper: the turn's $GITHUB_TOKEN (the project's own, else Settings › Credentials'). */
+export const GITHUB_HELPER = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
+
+/**
+ * `git` with `helper` as its credential helper. Git asks each configured helper in turn (system, global, the repo's,
+ * then `-c`) and takes the first answer, so a box whose global config had `credential.helper=store` answered with
+ * the token it had stored, never the project's GITHUB_TOKEN. With `only`, an empty helper clears that list first.
+ */
+export const gitWithHelper = (helper: string, only: boolean) => `git ${only ? "-c credential.helper= " : ""}-c credential.helper=${q(helper)}`
+
+/** Shell, run in a repo: put `helper` in its config, with an empty one before it when `only` (see gitWithHelper). */
+export function setHelperScript(helper: string, only: boolean, git = "git"): string {
+  return only
+    ? `${git} config --replace-all credential.helper '' && ${git} config --add credential.helper ${q(helper)}`
+    : `${git} config --replace-all credential.helper ${q(helper)}`
+}
+
 export const mirrorObjects = (mirror: string) => `${mirror}/objects`
 
 /** Shell test: some task folder on the box (in `tasks`, `<root>/tasks` on a box) borrows this mirror's objects. */
