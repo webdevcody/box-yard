@@ -6,6 +6,7 @@ import type { WorkerSize } from "../../shared/types.js"
 import { LOCAL_BOX_ID } from "../../shared/runner.js"
 import { isGpuBox } from "../../shared/runpod.js"
 import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
+import { TURN_SH } from "../turnProcess.js"
 
 /**
  * "Boxes" that are folders on this machine. Good for trying Box Yard with no
@@ -133,8 +134,8 @@ export class LocalProvider implements BoxProvider {
   }
 
   async destroy(boxId: string) {
-    // Stop any turn still running in this box before removing its folder.
-    await this.exec(boxId, `for f in tasks/*/turn.pid; do [ -f "$f" ] && kill -TERM -- -$(cat "$f") 2>/dev/null; kill -TERM $(cat "$f") 2>/dev/null; done; true`)
+    // Stop any turn still running in this box before removing its folder (by its run record: never a reused pid).
+    await this.exec(boxId, `${TURN_SH}\nfor d in tasks/*/; do by_turn_kill "$d" TERM; done; true`)
     fs.rmSync(this.root(boxId), { recursive: true, force: true })
   }
 }

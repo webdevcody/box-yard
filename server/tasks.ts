@@ -60,6 +60,7 @@ import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
 import { SCRATCH_MARKER, depsSaveScript, depsSaveSummary, stripCounts, stripScript, stripSummary } from "./boxSnapshot.js"
+import { TURN_SH, parseRunRecord, parseTurnProbe, turnKillScript, turnProbeScript, whileTurnRuns, type TurnProbe } from "./turnProcess.js"
 import {
   compareSizes,
   initiatorLabel,
@@ -578,6 +579,7 @@ export class TaskManager {
       // half-started runner first).
       this.store.updateTask(row.id, { status: "queued", currentTurnId: null })
     }
+    const running: TaskRow[] = []
     for (const row of this.store.listTaskRows({ status: ["working"] })) {
       if (!row.box_id || !row.current_turn_id) {
         this.store.updateTask(row.id, { status: "queued", currentTurnId: null })
@@ -585,11 +587,34 @@ export class TaskManager {
       }
       this.lastEventAt.set(row.id, Date.now())
       this.holdOpen(row.id, row.box_id)
+      running.push(row)
     }
     for (const box of this.store.listBoxes()) {
       // A box that was mid-creation when we died may exist without us knowing its id.
       if (box.status === "creating") this.store.removeBox(box.id)
     }
+    for (const row of running) void this.reattach(row).catch((err) => console.warn(`[box-yard] re-attaching ${row.id}: ${errorMessage(err)}`))
+  }
+
+  /**
+   * After a restart, a turn that was running. Its process still running (the pid, boot and start time its run record
+   * names): Box Yard picks it back up, polling from the saved cursor, and the turn ends as usual. Its process gone (it
+   * died or finished while Box Yard was down, or the machine or box restarted): what it wrote is read, and a turn
+   * still open after that is interrupted, queued to carry on in the same session. A box that can't be asked right
+   * now (paused, unreachable) is left to maintain(), as for any quiet turn.
+   */
+  private async reattach(row: TaskRow) {
+    const { box_id: boxId, current_turn_id: turnId } = row
+    if (!boxId || !turnId) return
+    if (!isLocalRunnerBox(boxId) && (await this.provider.health(boxId).catch(() => "unknown" as const)) !== "running") return
+    const probe = await this.turnProcess(boxId, row.id).catch(() => null)
+    const fresh = this.store.getTaskRow(row.id)
+    if (!probe || this.stopped || fresh?.current_turn_id !== turnId) return
+    if (probe.alive) {
+      this.addEvent(row.id, "Box Yard restarted and picked this turn back up; the agent kept working.", { kind: "reattached" })
+      return
+    }
+    await this.turnGone(fresh, "Box Yard restarted and the agent's process had stopped meanwhile (this computer or its box may have restarted)")
   }
 
   private async cleanupOrphanBoxes() {
@@ -929,8 +954,9 @@ export class TaskManager {
     const row = this.requireRow(taskId)
     if (row.current_turn_id && row.box_id) {
       this.stopRequested.add(row.id)
-      if (row.status === "working") await this.killTurn(row).catch(() => {})
-      // The runner writes turn_end after it stops; that settles the status.
+      // The runner writes turn_end after it stops; that settles the status. A turn whose process is gone has no
+      // runner left to write it: it's settled here, as stopped.
+      if (row.status === "working" && (await this.killTurn(row).catch(() => null)) === "gone") await this.turnGone(row, "its process had already stopped")
     } else if (row.status === "queued" || row.status === "starting") {
       this.dropQueuedMessages(row.id)
       this.store.updateTask(row.id, { compactPending: false, status: row.turn_count > 0 ? "idle" : "failed", error: row.turn_count > 0 ? null : "Stopped before it started." }, { quiet: true })
@@ -971,7 +997,11 @@ export class TaskManager {
     const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
     this.addEvent(row.id, `${who} sent ${them} now: stopping the current step so the next turn delivers ${queued === 1 ? "it" : "them"}.`, { kind: "send_now", queued })
     if (row.status === "starting") this.stopRequested.add(row.id)
-    else await this.killTurn(row, row.current_turn_id).catch(() => {})
+    else if ((await this.killTurn(row, row.current_turn_id).catch(() => null)) === "gone") {
+      // Its process ended without a turn_end (it died while Box Yard was down): end the turn here, as stopped.
+      this.stopRequested.add(row.id)
+      await this.turnGone(row, "its process had already stopped")
+    }
     // The runner writes turn_end once it stops; that turn ends "stopped" and the scheduler starts the next one.
     this.emitTask(row.id)
     return result("interrupted")
@@ -3833,15 +3863,16 @@ export class TaskManager {
         trigger,
       })
 
-      // setsid (where it exists; macOS has none) + nohup: the turn survives a
-      // dropped exec connection. The runner writes turn.pid itself.
+      // setsid (where it exists; on macOS the runner makes its own session) + nohup: the turn survives a dropped
+      // exec connection and a Box Yard restart. Any half-started runner is stopped first, by its run record, so a
+      // pid someone else holds now is never hit. The runner writes run.json and turn.pid itself.
       const start = await this.provider.exec(
         boxId,
-        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
+        `${TURN_SH}\ncd ${q(dir)} && (by_turn_kill . TERM; rm -f turn.pid run.json; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       if (superseded()) {
-        await this.provider.exec(boxId, `cd ${q(dir)} && [ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; true`).catch(() => {})
+        await this.provider.exec(boxId, turnKillScript(dir)).catch(() => {})
         this.store.finishTaskTurn(turnId, { status: "stopped", error: "Its start timed out." })
         throw new TurnSuperseded()
       }
@@ -4111,7 +4142,7 @@ export class TaskManager {
       await putFile(this.provider, boxId, row.archive_path!, remote)
       const res = await this.provider.exec(
         boxId,
-        `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")}`,
+        `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")} ${q(dir + "/run.json")}`,
       )
       if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
       // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
@@ -4129,7 +4160,7 @@ export class TaskManager {
     // The restored events log keeps its own seq numbers; restart the byte offset.
     const cursor = parseCursor(row.event_cursor)
     const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
-    this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0 }) })
+    this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0, ino: null }) })
     this.addEvent(row.id, from === "git" ? `Workspace restored ${onBox(boxId)}: its session from the archive, its code from git.` : `Workspace restored ${onBox(boxId)}.`)
     return { restored: true }
   }
@@ -4356,11 +4387,12 @@ export class TaskManager {
     this.holds.get(taskId)?.abort()
     const ctrl = new AbortController()
     this.holds.set(taskId, ctrl)
-    const pidFile = `${this.taskDir(boxId, taskId)}/turn.pid`
-    const wait = `while [ -f ${q(pidFile)} ] && kill -0 $(cat ${q(pidFile)}) 2>/dev/null; do sleep 15; echo .; done`
+    const dir = this.taskDir(boxId, taskId)
+    // Only while it's the turn's own process (its run record), never a process that took its pid after a restart.
+    const wait = whileTurnRuns(dir, "sleep 15; echo .")
     // On this computer it keeps a Mac out of idle sleep while the turn runs (caffeinate; -s holds off system sleep on
     // AC power too), as the stream keeps a box awake. Closing the lid still sleeps it: the turn resumes on wake.
-    const command = isLocalRunnerBox(boxId) ? `if command -v caffeinate >/dev/null 2>&1 && [ -f ${q(pidFile)} ]; then exec caffeinate -is -w "$(cat ${q(pidFile)})"; fi; ${wait}` : wait
+    const command = isLocalRunnerBox(boxId) ? `${TURN_SH}\nif command -v caffeinate >/dev/null 2>&1 && by_turn_alive ${q(dir)}; then exec caffeinate -is -w "$p"; fi\n${wait}` : wait
     const loop = async () => {
       let quickExits = 0
       while (!ctrl.signal.aborted && !this.stopped) {
@@ -4370,7 +4402,16 @@ export class TaskManager {
         const row = this.store.getTaskRow(taskId)
         if (!row?.current_turn_id || row.box_id !== boxId) break
         // The process ended (turn_end is on its way) or the stream dropped.
-        void this.pollTask(row)
+        await this.pollTask(row)
+        // Ended without a turn_end (killed, crashed): settle it now rather than at the next stall check.
+        const after = this.store.getTaskRow(taskId)
+        if (!ctrl.signal.aborted && after?.status === "working" && after.current_turn_id === row.current_turn_id) {
+          const probe = await this.turnProcess(boxId, taskId).catch(() => null)
+          if (probe && !probe.alive && !ctrl.signal.aborted) {
+            await this.turnGone(after, "the worker process stopped without finishing")
+            break
+          }
+        }
         quickExits = Date.now() - started < 5000 ? quickExits + 1 : 0
         await new Promise((r) => setTimeout(r, Math.min(30_000, 1000 * 2 ** quickExits)))
       }
@@ -4379,13 +4420,73 @@ export class TaskManager {
     void loop()
   }
 
-  /** Stop the task's running turn. `turnId`: only if that turn is still the one on the box (not a newer one). */
-  private async killTurn(row: TaskRow, turnId?: string | null) {
-    if (!row.box_id) return
-    const dir = this.taskDir(row.box_id, row.id)
-    const pidFile = `${dir}/turn.pid`
-    const only = turnId ? `grep -qF ${q(`"turnId":${JSON.stringify(turnId)}`)} ${q(`${dir}/turn.json`)} && ` : ""
-    await this.provider.exec(row.box_id, `${only}[ -f ${q(pidFile)} ] && (kill -TERM -- -$(cat ${q(pidFile)}) 2>/dev/null || kill -TERM $(cat ${q(pidFile)}) 2>/dev/null); true`)
+  /**
+   * Stop the task's running turn: its process group, found by its run record (so never a process that took its pid
+   * after a restart). `turnId`: only if that turn is still the one on the box (not a newer one). "gone": its process
+   * had already ended (it died while Box Yard was down, or the machine restarted), so no turn_end will come from it.
+   */
+  private async killTurn(row: TaskRow, turnId?: string | null): Promise<"signalled" | "gone"> {
+    if (!row.box_id) return "gone"
+    const probe = await this.turnProcess(row.box_id, row.id).catch(() => null)
+    if (probe && !probe.alive) return "gone"
+    await this.provider.exec(row.box_id, turnKillScript(this.taskDir(row.box_id, row.id), "TERM", turnId))
+    return "signalled"
+  }
+
+  /** Whether the task's turn process still runs, by its run record; null when the box can't say (unreachable). */
+  private async turnProcess(boxId: string, taskId: string): Promise<TurnProbe | null> {
+    const res = await this.provider.exec(boxId, turnProbeScript(this.taskDir(boxId, taskId)))
+    return res.exitCode === 0 ? parseTurnProbe(res.stdout) : null
+  }
+
+  /**
+   * The turn's process ended without a turn_end Box Yard has seen. What it wrote is read first: its last output, and
+   * its turn_end if it got that far (which ends the turn as usual, as when Box Yard was down while it finished). A
+   * turn still open after that is settled: stopped when someone asked it to stop, else interrupted and queued to
+   * carry on in the same session.
+   */
+  private async turnGone(row: TaskRow, reason: string) {
+    const turnId = row.current_turn_id
+    if (!row.box_id || !turnId) return
+    await this.drainEvents(row).catch((err) => console.warn(`[box-yard] reading the last events of ${row.id}: ${errorMessage(err)}`))
+    if (this.stopped) return
+    const fresh = this.store.getTaskRow(row.id)
+    if (!fresh || fresh.current_turn_id !== turnId) return
+    if (this.stopRequested.has(row.id)) return this.finishTurn(fresh, { seq: 0, ts: Date.now(), turnId, t: "turn_end", stopped: true, ok: true, exitCode: null })
+    this.interrupt(fresh, reason)
+  }
+
+  /**
+   * Apply every event a turn whose process is gone wrote, straight from its events.jsonl: nothing more is coming, and
+   * Redis may have missed some. From the saved cursor; with Redis (whose cursor isn't a file offset) from where the
+   * turn's events start, by its run record, or the end of the file for a runner from before run records.
+   */
+  private async drainEvents(row: TaskRow) {
+    const boxId = row.box_id
+    if (!boxId) return
+    const dir = this.taskDir(boxId, row.id)
+    // A poll in progress would apply the same events: wait for it, and keep the next one out.
+    for (let i = 0; this.pollLocks.has(row.id) && i < 200; i++) await new Promise((r) => setTimeout(r, 50))
+    this.pollLocks.add(row.id)
+    try {
+      let cursor = parseCursor(this.store.getTaskRow(row.id)?.event_cursor ?? null)
+      if (this.reader.mode === "redis") {
+        const record = await this.provider.exec(boxId, `cat ${q(`${dir}/run.json`)} 2>/dev/null; true`).then((r) => parseRunRecord(r.stdout), () => null)
+        if (record?.eventsOffset === null || record?.eventsOffset === undefined) {
+          const { events, cursor: next } = await this.reader.readFileTail(boxId, dir, cursor)
+          return await this.applyEvents(row.id, events, next)
+        }
+        cursor = { ...cursor, offset: record.eventsOffset, ino: null }
+      }
+      for (let i = 0; i < 1000; i++) {
+        const { events, cursor: next } = await this.reader.readFile(boxId, dir, cursor)
+        await this.applyEvents(row.id, events, next)
+        if (next.offset === cursor.offset && next.ino === cursor.ino) break
+        cursor = { ...next, seq: parseCursor(this.store.getTaskRow(row.id)?.event_cursor ?? null).seq }
+      }
+    } finally {
+      this.pollLocks.delete(row.id)
+    }
   }
 
   // ------------------------------------------------------------------ events
@@ -5221,7 +5322,7 @@ export class TaskManager {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     // A thin archive is a partial one that also leaves out the history GitHub has.
     const partial = Boolean(mode.partial || mode.thin)
-    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
+    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/run.json`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
     const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
     const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
     const script = archiveScript({ root: tasksRootOf(this.provider, boxId), boxRoot: this.provider.root(boxId), taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
@@ -5266,10 +5367,7 @@ export class TaskManager {
 
   private async removeTaskDir(boxId: string, taskId: string) {
     const dir = this.taskDir(boxId, taskId)
-    await this.provider.exec(
-      boxId,
-      `[ -f ${q(dir + "/turn.pid")} ] && kill -TERM -- -$(cat ${q(dir + "/turn.pid")}) 2>/dev/null; rm -rf ${q(dir)}`,
-    )
+    await this.provider.exec(boxId, `${turnKillScript(dir)}; rm -rf ${q(dir)}`)
   }
 
   private async evictWhenSettled(taskId: string) {
@@ -5521,22 +5619,12 @@ export class TaskManager {
         // Pausing killed the process. Wake the box; the pid check below will see it dead.
         await this.provider.wake(row.box_id).catch(() => {})
       }
-      const pidFile = `${this.taskDir(row.box_id, row.id)}/turn.pid`
-      const alive = await this.provider
-        .exec(row.box_id, `[ -f ${q(pidFile)} ] && kill -0 $(cat ${q(pidFile)}) 2>/dev/null && echo alive || echo dead`)
-        .catch(() => null)
-      if (!alive || alive.stdout.includes("alive")) {
+      const probe = await this.turnProcess(row.box_id, row.id).catch(() => null)
+      if (!probe || probe.alive) {
         this.lastEventAt.set(row.id, now - STALL_MS / 2) // check again soon
         continue
       }
-      // Dead process. Look in the file for anything Redis may have missed.
-      try {
-        const cursor = parseCursor(row.event_cursor)
-        const { events, cursor: next } = await this.reader.readFileTail(row.box_id, this.taskDir(row.box_id, row.id), cursor)
-        await this.applyEvents(row.id, events, next)
-      } catch {}
-      const fresh = this.store.getTaskRow(row.id)
-      if (fresh?.current_turn_id === row.current_turn_id) this.interrupt(fresh, "the worker process stopped without finishing")
+      await this.turnGone(row, "the worker process stopped without finishing")
     }
 
     // Idle boxes too: one deleted in the provider's console has no turn to notice it. After the stalled turns, so
@@ -5632,6 +5720,8 @@ export class TaskManager {
     const flags = this.store.turnFlags(row)
     const interrupts = (flags.interrupts ?? 0) + 1
     this.holds.get(row.id)?.abort()
+    this.captainWaits.delete(row.id)
+    if (row.current_turn_id) this.store.finishTaskTurn(row.current_turn_id, { status: "interrupted", error: reason })
     if (row.compacting) {
       // Not worth retrying: the user can press Compact again.
       const prev = row.compact_prev_status
