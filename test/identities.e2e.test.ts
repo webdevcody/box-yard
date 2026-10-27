@@ -38,11 +38,12 @@ afterEach(async () => {
 async function start() {
   const dir = tmpDir("identities-e2e-")
   const log = path.join(dir, "claude-env.log")
-  // Writes the credential and author vars it sees, then runs the fake claude.
+  // Writes where it runs and the credential and author vars it sees (only whether the secret key is there), then
+  // runs the fake claude.
   const claude = path.join(dir, "claude")
   fs.writeFileSync(
     claude,
-    `#!/bin/sh\nenv | grep -E '^(ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|GH_TOKEN|GITHUB_TOKEN|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+)=' >> ${JSON.stringify(log)}\necho --- >> ${JSON.stringify(log)}\nexec ${FAKE_CLAUDE} "$@"\n`,
+    `#!/bin/sh\n{ echo "CWD=$PWD"; env | grep -E '^(ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|GH_TOKEN|GITHUB_TOKEN|GIT_AUTHOR_[A-Z]+|GIT_COMMITTER_[A-Z]+)='; [ -n "$BOXYARD_SECRET_KEY" ] && echo SECRET_KEY_SET; echo ---; } >> ${JSON.stringify(log)}\nexec ${FAKE_CLAUDE} "$@"\n`,
     { mode: 0o755 },
   )
   const port = await freePort()
@@ -65,15 +66,19 @@ async function start() {
     if (r.status >= 300) throw new Error(`${method} ${url} -> ${r.status}: ${r.text}`)
     return JSON.parse(r.text) as T
   }
-  /** What `claude` was started with on each turn so far, sorted. */
-  const turns = () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("---\n").filter(Boolean).map((t) => t.trim().split("\n").filter(Boolean).sort()) : [])
+  /** What `claude` was started with so far, sorted: each agent turn's, or (`captains`) each Captain run's. */
+  const turns = (captains = false) =>
+    (fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("---\n").filter(Boolean) : [])
+      .map((t) => t.trim().split("\n").filter(Boolean))
+      .filter((lines) => lines[0]!.includes(`${path.sep}captains${path.sep}`) === captains)
+      .map((lines) => lines.slice(1).sort())
   const runTask = async (project: Project) => {
     const before = turns().length
     const task = await call<Task>("POST", "/api/tasks", { projectId: project.id, title: "Hello", prompt: "Say hi" })
     await waitFor(() => (yard.store.getTask(task.id)?.status === "done" ? true : null), "the task's turn to end", 30_000)
     return turns()[before]
   }
-  return { yard, raw, call, runTask }
+  return { yard, raw, call, runTask, turns }
 }
 
 describe("identities over the API", () => {
@@ -136,6 +141,21 @@ describe("identities over the API", () => {
     // A project's own env vars still win over its identity's.
     await r.call("PATCH", `/api/projects/${onAcme.id}`, { env: { GITHUB_TOKEN: "project-gh" } })
     expect(await r.runTask(onAcme)).toEqual(expect.arrayContaining(["CLAUDE_CODE_OAUTH_TOKEN=acme-oauth-0001", "GITHUB_TOKEN=project-gh", "GH_TOKEN=project-gh"]))
+  })
+
+  it("run a project's Captain on its identity's Claude login, and never hand it the secret key", async () => {
+    process.env.BOXYARD_SECRET_KEY = "a-passphrase-for-this-test"
+    try {
+      const r = await start()
+      const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+      await r.call("PUT", `/api/identities/${acme.id}/claude`, { kind: "api_key", value: "acme-key-0001" })
+      const project = await r.call<Project>("POST", "/api/projects", { name: "acme-app", identityId: acme.id })
+      await r.call("POST", `/api/projects/${project.id}/captain/messages`, { content: "status" })
+      const run = await waitFor(() => r.turns(true)[0] ?? null, "the Captain's run")
+      expect(run.filter((l) => /^(ANTHROPIC|CLAUDE_CODE_OAUTH)/.test(l) || l === "SECRET_KEY_SET")).toEqual(["ANTHROPIC_API_KEY=acme-key-0001"])
+    } finally {
+      delete process.env.BOXYARD_SECRET_KEY
+    }
   })
 
   it("keep projects on runners their identity allows, and move them to Default when it's removed", async () => {

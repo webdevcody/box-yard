@@ -420,10 +420,16 @@ export class Identities {
     if (isDefault) githubToken = this.d.credentials.get("githubToken")
     else if (repoOwner) githubToken = this.secret(identityId, "github_token", repoOwner)
     if (!isDefault) githubToken ||= this.secret(identityId, "github_token", "")
-    const claudeValue = row?.claude_kind ? this.secret(identityId, "claude", "") : ""
-    const claude = claudeValue ? { [CLAUDE_KIND_VAR[row!.claude_kind as IdentityClaudeKind]]: claudeValue } : this.d.credentials.claudeEnv()
+    const claude = this.ownClaude(projectId) ?? this.d.credentials.claudeEnv()
     const author = row?.author_name && row.author_email ? { name: row.author_name, email: row.author_email } : null
     return { identityId, isDefault, claude, githubToken, author }
+  }
+
+  /** The Claude login of a project's identity when it has one of its own, as a one-var env; else null (the global one). */
+  ownClaude(projectId: string): Record<string, string> | null {
+    const row = this.row(this.idOf(projectId))
+    const value = row?.claude_kind && row.is_default !== 1 ? this.secret(row.id, "claude", "") : ""
+    return value ? { [CLAUDE_KIND_VAR[row!.claude_kind as IdentityClaudeKind]]: value } : null
   }
 
   /** Why a project of this identity can't run on `runner`, or null when it can. */

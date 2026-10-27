@@ -388,6 +388,7 @@ export function createBoxYard(
   // An agent's message_captain goes to its own project's Captain; the Captain's turn tells a still-waiting agent it's done.
   tasks.onCaptainMessage = (projectId, input) => captains.fromAgent(projectId, input)
   captains.onAgentMessagesHandled = (_projectId, messages, reply) => tasks.captainHandledAgentMessages(messages, reply)
+  captains.claudeLogin = (projectId) => identities.ownClaude(projectId)
   const hooks = new HookEngine({
     store,
     hooks: new HookStore(db),

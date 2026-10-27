@@ -3232,7 +3232,7 @@ export class TaskManager {
 
   /** A Docker project's agents need a Claude key (Settings › Credentials, or the project's env): a container can't use this computer's login. */
   private dockerClaudeProblem(projectId: string): string | null {
-    if (this.c.mock || Object.keys(this.settings.credentials.claudeEnv()).length) return null
+    if (this.c.mock || Object.keys(this.settings.credentials.claudeEnv()).length || this.identities.ownClaude(projectId)) return null
     const env = this.store.projectEnv(projectId)
     return env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY ? null : DOCKER_NEEDS_CLAUDE_KEY
   }

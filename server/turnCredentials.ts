@@ -22,6 +22,20 @@ export interface TurnEnv {
   claudeFrom: "project" | "global" | null
 }
 
+/**
+ * The env of a `claude` process Box Yard runs on this server (the Coordinator, a Captain): the server's own, without
+ * what would mark it a Claude Code session's child or the key identities' secrets are encrypted with. It logs in with
+ * `own` (a project identity's Claude login), alone, or else with `global` (Settings › Credentials) over the server's.
+ */
+export function serverClaudeEnv(own: Record<string, string> | null, global: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
+  // When Box Yard itself was started from inside a Claude Code session, don't let `claude` think it is that session's child.
+  for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
+  delete env.BOXYARD_SECRET_KEY
+  if (own) for (const k of CLAUDE_CREDENTIAL_VARS) delete env[k]
+  return Object.assign(env, own ?? global)
+}
+
 /** The strongest Claude credential in `env`, as a one-var env; empty values don't count. */
 function strongestClaude(env: Record<string, string>): Record<string, string> {
   const k = CLAUDE_CREDENTIAL_VARS.find((v) => env[v])
