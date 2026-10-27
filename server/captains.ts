@@ -46,6 +46,8 @@ const NO_UPDATE = "(no update)"
 /** ask_captain/wait_for_captain never hold the Coordinator's turn longer than this: the reply is pushed anyway. */
 export const CAPTAIN_WAIT_MAX_SECONDS = 60
 export const CAPTAIN_WAIT_DEFAULT_SECONDS = 30
+/** ask/wait_for_captain's word on a status-only project's Captain, in place of its chat. */
+export const STATUS_ONLY_CAPTAIN = "Status only: you get this Captain's replies to you, not the rest of its chat (task updates and its other conversations)."
 const MAX_THRESHOLD_SHARE = 0.95
 
 type RunKind = "turn" | "summary" | "compact" | "context"
@@ -248,10 +250,15 @@ export class CaptainManager {
     const messages = this.store.listCaptainMessages(captain.projectId, 60)
     // Only what the Captain said after this question, not an older reply.
     const after = messages.filter((m) => m.createdAt >= sent.createdAt && m.id !== sent.id && (m.role === "assistant" || m.role === "error"))
+    const sealed = captain.lastCoordinatorReply
     return {
       ...this.waitResult(captain, messages, answered),
       messageId: sent.id,
-      reply: after.length ? after.map((m) => m.content).join("\n\n").slice(0, TOOL_REPLY_MAX) : null,
+      reply: this.statusOnly?.(captain.projectId)
+        ? (sealed?.ids.includes(sent.id) && sealed.text) || null
+        : after.length
+          ? after.map((m) => m.content).join("\n\n").slice(0, TOOL_REPLY_MAX)
+          : null,
     }
   }
 
@@ -263,14 +270,18 @@ export class CaptainManager {
   }
 
   private waitResult(captain: Captain, messages: CaptainMessage[], answered: boolean) {
+    // A status-only project's Captain chat holds its tasks' content (notices, Cody's and agents' messages, replies to
+    // them): the Coordinator gets only the Captain's replies to the Coordinator.
+    const sealed = this.statusOnly?.(captain.projectId) ?? false
     const last = [...messages].reverse().find((m) => m.role === "assistant" || m.role === "error")
     return {
       projectId: captain.projectId,
       // A waiter that got its reply runs while that turn wraps up: only queued work means it isn't finished.
       allFinished: answered ? !captain.queued : !captain.active,
       state: captain.state(),
-      lastReply: last?.content ?? null,
-      messages: messages.slice(-8),
+      ...(sealed
+        ? { lastReply: captain.lastCoordinatorReply?.text || null, statusOnly: STATUS_ONLY_CAPTAIN }
+        : { lastReply: last?.content ?? null, messages: messages.slice(-8) }),
       ...(answered ? {} : { note: "Stopped waiting; the Captain is still working. Its reply will reach you as a Box Yard update when it's done, so don't wait again." }),
     }
   }
@@ -378,6 +389,8 @@ class Captain {
    */
   private compactionSystemPrompt: string | null = null
   private lastError: string | null = null
+  /** The Captain's last reply to the Coordinator and the messages it answered: all a status-only project's ask/wait_for_captain return. */
+  lastCoordinatorReply: { ids: string[]; text: string } | null = null
   private readonly waiters = new Set<ReplyWaiter>()
   private readonly workdir: string
   private readonly mcpConfigPath: string
@@ -692,12 +705,13 @@ class Captain {
   private replyUpward(answered: CaptainMessage[], result: { ok: boolean; error: string; text: string }) {
     const asked = answered.filter((m) => captainSourceOf(m) === "coordinator").map((m) => m.id)
     if (!asked.length) return
+    const text = result.ok ? result.text.trim() : `I hit an error: ${result.error.slice(0, 500)}`
+    this.lastCoordinatorReply = { ids: asked, text: text === NO_UPDATE ? "" : text.slice(0, TOOL_REPLY_MAX) }
     const takers = [...this.waiters].filter((w) => !w.ids || w.ids.some((id) => asked.includes(id)))
     const taken = new Set(takers.flatMap((w) => w.ids ?? asked))
     for (const w of takers) w.done()
     const replyTo = asked.filter((id) => !taken.has(id))
     if (!replyTo.length) return
-    const text = result.ok ? result.text.trim() : `I hit an error: ${result.error.slice(0, 500)}`
     if (!text || text === NO_UPDATE) return
     this.report(text.slice(0, TOOL_REPLY_MAX), { replyTo })
   }

@@ -192,6 +192,23 @@ describe("the Coordinator's view of a status-only project", () => {
     expect((await tool("read_artifact", { artifact: r.art.id })).text).toContain("ARTIFACT-WORDS")
     expect((await tool("search_history", { query: "launch quiet" })).text).toContain("CHAT-WORDS")
   })
+
+  it("ask_captain and wait_for_captain return its Captain's reply to the Coordinator, not the rest of its chat", async () => {
+    const r = await start()
+    const tool = await r.as({ kind: "coordinator" })
+    const asked = (await tool("ask_captain", { project: "secret", message: "status", timeout_seconds: 30 })).json()
+    expect(asked.reply).toContain("Ship the private build")
+    expect(asked).toMatchObject({ lastReply: asked.reply, statusOnly: expect.stringMatching(/^Status only: /) })
+    expect(asked.messages).toBeUndefined()
+    const waited = (await tool("wait_for_captain", { project: "secret", timeout_seconds: 5 })).json()
+    expect(waited).toMatchObject({ lastReply: asked.reply, statusOnly: expect.stringMatching(/^Status only: /) })
+    expect(waited.messages).toBeUndefined()
+    r.sealedFromCoordinator()
+    // An open project's Captain chat still comes back as before.
+    r.yard.store.addCaptainMessage(r.open.id, "user", "An open aside")
+    const open = (await tool("ask_captain", { project: "open", message: "status", timeout_seconds: 30 })).json()
+    expect(open.messages.map((m: { content: string }) => m.content)).toContain("An open aside")
+  })
 })
 
 describe("the seal is one-way through the tools", () => {
