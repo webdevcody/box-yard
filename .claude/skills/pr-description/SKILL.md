@@ -21,8 +21,10 @@ never "feat(tasks): add retention settings").
    `#user-content-…` — see *GitHub anchors* below; a dead TOC is worse than none.
 2. **Screenshots or terminal proof of the change.** A web UI change without a picture is a claim.
    Include at least one screenshot of the screen after the change; use a before/after pair when the
-   change replaces something visible. In Cursor Cloud, reference walkthrough artifact paths directly
-   in the PR body so the PR tool can upload them. A change with no screen (server retention,
+   change replaces something visible. In Box Yard, publish each image with `publish_artifact` and put
+   its `/artifacts/…` link in the body: `create_pull_request` copies it to the repo's `boxyard-assets`
+   branch and rewrites the link so GitHub shows it. In Cursor Cloud, reference walkthrough artifact
+   paths directly in the PR body so the PR tool can upload them. A change with no screen (server retention,
    scheduler logic, CLI/deploy scripts) shows its terminal output in a fenced block *and* a diagram,
    and says why there is no screenshot.
 3. **A mermaid diagram of the change**, in a ```` ```mermaid ```` fence — GitHub renders it inline.
@@ -111,6 +113,10 @@ beats a new shape — the archive is easier to read when the PRs rhyme.
 For web UI changes, run the app or an existing preview and capture the screen after the change. A
 before shot from `origin/main` is useful only when the template asks for a pair. In Cursor Cloud,
 prefer walkthrough artifacts and reference the artifact path in the PR body; the PR tool uploads it.
+In Box Yard, `publish_artifact` the PNG and link its `/artifacts/…` URL from the body.
+`create_pull_request` copies files this task published to the `boxyard-assets` branch and points the
+links there; its reply names any it couldn't copy (another task's artifact, or a deleted file).
+Re-publish those, then call it again, which also replaces the open PR's title and body.
 For local-only work, use a repo-appropriate assets workflow or leave a terminal proof block instead
 of pretending a screenshot exists.
 
