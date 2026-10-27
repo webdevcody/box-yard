@@ -34,6 +34,8 @@ export interface HistoryScope {
   projectId?: string
   /** Search the Coordinator's own summaries and chat (never for a Captain). */
   coordinator: boolean
+  /** Projects the Coordinator sees the status of only: their Captain chat, summaries and tasks are left out. */
+  statusOnly?: (projectId: string) => boolean
 }
 
 export interface HistoryQuery {
@@ -242,9 +244,10 @@ export function searchHistory(readers: HistoryReaders, scope: HistoryScope, q: H
   }
   if (want.has("tasks")) hits.push(...taskHits(store, q, scope.projectId))
   if (want.has("transcripts")) hits.push(...transcriptHits(store, q, scope.projectId))
+  const shown = scope.statusOnly ? hits.filter((h) => !h.projectId || !scope.statusOnly!(h.projectId)) : hits
   const perSource: Partial<Record<HitKind, number>> = {}
-  for (const h of hits) perSource[h.kind] = (perSource[h.kind] ?? 0) + 1
-  return { hits: hits.sort((a, b) => b.at - a.at).slice(0, q.limit), perSource }
+  for (const h of shown) perSource[h.kind] = (perSource[h.kind] ?? 0) + 1
+  return { hits: shown.sort((a, b) => b.at - a.at).slice(0, q.limit), perSource }
 }
 
 type ChatRow = { id: string; role: string; content: string; created_at: number }
@@ -274,6 +277,6 @@ export function chatAround(
     if (hit) return { kind: "coordinator_chat", messages: thread("chat_messages", hit.n, "", []) }
   }
   const hit = store.db.prepare("SELECT rowid AS n, project_id FROM captain_messages WHERE id = ?").get(id) as { n: number; project_id: string } | undefined
-  if (!hit || (scope.projectId && hit.project_id !== scope.projectId)) return null
+  if (!hit || (scope.projectId && hit.project_id !== scope.projectId) || scope.statusOnly?.(hit.project_id)) return null
   return { kind: "captain_chat", projectId: hit.project_id, messages: thread("captain_messages", hit.n, " AND project_id = ?", [hit.project_id]) }
 }

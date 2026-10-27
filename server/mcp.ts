@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Request, Response } from "express"
 import { z } from "zod"
 import { capReply, preview } from "./replies.js"
+import { STATUS_ONLY_SNAPSHOT } from "./compactionTasks.js"
 import type { Store } from "./store.js"
 import type { SendNowResult, TaskManager } from "./tasks.js"
 import type { Hub } from "./hub.js"
@@ -40,7 +41,7 @@ import type { Identities } from "./identity/identities.js"
 import { IdentityDetector } from "./identity/detect.js"
 import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
-import { COORDINATOR_SEES, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
+import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -91,6 +92,9 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
     }
   }
 }
+
+/** What a status-only project's task shows instead of its question or error (docs/identities.md › Coordinator sees). */
+const STATUS_ONLY_FIELD = "(status only: ask the project's Captain)"
 
 const SEND_NOW_DESCRIPTION =
   "true: deliver it now. If the agent is mid-turn, its current step is stopped (like stop_task: workspace, session and queue kept) and the next turn resumes the session with this and every other queued message, in send order. Use it only when the message changes what the agent is doing right now. No effect when it isn't mid-turn."
@@ -233,14 +237,38 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     }
     return s
   }
-  /** A hosted artifact by id or URL. A Captain only reaches its own project's (or its tasks'). */
+  /**
+   * Coordinator sees: status only (docs/identities.md). For a project whose identity says so, the Coordinator gets its
+   * tasks' status (title, state, PR, box, when) and none of their content: replies, summaries, questions, errors,
+   * prompts, transcripts, queued messages, notes, artifacts and its Captain's history. Status views leave those fields
+   * out, and every tool that returns content checks unsealed() first. A Captain sees all of its own project.
+   */
+  const statusOnly = (projectId: string | null | undefined): boolean => !scopeId && Boolean(projectId) && (deps.identities?.statusOnly(projectId!) ?? false)
+  const statusOnlyError = (projectId: string, what: string) =>
+    new Error(
+      `Status only: ${what}. ` +
+        owner(
+          `Cody set project "${store.getProject(projectId)?.name ?? projectId}" to show you its status only (its identity's Coordinator sees). Its Captain sees everything: ask it with ask_captain or send_to_captain, and it answers with the state of the work.`,
+        ),
+    )
+  /** list_projects' word on a status-only project. */
+  const STATUS_ONLY_PROJECT = owner(
+    "status only: Cody set its identity to show you its tasks' status (title, state, PR, box), not their replies, questions, errors, prompts, notes or artifacts. Ask its Captain for anything more.",
+  )
+  /** The check every content-returning tool makes: none of a status-only project's content reaches the Coordinator. */
+  const unsealed = (projectId: string | null | undefined, what: string) => {
+    if (statusOnly(projectId)) throw statusOnlyError(projectId!, what)
+  }
+  /** A hosted artifact by id or URL. A Captain only reaches its own project's (or its tasks'); nobody a status-only one's. */
   const artifactRef = (ref: string): Artifact => {
     const id = ARTIFACT_REF.exec(ref)?.[1] ?? ref.trim()
     const a = store.getArtifact(id)
     if (!a) throw new Error(`No artifact "${ref}". Use list_artifacts.`)
+    const projectId = a.projectId ?? (a.taskId ? store.getTask(a.taskId)?.projectId : null)
     if (scopeId && a.projectId !== scopeId && (!a.taskId || store.getTask(a.taskId)?.projectId !== scopeId)) {
       throw outOfScope(`artifact ${a.id} ("${a.title}") is not in this project`)
     }
+    unsealed(projectId, `artifact ${a.id} is in it`)
     return a
   }
   /** An attachment ref, checked (an upload, or an artifact in scope that still has its file) but not copied yet. */
@@ -263,11 +291,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       copies.set(src.artifact.id, copy)
       return copy
     })
-  /** The "Related earlier work" section create_task adds to a prompt. */
-  const relatedWork = (refs: string[]) =>
+  /**
+   * The "Related earlier work" section create_task adds to a prompt. A status-only project's task goes only into a new
+   * task of its own project: get_task would show the Coordinator another project's prompt.
+   */
+  const relatedWork = (refs: string[], projectId: string) =>
     `## Related earlier work\n${refs
       .map((ref) => {
         const r = task(ref)
+        if (r.projectId !== projectId) unsealed(r.projectId, `related task ${r.id} is in it, and its outcome would go into another project's prompt`)
         return [`- ${r.title} (${r.id}, ${r.status})`, r.summary ? `  Outcome: ${preview(r.summary, 1200, "call get_task for the full reply")}` : "", r.branch ? `  Branch: ${r.branch}` : "", r.prUrl ? `  PR: ${r.prUrl}` : ""]
           .filter(Boolean)
           .join("\n")
@@ -316,7 +348,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   }
   /** Ask GitHub about these tasks' PRs whose state is older than PR_REPORT_FRESH_MS, before reporting them. */
   const refreshPrs = (list: Task[]) => tasks.prs.ensureFresh(list.filter((t) => t.prUrl).map((t) => t.id))
-  const brief = (t: Task) => ({
+  const fullBrief = (t: Task) => ({
     id: t.id,
     title: t.title,
     project: store.getProject(t.projectId)?.name ?? t.projectId,
@@ -344,6 +376,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     lastActive: ago(t.updatedAt),
     summary: t.summary ? preview(t.summary, 300, "call get_task or wait_for_tasks for the full reply") : undefined,
   })
+  const brief = (t: Task) => {
+    const b = fullBrief(t)
+    if (!statusOnly(t.projectId)) return b
+    // A status-only project's task: whether it asks something or failed, not what.
+    return { ...b, statusOnly: true, question: t.question ? STATUS_ONLY_FIELD : undefined, error: t.error ? STATUS_ONLY_FIELD : undefined, summary: undefined, previews: undefined }
+  }
   const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
   /** A task's status now, next to the one a snapshot recorded (undefined when unchanged or gone). */
   const statusNow = (t: CompactionTaskSnapshot) => {
@@ -368,7 +406,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       branch: t.branch ?? undefined,
       pr: t.prUrl ?? undefined,
       sessionId: t.sessionId,
-      summary: t.summary,
+      // A snapshot written before Cody sealed the project still holds its content.
+      summary: statusOnly(t.projectId) ? STATUS_ONLY_SNAPSHOT : t.summary,
     })),
     markdown: c.markdown ?? "",
   })
@@ -391,6 +430,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
    * added when it says something different (e.g. the text passed to mark_done).
    */
   const replyFields = (t: Task, offset = 0) => {
+    if (statusOnly(t.projectId)) return { reply: null, fields: brief(t) }
     const last = store.listTaskMessages(t.id, 50).filter((m) => m.role === "assistant").pop()
     const reply = t.summary && (!last || t.summary.length > last.content.length) ? t.summary : (last?.content ?? null)
     const summary = t.summary && t.summary !== reply ? capReply(t.summary) : undefined
@@ -429,14 +469,17 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     if (scopeId) return ownProject()
     throw new Error("Pass project: which project's notes. Use list_projects.")
   }
+  /** A note to rewrite or delete. A status-only project's are its Captain's to keep (add_note still adds one). */
   const note = (ref: string): ProjectNote => {
     const n = notes.require(ref.trim())
     if (scopeId && n.projectId !== scopeId) throw outOfScope(`note ${n.id} belongs to another project`)
+    unsealed(n.projectId, `note ${n.id} is in it, and its Captain keeps its notes`)
     return n
   }
   const suggestion = (ref: string): NoteSuggestion => {
     const s = notes.requireSuggestion(ref.trim())
     if (scopeId && s.projectId !== scopeId) throw outOfScope(`suggestion ${s.id} belongs to another project`)
+    unsealed(s.projectId, `suggestion ${s.id} is in it, and its Captain keeps its notes`)
     return s
   }
   /** The notes budget, as every note tool reports it. */
@@ -563,7 +606,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
       : {}),
     ...(tasks?.snapshotJob(p.id)?.status === "running" ? { snapshotJob: snapshotJobLine(tasks.snapshotJob(p.id)!) } : {}),
-    notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`),
+    ...(statusOnly(p.id)
+      ? { coordinatorSees: STATUS_ONLY_PROJECT, notes: p.notes.length ? `${p.notes.length} (status only)` : [] }
+      : { notes: p.notes.map((n) => `${n.id} (${n.author}) ${n.content}`) }),
     ...(p.notesMaxCount !== null || p.notesMaxTokens !== null ? { notesBudget: notes.budgetStatus(p.id).line } : {}),
     tasks: store.listTasks({ projectId: p.id }).map((t) => `${t.id} ${t.title} [${t.status}]`),
   })
@@ -771,7 +816,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       if (a.query?.trim()) {
         const words = a.query.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
         const score = (t: Task) => {
-          const hay = `${t.title} ${t.prompt} ${t.summary ?? ""} ${t.prUrl ?? ""}`.toLowerCase()
+          // A status-only task matches on its title and PR only, so a query can't probe its prompt or summary.
+          const hay = (statusOnly(t.projectId) ? `${t.title} ${t.prUrl ?? ""}` : `${t.title} ${t.prompt} ${t.summary ?? ""} ${t.prUrl ?? ""}`).toLowerCase()
           return words.filter((w) => hay.includes(w)).length
         }
         list = list.filter((t) => score(t) > 0).sort((x, y) => score(y) - score(x))
@@ -814,6 +860,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const projectId = projectFilter(a.project)
       const filter = { taskId, limit: a.limit ?? 10, before: beforeOf(a.before) }
       if (!projectId) return okCompact(store.listOrchestratorCompactions(filter).map(compactionDigest))
+      unsealed(projectId, "its Captain's compactions are its content")
       const list = captainCompactions(projectId, filter)
       return list ? okCompact(list) : fail(noCaptains)
     }),
@@ -837,6 +884,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (!c) throw new Error(`No Coordinator compaction "${a.compaction}". Use list_compactions, and pass project for a Captain compaction.`)
         return ok(compactionView(c))
       }
+      unsealed(projectId, "its Captain's compactions are its content")
       if (!deps.captains) return fail(noCaptains)
       const c = deps.captains.compactionRecord(projectId, a.compaction)
       if (!c) throw new Error(`No Captain compaction "${a.compaction}" in this project. Use list_compactions.`)
@@ -855,6 +903,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { task: string; limit?: number }) => {
       const t = task(a.task)
       const limit = a.limit ?? 10
+      if (statusOnly(t.projectId)) {
+        return okCompact({ task: brief(t), orchestratorCompactions: store.listOrchestratorCompactions({ taskId: t.id, limit }).map(compactionDigest), statusOnly: STATUS_ONLY_PROJECT })
+      }
       return okCompact({
         task: brief(t),
         // Coordinator compactions span every project, so Captains only get their own and the task's.
@@ -922,7 +973,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     },
     safe(async (a: { query?: string; project?: string; sources?: HistorySource[]; since?: string; until?: string; limit?: number; around?: string }) => {
       const projectId = projectFilter(a.project)
-      const scope = { projectId, coordinator: !scopeId }
+      unsealed(projectId, "its history is its content")
+      const scope = { projectId, coordinator: !scopeId, statusOnly }
       if (a.around) {
         const thread = chatAround(store, a.around.trim(), scope)
         if (!thread) throw new Error(`No chat message "${a.around}"${scopeId ? " in this project's Captain chat" : ""}. Pass the id of a chat hit.`)
@@ -971,6 +1023,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { task: string; last_messages?: number; full_reply?: boolean; offset?: number }) => {
       await refreshPrs([task(a.task)])
       const t = task(a.task)
+      if (statusOnly(t.projectId)) return ok({ ...brief(t), branch: t.branch, coordinatorSees: STATUS_ONLY_PROJECT })
       const { reply, fields } = replyFields(t, a.offset ?? 0)
       if (a.full_reply) return ok({ ...fields, summary: undefined, totalChars: reply?.length ?? 0, offset: a.offset ?? 0 })
       const all = store.listTaskMessages(t.id, Math.max(a.last_messages ?? 20, 50))
@@ -1002,8 +1055,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
     },
     safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
-      const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks)}` : a.prompt
       const projectId = project(a.project).id
+      const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
       await tasks.requireRunner(a.runs_on)
       const t = tasks.createTask({
         projectId,
@@ -1121,7 +1174,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         // Files first (an artifact is copied once for the whole batch): if one can't be copied, no task exists yet.
         const inputs = a.tasks.map((item) => {
           const related = [...new Set([...(a.related_tasks ?? []), ...(item.related_tasks ?? [])])]
-          const prompt = [common, item.prompt, related.length ? relatedWork(related) : ""].filter(Boolean).join("\n\n")
+          const prompt = [common, item.prompt, related.length ? relatedWork(related, p.id) : ""].filter(Boolean).join("\n\n")
           const env = a.env || item.env ? { ...a.env, ...item.env } : undefined
           return {
             projectId: p.id,
@@ -1212,6 +1265,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     },
     safe(async (a: { task: string }) => {
       const t = task(a.task)
+      unsealed(t.projectId, "its queued messages are its content (cancel_queued_message and deliver_queued_now still work)")
       const list = tasks.listQueue(t.id)
       return ok({ task: t.id, title: t.title, status: t.status, messages: list.map(queuedView) })
     }),
@@ -1261,6 +1315,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     },
     safe(async (a: { task: string; message_id: string; message: string; version?: number }) => {
       const t = task(a.task)
+      unsealed(t.projectId, "its queued messages are its content")
       return ok(queuedView(tasks.editQueued(t.id, a.message_id, a.message, a.version)))
     }),
   )
@@ -1411,6 +1466,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     },
     safe(async (a: { project?: string }) => {
       const p = notesProject(a.project)
+      unsealed(p.id, "its notes are its content")
       const report = notes.budget(p.id)
       const left = new Set(report.hidden.map((n) => n.id))
       return ok({
@@ -1481,6 +1537,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const t = a.task ? task(a.task) : null
       const p = t ? store.getProject(t.projectId)! : notesProject(a.project)
       if (t && a.project && project(a.project).id !== t.projectId) throw new Error(`Task ${t.id} isn't in project ${a.project}.`)
+      unsealed(p.id, "its note suggestions are its content")
       const list = store.listNoteSuggestions({ projectId: p.id, taskId: t?.id, status: a.status === "all" ? undefined : ["pending"] })
       return ok({ project: p.name, ...budgetView(p.id), suggestions: list.map(suggestionView) })
     }),
@@ -1547,13 +1604,17 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description: "List hosted artifacts, optionally for a project or task.",
       inputSchema: { project: z.string().optional(), task: z.string().optional() },
     },
-    safe(async (a: { project?: string; task?: string }) =>
-      ok(
+    safe(async (a: { project?: string; task?: string }) => {
+      const t = a.task ? task(a.task) : null
+      const projectId = projectFilter(a.project)
+      unsealed(projectId ?? t?.projectId, "its artifacts are its content")
+      return ok(
         store
-          .listArtifacts({ projectId: projectFilter(a.project), taskId: a.task ? task(a.task).id : undefined })
+          .listArtifacts({ projectId, taskId: t?.id })
+          .filter((x) => !statusOnly(x.projectId ?? (x.taskId ? store.getTask(x.taskId)?.projectId : null)))
           .map((x) => ({ id: x.id, title: x.title, url: absolute(x.url), size: x.size, task: x.taskId })),
-      ),
-    ),
+      )
+    }),
   )
 
   server.registerTool(
@@ -1927,9 +1988,23 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       if (i.isDefault) throw outOfScope("the Default identity is every project's fallback, so only the Coordinator changes it")
       if (i.projectIds.some((id) => id !== scopeId)) throw outOfScope(`the ${i.name} identity is used by other projects too`)
     }
+    /**
+     * Only Cody lets the Coordinator see more of a project, in Settings › Identities or the project's settings. Through
+     * these tools an identity can be set to show status only, but never back: a model can't undo the seal.
+     */
+    const keepSealed = (what: string) =>
+      new Error(owner(`Only Cody can let the Coordinator see more: ${what}. Cody does that in Settings › Identities (Coordinator sees) or in the project's settings.`))
+    const mayLoosen = (i: Identity, sees: CoordinatorSees | undefined) => {
+      if (i.coordinatorSees === "status" && sees === "everything") throw keepSealed(`the ${i.name} identity shows the Coordinator its projects' status only`)
+    }
     /** Give a project an identity: its runner has to fit, and no turn of it may be running (it'd switch accounts halfway). */
     const assignProject = (ref: string, identityId: string): string => {
       const p = project(ref)
+      const from = identities.of(p.id)
+      const to = identities.require(identityId)
+      if (from.id !== to.id && from.coordinatorSees === "status" && to.coordinatorSees !== "status") {
+        throw keepSealed(`${p.name} shows the Coordinator its status only (the ${from.name} identity), and the ${to.name} identity shows everything`)
+      }
       const r = assignChecked(identities, store, p, identityId)
       if (r.changed) {
         const updated = store.getProject(p.id)
@@ -1952,7 +2027,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       owners: z.array(z.string()).optional().describe('GitHub owners (users and orgs) whose repos it\'s for, e.g. ["acme-corp"].'),
       author: authorInput,
       runners: runnersInput,
-      coordinator_sees: z.enum(COORDINATOR_SEES).optional().describe("everything (default), or status: the Coordinator sees only the status of its projects; their Captains still see everything."),
+      coordinator_sees: z.enum(COORDINATOR_SEES).optional().describe(
+          "everything (default), or status: the Coordinator gets only the status of its projects' tasks (title, state, PR), not their replies, questions, notes or artifacts; their Captains still see everything. You can set status, but only Cody sets it back to everything, in Settings › Identities.",
+        ),
     }
     const refsInput = {
       github_token_ref: z.string().optional().describe("gh:<login>: the token gh keeps on this computer for that account (detect_identities lists them). The server reads it. Never pass a token itself: a pasted one goes in Settings › Identities."),
@@ -2035,7 +2112,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           detection,
           { login: a.login, name: a.name, color: a.color, owners: a.owners, author: a.author, runners: a.runners, coordinatorSees: a.coordinator_sees, signingKeyRef: a.signing_key_ref, signingProgram: a.signing_program, requireSigned: a.require_signed, projects },
           assignProject,
-          { mayUpdate: mayChange },
+          {
+            mayUpdate: (i) => {
+              mayChange(i)
+              mayLoosen(i, a.coordinator_sees)
+            },
+          },
         )
         return ok({ identity: identityView(r.identity), created: r.created, done: r.lines, next: "test_identity checks it with GitHub (tokens, push access, author email, signing key)." })
       }),
@@ -2073,6 +2155,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       guarded(async (a: { identity: string; name?: string; remove_token?: string; remove_claude?: boolean } & FieldsArgs & RefsArgs) => {
         const i = identity(a.identity)
         mayChange(i)
+        mayLoosen(i, a.coordinator_sees)
         const fields = fieldsOf(a)
         const done: string[] = []
         if (Object.keys(fields).length) {
@@ -2103,6 +2186,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       guarded(async (a: { identity: string; move_projects_to_default?: boolean }) => {
         const i = identity(a.identity)
         mayChange(i)
+        if (a.move_projects_to_default && i.projectIds.length && i.coordinatorSees === "status" && identities.require(DEFAULT_IDENTITY_ID).coordinatorSees !== "status") {
+          throw keepSealed(`the ${i.name} identity shows the Coordinator its projects' status only, and Default shows everything`)
+        }
         const { movedProjectIds } = identities.delete(i.id, { moveProjects: a.move_projects_to_default })
         for (const id of movedProjectIds) {
           const p = store.getProject(id)
@@ -2191,7 +2277,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       status: r.status,
       result: r.result,
       target: r.targetTaskId && r.targetTaskId !== r.taskId ? r.targetTaskId : undefined,
-      prompt: preview(r.prompt, 400, "see the hook's runs in the app"),
+      // The rendered prompt can hold the task's {summary}.
+      prompt: statusOnly(r.projectId ?? (r.taskId ? store.getTask(r.taskId)?.projectId : null)) ? STATUS_ONLY_FIELD : preview(r.prompt, 400, "see the hook's runs in the app"),
     })
     const filtersSchema = z
       .object({
