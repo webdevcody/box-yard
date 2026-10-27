@@ -218,6 +218,26 @@ describe("commit signing", () => {
     // An agent key can't sign on a box.
     await expect(r.call("PATCH", `/api/projects/${p.id}`, { runner: "box" })).rejects.toThrow(/-> 400: .*only on this computer/)
   })
+
+  it("with requireSigned, a turn that can't sign can't push either, and says why", async () => {
+    const r = await start()
+    const key = keyPair()
+    const o = origin()
+    const program = path.join(tmpDir("op-ssh-sign-"), "op-ssh-sign")
+    fs.writeFileSync(program, "#!/bin/sh\nexit 1\n", { mode: 0o755 })
+    const laptop = await r.call<Identity>("POST", "/api/identities", { name: "Laptop", runners: ["local"], author: { name: "Cody", email: "cody@laptop.example" } })
+    await r.call("PUT", `/api/identities/${laptop.id}/signing`, { kind: "agent", publicKey: key.pub, program, requireSigned: true })
+    const p = await r.project("laptop-app", laptop.id, { url: o.url, runner: "local" })
+    // 1Password was uninstalled since.
+    fs.rmSync(program)
+
+    const { lines, task } = await r.runTask(p, "Ship it [commit] [push]")
+    expect(lines.some((l) => l.startsWith("SIGNING_KEY="))).toBe(false)
+    expect(lines).toContain("SIG signed by the turn N")
+    expect(lines).toContain("PUSH_EXIT=1")
+    expect(o.ref(`refs/heads/${task.branch}`)).toBeNull()
+    expect(r.events(task.id).join("\n")).toContain(`This turn's commits aren't signed: the signing program ${program} isn't on this computer; the Laptop identity requires signed commits, so this turn's pushes are stopped.`)
+  })
 })
 
 describe("the local-runner walls", () => {

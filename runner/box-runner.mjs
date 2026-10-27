@@ -356,7 +356,10 @@ const GIT_HOOKS = [
   "pre-rebase", "post-checkout", "post-merge", "pre-push", "post-rewrite", "pre-auto-gc", "reference-transaction", "sendemail-validate", "post-index-change",
 ]
 
-/** Get the turn's signing ready. Returns why its commits won't be signed, or null (signed, or no key to sign with). */
+/**
+ * Get the turn's signing ready. Returns why its commits won't be signed, or null (signed, or no key to sign with).
+ * With requireSigned, the push guard goes in even when signing can't: the turn's commits then can't be pushed.
+ */
 function setupSigning() {
   cleanupSigning()
   let key = null
@@ -367,13 +370,24 @@ function setupSigning() {
   const s = task.signing
   if (!s) return null
   const problem = signingProblem(s, key)
-  if (problem) return problem
-  fs.mkdirSync(signingDir, { recursive: true, mode: 0o700 })
-  if (s.kind === "file") fs.writeFileSync(path.join(signingDir, "key"), key, { mode: 0o600 })
-  if (s.requireSigned) writeSigningHooks(s)
-  // Last: signingEnv takes this file as the sign that signing is ready.
-  fs.writeFileSync(allowedSigners, `box-yard namespaces="git" ${s.publicKey}\n`)
-  return null
+  if (problem && !s.requireSigned) return problem
+  const stopped = problem && `${problem}; the ${s.identity} identity requires signed commits, so this turn's pushes are stopped`
+  try {
+    // Not recursive, and just after removing it: a folder someone else made first (a shared /tmp) is refused,
+    // never written into.
+    fs.mkdirSync(signingDir, { mode: 0o700 })
+    if (!problem) {
+      if (s.kind === "file") fs.writeFileSync(path.join(signingDir, "key"), key, { mode: 0o600, flag: "wx" })
+      fs.writeFileSync(path.join(signingDir, "signs"), "")
+    }
+    if (s.requireSigned) writeSigningHooks(s)
+    // Last: signingEnv takes this file as the sign that the folder is ready.
+    fs.writeFileSync(allowedSigners, `box-yard namespaces="git" ${s.publicKey}\n`)
+  } catch (err) {
+    cleanupSigning()
+    return stopped || `the folder for its signing key couldn't be made (${signingDir}: ${err.code ?? err.message})`
+  }
+  return stopped || null
 }
 
 function signingProblem(s, key) {
@@ -388,6 +402,7 @@ function signingProblem(s, key) {
       return `the signing program ${s.program} isn't on this computer`
     }
   } else if (spawnSync("ssh-keygen", ["-?"], { stdio: "ignore" }).error?.code === "ENOENT") return "this box has no ssh-keygen, which git signs with"
+  else if (s.kind === "agent" && !{ ...process.env, ...task.env }.SSH_AUTH_SOCK) return "no SSH agent reaches this runner (SSH_AUTH_SOCK isn't set in Box Yard's environment)"
   return null
 }
 
@@ -435,12 +450,17 @@ function writeSigningHooks(s) {
 function signingEnv(env) {
   const s = task.signing
   if (!s || !fs.existsSync(allowedSigners)) return {}
+  const signs = fs.existsSync(path.join(signingDir, "signs"))
   const pairs = [
-    ["gpg.format", "ssh"],
-    ["user.signingKey", s.kind === "file" ? path.join(signingDir, "key") : `key::${s.publicKey}`],
-    ["commit.gpgSign", "true"],
+    ...(signs
+      ? [
+          ["gpg.format", "ssh"],
+          ["user.signingKey", s.kind === "file" ? path.join(signingDir, "key") : `key::${s.publicKey}`],
+          ["commit.gpgSign", "true"],
+          ...(s.program ? [["gpg.ssh.program", s.program]] : []),
+        ]
+      : []),
     ["gpg.ssh.allowedSignersFile", allowedSigners],
-    ...(s.program ? [["gpg.ssh.program", s.program]] : []),
     ...(s.requireSigned ? [["core.hooksPath", path.join(signingDir, "hooks")]] : []),
   ]
   const n = Math.max(0, Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10) || 0)
