@@ -48,6 +48,14 @@ export interface AutoBoxSize {
   label: string
 }
 
+/** A project's auto size as the API and project settings show it (TaskManager.autoBoxSize). */
+export type ProjectAutoSize = AutoBoxSize & {
+  /** Settings › Size and resize boxes automatically is on, so the size applies where the project has none of its own. */
+  enabled: boolean
+  /** The project's own box size, which overrides it. */
+  override: BoxSize | null
+}
+
 const next = (size: BoxSize): BoxSize => BOX_SIZE_ORDER[BOX_SIZE_ORDER.indexOf(size) + 1] ?? size
 /** The smallest size with at least `need` of something, else the largest. */
 const smallestWith = (need: number, has: (size: BoxSize) => number): BoxSize => BOX_SIZE_ORDER.find((s) => has(s) >= need) ?? BOX_SIZE_ORDER[BOX_SIZE_ORDER.length - 1]!

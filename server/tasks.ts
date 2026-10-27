@@ -63,7 +63,7 @@ import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import { TurnMeter, type MeasuredTurn } from "./turnPeaks.js"
-import { pickAutoSize, type AutoBoxSize, type TurnPeak } from "../shared/autoSize.js"
+import { pickAutoSize, type ProjectAutoSize, type TurnPeak } from "../shared/autoSize.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -1277,7 +1277,7 @@ export class TaskManager {
    * Settings › Max size it may choose. `size` is null until 3 runs are measured. `enabled`: Settings › Resize boxes
    * (autoResizeEnabled) is on, so the size applies where the project has no box size of its own (`override`).
    */
-  autoBoxSize(projectId: string): AutoBoxSize & { enabled: boolean; override: BoxSize | null } {
+  autoBoxSize(projectId: string): ProjectAutoSize {
     let peaks = this.turnPeakCache.get(projectId)
     if (!peaks) {
       peaks = this.store.turnPeaks(projectId)

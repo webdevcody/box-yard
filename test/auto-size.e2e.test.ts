@@ -6,7 +6,7 @@ import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import type { ExecResult } from "../server/providers/types.js"
 import { LocalProvider } from "../server/providers/local.js"
-import type { AutoBoxSize } from "../shared/autoSize.js"
+import type { ProjectAutoSize } from "../shared/autoSize.js"
 import type { Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
@@ -84,7 +84,7 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
 }
 
 const task = (r: Running, projectId: string, title: string, prompt: string) => call<Task>(r, "POST", "/api/tasks", { projectId, title, prompt })
-const autoSize = (r: Running, projectId: string) => call<AutoBoxSize & { enabled: boolean; override: string | null }>(r, "GET", `/api/projects/${projectId}/auto-size`)
+const autoSize = (r: Running, projectId: string) => call<ProjectAutoSize>(r, "GET", `/api/projects/${projectId}/auto-size`)
 const until = (r: Running, id: string, status: Task["status"]) =>
   waitFor(async () => {
     const t = await call<Task>(r, "GET", `/api/tasks/${id}`)

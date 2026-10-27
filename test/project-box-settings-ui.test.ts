@@ -7,6 +7,7 @@ import { ProjectView } from "../web/src/components/ProjectView.js"
 import { keys } from "../web/src/lib/queries.js"
 import { DEFAULT_SETTINGS } from "../server/settings.js"
 import type { Project, Settings, SettingSource, SettingsInfo } from "../shared/types"
+import type { ProjectAutoSize } from "../shared/autoSize"
 
 // Project › Settings › Boxes: each of the project's box settings says the global value it uses ("Using global: …")
 // or overrides, Use global clears an override, and Save sends null for a cleared one.
@@ -52,7 +53,7 @@ let root: Root
 let host: HTMLElement
 let requests: { method: string; url: string; body?: Record<string, unknown> }[]
 
-function render(p: Project, settings = info({ workerSize: "medium", maxBoxes: 6 })) {
+function render(p: Project, settings = info({ workerSize: "medium", maxBoxes: 6 }), autoSize?: ProjectAutoSize) {
   history.replaceState(null, "", `/projects/${p.id}?tab=settings`)
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.projects, [p])
@@ -61,6 +62,7 @@ function render(p: Project, settings = info({ workerSize: "medium", maxBoxes: 6 
   qc.setQueryData(keys.settings, { defaultTimezone: "UTC", scheduler: "local", maxUploadMb: 20, localDir: "~/boxyard-workspaces" })
   qc.setQueryData(keys.health, { provider: "upstash" })
   for (const k of [keys.artifacts, keys.schedules, keys.boxes]) qc.setQueryData(k, [])
+  if (autoSize) qc.setQueryData(keys.projectAutoSize(p.id), autoSize)
   act(() => root.render(createElement(QueryClientProvider, { client: qc }, createElement(ProjectView, { id: p.id }))))
 }
 
@@ -141,6 +143,32 @@ describe("Project › Settings › Boxes", () => {
     expect(sent.url).toBe("/api/projects/prj_game")
     expect(sent.body).toMatchObject({ boxSize: null, agentsPerBox: null, tasksPerBox: 4, maxBoxes: 2 })
     expect(sent.body).not.toHaveProperty("heavyTasks")
+  })
+
+  it("names the size auto-sizing picked as what a blank Box size uses, and Use auto clears an override", () => {
+    const GB = 1024 ** 3
+    const measured: ProjectAutoSize = { size: "medium", runs: 12, memPeakBytes: 5.1 * GB, cpuPeakCores: 1, diskPeakBytes: GB, basis: "memory", capped: false, label: "medium (peak 5.1 GB over 12 runs)", enabled: true, override: null }
+    render(project(), undefined, measured)
+    expect(source("box-size")).toBe("Using auto: medium (peak 5.1 GB over 12 runs).")
+    expect($<HTMLSelectElement>("project-box-size")!.options[0]!.textContent).toBe("Auto: medium (peak 5.1 GB over 12 runs)")
+    expect($("project-box-size")!.closest("div.space-y-1\\.5")!.textContent).toContain("A size set here overrides that")
+
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(project({ boxSize: "large" }), undefined, { ...measured, override: "large" })
+    expect(source("box-size")).toBe("Overrides auto: medium (peak 5.1 GB over 12 runs).")
+    expect(clear("box-size")!.textContent).toBe(" Use auto")
+
+    // Not measured yet: Worker size until then. With auto-sizing off it's the global Worker size, as before.
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(project(), undefined, { ...measured, size: null, runs: 1, basis: null, label: "not measured yet (1 of 3 runs)" })
+    expect(source("box-size")).toBe("Using auto: medium (Worker size) until 3 runs are measured (1 so far).")
+    expect($<HTMLSelectElement>("project-box-size")!.options[0]!.textContent).toBe("Auto: medium until measured")
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(project(), undefined, { ...measured, enabled: false })
+    expect(source("box-size")).toBe("Using global: medium (Worker size).")
   })
 
   it("on this computer, says Agents at once still applies there", () => {
