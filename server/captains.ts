@@ -164,6 +164,8 @@ export class CaptainManager {
   onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** The Claude login a project's Captain runs on when its identity has one of its own (app.ts: Identities.ownClaude). */
   claudeLogin: ((projectId: string) => Record<string, string> | null) | null = null
+  /** Whether a project's identity shows the Coordinator its status only (app.ts: Identities.statusOnly). */
+  statusOnly: ((projectId: string) => boolean) | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -193,6 +195,7 @@ export class CaptainManager {
         (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
         (messages, reply) => this.onAgentMessagesHandled?.(project.id, messages, reply),
         () => this.claudeLogin?.(project.id) ?? null,
+        () => this.statusOnly?.(project.id) ?? false,
       )
       this.captains.set(project.id, captain)
     }
@@ -394,6 +397,8 @@ class Captain {
     private readonly agentMessagesHandled: (messages: CaptainMessage[], reply: string) => void = () => {},
     /** Its project identity's own Claude login (Identities.ownClaude), or null for the global one. */
     private readonly claudeLogin: () => Record<string, string> | null = () => null,
+    /** Its identity shows the Coordinator status only, so its replies to the Coordinator report state, not content. */
+    private readonly statusOnly: () => boolean = () => false,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
@@ -963,7 +968,7 @@ class Captain {
   /** Box Yard's part of the system prompt. Settings are read here, so changes apply from the next run. */
   private systemPrompt(): string {
     const st = this.settings.get()
-    return `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)))}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
+    return `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)), this.statusOnly())}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
   }
 
   private readRules(): string[] {

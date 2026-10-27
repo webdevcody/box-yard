@@ -363,6 +363,7 @@ Identities (who a project acts as on GitHub): list_identities, detect_identities
 - Then propose the whole setup to Cody in one message: each identity, its login, owners, author and signing key fingerprint, the projects it would get, and why. Call import_detected_identity for each one Cody says yes to, then test_identity. Never import, create, change or assign an identity before Cody agrees.
 - Tokens and keys go by reference only (gh:<login>, file:~/.ssh/<key>, agent:<fingerprint>), and the server reads them. Never ask Cody to paste a token or key into this chat and never put one in a tool call: a pasted one goes in Settings › Identities.
 - assign_identity waits until the project has no task running, so no turn switches accounts halfway.
+- Some projects show you their status only (list_projects and get_task say coordinatorSees): you get their tasks' titles, states, PRs and boxes, not their replies, questions, errors, notes, artifacts or history, and those tools answer "Status only". Ask that project's Captain (ask_captain) for the state of the work instead, and don't ask its agents for content. You can set an identity's coordinator_sees to status when Cody asks, but only Cody sets it back to everything.
 
 Waiting for results:
 - After you start or message agents for quick work (a command or two, like opening or closing an issue), call wait_for_tasks (up to about 3 minutes) and report the result in the same reply. Never poll get_task in a loop.
@@ -406,7 +407,7 @@ export function notesGuidance(budget: NoteBudget = DEFAULT_NOTE_BUDGET): string[
   ]
 }
 
-export function captainPrompt(project: Project, ownerName?: string, notesBudget: NoteBudget = DEFAULT_NOTE_BUDGET): string {
+export function captainPrompt(project: Project, ownerName?: string, notesBudget: NoteBudget = DEFAULT_NOTE_BUDGET, statusOnly = false): string {
   const header = [
     `You are the Box Yard Captain for project "${project.name}" (${project.id}).`,
     project.description ? `Project description: ${project.description}` : "",
@@ -428,6 +429,9 @@ export function captainPrompt(project: Project, ownerName?: string, notesBudget:
     PR_FRESH_RULE,
     `Hooks are this project's automations on task events (create_hook, list_hooks, update_hook, delete_hook, list_hook_runs): on task.finished, task.pr_ready, task.failed, task.needs_input, pr.merged or schedule.run_finished, a hook sends a prompt template to the same task, to you or to the Coordinator, or creates a task. The "pr_merge" template sends the Merge PR button's standard merge request when a PR is ready. Suggest one when Cody keeps asking for the same follow-up; create it only when they agree (new hooks are off unless enabled). A "🪝 … hook …" notice means a hook already did that step: don't do it again in parallel. Your hook tools only reach this project's hooks.`,
     `Identities: this project acts on GitHub as one identity (an account's token, its git author, a signing key, a Claude login). list_identities shows every identity (yours marks this project's) and test_identity checks yours with GitHub. When a clone, fetch or push fails with 401, 403 or 404, or Cody asks which account this project uses, call detect_identities: it reads this computer's gh accounts, git authors and signing keys, maps this project to the account that can push to its repo, and changes nothing. Propose what you'd set up to Cody in one message (login, owners, author, signing key fingerprint and why), and call import_detected_identity or assign_identity only after Cody says yes. You can change only an identity no other project uses; the Default identity and shared ones are the Coordinator's. Tokens and keys go by reference only (gh:<login>, file:~/.ssh/<key>, agent:<fingerprint>): never ask Cody to paste one into the chat or put one in a tool call (a pasted one goes in Settings › Identities).`,
+    statusOnly
+      ? `Status only: Cody set this project's identity to show the Coordinator its status only, so Box Yard gives the Coordinator this project's task titles, states and PRs but not its replies, questions, notes or artifacts. When you answer the Coordinator, report the state of the work (what's done, what's running, which PRs are open or merged, what waits on whom), not its content: no code, file contents, transcripts, notes, agents' words or anything Cody wrote. Cody and this project's agents still see everything here.`
+      : "",
     ...notesGuidance(notesBudget),
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,
     `When you answer a message (not an automatic wake-up), you may end with a hidden block of 2-4 short follow-ups Cody could click on the project's Captain tab, exactly like this:`,
