@@ -100,7 +100,7 @@ function couldntArchive(taskIds: string[]) {
 }
 
 /** How a resize error names its failed step. */
-const RESIZE_STEP_NAMES: Record<ResizeStep["key"], string> = { stop: "stop agents", resize: "resize", create: "create", archive: "archive", move: "move", delete: "destroy" }
+const RESIZE_STEP_NAMES: Record<ResizeStep["key"], string> = { stop: "stop tasks", resize: "resize", create: "create", archive: "archive", move: "move", delete: "destroy" }
 
 const RUNNER_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../runner/box-runner.mjs")
 const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
@@ -123,8 +123,8 @@ const MAX_SLEEP_RESUMES = 10
 const SLEEP_WAKE_GRACE_MS = 15 * 60_000
 /** Below this the runner's own clocks saw a hiccup, not a sleep (SleepWatch's threshold). */
 const RUNNER_SLEEP_MIN_MS = 20_000
-/** A local task waits with this while every Settings › Local agents slot is taken. */
-const LOCAL_SLOT_WAIT = "Waiting for a free local agent slot (Settings › Local agents)"
+/** A local task waits with this while every Settings › Tasks running at once on this computer slot is taken. */
+const LOCAL_SLOT_WAIT = "Waiting for a free slot on this computer (Settings › Tasks running at once on this computer)"
 
 /** Why a task waits (the text, without "Waiting" for a box's) and the tasks it names as holding it back (Task.waitFor). */
 interface Wait {
@@ -134,12 +134,12 @@ interface Wait {
 const asWait = (text: string | null): Wait | null => (text ? { text, by: [] } : null)
 /** The tasks a reason names (agentRefs: the first two, then "and N more"). */
 const waitFor = (agents: BoxAgent[]): WaitFor[] => named(agents).map((a) => ({ taskId: a.taskId, title: a.title }))
-const GPU_SLOT_WAIT = "Waiting for a free agent slot on its project's GPU pod (Agents per box, or Settings › RunPod GPU › Agents per pod)"
+const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)"
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
-const DOCKER_SLOT_WAIT = "Waiting for a free agent slot in its project's Docker container (Agents per box, or Settings › Docker › Agents per container)"
+const DOCKER_SLOT_WAIT = "Waiting for a free slot in its project's Docker container (its Tasks running at once, or Settings › Docker › Tasks running at once per container)"
 
 /** The runners whose boxes are a project's own: RunPod GPU pods (`runpod-<projectId>[-<n>]`) and its Docker container. */
 type OwnRunner = "gpu" | "docker"
@@ -1140,7 +1140,7 @@ export class TaskManager {
     return { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes }
   }
 
-  /** Agents per box and task folders per box for a box of this size: Settings when set there, else the size's defaults. */
+  /** Tasks running at once and task folders kept per box for a box of this size: Settings when set there, else the size's defaults. */
   sizeLimits(size: BoxSize): { slotsPerBox: number; maxResidentPerBox: number } {
     const o = this.settings.boxLimitOverrides()
     return { slotsPerBox: o.slotsPerBox ?? SIZE_DEFAULTS[size].slotsPerBox, maxResidentPerBox: o.maxResidentPerBox ?? SIZE_DEFAULTS[size].maxResidentPerBox }
@@ -1173,8 +1173,8 @@ export class TaskManager {
   }
 
   /**
-   * Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Local agents), and
-   * GPU pods' and Docker containers' their own slots.
+   * Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Tasks running at once
+   * on this computer), and GPU pods' and Docker containers' their own slots.
    */
   runningTotal() {
     return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id) && !isGpuBox(r.box_id) && !isDockerBox(r.box_id)).length
@@ -1208,7 +1208,7 @@ export class TaskManager {
 
   /**
    * A project's box settings as they apply now (list_projects, pool_status): each one its own ("… (this project)")
-   * or the global setting it falls back to. Agents and task folders per box follow each box's size unless Settings
+   * or the global setting it falls back to. Tasks running at once and task folders kept per box follow each box's size unless Settings
    * or env set one number for every box.
    */
   projectBoxSettings(p: Pick<Project, "id" | "boxSize" | "agentsPerBox" | "tasksPerBox" | "maxBoxes"> & { wholeMachine?: boolean }) {
@@ -1220,10 +1220,10 @@ export class TaskManager {
     const used = this.projectBoxCap(p.id)?.used.size ?? 0
     return {
       boxSize: p.boxSize ? own(p.boxSize) : `global: ${s.workerSize} (Settings › Worker size)`,
-      agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its agents at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Agents per box"),
-      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Resident tasks per box"),
+      agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
+      tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Task folders kept per box"),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
-      ...(p.wholeMachine ? { wholeMachine: "yes: no other project's agent starts on a box or this computer while one of its agents runs there" } : {}),
+      ...(p.wholeMachine ? { wholeMachine: "yes: no other project's task starts on a box or this computer while one of its tasks runs there" } : {}),
     }
   }
 
@@ -1249,7 +1249,7 @@ export class TaskManager {
       totalMaxHourlyUsd: `${usd(s.totalMaxHourlyUsd)} for every project's pods together (Settings › RunPod GPU › Max for all pods)`,
       maxPods: p.maxBoxes !== null ? `${Math.min(p.maxBoxes, MAX_GPU_PODS)} (its Max boxes)` : `${MAX_GPU_PODS} (no Max boxes set; the $/hr caps bound it)`,
       agentsPerPod: this.slotsFor(gpuBoxId(p.id)),
-      pods: pods.map(({ boxId, pod }) => `#${gpuBoxIndex(boxId)} ${boxId}: ${pod.status.toLowerCase()}${pod.gpu?.id ? ` ${shortGpu(pod.gpu.id)}` : ""}${pod.cost ? ` ${usd(pod.cost)}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} agents`),
+      pods: pods.map(({ boxId, pod }) => `#${gpuBoxIndex(boxId)} ${boxId}: ${pod.status.toLowerCase()}${pod.gpu?.id ? ` ${shortGpu(pod.gpu.id)}` : ""}${pod.cost ? ` ${usd(pod.cost)}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} tasks running`),
       spend: usd(pods.reduce((sum, x) => sum + (x.pod.cost ?? 0), 0)),
     }
   }
@@ -1273,7 +1273,7 @@ export class TaskManager {
       agentsPerContainer: this.slotsFor(boxId),
       whenIdle: s.idleMinutes ? `stopped after ${s.idleMinutes} min with no agent running; its volume keeps every workspace` : "never stopped when idle (Settings › Docker)",
       container: c
-        ? `${c.name}: ${c.state}${c.hostPortBase ? `, previews on localhost:${c.hostPortBase}-${c.hostPortBase + DOCKER_MAX_TASKS - 1}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} agents`
+        ? `${c.name}: ${c.state}${c.hostPortBase ? `, previews on localhost:${c.hostPortBase}-${c.hostPortBase + DOCKER_MAX_TASKS - 1}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} tasks running`
         : "none yet (its next task makes it)",
     }
   }
@@ -1614,7 +1614,7 @@ export class TaskManager {
     const busy = this.boxOperation(boxId)
     if (busy) throw new ConflictError(busyMessage(boxId, busy))
     const running = this.store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length
-    if (running && !stopAgents) throw new ConflictError(`${running} ${running === 1 ? "agent is" : "agents are"} running on ${boxId}: stop ${running === 1 ? "it" : "them"} first.`)
+    if (running && !stopAgents) throw new ConflictError(`${running} ${running === 1 ? "task is" : "tasks are"} running on ${boxId}: stop ${running === 1 ? "it" : "them"} first.`)
     this.boxOps.set(boxId, op)
     this.emitBoxes()
   }
@@ -1749,7 +1749,7 @@ export class TaskManager {
       mode,
       status: "running",
       steps: [
-        ...(opts.stopAgents && running ? [step("stop", `Stop ${running} running ${running === 1 ? "agent" : "agents"}`)] : []),
+        ...(opts.stopAgents && running ? [step("stop", `Stop ${running} running ${running === 1 ? "task" : "tasks"}`)] : []),
         ...(mode === "in-place"
           ? [step("resize", `Resize ${boxId} to ${to}`)]
           : [
@@ -2976,7 +2976,7 @@ export class TaskManager {
       const set = this.store.projectBoxLimits(projectId).maxBoxes !== null
       this.setWaitReason(
         row.id,
-        `Waiting for a free agent slot on its project's ${up.length === 1 ? "GPU pod" : `${up.length} GPU pods`} (${set ? `its Max boxes is ${max}` : `at most ${max} pods`}; Agents per box, or Settings › RunPod GPU › Agents per pod)`,
+        `Waiting for a free slot on its project's ${up.length === 1 ? "GPU pod" : `${up.length} GPU pods`} (${set ? `its Max boxes is ${max}` : `at most ${max} pods`}; its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)`,
       )
       return null
     }
@@ -3090,8 +3090,8 @@ export class TaskManager {
 
   /**
    * A Docker task's next turn runs in its project's one container, `docker-<projectId>` (launch makes or starts it),
-   * when Docker is up and the container has a free agent slot (its project's Agents per box, else Settings › Docker ›
-   * Agents per container); else null with the reason. Never anywhere else: it waits for Docker rather than run
+   * when Docker is up and the container has a free slot (its project's Tasks running at once, else Settings › Docker ›
+   * Tasks running at once per container); else null with the reason. Never anywhere else: it waits for Docker rather than run
    * outside a container.
    */
   private async dockerTarget(row: TaskRow): Promise<string | null> {
@@ -3656,7 +3656,7 @@ export class TaskManager {
     const slots = this.slotsFor(LOCAL_BOX_ID)
     if (running.length >= slots) {
       if (!running.length) return { text: LOCAL_SLOT_WAIT, by: [] }
-      return { text: `Waiting for ${agentRefs(running)}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`, by: waitFor(running) }
+      return { text: `Waiting for ${agentRefs(running)}: this computer runs ${slots === 1 ? "1 task" : `${slots} tasks`} at a time (Settings › Tasks running at once on this computer)`, by: waitFor(running) }
     }
     const agent = this.store.boxAgent(row.id)
     const block = agent ? limitBlock(agent, running) : null

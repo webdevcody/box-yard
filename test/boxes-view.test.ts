@@ -254,7 +254,7 @@ describe("Boxes overview", () => {
     const cell = row("mem-box").querySelector("[data-testid=box-row-memory]")!
     expect(cell.textContent).toBe("88% mem")
     expect(cell.getAttribute("title")).toBe(
-      "Memory: 3.5 GB of 4.0 GB memory in use (88%)\nload 1.25 on 2 CPUs\nNew agents go to other boxes while agents run here: 3.5 GB of 4.0 GB memory in use (88%), over 80%",
+      "Memory: 3.5 GB of 4.0 GB memory in use (88%)\nload 1.25 on 2 CPUs\nNew tasks go to other boxes while tasks run here: 3.5 GB of 4.0 GB memory in use (88%), over 80%",
     )
     const meter = cell.querySelector("[role=meter]")!
     expect(meter.getAttribute("aria-label")).toBe("Memory used")
@@ -270,21 +270,21 @@ describe("Boxes overview", () => {
     const use = dialog()!.querySelector("[data-testid=memory-use]")!
     expect(use.textContent).toContain("3.5 GB of 4.0 GB memory in use (88%)")
     expect(use.textContent).toContain("load 1.25 on 2 CPUs")
-    expect(use.textContent).toContain("new agents go elsewhere")
+    expect(use.textContent).toContain("new tasks go elsewhere")
     expect(use.querySelector("[role=meter]")!.getAttribute("aria-label")).toBe("Memory used")
     expect(dialog()!.querySelector("[data-testid=box-attention-list]")!.textContent).toContain(
-      "Busy: 3.5 GB of 4.0 GB memory in use (88%), over 80%. New agents go to other boxes (or wait) until it calms down",
+      "Busy: 3.5 GB of 4.0 GB memory in use (88%), over 80%. New tasks go to other boxes (or wait) until it calms down",
     )
   })
 
   it("says when a project that needs the whole machine holds a box", () => {
     const shared = box("shared-box", { slots: 4, runningTurns: 1, projects: ["survive-the-night"], projectLimit: { slots: 1, project: "survive-the-night" } })
     render("/boxes", [...BOXES, shared])
-    expect(row("shared-box").querySelector("[title*='agent slots busy']")!.getAttribute("title")).toBe("1 of 4 agent slots busy; survive-the-night needs the whole machine (1 of its agents at once)")
+    expect(row("shared-box").querySelector("[title*='tasks running at once']")!.getAttribute("title")).toBe("1 of 4 tasks running at once; survive-the-night needs the whole machine (1 of its tasks at once)")
     click(row("shared-box"))
     act(() => void window.dispatchEvent(new HashChangeEvent("hashchange")))
-    expect(dialog()!.querySelector("[data-testid=box-project-limit]")!.textContent).toBe("survive-the-night needs the whole machine (1 of its agents at once)")
-    expect(row("idle-box").querySelector("[title*='agent slots busy']")!.getAttribute("title")).toBe("0 of 2 agent slots busy")
+    expect(dialog()!.querySelector("[data-testid=box-project-limit]")!.textContent).toBe("survive-the-night needs the whole machine (1 of its tasks at once)")
+    expect(row("idle-box").querySelector("[title*='tasks running at once']")!.getAttribute("title")).toBe("0 of 2 tasks running at once")
   })
 
   it("doesn't show a box that stopped answering as green, or its old numbers as fresh", () => {
@@ -386,13 +386,13 @@ describe("Clear box and Delete box", () => {
     expect(contents).toContain("1 working")
     expect(contents).toContain("1 done")
     expect(contents).toContain("Zombie waves· 3 uncommitted files, archived first")
-    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("1 agent is running: stop it first")
-    expect(confirmButton().textContent).toBe("Stop agents and clear…")
+    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("1 task is running: stop it first")
+    expect(confirmButton().textContent).toBe("Stop tasks and clear…")
     await submit()
     // The first press only asks again; nothing was sent.
     expect(requests.some((r) => r.url.endsWith("/clear"))).toBe(false)
-    expect(d.querySelector("[data-testid=stop-confirm]")!.textContent).toContain("Stop 1 running agent first?")
-    expect(confirmButton().textContent).toBe("Stop 1 agent and clear")
+    expect(d.querySelector("[data-testid=stop-confirm]")!.textContent).toContain("Stop 1 running task first?")
+    expect(confirmButton().textContent).toBe("Stop 1 running task and clear")
     REPLY = { boxId: "low-box", reason: "clear", status: "done", steps: [] }
     await submit()
     expect(requests.filter((r) => r.url.endsWith("/clear"))).toHaveLength(1)
@@ -494,7 +494,7 @@ describe("Resize box", () => {
     expect(d.textContent).toContain("Resize boxidle-box")
     expect(d.querySelector("[role=radio][aria-checked=true]")!.textContent).toContain("Medium")
     expect(d.querySelector("[data-testid=size-small]")!.textContent).toContain("Current")
-    expect(d.querySelector("[data-testid=size-large]")!.textContent).toBe("LargeCPU8 vCPURAM16 GBDisk30 GBPrice$0.40/hAgents4")
+    expect(d.querySelector("[data-testid=size-large]")!.textContent).toBe("LargeCPU8 vCPURAM16 GBDisk30 GBPrice$0.40/hTasks at once4")
     expect(d.querySelector("[data-testid=resize-mode]")!.textContent).toBe("migration to a new box")
     expect(d.querySelector("[data-testid=resize-steps]")!.textContent).toContain("Creates a new medium box")
     expect(d.querySelector("[data-testid=agents-running]")).toBeNull()
@@ -513,13 +513,13 @@ describe("Resize box", () => {
     render()
     await menuItem("busy-box", "Resize…")
     const d = dialog()!
-    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("2 agents are running. Box Yard never interrupts them")
+    expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("2 tasks are running. Box Yard never interrupts them")
     expect(d.querySelector("[data-testid=agents-running]")!.textContent).toContain("Boxes redesign")
-    expect(resizeButton().textContent).toBe("Stop agents and resize…")
+    expect(resizeButton().textContent).toBe("Stop tasks and resize…")
     await submitResize()
     expect(requests.some((r) => r.method === "POST")).toBe(false)
-    expect(d.querySelector("[data-testid=stop-confirm]")!.textContent).toContain("Stop 2 running agents first?")
-    expect(resizeButton().textContent).toBe("Stop 2 agents and resize")
+    expect(d.querySelector("[data-testid=stop-confirm]")!.textContent).toContain("Stop 2 running tasks first?")
+    expect(resizeButton().textContent).toBe("Stop 2 running tasks and resize")
   })
 
   it("shows a scale-down that wouldn't fit and keeps the button off", async () => {

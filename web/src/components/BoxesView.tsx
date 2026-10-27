@@ -109,7 +109,7 @@ export function BoxesView() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-50">Boxes</h1>
           <p className="mt-1 text-sm text-zinc-500">
-            Worker boxes on {health.data?.provider ?? "…"} and the agents running on them.
+            Worker boxes on {health.data?.provider ?? "…"} and the tasks running on them.
           </p>
         </div>
         <button onClick={() => openSettings("limits")} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg text-sm text-sky-400 hover:underline sm:min-h-0">
@@ -195,7 +195,7 @@ function SummaryStrip({ boxes, maxBoxes, running, maxAgents }: { boxes: BoxInfo[
           <Ratio value={boxes.length} max={maxBoxes} />
           <Meter used={boxes.length} total={maxBoxes} className="mt-1.5" />
         </Tile>
-        <Tile label="Agents running" over={running > maxAgents}>
+        <Tile label="Tasks running" over={running > maxAgents}>
           <Ratio value={running} max={maxAgents} />
           <Meter used={running} total={maxAgents} className="mt-1.5" />
         </Tile>
@@ -271,8 +271,8 @@ function FilterTabs({ boxes, selected }: { boxes: BoxInfo[]; selected: BoxFilter
   )
 }
 
-/** A project that needs the whole machine running on the box: no other project's agents start there meanwhile. */
-const projectLimitLine = (l: NonNullable<BoxInfo["projectLimit"]>) => `${l.project} needs the whole machine (${l.slots === 1 ? "1 of its agents" : `up to ${l.slots} of its agents`} at once)`
+/** A project that needs the whole machine running on the box: no other project's tasks start there meanwhile. */
+const projectLimitLine = (l: NonNullable<BoxInfo["projectLimit"]>) => `${l.project} needs the whole machine (${l.slots === 1 ? "1 of its tasks" : `up to ${l.slots} of its tasks`} at once)`
 
 /** A thin bar; segmented when there are few enough slots to count at a glance. */
 function Meter({ used, total, className, tone, label }: { used: number; total: number; className?: string; tone?: keyof typeof TONE_BAR; label?: string }) {
@@ -317,7 +317,7 @@ function BoxTable({
     <div className="@container rounded-xl border border-zinc-800/80 bg-zinc-900/40" data-testid="box-table">
       <div className={cx("hidden gap-x-3 border-b border-zinc-800/80 px-3 py-1.5 text-[11px] font-medium tracking-wide text-zinc-500 uppercase @2xl:grid", COLS)}>
         <span>Box</span>
-        <span>Agents</span>
+        <span>Tasks running</span>
         <span>Disk</span>
         <span>Memory</span>
         <span>Projects</span>
@@ -409,12 +409,12 @@ function BoxRow({
       </div>
 
       <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-3 @2xl:contents">
-        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={`${box.runningTurns} of ${box.slots} agent slots busy${box.projectLimit ? `; ${projectLimitLine(box.projectLimit)}` : ""}`}>
+        <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={`${box.runningTurns} of ${box.slots} tasks running at once${box.projectLimit ? `; ${projectLimitLine(box.projectLimit)}` : ""}`}>
           <span className={cx("tabular-nums", over ? "font-medium text-amber-300" : box.runningTurns ? "text-zinc-200" : "text-zinc-500")}>
             {box.runningTurns}/{box.slots}
-            <span className="@2xl:hidden"> agents</span>
+            <span className="@2xl:hidden"> tasks running</span>
           </span>
-          <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="w-8 @2xl:w-full" />
+          <Meter used={box.runningTurns} total={box.slots} label="Tasks running" className="w-8 @2xl:w-full" />
         </div>
         <div className="flex shrink-0 items-center gap-1.5 @2xl:flex-col @2xl:items-stretch @2xl:gap-1" title={rowDiskTitle(box)}>
           <span className={cx("whitespace-nowrap tabular-nums", TONE_TEXT[tone])}>{disk ? `${formatBytes(disk.free)} free` : "disk —"}</span>
@@ -654,11 +654,11 @@ function BoxDetails({
       {box.resize && <ResizeStatus box={box} />}
 
       <dl className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
-        <Fact label="Agents busy">
+        <Fact label="Tasks running">
           <span className={box.runningTurns > box.slots ? "text-amber-300" : undefined}>
             {box.runningTurns} of {box.slots}
           </span>
-          <Meter used={box.runningTurns} total={box.slots} label="Agents busy" className="mt-1.5" />
+          <Meter used={box.runningTurns} total={box.slots} label="Tasks running" className="mt-1.5" />
           {box.projectLimit && (
             <p className="mt-1 text-[11px] text-zinc-500" data-testid="box-project-limit">
               {projectLimitLine(box.projectLimit)}
@@ -719,7 +719,7 @@ function BoxDetails({
           })}
         </div>
         <div role="tabpanel" className="pt-3">
-          {tab === "running" && <TaskList tasks={active} projectName={projectName} empty="No agents running on this box." />}
+          {tab === "running" && <TaskList tasks={active} projectName={projectName} empty="No tasks running on this box." />}
           {tab === "finished" && <TaskList tasks={finished} projectName={projectName} muted empty="No finished tasks on this box." />}
           {tab === "disk" && <DiskPanel box={box} />}
           {tab === "previews" && (
@@ -799,7 +799,7 @@ function readDismissed(): string | null {
   }
 }
 
-/** One-time notice when per-box capacity is below the old defaults (2 agents, 12 resident folders). */
+/** One-time notice when per-box capacity is below the old defaults (2 tasks running at once, 12 task folders kept). */
 function CapacityNotice({ onEdit }: { onEdit: () => void }) {
   const settings = useAgentSettings()
   const [dismissed, setDismissed] = useState(readDismissed)
@@ -819,7 +819,7 @@ function CapacityNotice({ onEdit }: { onEdit: () => void }) {
           Each {notice.workerSize} box now {capacityNoticeText(notice)}.
         </div>
         <div className="mt-1 text-sky-200/70">
-          Pool limits now default by worker size, so fewer agents share a box and older workspaces are parked sooner. Add boxes, pick a larger size or raise the limits if you
+          Pool limits now default by worker size, so fewer tasks run at once on a box and older workspaces are parked sooner. Add boxes, pick a larger size or raise the limits if you
           want the old capacity back.{" "}
           <button onClick={onEdit} className="text-sky-300 underline-offset-2 hover:underline">
             Edit limits
@@ -932,7 +932,7 @@ function MemorySummary({ box }: { box: BoxInfo }) {
       <Meter used={mem.used} total={mem.total} tone={tone} label="Memory used" className="mt-1.5" />
       {mem.load && <div className="mt-1 text-[11px] text-zinc-500">{mem.load}</div>}
       {stale && <div className="mt-1 text-[11px] text-zinc-500">{stale}</div>}
-      {mem.busy && <div className="mt-1 text-[11px] text-amber-300">new agents go elsewhere</div>}
+      {mem.busy && <div className="mt-1 text-[11px] text-amber-300">new tasks go elsewhere</div>}
     </div>
   )
 }

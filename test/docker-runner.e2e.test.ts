@@ -137,7 +137,7 @@ describe("Docker runner (mock mode: containers are folders)", () => {
     // pool_status shows the project's container to the Coordinator and to its own Captain.
     const coordinator = await mcpAs(r, { kind: "coordinator" })
     const pool = await coordinator("pool_status")
-    expect(pool.docker_projects.contained).toMatchObject({ agentsPerContainer: 2, container: `${box}: running, 0/2 agents` })
+    expect(pool.docker_projects.contained).toMatchObject({ agentsPerContainer: 2, container: `${box}: running, 0/2 tasks running` })
 
     // Stop: the volume (the folder) keeps the workspace; the next turn starts it again.
     s = await call<DockerStatus>(r, "POST", `/api/docker/containers/${box}/stop`)

@@ -21,7 +21,7 @@ export const SETUP_RUNNERS = ["box", "local", "docker"] as const
 
 /**
  * The one virtual box every local-runner task lives on. It is never a `boxes` row, so box reconcile, the pool
- * (Max boxes, Max agents), cost metering, the janitor and the Boxes page never see it, and it can't be lost or
+ * (Max boxes, Max tasks running at once), cost metering, the janitor and the Boxes page never see it, and it can't be lost or
  * swept. It must not start with `local-`: that prefix is LocalProvider's mock boxes (providers/auto.ts).
  */
 export const LOCAL_BOX_ID = "this-computer"
@@ -30,7 +30,7 @@ export const isLocalRunnerBox = (id: string | null | undefined): boolean => id =
 
 /** Shown on the "Runs on" setting and on each local task's header. */
 export const LOCAL_UNSANDBOXED =
-  "Local agents are not sandboxed: they run as your user on this computer, with your files, keys, network and logged-in tools. Only use it for repos and prompts you trust."
+  "Tasks on this computer are not sandboxed: their agents run as your user, with your files, keys, network and logged-in tools. Only use it for repos and prompts you trust."
 
-/** Settings › Local agents: how many local turns may run at once. */
+/** Settings › Tasks running at once on this computer: how many local turns may run at once. */
 export const LOCAL_AGENTS_LIMITS = { min: 1, max: 32 } as const

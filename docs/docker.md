@@ -20,7 +20,7 @@ Box Yard asks Docker for nothing until a project runs on Docker, so an install t
 | Image | Box Yard's | Blank: Box Yard's own image, built here from `docker/`. Or name an image of yours (it needs bash, node, git and claude), pulled when a container first needs it |
 | CPUs per container | 2 | `docker run --cpus`: the most CPU one project's container may use. Its agents share it |
 | Memory per container | 4096 MB | `--memory` (swap: as much again). On a Mac every container shares Docker Desktop's own memory (Docker Desktop › Settings › Resources), so keep this times the Docker projects in use within it. Settings warns when one container could take nearly all of it |
-| Agents per container | 2 | Agents of one project that run at once, unless the project sets its own **Agents at once** |
+| Tasks running at once per container | 2 | Tasks of one project that run at once, unless the project sets its own **Tasks running at once** |
 | Stop when idle | 30 min | A container with no agent running or waiting is stopped. Its volume keeps every workspace, and the next task starts it again in a few seconds. 0: never stop |
 | Preview ports from | 47100 | The first port on this computer that previews take: 20 per container in a row |
 
@@ -36,13 +36,13 @@ A project can pick its own image in Project › Settings › Runs on:
 
 ## How it works
 
-- **One container per project.** A Docker project's box is the virtual `docker-<projectId>`, never a row in the boxes pool, so Max boxes, Max agents and box costs don't count it.
+- **One container per project.** A Docker project's box is the virtual `docker-<projectId>`, never a row in the boxes pool, so Max boxes, Max tasks running at once and box costs don't count it.
   - Its container is `boxyard-<install id>-<projectId>`. Its named volume is `boxyard-<install id>-<projectId>-work`, mounted at `/workspace`, and it holds the task folders, the repo mirrors and the dependency cache, as on a box.
   - Every container and volume carries the labels `boxyard=1`, `boxyard.install`, `boxyard.box`, `boxyard.project`, `boxyard.image` and `boxyard.ports`. Box Yard lists, stops and deletes only ones labelled with its own install id, and refuses to touch a container or volume that has one of its names but not its label. Your other containers and images are never touched.
 - **Starts on demand.** A task starts its project's container (`wake`): it builds the image if needed, makes the volume, and runs the container with the image's user. It then checks that bash, node, git and claude are there, and sets git's name and email as on boxes.
   - Box history records each create, start, stop, delete and loss with an actor and a reason, under the box `Docker · <project>`.
   - A container whose image changed (an edit to `docker/` or the project's Dockerfile) is made again on its next start. The volume keeps every workspace; only what agents installed outside it (apt packages) goes.
-- **Placement.** A task waits while its project's container is full (Agents per container, or the project's Agents at once) and starts when a slot frees up.
+- **Placement.** A task waits while its project's container is full (Tasks running at once per container, or the project's own Tasks running at once) and starts when a slot frees up.
   - A container holds up to 20 task folders, one preview port each. A 21st task parks the oldest resting folder in the archive store to make room, like a full box does.
 - **Archives.** Task folders are archived after each turn as on boxes. A deleted container's tasks are restored from their archives into the next one.
 - **Idle stop.** The minute sweep stops a container after **Stop when idle** with no agent running or waiting. Stopped containers cost nothing but disk. Settings › Docker › Containers lists each container with its state, its tasks and its ports, with **Stop** and **Delete…**. Delete archives every workspace first, then removes the container and its volume. On restore, pushed history comes back from GitHub and the rest from the archive.

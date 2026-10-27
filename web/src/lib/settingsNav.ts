@@ -56,7 +56,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "limits",
     label: "Boxes & limits",
     description:
-      "Worker box size and resizing, capacity, local agents on this computer, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
+      "Worker box size and resizing, capacity, tasks running at once on this computer, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
     fields: [
       "workerSize",
       "autoResizeEnabled",

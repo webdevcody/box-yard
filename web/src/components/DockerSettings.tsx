@@ -1,5 +1,5 @@
 // Settings › Docker: Docker on this computer, the image containers start from (Box Yard's own, built here from
-// docker/, or one named here), each container's CPU and memory, agents per container, idle stop and the preview ports,
+// docker/, or one named here), each container's CPU and memory, tasks running at once per container, idle stop and the preview ports,
 // and the containers Box Yard has made. docs/docker.md explains the runner. The settings are a draft until the
 // dialog's Save; Build image, Stop and Delete are actions and run at once.
 import { useState } from "react"
@@ -25,9 +25,9 @@ const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit:
   },
   {
     key: "agentsPerContainer",
-    label: "Agents per container",
-    unit: "agents",
-    help: "Agents of one project that may run in its container at once, unless the project sets its own Agents at once.",
+    label: "Tasks running at once per container",
+    unit: "tasks",
+    help: "Tasks of one project that may run in its container at once, unless the project sets its own Tasks running at once.",
   },
   {
     key: "idleMinutes",

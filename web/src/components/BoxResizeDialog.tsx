@@ -41,7 +41,7 @@ export function BoxResizeDialog({ box, onClose }: { box: BoxInfo; onClose: () =>
 
   const Dir = dir === "down" ? ArrowDown : ArrowUp
   const n = running.length
-  const label = stopStep ? `Stop ${n} ${n === 1 ? "agent" : "agents"} and resize` : n > 0 ? "Stop agents and resize…" : `Resize to ${BOX_SIZE_SPECS[target].label.toLowerCase()}`
+  const label = stopStep ? `Stop ${n} running ${n === 1 ? "task" : "tasks"} and resize` : n > 0 ? "Stop tasks and resize…" : `Resize to ${BOX_SIZE_SPECS[target].label.toLowerCase()}`
   return (
     <Modal
       onClose={onClose}
@@ -89,7 +89,7 @@ export function BoxResizeDialog({ box, onClose }: { box: BoxInfo; onClose: () =>
         <div className="space-y-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-sm text-red-100" data-testid="stop-confirm">
           <div className="flex items-center gap-2 font-medium">
             <AlertTriangle className="h-4 w-4 shrink-0 text-red-300" />
-            Stop {n} running {n === 1 ? "agent" : "agents"} first?
+            Stop {n} running {n === 1 ? "task" : "tasks"} first?
           </div>
           <p className="text-xs text-red-200/80">
             {n === 1 ? "Its turn ends" : "Their turns end"} mid-way. What {n === 1 ? "it has" : "they have"} done so far is archived, and {n === 1 ? "it picks" : "they pick"} up from there on the
@@ -136,8 +136,8 @@ export function BoxResizeDialog({ box, onClose }: { box: BoxInfo; onClose: () =>
                     <dd className="text-right text-zinc-200 tabular-nums" title="Per active CPU hour">
                       {row.price}
                     </dd>
-                    <dt>Agents</dt>
-                    <dd className="text-right text-zinc-200 tabular-nums" title="Agents at once by default (Settings → Agents per box overrides)">
+                    <dt>Tasks at once</dt>
+                    <dd className="text-right text-zinc-200 tabular-nums" title="Tasks running at once by default (Settings → Tasks running at once per box overrides)">
                       {row.slots}
                     </dd>
                   </dl>
@@ -188,7 +188,7 @@ export function BoxResizeDialog({ box, onClose }: { box: BoxInfo; onClose: () =>
               <div className="flex gap-2">
                 <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-300" />
                 <span>
-                  {n} {n === 1 ? "agent is" : "agents are"} running. Box Yard never interrupts {n === 1 ? "it" : "them"} for a resize: wait until the box is idle, or choose “Stop agents and
+                  {n} {n === 1 ? "task is" : "tasks are"} running. Box Yard never interrupts {n === 1 ? "it" : "them"} for a resize: wait until the box is idle, or choose “Stop tasks and
                   resize” to stop {n === 1 ? "it" : "them"} first.
                 </span>
               </div>

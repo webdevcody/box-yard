@@ -4,7 +4,7 @@
 
 /**
  * A Docker project's virtual box: `docker-<projectId>`, its one container. Like the GPU pods and the local runner's
- * box it is never a `boxes` row, so the pool (Max boxes, Max agents), cost metering and the box janitor never see it.
+ * box it is never a `boxes` row, so the pool (Max boxes, Max tasks running at once), cost metering and the box janitor never see it.
  */
 export const DOCKER_BOX_PREFIX = "docker-"
 export const dockerBoxId = (projectId: string) => `${DOCKER_BOX_PREFIX}${projectId}`
@@ -34,7 +34,7 @@ export interface DockerSettings {
   cpus: number
   /** Memory one container may use, in MB (--memory). Docker Desktop's own VM limit (Settings › Resources) caps all of them. */
   memoryMb: number
-  /** Agents that may run in one container at once, unless the project sets its own Agents per box. */
+  /** Tasks running at once in one container, unless the project sets its own Tasks running at once. */
   agentsPerContainer: number
   /** Stop a container after this many minutes with no agent turn running (its volume keeps the workspaces). 0: never. */
   idleMinutes: number
