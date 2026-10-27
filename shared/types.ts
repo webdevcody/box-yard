@@ -9,6 +9,7 @@ import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
+import type { ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -82,6 +83,8 @@ export interface Project {
   gpuMaxHourlyUsd: number | null
   /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
   gpuMachine: ProjectGpuMachine
+  /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
+  docker: ProjectDocker
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number

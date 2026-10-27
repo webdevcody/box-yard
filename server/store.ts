@@ -7,6 +7,7 @@ import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
+import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
 import type {
@@ -286,6 +287,8 @@ interface ProjectRow {
   gpu_cloud?: string | null
   gpu_min_ram_gb?: number | null
   gpu_min_vcpus?: number | null
+  docker_image?: string | null
+  docker_dockerfile?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -677,6 +680,7 @@ export class Store {
       maxBoxes: row.max_boxes ?? null,
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       gpuMachine: gpuMachineOf(row),
+      docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -768,6 +772,7 @@ export class Store {
     maxBoxes?: number | null
     gpuMaxHourlyUsd?: number | null
     gpuMachine?: Partial<ProjectGpuMachine>
+    docker?: Partial<ProjectDocker>
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -829,6 +834,8 @@ export class Store {
       gpuMaxHourlyUsd?: number | null
       /** Each field: undefined leaves it, null clears it (Settings › RunPod GPU's applies). */
       gpuMachine?: Partial<ProjectGpuMachine>
+      /** Each field: undefined leaves it, null clears it (Settings › Docker's image applies). */
+      docker?: Partial<ProjectDocker>
       /** null clears it (Settings › Max notes applies). */
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
@@ -885,7 +892,7 @@ export class Store {
    * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
    * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
    */
-  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine> }) {
+  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine>; docker?: Partial<ProjectDocker> }) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
     if (b.wholeMachine !== undefined) this.db.prepare("UPDATE projects SET whole_machine = ? WHERE id = ?").run(b.wholeMachine ? 1 : 0, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
@@ -896,6 +903,15 @@ export class Store {
     if (m.cloud !== undefined) this.db.prepare("UPDATE projects SET gpu_cloud = ? WHERE id = ?").run(m.cloud, id)
     if (m.minRamGb !== undefined) this.db.prepare("UPDATE projects SET gpu_min_ram_gb = ? WHERE id = ?").run(m.minRamGb, id)
     if (m.minVcpus !== undefined) this.db.prepare("UPDATE projects SET gpu_min_vcpus = ? WHERE id = ?").run(m.minVcpus, id)
+    const d = b.docker ?? {}
+    if (d.image !== undefined) this.db.prepare("UPDATE projects SET docker_image = ? WHERE id = ?").run(d.image?.trim() || null, id)
+    if (d.dockerfile !== undefined) this.db.prepare("UPDATE projects SET docker_dockerfile = ? WHERE id = ?").run(d.dockerfile?.trim() ? d.dockerfile : null, id)
+  }
+
+  /** A Docker project's own image (Project.docker), without loading the rest. */
+  projectDocker(id: string): ProjectDocker {
+    const row = this.db.prepare("SELECT docker_image, docker_dockerfile FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
+    return { image: row?.docker_image || null, dockerfile: row?.docker_dockerfile || null }
   }
 
   /** A project's own notes budget; undefined leaves a value as it is, null clears it. */
@@ -1286,6 +1302,14 @@ export class Store {
    * Agent slots in use on a box: turns that hold a turn id, plus any task starting or working there (a turn
    * id that isn't written yet, or a launch that outlived it, still runs an agent). `except` leaves one task out.
    */
+  /** Docker containers' boxes (`docker-…`) with a turn on them or starting. */
+  dockerBoxesInUse(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE box_id LIKE 'docker-%' AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .all() as { box_id: string }[]
+    return rows.map((r) => r.box_id)
+  }
+
   /** GPU pods' boxes (`runpod-…`) with a turn on them: pods that are up or starting. */
   gpuBoxesInUse(): string[] {
     const rows = this.db
