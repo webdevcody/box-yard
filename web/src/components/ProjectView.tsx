@@ -6,6 +6,7 @@ import {
   useArtifacts,
   useCaptainState,
   useDeleteProject,
+  useDocker,
   useHooks,
   useProjects,
   useRunPod,
@@ -43,6 +44,7 @@ import { GpuTypePicker } from "./GpuTypePicker"
 import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
+import { DOCKERFILE_TEMPLATE, type ProjectDocker } from "../../../shared/docker"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -390,6 +392,7 @@ function ProjectBoxSettings(p: {
   name: string
   local: boolean
   gpu: boolean
+  docker: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
   agentsPerBox: string
@@ -433,6 +436,8 @@ function ProjectBoxSettings(p: {
         {p.local && " This project runs on this computer: Tasks running at once also limits its tasks here, within Settings › Tasks running at once on this computer, and the rest apply when it runs on boxes."}
         {p.gpu &&
           " This project runs on RunPod GPU pods: Tasks running at once sets its tasks per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Task folders kept per box and Box size apply when it runs on boxes."}
+        {p.docker &&
+          " This project runs in a Docker container of its own: Tasks running at once sets its tasks in the container at once (blank: Settings › Docker › Tasks running at once per container), within the container's CPU and memory (Settings › Docker). Task folders kept per box and Box size apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -657,6 +662,73 @@ function LimitInput({
   )
 }
 
+/** Project › Settings › Runs on › Docker image as the form edits it: which source, and each one's text. */
+type DockerDraft = { mode: "" | "image" | "dockerfile"; image: string; dockerfile: string }
+
+const dockerDraft = (d: ProjectDocker): DockerDraft => ({ mode: d.dockerfile ? "dockerfile" : d.image ? "image" : "", image: d.image ?? "", dockerfile: d.dockerfile ?? "" })
+
+/** What Save sends: only the source picked (the other is cleared). */
+const dockerOf = (d: DockerDraft): ProjectDocker => ({
+  image: d.mode === "image" ? d.image.trim() || null : null,
+  dockerfile: d.mode === "dockerfile" ? d.dockerfile.trim() || null : null,
+})
+
+/**
+ * A Docker project's image: Settings › Docker's, an image of its own, or its own Dockerfile built on Box Yard's
+ * (BOXYARD_BASE), plus whether Docker can run now.
+ */
+function ProjectDockerSettings({ draft, setDraft }: { draft: DockerDraft; setDraft: (d: DockerDraft) => void }) {
+  const status = useDocker()
+  const openSettings = useOpenSettings()
+  const global = status.data ? (status.data.settings.image ?? "Box Yard's own") : "Settings › Docker"
+  const set = (patch: Partial<DockerDraft>) => setDraft({ ...draft, ...patch })
+  return (
+    <div className="space-y-2 sm:max-w-xl" data-testid="project-docker">
+      <p className="text-xs text-zinc-500">
+        Each task works in this project's own container on this computer: only its workspace volume is mounted (no folder of yours, no Docker socket), and the GitHub and Claude credentials from
+        Settings › Credentials are put inside it, never in the image. Previews reach http://localhost.{" "}
+        <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("docker")}>
+          Settings › Docker
+        </button>
+      </p>
+      {status.data?.docker.error && (
+        <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="project-docker-problem">
+          {status.data.docker.error}. Its tasks wait until then.
+        </p>
+      )}
+      <Field label="Docker image" hint="A Dockerfile builds on this computer on its first task (and again when it changes); FROM ${BOXYARD_BASE} starts from the image above it, with the agent tools.">
+        <Select className="w-full sm:w-80" value={draft.mode} onChange={(e) => set({ mode: e.target.value as DockerDraft["mode"], ...(e.target.value === "dockerfile" && !draft.dockerfile.trim() ? { dockerfile: DOCKERFILE_TEMPLATE } : {}) })} data-testid="project-docker-mode">
+          <option value="">Settings › Docker's ({global})</option>
+          <option value="image">An image of its own</option>
+          <option value="dockerfile">A Dockerfile of its own</option>
+        </Select>
+      </Field>
+      {draft.mode === "image" && (
+        <input
+          className={cx(inputClass, "font-mono text-xs")}
+          value={draft.image}
+          onChange={(e) => set({ image: e.target.value })}
+          placeholder="ghcr.io/you/agent:1 (needs bash, node, git and claude)"
+          spellCheck={false}
+          aria-label="Docker image"
+          data-testid="project-docker-image"
+        />
+      )}
+      {draft.mode === "dockerfile" && (
+        <textarea
+          className={cx(inputClass, "font-mono text-xs")}
+          rows={8}
+          value={draft.dockerfile}
+          onChange={(e) => set({ dockerfile: e.target.value })}
+          spellCheck={false}
+          aria-label="Dockerfile"
+          data-testid="project-dockerfile"
+        />
+      )}
+    </div>
+  )
+}
+
 function ProjectSettings({ project, onDone }: { project: Project; onDone: () => void }) {
   const update = useUpdateProject()
   const remove = useDeleteProject()
@@ -678,6 +750,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
   const [gpuMaxHourlyUsd, setGpuMaxHourlyUsd] = useState(project.gpuMaxHourlyUsd?.toString() ?? "")
   const [machine, setMachine] = useState<MachineDraft>(() => machineDraft(project.gpuMachine))
+  const [docker, setDocker] = useState<DockerDraft>(() => dockerDraft(project.docker))
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const settings = useAgentSettings()
@@ -690,7 +763,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, notesMax, notesTokens])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -733,6 +806,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           maxBoxes: optionalInt(maxBoxes),
           ...(runner === "gpu" || project.gpuMaxHourlyUsd !== null ? { gpuMaxHourlyUsd: optionalNumber(gpuMaxHourlyUsd) } : {}),
           ...(runner === "gpu" ? { gpuMachine: { gpuTypes: machine.gpuTypes, cloud: machine.cloud || null, minRamGb: optionalInt(machine.minRamGb), minVcpus: optionalInt(machine.minVcpus) } } : {}),
+          ...(runner === "docker" ? { docker: dockerOf(docker) } : {}),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
         })
@@ -760,7 +834,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Tasks running at once on this computer). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Tasks running at once on this computer). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Docker container: the project gets an isolated container of its own on this computer, started when a task needs it and stopped when idle (Settings → Docker). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
@@ -798,12 +872,14 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
             <span>{LOCAL_UNSANDBOXED}</span>
           </div>
         )}
+        {runner === "docker" && <ProjectDockerSettings draft={docker} setDraft={setDocker} />}
       </div>
       <ProjectBoxSettings
         info={settings.data}
         name={name}
         local={runner === "local"}
         gpu={runner === "gpu"}
+        docker={runner === "docker"}
         boxSize={boxSize}
         setBoxSize={setBoxSize}
         agentsPerBox={agentsPerBox}

@@ -21,6 +21,7 @@ import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS, isGpuBox } from "../shared/runpod.js"
+import { isDockerBox } from "../shared/docker.js"
 import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
 import type { BoxActor } from "../shared/boxHistory.js"
 import { errorMessage } from "./util/retry.js"
@@ -146,7 +147,7 @@ const runsOnSchema = z
   .enum(RUNNERS)
   .optional()
   .describe(
-    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod (billed per hour; needs a RunPod key). Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer". If the runner can\'t run (e.g. claude missing or signed out on this computer), the call fails with the reason; it never falls back to the other runner.',
+    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod (billed per hour; needs a RunPod key), "docker" = the project\'s own isolated Docker container on this computer (needs Docker running and a Claude key). Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", and "docker" for "in a container" or "isolated". If the runner can\'t run (e.g. claude missing or signed out on this computer, or Docker stopped), the call fails with the reason; it never falls back to the other runner.',
   )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 
@@ -547,6 +548,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     boxSettings: tasks.projectBoxSettings(p),
     // Its RunPod pods and $/hr caps, when it runs on RunPod GPU.
     ...(p.runner === "gpu" && tasks ? { gpu: await tasks.projectGpuSettings(p, true) } : {}),
+    // Its Docker container, image and limits, when it runs in a Docker container.
+    ...(p.runner === "docker" && tasks?.projectDockerSettings(p) ? { docker: tasks.projectDockerSettings(p) } : {}),
     ...(p.snapshot
       ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
       : {}),
@@ -1016,7 +1019,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     attachments: z.array(z.string()).optional().describe("Files for this task only, added to the shared attachments (up_… or art_… ids or paths, as in create_task)"),
     related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
     env: envSchema,
-    runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box) or "gpu" (the project\'s RunPod GPU pod), over the shared runs_on and the project\'s "Runs on"'),
+    runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer), over the shared runs_on and the project\'s "Runs on"'),
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -1041,7 +1044,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema.describe("Earlier tasks whose outcome every new agent should know about (their summary, branch and PR are added to each prompt)"),
         env: envSchema.describe("Env vars for every task, as NAME: value; an item's own env wins for the same name"),
         runs_on: runsOnSchema.describe(
-          'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
+          'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod, "docker" = the project\'s isolated Docker container on this computer, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
         ),
         model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
         effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
@@ -1151,7 +1154,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         runs_on: z
           .enum(RUNNERS)
           .optional()
-          .describe('Pin the task to "local" (this computer) or "box" (an Upstash box) from its next turn on, over the project\'s "Runs on". Omit it to leave it where it runs.'),
+          .describe('Pin the task to "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer) from its next turn on, over the project\'s "Runs on". Omit it to leave it where it runs.'),
         interrupt: z.boolean().optional().describe(SEND_NOW_DESCRIPTION),
         allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION),
         ...routeParams,
@@ -1768,12 +1771,20 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     const views = await Promise.all(gpu.map(async (p) => [p.name, await tasks.projectGpuSettings(p, true)] as const))
     return { gpu_projects: Object.fromEntries(views.filter(([, v]) => v)) }
   }
+  const dockerPools = async () => {
+    const docker = (scopeId ? [ownProject()] : store.listProjects()).filter((p) => p.runner === "docker")
+    if (!docker.length) return {}
+    // A fresh look at the containers (Docker answers fast; a stopped Docker leaves the last list).
+    await tasks.refreshDockerContainers()
+    const views = docker.map((p) => [p.name, tasks.projectDockerSettings(p)] as const)
+    return { docker_projects: Object.fromEntries(views.filter(([, v]) => v)) }
+  }
 
   server.registerTool(
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1815,6 +1826,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         resize_box: resizeGuard(),
         // RunPod GPU projects: their pods (each a box of its own, runpod-<project>[-<n>]), spend and $/hr caps.
         ...(await gpuPools()),
+        // Docker projects: their one container each (docker-<project>), image and limits.
+        ...(await dockerPools()),
         queued: store
           .listTasks({ projectId: scopeId ?? undefined, status: ["queued"] })
           .map((t) => {
@@ -1838,7 +1851,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             "Read Box Yard's global Settings, everything the Settings dialog shows (slotsPerBox = tasks running at once per box, maxAgents = max tasks running at once, localAgents = tasks running at once on this computer, maxResidentPerBox = task folders kept per box): each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
             "An env var only seeds a value: saving one here overrides it, as in the Settings UI. Rows with envLocked (group server) come only from env vars on the server. " +
             "API keys and tokens (group credentials, voice.*ApiKey) show only as set / not set.",
-          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, box agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
+          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, box agents, boxes & limits, usage), runpod, docker, voice, runner, credentials or server.") },
         },
         safe(async (a: { group?: SettingsGroup }) => okCompact({ settings: settingsTools.list(a.group) })),
       ),
@@ -2278,10 +2291,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   // own project's work.
   const deleter: BoxActor = scopeId ? { kind: "captain", projectId: scopeId } : { kind: "coordinator" }
   const projectName = (id: string) => store.getProject(id)?.name ?? id
-  /** A box id or GPU pod id this caller may delete. */
+  /** A box id, GPU pod id or Docker container id this caller may delete. */
   const deletableBox = (ref: string): string => {
     const id = ref.trim()
-    if (!isGpuBox(id) && !store.getBox(id) && !tasks.history.boxIds().includes(id)) throw new Error(`No box "${ref}". Use pool_status.`)
+    if (!isGpuBox(id) && !isDockerBox(id) && !store.getBox(id) && !tasks.history.boxIds().includes(id)) throw new Error(`No box "${ref}". Use pool_status.`)
     if (scopeId && !tasks.onlyProjectOn(id, scopeId)) {
       const on = tasks.projectsOnBox(id).map(projectName)
       throw outOfScope(`box ${id} ${on.length ? `holds work of ${on.join(", ")}` : "holds no work of your project"}, and a Captain can only delete a box that holds nothing but its own project's`)
@@ -2297,13 +2310,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "delete_box",
     {
       description:
-        "Delete one worker box at its provider, or terminate a RunPod GPU pod (runpod-<project>[-n]; terminated, never just stopped, and its network volume stays). " +
+        "Delete one worker box at its provider, terminate a RunPod GPU pod (runpod-<project>[-n]; terminated, never just stopped, and its network volume stays), or delete a project's Docker container (docker-<project>) with its workspace volume (the image stays). " +
         SAFETY +
-        "The tasks on it keep working: each restores from its archive on its next turn, on another box or a new pod. The box history records it as deleted by you, with your reason. " +
+        "The tasks on it keep working: each restores from its archive on its next turn, on another box, a new pod or a new container. The box history records it as deleted by you, with your reason. " +
         "To clear out many boxes, use delete_idle_boxes (dry run first)." +
         (scopeId ? " As a Captain you can only delete a box that holds nothing but your project's work." : ""),
       inputSchema: {
-        box: z.string().describe("Box id from pool_status, or a GPU pod's runpod-… id"),
+        box: z.string().describe("Box id from pool_status, a GPU pod's runpod-… id or a Docker container's docker-… id"),
         reason: z.string().trim().min(3).max(500).describe("Why, in one sentence for the box history (e.g. \"Idle since tiny-town's last PR merged\")."),
       },
     },
@@ -2313,7 +2326,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       if (r.alreadyGone) return ok(`${id} is already gone (deleted earlier, or at the provider): nothing left to delete. box_history has what happened to it.`)
       return ok({
         [r.kind === "pod" ? "terminated" : "deleted"]: r.label === id ? id : `${r.label} (${id})`,
-        ...(r.kind === "pod" ? { volume: "kept" } : {}),
+        ...(r.kind === "pod" ? { volume: "kept" } : r.kind === "container" ? { volume: "deleted with it (its workspaces were archived first)" } : {}),
         archived: r.archived.length ? r.archived : undefined,
         no_archive_needed: r.fromGitHub.length ? r.fromGitHub.map((t) => `${t} (PR merged, nothing unpushed)`) : undefined,
         next: "Its tasks restore from their archive on their next turn. box_history has the row.",

@@ -37,6 +37,7 @@ const project = (over: Partial<Project> = {}) =>
     maxBoxes: null,
     gpuMaxHourlyUsd: null,
     gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
+    docker: { image: null, dockerfile: null },
     partialClone: null,
     pushAtTurnEnd: null,
     depCache: null,

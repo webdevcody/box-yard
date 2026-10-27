@@ -1,0 +1,12 @@
+# Box Yard's Docker runner image: git's system config (docs/docker.md). No secrets: it only reads the turn's env.
+[init]
+	defaultBranch = main
+[safe]
+	directory = *
+# GitHub's token is the turn's $GITHUB_TOKEN (the project's own, else Settings › Credentials'), read when git asks.
+# This helper comes first and nothing writes a credential store or ~/.git-credentials, so no stored token can answer
+# before it (on Upstash boxes a global credential.helper=store won over a project's GITHUB_TOKEN). Only github.com
+# gets it.
+[credential "https://github.com"]
+	helper =
+	helper = "!f() { test \"$1\" = get || exit 0; t=\"${GITHUB_TOKEN:-$GH_TOKEN}\"; test -n \"$t\" || exit 0; echo username=x-access-token; echo \"password=$t\"; }; f"

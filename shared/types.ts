@@ -10,6 +10,7 @@ import type { Runner } from "./runner.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
+import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
 export type { BoxCleanup } from "./disk.js"
 export type { BoxResize, ResizePlan, ResizeInitiator, ResizeMode, ResizeStep, DiskFit } from "./boxSizes.js"
@@ -83,6 +84,8 @@ export interface Project {
   gpuMaxHourlyUsd: number | null
   /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
   gpuMachine: ProjectGpuMachine
+  /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
+  docker: ProjectDocker
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number
@@ -471,8 +474,9 @@ export const deleteAtRisk = <T extends { verdict: BoxDeleteVerdict }>(tasks: T[]
 /** What Clear box and Delete box would touch, for their confirmations, and the safety check delete_box runs. */
 export interface BoxContents {
   boxId: string
-  /** A worker box (deleted at its provider) or a RunPod GPU pod (terminated; its network volume stays). */
-  kind: "box" | "pod"
+  /** A worker box (deleted at its provider), a RunPod GPU pod (terminated; its network volume stays), or a Docker
+   * project's container (deleted with its workspace volume). */
+  kind: "box" | "pod" | "container"
   /** The box id, or "GPU pod #1 · project" for a pod. */
   label: string
   tasks: {
@@ -543,6 +547,8 @@ export type UiEvent =
   | { type: "setup"; status: SetupStatus }
   /** Settings › RunPod GPU's image build moved on (state and the log's tail; never a secret). */
   | { type: "runpod.build"; build: RunPodImageBuild }
+  /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
+  | { type: "docker.build"; build: DockerImageBuild }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

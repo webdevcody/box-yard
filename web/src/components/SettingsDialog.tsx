@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, Cpu, DollarSign, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, Container, Cpu, DollarSign, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -23,6 +23,7 @@ import { setSendSound, useSendSound } from "../lib/sendSound"
 import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { RunPodPanel } from "./RunPodSettings"
+import { DockerPanel } from "./DockerSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
@@ -50,10 +51,10 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, runpod: Cpu, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, runpod: Cpu, docker: Container, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 /** Sections whose controls keep their own drafts (useDraft). They stay mounted once opened, so the drafts survive. */
-const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "runpod", "hooks", "notifications", "voice"]
+const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "runpod", "docker", "hooks", "notifications", "voice"]
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -435,6 +436,8 @@ export function SettingsDialog({
                 <CredentialsPanel fid={fid} />
               ) : k === "runpod" ? (
                 <RunPodPanel fid={fid} active={section === "runpod"} />
+              ) : k === "docker" ? (
+                <DockerPanel fid={fid} active={section === "docker"} />
               ) : (
                 <Panel section="hooks">
                   <HooksPanel projectId={null} intro={false} />

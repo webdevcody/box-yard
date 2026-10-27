@@ -13,6 +13,7 @@ import { loadTtsInfo, setTtsInfo } from "./tts"
 import { onResume } from "./resume"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 import type { RunPodStatus } from "../../../shared/runpod"
+import type { DockerStatus } from "../../../shared/docker"
 
 export type Connection = "connecting" | "live" | "offline"
 
@@ -183,6 +184,11 @@ export function useServerEvents(enabled: boolean): Connection {
           break
         case "runpod.build":
           qc.setQueryData<RunPodStatus>(keys.runpod, (old) => (old ? { ...old, build: ev.build } : old))
+          break
+        case "docker.build":
+          qc.setQueryData<DockerStatus>(keys.docker, (old) =>
+            old ? { ...old, build: ev.build, image: ev.build.state === "succeeded" && ev.build.image === old.image.tag ? { ...old.image, present: true } : old.image } : old,
+          )
           break
         case "tts":
           setTtsInfo(ev.info)

@@ -110,7 +110,7 @@ describe("get_settings", () => {
     expect(all["runpod.maxHourlyUsd"]).toMatchObject({ value: 1, default: 1, allowed: "number 0–100", writable: true })
     expect(all["runpod.gpuTypes"].allowed).toMatch(/^list of 1–10 of text/)
     expect(all["voice.provider"]).toMatchObject({ value: "browser", writable: true })
-    expect(all.runner).toMatchObject({ value: "box", allowed: "one of: box, local", writable: true })
+    expect(all.runner).toMatchObject({ value: "box", allowed: "one of: box, local, docker", writable: true })
     expect(all["server.timezone"]).toMatchObject({ envVar: "BOXYARD_TIMEZONE", envLocked: true, writable: false })
 
     // A group filter returns only that group.

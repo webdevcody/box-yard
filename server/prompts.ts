@@ -28,11 +28,14 @@ export function workerSystemPrompt(input: {
   const { project, task, branch, port } = input
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
+  const docker = Boolean(input.box?.docker)
   const header = [
     local
       ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
       : gpu
       ? `You are a Box Yard agent: a headless Claude Code worker running on a RunPod GPU pod of your project's own (Linux, as root).`
+      : docker
+      ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running in an isolated Docker container of your project's own (Linux) on Cody's computer.`, input.ownerName)
       : `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
@@ -50,6 +53,8 @@ export function workerSystemPrompt(input: {
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
       : gpu
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
+      : docker
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is published to Cody's computer, on another port there (report_preview gives Cody the right http://localhost link); ${port + 1}-${port + 9} work inside the container only.`
       : `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
     `- publish_artifact: for any deliverable file (report, page, image, export) so Cody can open it.`,
     `- mark_done: when the task is finished and there is nothing left to do. A scheduled run that found nothing to do and changed nothing passes outcome "noop".`,
@@ -97,6 +102,8 @@ export interface BoxPromptInfo {
   local?: boolean
   /** A RunPod GPU pod of the project's own (shared/runpod.ts): its GPU, e.g. "RTX A5000". */
   gpu?: { name: string }
+  /** A Docker container of the project's own on the computer running Box Yard (shared/docker.ts): its CPU limit. */
+  docker?: { cpus: number | null }
 }
 
 /** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */
@@ -107,6 +114,15 @@ function boxLines(b: BoxPromptInfo): string[] {
       `Your pod has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
       `The pod is stopped when your project has been idle a while and started again (a new pod) for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the pod's disk goes. /workspace/data is the project's network volume: put large downloads, datasets and model weights there to keep them across pods.`,
       `Run heavy jobs one at a time and stop servers you no longer need.`,
+    ]
+  }
+  if (b.docker) {
+    const mem = b.memoryBytes ? `${formatBytes(b.memoryBytes)} of memory` : `limited memory`
+    const cpus = b.docker.cpus ? ` and ${b.docker.cpus} CPUs` : ""
+    const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    return [
+      `Your container has ${mem}${cpus}${others}. Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need: running out of memory kills every agent in the container.`,
+      `The container is stopped when your project has been idle a while and started again for the next turn. /workspace is a volume, so your working directory stays; packages installed elsewhere (apt, global npm) may go when the container is made again from a newer image. Box Yard's image runs as the user "agent" with sudo, and has Node, git, gh, build tools and Chromium (CHROME_PATH).`,
     ]
   }
   if (b.local) {
@@ -324,7 +340,7 @@ Routing every request (check list_projects / list_tasks first when you're not su
 5. Work across several repos: one message per Captain, all started at once.
 6. Several independent pieces in one repo: ask that project's Captain to split them into one task each; it starts them all in one create_tasks call. Things that must happen in order go into one task, or into a follow-up after the first finishes.
    - When you start tasks yourself, start several at once with one create_tasks call (the shared brief in common_prompt, each task's own part in its prompt), never a series of create_task calls: each call costs a whole step, so 20 of them take minutes before the last agent even exists.
-   - Where it runs: when Cody says to do it "locally", "on my machine" or "on this computer", the work runs on the computer running Box Yard whatever the project's "Runs on" setting is. Say so when you route it to the Captain ("run it on this computer: runs_on local"), or pass runs_on: "local" yourself to create_task, create_tasks or send_to_task ("continue it locally"); runs_on: "box" sends it to an Upstash box. It sticks for the task's later turns. If this computer can't run it, the tool fails with the reason: tell Cody, don't retry it on a box.
+   - Where it runs: when Cody says to do it "locally", "on my machine" or "on this computer", the work runs on the computer running Box Yard whatever the project's "Runs on" setting is. Say so when you route it to the Captain ("run it on this computer: runs_on local"), or pass runs_on: "local" yourself to create_task, create_tasks or send_to_task ("continue it locally"); runs_on: "box" sends it to an Upstash box, and runs_on: "docker" to the project's isolated Docker container on this computer (when Cody says "in a container" or "isolated"). It sticks for the task's later turns. If this computer can't run it, the tool fails with the reason: tell Cody, don't retry it on a box.
 7. Recurring work ("every morning", "each Monday", "hourly", "remind me to..."): create_schedule instead of a task or doing it once. There are two kinds:
    - Coordinator schedule (no project; internally target "orchestrator" for compatibility): at each run its prompt arrives in this chat as "[Scheduled: <name>] <prompt>", and you handle it like a message from Cody with your usual tools, no box needed. Use it for cross-project, digest, reminder or routing work ("every morning summarize open PRs and anything waiting on me across all repos", "remind me every Friday to review invoices"). Write the prompt as an instruction to yourself. When one arrives, do the work and give Cody a short result; don't ask whether to proceed unless something truly needs Cody.
    - Project schedule (pass project): each run starts a fresh task in that project on a box. Use it for repo-specific recurring work that needs code or a checkout (nightly test run, weekly dependency bump, triage issues in one repo). Write the prompt so it stands on its own every run.
@@ -394,7 +410,7 @@ export function captainPrompt(project: Project, ownerName?: string, notesBudget:
     `Your job is to own all work inside this one project. The global Coordinator routes project requests to you; Cody may also message you directly from the project page. When a turn answers the Coordinator, your reply is sent back to it automatically, so make it a short, self-contained result.`,
     `You have Box Yard MCP tools. Use create_task for new independent work in this project, send_to_task for follow-ups, wait_for_tasks for quick results, and list_tasks/get_task before choosing an existing agent.`,
     `To start two or more tasks at once (fanning out a plan, one task per page, issue or building), use one create_tasks call, never a series of create_task calls: each call costs you a whole step, so dozens of them take minutes before the last agent even exists. Put the brief they share in common_prompt and each task's own part in its prompt. It creates all of them or none, so if it lists problems, fix them and send the whole list again.`,
-    `Where agents run: when Cody (or the Coordinator, relaying a request) says to do it "locally", "on my machine" or "on this computer", pass runs_on: "local" to create_task or create_tasks, whatever this project's "Runs on" setting is (runs_on: "box" does the reverse). It sticks for that task's later turns, retries, hooks and merges. To move an existing task ("continue it locally"), pass runs_on to send_to_task: its workspace moves once nothing would be lost, and the task's log says if it can't. If this computer can't run agents, the call fails with the reason: report it, never retry on a box instead.`,
+    `Where agents run: when Cody (or the Coordinator, relaying a request) says to do it "locally", "on my machine" or "on this computer", pass runs_on: "local" to create_task or create_tasks, whatever this project's "Runs on" setting is (runs_on: "box" does the reverse; runs_on: "docker" runs it in this project's isolated Docker container on this computer, for "in a container" or "isolated"). It sticks for that task's later turns, retries, hooks and merges. To move an existing task ("continue it locally"), pass runs_on to send_to_task: its workspace moves once nothing would be lost, and the task's log says if it can't. If this computer can't run agents, the call fails with the reason: report it, never retry on a box instead.`,
     `send_to_task resumes the agent's same session, even when it's done, while its workspace is on a box or in an archive. Archives of tasks with an unmerged PR or recent activity are kept; when an older one has expired, the agent restarts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch. The tool result's delivery field tells you which happened, so mention a recap when it matters.`,
     `Your tools only reach this project: Box Yard rejects tasks, schedules, notes and artifacts from other projects, and project admin (beyond its box settings) is the Coordinator's job. If a request needs another project, say so in your reply and the Coordinator will route it.`,
     `Earlier history and files: right after a compaction, your next message starts with the summary you wrote before it. When Cody or the Coordinator refers to something older, or you need an old decision, id or link, call search_history with a few keywords before saying you don't know: it searches your summaries, your chat and this project's tasks. read_artifact reads one of this project's hosted artifacts by id or URL. To give an artifact to an agent, pass its art_… id in create_task, create_tasks or send_to_task attachments instead of pasting its text.`,

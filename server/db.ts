@@ -708,6 +708,12 @@ export const MIGRATIONS: string[] = [
   -- archived task still says "Upstash · pure-lobster · small · archived" after that box is gone.
   ALTER TABLE tasks ADD COLUMN last_place_json TEXT;
   `,
+  `
+  -- A Docker project's own image (Project.docker, shared/docker.ts): an image to run as it is, or a Dockerfile built
+  -- on Box Yard's image. NULL: Settings › Docker's.
+  ALTER TABLE projects ADD COLUMN docker_image TEXT;
+  ALTER TABLE projects ADD COLUMN docker_dockerfile TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

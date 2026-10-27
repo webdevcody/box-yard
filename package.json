@@ -19,6 +19,7 @@
     "deploy:vps": "bash scripts/deploy-vps.sh",
     "worker-snapshot": "tsx scripts/make-worker-snapshot.ts",
     "smoke:runpod": "tsx scripts/smoke-runpod.ts",
+    "test:docker": "BOXYARD_DOCKER_E2E=1 vitest run test/docker-real.e2e.test.ts",
     "demo": "./yard demo"
   },
   "dependencies": {

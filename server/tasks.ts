@@ -55,6 +55,8 @@ import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
+import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
+import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
@@ -140,6 +142,30 @@ const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tas
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
+const DOCKER_SLOT_WAIT = "Waiting for a free slot in its project's Docker container (its Tasks running at once, or Settings › Docker › Tasks running at once per container)"
+
+/** The runners whose boxes are a project's own: RunPod GPU pods (`runpod-<projectId>[-<n>]`) and its Docker container. */
+type OwnRunner = "gpu" | "docker"
+/** How placement's log lines name a project's own boxes (toOwnBox, fromOwnBox). */
+const OWN_BOX: Record<OwnRunner, { asked: string; projectNow: string; to: string; from: string; stays: string; at: (boxId: string) => string }> = {
+  gpu: {
+    asked: "It was asked to run on a RunPod GPU pod",
+    projectNow: "Its project runs on a RunPod GPU pod now",
+    to: "the GPU pod",
+    from: "on the GPU pod",
+    stays: "on its project's GPU pod",
+    at: (boxId) => `its project's GPU pod #${gpuBoxIndex(boxId)}`,
+  },
+  docker: {
+    asked: "It was asked to run in a Docker container",
+    projectNow: "Its project runs in a Docker container now",
+    to: "its Docker container",
+    from: "in its Docker container",
+    stays: "in its project's Docker container",
+    at: () => "its project's Docker container",
+  },
+}
+const ownRunnerOf = (boxId: string | null | undefined): OwnRunner | null => (isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : null)
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 /** Note suggestions one task can leave for its retro; past that the agent is logging, not suggesting. */
 const MAX_SUGGESTIONS_PER_TASK = 20
@@ -177,6 +203,26 @@ export interface TaskManagerDeps {
   github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
   /** RunPod GPU pods (Runs on: RunPod GPU), when this install has the runner. */
   gpu?: GpuRunner | null
+  /** Docker containers on this computer (Runs on: Docker container), when this install has the runner. */
+  docker?: DockerRunner | null
+}
+
+/** What TaskManager uses of the Docker containers' provider: DockerProvider, or FolderDockerProvider (mock mode, tests). */
+export type DockerBoxProvider = BoxProvider & {
+  /** This install's containers (and volumes left without one), from Docker; cached a few seconds unless `fresh`. */
+  list(fresh?: boolean): Promise<DockerContainerState[]>
+  /** The containers as last listed (no Docker call). */
+  cached(): DockerContainerState[]
+  /** Stop a container; its volume keeps every workspace. */
+  stop(boxId: string): Promise<void>
+}
+
+/** What TaskManager needs of the Docker runner (server/docker/service.ts). */
+export interface DockerRunner {
+  provider: DockerBoxProvider
+  settings(): DockerSettings
+  /** Why containers can't start now (Docker missing or stopped), or null. */
+  problem(): Promise<string | null>
 }
 
 /** What TaskManager needs of the RunPod GPU runner (server/runpod/service.ts). */
@@ -201,7 +247,8 @@ interface PreparedWorkspace {
 }
 
 /** "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. */
-const onBox = (boxId: string) => (isLocalRunnerBox(boxId) ? "on this computer" : isGpuBox(boxId) ? `on its project's GPU pod #${gpuBoxIndex(boxId)}` : `on box ${boxId}`)
+const onBox = (boxId: string) =>
+  isLocalRunnerBox(boxId) ? "on this computer" : isGpuBox(boxId) ? `on its project's GPU pod #${gpuBoxIndex(boxId)}` : isDockerBox(boxId) ? "in its project's Docker container" : `on box ${boxId}`
 
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
@@ -471,11 +518,17 @@ export class TaskManager {
   private gpuSeen: GpuPods = []
   /** Tasks whose Captain heard why they wait for a GPU pod (a $/hr cap), by the kind of wait: a notice once. */
   private gpuWaitNoticed = new Map<string, string>()
+  /** Docker containers on this computer, or null when this install has no Docker runner. */
+  private readonly docker: DockerRunner | null
+  private lastDockerSweepAt = 0
+  /** Tasks whose Captain heard why they wait for Docker (missing or stopped), by the reason: a notice once. */
+  private dockerWaitNoticed = new Map<string, string>()
   /** The task event bus hooks listen on (see subscribe). */
   private readonly listeners = new Set<TaskEventListener>()
 
   constructor(deps: TaskManagerDeps) {
     this.gpu = deps.gpu ?? null
+    this.docker = deps.docker ?? null
     this.c = deps.config
     this.store = deps.store
     this.provider = deps.provider
@@ -1131,6 +1184,7 @@ export class TaskManager {
   private slotsFor(boxId: string) {
     if (isLocalRunnerBox(boxId)) return this.settings.get().localAgents
     if (isGpuBox(boxId)) return this.store.projectBoxLimits(gpuBoxProject(boxId)).agentsPerBox ?? this.gpu?.settings().agentsPerPod ?? 1
+    if (isDockerBox(boxId)) return this.store.projectBoxLimits(dockerBoxProject(boxId)).agentsPerBox ?? this.docker?.settings().agentsPerContainer ?? 1
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
   }
 
@@ -1152,9 +1206,12 @@ export class TaskManager {
     return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? this.settings.get().workerSize
   }
 
-  /** Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Tasks running at once on this computer). */
+  /**
+   * Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Tasks running at once
+   * on this computer), and GPU pods' and Docker containers' their own slots.
+   */
   runningTotal() {
-    return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id) && !isGpuBox(r.box_id)).length
+    return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id) && !isGpuBox(r.box_id) && !isDockerBox(r.box_id)).length
   }
 
   /**
@@ -1229,6 +1286,36 @@ export class TaskManager {
       pods: pods.map(({ boxId, pod }) => `#${gpuBoxIndex(boxId)} ${boxId}: ${pod.status.toLowerCase()}${pod.gpu?.id ? ` ${shortGpu(pod.gpu.id)}` : ""}${pod.cost ? ` ${usd(pod.cost)}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} tasks running`),
       spend: usd(pods.reduce((sum, x) => sum + (x.pod.cost ?? 0), 0)),
     }
+  }
+
+  /**
+   * A Docker project's container, image and limits as they apply now (list_projects, pool_status), from the
+   * containers as last listed. Null when this Box Yard has no Docker runner.
+   */
+  projectDockerSettings(p: Pick<Project, "id" | "docker">) {
+    if (!this.docker) return null
+    const s = this.docker.settings()
+    const boxId = dockerBoxId(p.id)
+    const c = this.docker.provider.cached().find((x) => x.boxId === boxId)
+    return {
+      image: p.docker.dockerfile
+        ? "its own Dockerfile (this project), built on this computer"
+        : p.docker.image
+          ? `${p.docker.image} (this project)`
+          : `${s.image ?? "Box Yard's own, built from docker/"} (Settings › Docker › Image)`,
+      limits: `${s.cpus} CPUs and ${s.memoryMb} MB of memory per container (Settings › Docker)`,
+      agentsPerContainer: this.slotsFor(boxId),
+      whenIdle: s.idleMinutes ? `stopped after ${s.idleMinutes} min with no agent running; its volume keeps every workspace` : "never stopped when idle (Settings › Docker)",
+      container: c
+        ? `${c.name}: ${c.state}${c.hostPortBase ? `, previews on localhost:${c.hostPortBase}-${c.hostPortBase + DOCKER_MAX_TASKS - 1}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} tasks running`
+        : "none yet (its next task makes it)",
+    }
+  }
+
+  /** List the Docker containers again (pool_status) unless Docker is down, when the last list stays. */
+  async refreshDockerContainers(): Promise<void> {
+    if (!this.docker || (await this.docker.problem())) return
+    await this.docker.provider.list(true).catch(() => {})
   }
 
   /** Box creation for pool_status: how many are on their way, how many may be at once, and any backoff. */
@@ -1308,14 +1395,22 @@ export class TaskManager {
    */
   async boxContents(boxId: string): Promise<BoxContents> {
     const pod = isGpuBox(boxId)
-    const box = pod ? null : this.store.getBox(boxId)
+    const container = isDockerBox(boxId)
+    const box = pod || container ? null : this.store.getBox(boxId)
     const rows = this.store.listTaskRows({ boxId }).sort((a, b) => a.created_at - b.created_at)
-    if (!box && !pod) throw new NotFoundError(`Box ${boxId} not found`)
+    if (!box && !pod && !container) throw new NotFoundError(`Box ${boxId} not found`)
     let up = box?.status === "ready"
     if (pod) {
       if (!this.gpu) throw new NotFoundError(`Box ${boxId} not found`)
       up = Boolean((await this.gpuPods())?.some((p) => p.boxId === boxId && p.pod.status === "RUNNING"))
       if (!up && !rows.length) throw new NotFoundError(`GPU pod ${boxId} isn't running`)
+    }
+    if (container) {
+      if (!this.docker) throw new NotFoundError(`Box ${boxId} not found`)
+      // Stopped or not, its volume holds the workspaces: the check below starts it to read them.
+      const listed = await this.docker.provider.list().catch(() => null)
+      up = Boolean(listed?.some((c) => c.boxId === boxId))
+      if (!up && !rows.length) throw new NotFoundError(`Docker container ${boxId} doesn't exist`)
     }
     let git = new Map<string, WorkspaceGit>()
     let reachable = up
@@ -1332,9 +1427,11 @@ export class TaskManager {
         ? up
           ? null
           : `GPU pod ${boxId} isn't running, so there's no pod to terminate`
-        : box!.status === "ready"
+        : container
           ? null
-          : `Box ${boxId} is ${box!.status}`
+          : box!.status === "ready"
+            ? null
+            : `Box ${boxId} is ${box!.status}`
     const tasks = rows.map((r) => {
       const archived = this.hasFreshArchive(r)
       // A box that isn't up has no workspace to check, but its running and queued tasks still say so.
@@ -1349,7 +1446,7 @@ export class TaskManager {
             reachable,
             git: git.get(r.id) ?? null,
             archived,
-            archivesAll: pod,
+            archivesAll: pod || container,
           })
         : { verdict: "ok" as const, detail: "no workspace to reach; it restores from its last archive" }
       return {
@@ -1366,8 +1463,8 @@ export class TaskManager {
     })
     return {
       boxId,
-      kind: pod ? "pod" : "box",
-      label: pod ? gpuPodLabel(boxId, this.store.getProjectName(gpuBoxProject(boxId))) : boxId,
+      kind: pod ? "pod" : container ? "container" : "box",
+      label: pod ? gpuPodLabel(boxId, this.store.getProjectName(gpuBoxProject(boxId))) : container ? dockerLabel(boxId, this.store.getProjectName(dockerBoxProject(boxId))) : boxId,
       tasks,
       running: rows.filter((r) => r.current_turn_id).length,
       diskUsedBytes: box?.disk_free_bytes != null && box.disk_total_bytes != null ? Math.max(0, box.disk_total_bytes - box.disk_free_bytes) : null,
@@ -1424,9 +1521,14 @@ export class TaskManager {
     const stopAgents = owner && Boolean(opts.stopAgents)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("That's this computer, not a box: local tasks keep their folders until each task is deleted.")
     const pod = isGpuBox(boxId)
-    const box = pod ? null : this.store.getBox(boxId)
-    const gone = (): BoxDeleteResult => ({ boxId, kind: pod ? "pod" : "box", label: boxId, archived: [], fromGitHub: [], alreadyGone: true })
-    if (!pod) {
+    const container = isDockerBox(boxId)
+    const kind = pod ? "pod" : container ? "container" : "box"
+    const box = pod || container ? null : this.store.getBox(boxId)
+    const gone = (): BoxDeleteResult => ({ boxId, kind, label: boxId, archived: [], fromGitHub: [], alreadyGone: true })
+    if (container) {
+      const listed = this.docker ? await this.docker.provider.list().catch(() => null) : null
+      if (listed && !listed.some((c) => c.boxId === boxId) && !this.store.listTaskRows({ boxId }).length) return gone()
+    } else if (!pod) {
       if (!box) {
         // Already deleted or lost: deleting it again is a no-op.
         if (this.history.boxIds().includes(boxId)) return gone()
@@ -1439,15 +1541,15 @@ export class TaskManager {
       }
     }
     const check = await this.boxContents(boxId)
-    const reachable = pod || box!.status === "ready"
+    const reachable = pod || container || box!.status === "ready"
     if (!owner && check.refusals.length) throw new ConflictError(`${check.label} was not ${pod ? "terminated" : "deleted"}:\n- ${check.refusals.join("\n- ")}`)
-    if (pod && check.busy) throw new ConflictError(check.busy)
+    if ((pod || container) && check.busy) throw new ConflictError(check.busy)
     const risky = reachable ? atRisk(check) : []
     if (risky.length && !opts.override) {
       throw new ConflictError(`${check.label} was not ${pod ? "terminated" : "deleted"}: ${risky.map(refusalLine).join("; ")}. Choose ${pod ? "Terminate" : "Delete"} anyway to archive and ${pod ? "terminate" : "delete"} it.`)
     }
     const overridden = risky.length ? withOwner(` Cody chose ${pod ? "Terminate" : "Delete"} anyway past: ${risky.map(refusalLine).join("; ")}.`, this.owner()) : ""
-    const result: BoxDeleteResult = { boxId, kind: pod ? "pod" : "box", label: check.label, archived: [], fromGitHub: [] }
+    const result: BoxDeleteResult = { boxId, kind, label: check.label, archived: [], fromGitHub: [] }
     // The check ran before the box was claimed: an agent's delete also refuses a turn that started or got queued since.
     const lateCheck = () => {
       if (owner) return
@@ -1466,6 +1568,20 @@ export class TaskManager {
         await this.stopGpuPod(boxId, { actor, reason: `${reason}${overridden}` })
         // stopGpuPod archived every started workspace (a pod's tasks keep its id and restore on its next start).
         result.archived = this.store.listTaskRows({ boxId }).filter((r) => r.session_started).map((r) => r.id)
+        return result
+      } finally {
+        this.boxOps.delete(boxId)
+        this.emitBoxes()
+        this.schedule()
+      }
+    }
+    if (container) {
+      this.claimBox(boxId, "delete", stopAgents)
+      try {
+        lateCheck()
+        if (stopAgents) await this.stopAgentsOn(boxId)
+        const reason = opts.reason?.trim() || (owner ? "Deleted from Settings › Docker." : "No reason given.")
+        Object.assign(result, await this.deleteDockerContainer(boxId, { actor, reason: `${reason}${overridden}` }))
         return result
       } finally {
         this.boxOps.delete(boxId)
@@ -1577,13 +1693,17 @@ export class TaskManager {
     return [...new Set([...this.store.listTaskRows({ boxId }).map((r) => r.project_id), ...(owner ? [owner] : [])])]
   }
 
-  /** The box (or GPU pod) holds `projectId`'s work and no other project's: what a Captain may delete. */
+  /** The box (or GPU pod, or Docker container) holds `projectId`'s work and no other project's: what a Captain may delete. */
   onlyProjectOn(boxId: string, projectId: string): boolean {
-    const on = [...new Set([...(isGpuBox(boxId) ? [gpuBoxProject(boxId)] : []), ...this.projectsOnBox(boxId)])]
+    const own = isGpuBox(boxId) ? [gpuBoxProject(boxId)] : isDockerBox(boxId) ? [dockerBoxProject(boxId)] : []
+    const on = [...new Set([...own, ...this.projectsOnBox(boxId)])]
     return on.length > 0 && on.every((p) => p === projectId)
   }
 
-  /** Running boxes and GPU pods delete_idle_boxes looks at: with a project, only those holding nothing but its work. */
+  /**
+   * Running boxes and GPU pods delete_idle_boxes looks at: with a project, only those holding nothing but its work.
+   * Not Docker containers: they cost nothing idle and stop on their own (sweepDocker); delete_box deletes one.
+   */
   async deleteCandidates(projectId?: string): Promise<string[]> {
     const pods = this.gpu?.enabled() ? ((await this.gpuPods()) ?? []).filter((p) => p.pod.status === "RUNNING").map((p) => p.boxId) : []
     const ids = [...this.store.listBoxes().filter((b) => b.status === "ready").map((b) => b.id), ...pods]
@@ -2018,6 +2138,7 @@ export class TaskManager {
     if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
     if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
+    if (project.runner === "docker" || isDockerBox(boxId)) throw new BadRequestError(`${project.name} runs in a Docker container: its volume keeps caches between runs, so it has no box snapshot.`)
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
     if (box.status !== "ready") throw new BadRequestError(`Box ${boxId} is ${box.status}; only a running box can be snapshotted.`)
@@ -2067,6 +2188,7 @@ export class TaskManager {
 
   /** A project being deleted: its snapshot goes too. A job still running for it drops its own when it sees the project gone. */
   async projectDeleted(projectId: string) {
+    await this.dropDockerContainer(projectId, { kind: "owner" }, "Its project was deleted.")
     const snap = this.store.getProject(projectId)?.snapshot
     if (!snap) return
     this.store.setProjectSnapshot(projectId, null)
@@ -2449,7 +2571,7 @@ export class TaskManager {
       if (!claimed) {
         if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
         const local = isLocalRunnerBox(boxId) ? (this.localWait(row) ?? { text: LOCAL_SLOT_WAIT, by: [] }) : null
-        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? GPU_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
+        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? GPU_SLOT_WAIT : isDockerBox(boxId) ? DOCKER_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
         this.emitTask(row.id)
         continue
       }
@@ -2552,15 +2674,16 @@ export class TaskManager {
       this.setWaitReason(row.id, `Waiting while box ${row.box_id} is ${op === "clear" ? "cleared" : op === "resize" ? "resized" : op === "snapshot" ? "snapshotted" : "deleted"}`)
       return null
     }
-    // The task's runs_on, else its project's "Runs on": it moves to (or off) this computer or its GPU pod when nothing
-    // would be lost.
+    // The task's runs_on, else its project's "Runs on": it moves to (or off) this computer, its GPU pod or its Docker
+    // container when nothing would be lost.
     const runner = this.store.taskRunner(row)
-    if (isGpuBox(row.box_id) && !(runner === "gpu" && gpuBoxProject(row.box_id) === row.project_id)) {
-      const moved = await this.fromGpu(row, runner)
-      return moved === "stay" ? this.gpuSlot(row) : moved
+    const on = ownRunnerOf(row.box_id)
+    if (on && !this.onOwnBox(row, runner)) {
+      const moved = await this.fromOwnBox(row, runner)
+      return moved === "stay" ? this.ownSlot(row, on) : moved
     }
-    if (runner === "gpu") {
-      const here = await this.toGpu(row)
+    if (runner === "gpu" || runner === "docker") {
+      const here = await this.toOwnBox(row, runner)
       if (here !== "stay") return here
     } else if (runner === "local") {
       const here = await this.toLocal(row)
@@ -2791,72 +2914,89 @@ export class TaskManager {
     return !wait
   }
 
+  /** Its workspace is on its project's own box for `runner`: its GPU pod, or its Docker container. */
+  private onOwnBox(row: TaskRow, runner: Runner): boolean {
+    if (runner === "gpu") return isGpuBox(row.box_id) && gpuBoxProject(row.box_id!) === row.project_id
+    if (runner === "docker") return isDockerBox(row.box_id) && dockerBoxProject(row.box_id!) === row.project_id
+    return false
+  }
+
+  /** A pod of its project's (`gpuSlot`) or its project's container (`dockerSlot`) for its next turn, or null to wait. */
+  private ownSlot(row: TaskRow, runner: OwnRunner): Promise<string | null> {
+    return runner === "gpu" ? this.gpuSlot(row) : this.dockerSlot(row)
+  }
+
   /**
-   * A task of a project that runs on RunPod GPU (shared/runpod.ts): its turns run on one of the project's pods,
-   * `runpod-<projectId>[-<n>]`, which `gpuTarget` picks and launch starts when it isn't up. A workspace still on a
-   * box or on this computer moves to a pod when nothing would be lost (`moveBlock`, no upload limit: a restore over
-   * SSH has none); otherwise it stays where it is ("stay" for a box; on this computer it keeps running there) and
-   * its log says why.
+   * A task of a project that runs on boxes of its own: RunPod GPU pods (shared/runpod.ts), `runpod-<projectId>[-<n>]`,
+   * which `gpuTarget` picks, or its Docker container (shared/docker.ts), `docker-<projectId>`. Launch starts the pod
+   * or container when it isn't up. A workspace still on a box or on this computer moves there when nothing would be
+   * lost (`moveBlock`, no upload limit: a restore over SSH or docker exec has none); otherwise it stays where it is
+   * ("stay" for a box; on this computer it keeps running there) and its log says why.
    */
-  private async toGpu(row: TaskRow): Promise<string | null | "stay"> {
-    if (isGpuBox(row.box_id)) return this.gpuSlot(row)
-    const why = row.runs_on ? "it was asked to run on a RunPod GPU pod" : "its project runs on a RunPod GPU pod now"
+  private async toOwnBox(row: TaskRow, runner: OwnRunner): Promise<string | null | "stay"> {
+    const own = OWN_BOX[runner]
+    if (this.onOwnBox(row, runner)) return this.ownSlot(row, runner)
+    const said = row.runs_on ? own.asked : own.projectNow
+    const why = said.charAt(0).toLowerCase() + said.slice(1)
     if (isLocalRunnerBox(row.box_id)) {
       if (this.archiving.has(row.id)) return null
       const block = row.session_started ? this.moveBlock(row, Infinity) : null
       if (block && this.c.archiveWorkspaces && !this.archiveHoldsWorkspace(row) && !this.archiveErrors.has(row.id)) {
-        this.setWaitReason(row.id, "Waiting for its workspace on this computer to be archived, so it can move to the GPU pod")
+        this.setWaitReason(row.id, `Waiting for its workspace on this computer to be archived, so it can move to ${own.to}`)
         void this.archive(row.id, { forMove: true }).finally(() => this.schedule())
         return null
       }
       if (block) {
-        this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:gpu`, `${row.runs_on ? "It was asked to run on a RunPod GPU pod" : "Its project runs on a RunPod GPU pod now"}, but its workspace stays on this computer: it can't move safely (${block}).`)
+        this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:${runner}`, `${said}, but its workspace stays on this computer: it can't move safely (${block}).`)
         return this.localSlot(row)
       }
+      const target = runner === "docker" ? await this.dockerTarget(row) : null
+      if (runner === "docker" && !target) return null
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       void this.removeTaskDir(LOCAL_BOX_ID, row.id).catch(() => {})
-      this.addEvent(row.id, `Moved from this computer to its project's GPU pod: ${why}.`)
-      return this.gpuSlot(row)
+      this.addEvent(row.id, `Moved from this computer to ${runner === "gpu" ? "its project's GPU pod" : own.at(target!)}: ${why}.`)
+      return target ? this.dockerAssign(row, target) : this.ownSlot(row, runner)
     }
-    if (row.box_id) {
+    if (row.box_id && !ownRunnerOf(row.box_id)) {
       const box = this.store.getBox(row.box_id)
       if (box?.status === "creating") return null
       if (box?.status === "ready") {
         if (this.archiving.has(row.id)) return null
         const block = row.session_started ? this.moveBlock(row, Infinity) : null
         if (block) {
-          this.noteOnce(row.id, `${row.id}:${box.id}:gpu`, `${row.runs_on ? "It was asked to run on a RunPod GPU pod" : "Its project runs on a RunPod GPU pod now"}, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
+          this.noteOnce(row.id, `${row.id}:${box.id}:${runner}`, `${said}, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
           return "stay"
         }
-        const target = await this.gpuTarget(row)
+        const target = runner === "gpu" ? await this.gpuTarget(row) : await this.dockerTarget(row)
         if (!target) return null
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
         void this.removeTaskDir(box.id, row.id).catch(() => {})
-        this.addEvent(row.id, `Moved from box ${box.id} to its project's GPU pod #${gpuBoxIndex(target)}: ${why}.`)
-        return this.gpuAssign(row, target)
+        this.addEvent(row.id, `Moved from box ${box.id} to ${own.at(target)}: ${why}.`)
+        return runner === "gpu" ? this.gpuAssign(row, target) : this.dockerAssign(row, target)
       }
-      // Box is gone or lost; the workspace comes back from the archive, on the pod.
+      // Box is gone or lost; the workspace comes back from the archive, on the pod or in the container.
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     }
-    return this.gpuSlot(row)
+    return this.ownSlot(row, runner)
   }
 
   /**
-   * A task on a GPU pod whose project (or its own runs_on) moved to boxes or this computer: it moves once its
-   * workspace is archived (the turn-end archive usually is) and, for a box, pushed and small enough to upload.
-   * One that can't move stays on the pod ("stay").
+   * A task on its project's GPU pod or Docker container whose project (or its own runs_on) moved to another runner:
+   * it moves once its workspace is archived (the turn-end archive usually is) and, for a box, pushed and small
+   * enough to upload. One that can't move stays where it is ("stay").
    */
-  private async fromGpu(row: TaskRow, runner: Runner): Promise<string | null | "stay"> {
+  private async fromOwnBox(row: TaskRow, runner: Runner): Promise<string | null | "stay"> {
     const from = row.box_id!
+    const own = OWN_BOX[ownRunnerOf(from)!]
     if (this.archiving.has(row.id)) return null
     const block = row.session_started ? this.moveBlock(row, runner === "box" ? MOVE_MAX_ARCHIVE_BYTES : Infinity) : null
     if (block && this.c.archiveWorkspaces && !this.archiveHoldsWorkspace(row) && !this.archiveErrors.has(row.id)) {
-      this.setWaitReason(row.id, "Waiting for its workspace on the GPU pod to be archived, so it can move")
+      this.setWaitReason(row.id, `Waiting for its workspace ${own.from} to be archived, so it can move`)
       void this.archive(row.id, { forMove: true }).finally(() => this.schedule())
       return null
     }
     if (block) {
-      this.noteOnce(row.id, `${row.id}:${from}:${runner}`, `It should run on ${RUNNER_PHRASE[runner]} now, but its workspace stays on its project's GPU pod: it can't move safely (${block}).`)
+      this.noteOnce(row.id, `${row.id}:${from}:${runner}`, `It should run on ${RUNNER_PHRASE[runner]} now, but its workspace stays ${own.stays}: it can't move safely (${block}).`)
       return "stay"
     }
     let to: string | null
@@ -2866,14 +3006,17 @@ export class TaskManager {
     } else if (runner === "gpu") {
       to = await this.gpuTarget(row)
       if (!to) return null
+    } else if (runner === "docker") {
+      to = await this.dockerTarget(row)
+      if (!to) return null
     } else {
       to = await this.pickBox(row.id)
       if (!to) return null
     }
     this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     void this.removeTaskDir(from, row.id).catch(() => {})
-    this.addEvent(row.id, `Moved from its project's GPU pod to ${runner === "box" ? `box ${to}` : RUNNER_PHRASE[runner]}.`)
-    return runner === "gpu" ? this.gpuAssign(row, to) : this.assign(row.id, to)
+    this.addEvent(row.id, `Moved from ${own.stays.replace(/^(on|in) /, "")} to ${runner === "box" ? `box ${to}` : RUNNER_PHRASE[runner]}.`)
+    return runner === "gpu" ? this.gpuAssign(row, to) : runner === "docker" ? this.dockerAssign(row, to) : this.assign(row.id, to)
   }
 
   /** One of the project's GPU pods for a task's next turn, or null (with the reason) while it must wait. */
@@ -3023,8 +3166,190 @@ export class TaskManager {
     this.notice(`⚠️ **${row.title}** waits: ${reason}.`, { taskId: row.id, projectIds: [row.project_id] })
   }
 
-  /** Progress while a GPU pod starts: one line in the log of each task starting on it. */
-  gpuProgress(boxId: string, message: string) {
+  /** Its project's container for a Docker task's next turn, or null (with the reason) while it must wait. */
+  private async dockerSlot(row: TaskRow): Promise<string | null> {
+    const target = await this.dockerTarget(row)
+    return target ? this.dockerAssign(row, target) : null
+  }
+
+  /**
+   * A Docker task's next turn runs in its project's one container, `docker-<projectId>` (launch makes or starts it),
+   * when Docker is up and the container has a free slot (its project's Tasks running at once, else Settings › Docker ›
+   * Tasks running at once per container); else null with the reason. Never anywhere else: it waits for Docker rather than run
+   * outside a container.
+   */
+  private async dockerTarget(row: TaskRow): Promise<string | null> {
+    if (!this.docker) {
+      this.setWaitReason(row.id, "Waiting: Docker containers aren't available on this Box Yard")
+      return null
+    }
+    const problem = (await this.docker.problem()) ?? this.dockerClaudeProblem(row.project_id)
+    if (problem) {
+      this.dockerWait(row, problem)
+      return null
+    }
+    const target = dockerBoxId(row.project_id)
+    if (this.runningOn(target) >= this.slotsFor(target)) {
+      this.setWaitReason(row.id, DOCKER_SLOT_WAIT)
+      return null
+    }
+    const limit = this.limitBlock(row, target)
+    if (limit) {
+      this.setWaitReason(row.id, `Waiting: ${limit.text}`, null, limit.by)
+      return null
+    }
+    return target
+  }
+
+  /** A Docker project's agents need a Claude key (Settings › Credentials, or the project's env): a container can't use this computer's login. */
+  private dockerClaudeProblem(projectId: string): string | null {
+    if (this.c.mock || Object.keys(this.settings.credentials.claudeEnv()).length) return null
+    const env = this.store.projectEnv(projectId)
+    return env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY ? null : DOCKER_NEEDS_CLAUDE_KEY
+  }
+
+  /** Put a task in its project's container. A full one (DOCKER_MAX_TASKS folders, one preview port each) parks an archived, resting one. */
+  private dockerAssign(row: TaskRow, target: string): string {
+    this.dockerWaitNoticed.delete(row.id)
+    if (this.store.getTaskRow(row.id)?.box_id === target) return target
+    if (this.store.listTaskRows({ boxId: target }).length >= DOCKER_MAX_TASKS) this.evictOne(target, row.id)
+    return this.assign(row.id, target)
+  }
+
+  /** A Docker task waits for Docker (not installed, or not running): the reason on the task, and its Captain hears it once. */
+  private dockerWait(row: TaskRow, reason: string) {
+    this.setWaitReason(row.id, `Waiting: ${reason}`)
+    if (this.dockerWaitNoticed.get(row.id) === reason) return
+    this.dockerWaitNoticed.set(row.id, reason)
+    this.notice(`⚠️ **${row.title}** waits: ${reason}.`, { taskId: row.id, projectIds: [row.project_id] })
+  }
+
+  /** A Docker container was made or started (DockerProvider), or stopped, deleted or lost (here), for the box history. */
+  dockerEvent(e: { boxId: string; kind: "created" | "started" | "stopped" | "deleted" | "lost"; detail: string; actor?: BoxActor; reason?: string }) {
+    const reasons = {
+      created: "A task of a Docker project needed its container.",
+      started: "A task of a Docker project needed its stopped container.",
+      stopped: "The container was stopped.",
+      deleted: "The container was deleted.",
+      lost: "The container went away.",
+    }
+    this.recordBoxEvent({
+      boxId: e.boxId,
+      boxName: dockerLabel(e.boxId, this.store.getProjectName(dockerBoxProject(e.boxId))),
+      type: e.kind,
+      actor: e.actor ?? { kind: e.kind === "created" || e.kind === "started" ? "scheduler" : "provider" },
+      reason: e.reason ?? reasons[e.kind],
+      detail: e.detail,
+      size: null,
+    })
+  }
+
+  /**
+   * Stop a Docker project's container now (Stop in Settings › Docker, or the idle sweep). Nothing is archived: its
+   * volume keeps every workspace, and the next turn starts it again. Refused while an agent runs in it.
+   */
+  async stopDockerContainer(boxId: string, opts: { actor: BoxActor; reason: string }): Promise<void> {
+    if (!this.docker || !isDockerBox(boxId)) throw new BadRequestError(`${boxId} isn't a Docker container of this Box Yard`)
+    if (this.store.listTaskRows({ boxId }).some((r) => r.current_turn_id || r.status === "starting")) throw new ConflictError("An agent is running in that container; stop it first")
+    const was = (await this.docker.provider.list()).find((c) => c.boxId === boxId)
+    if (was?.state !== "running") return
+    await this.docker.provider.stop(boxId)
+    this.dockerEvent({ boxId, kind: "stopped", detail: `Stopped ${was.name}; its volume keeps every workspace.`, actor: opts.actor, reason: opts.reason })
+  }
+
+  /**
+   * Delete a Docker project's container and its volume (Delete in Settings › Docker, delete_box). Every started
+   * workspace is archived first (one whose PR is merged and fully pushed needs none); if one can't be, nothing is
+   * deleted. Its tasks restore from their archive on their next turn, in a new container. The image stays.
+   */
+  private async deleteDockerContainer(boxId: string, opts: { actor: BoxActor; reason: string }): Promise<Pick<BoxDeleteResult, "archived" | "fromGitHub">> {
+    if (!this.docker) throw new BadRequestError("Docker containers aren't available on this Box Yard")
+    const archived: string[] = []
+    const fromGitHub: string[] = []
+    const kept: string[] = []
+    for (const row of this.store.listTaskRows({ boxId })) {
+      if (!row.session_started) continue
+      if (await this.skipArchiveIfPushed(row.id, boxId, `delete its Docker container`)) {
+        fromGitHub.push(row.id)
+        continue
+      }
+      await this.archiveUnlessHeld(row.id).catch(() => {})
+      const fresh = this.store.getTaskRow(row.id)
+      if (fresh && !this.archiveHoldsWorkspace(fresh)) kept.push(fresh.id)
+      else archived.push(row.id)
+    }
+    if (kept.length) throw new ConflictError(`${couldntArchive(kept)}, so its Docker container was not deleted: ${this.archiveProblems(kept)}`)
+    const name = (await this.docker.provider.list().catch(() => [])).find((c) => c.boxId === boxId)?.name ?? boxId
+    await this.docker.provider.destroy(boxId)
+    // Their folders went with the volume: each restores from its archive on its next turn, in a new container.
+    for (const row of this.store.listTaskRows({ boxId })) {
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+      this.emitTask(row.id)
+    }
+    this.dockerEvent({ boxId, kind: "deleted", detail: `Deleted ${name} and its volume; the image stays.`, actor: opts.actor, reason: opts.reason })
+    return { archived, fromGitHub }
+  }
+
+  /**
+   * Remove a Docker container and its volume with nothing to keep: its project was deleted (with its tasks). When
+   * Docker can't be asked now, the minute sweep removes it later.
+   */
+  private async dropDockerContainer(projectId: string, actor: BoxActor, reason: string, known?: DockerContainerState) {
+    if (!this.docker) return
+    const boxId = dockerBoxId(projectId)
+    const c = known ?? (await this.docker.provider.list(true).catch(() => [])).find((x) => x.boxId === boxId)
+    if (!c) return
+    try {
+      await this.docker.provider.destroy(boxId)
+    } catch (err) {
+      console.warn(`[box-yard] delete Docker container ${c.name}: ${errorMessage(err)}`)
+      return
+    }
+    this.dockerEvent({ boxId, kind: "deleted", detail: `Deleted ${c.name} and its volume; the image stays.`, actor, reason })
+  }
+
+  /**
+   * Once a minute: stop Docker containers with no turn running, starting or waiting for Settings › Docker › Stop when
+   * idle, and remove ones whose project was deleted. Nothing needs archiving first: the volume keeps every
+   * workspace, and the next turn starts it again. Docker isn't asked at all while nothing uses it (after a first look).
+   */
+  private async sweepDocker(now: number) {
+    if (!this.docker || now - this.lastDockerSweepAt < 60_000) return
+    const first = this.lastDockerSweepAt === 0
+    this.lastDockerSweepAt = now
+    const used = this.docker.provider.cached().length > 0 || this.store.dockerBoxesInUse().length > 0 || this.store.listProjects().some((p) => p.runner === "docker")
+    if (!first && !used) return
+    const s = this.docker.settings()
+    if (await this.docker.problem()) return
+    let containers: DockerContainerState[]
+    try {
+      containers = await this.docker.provider.list(true)
+    } catch (err) {
+      console.warn(`[box-yard] Docker containers: ${errorMessage(err)}`)
+      return
+    }
+    for (const c of containers) {
+      if (!this.store.getProject(c.projectId)) {
+        await this.dropDockerContainer(c.projectId, { kind: "orphan-sweep" }, "Its project no longer exists.", c)
+        continue
+      }
+      if (c.state !== "running" || s.idleMinutes <= 0) continue
+      const residents = this.store.listTaskRows({ boxId: c.boxId })
+      if (residents.some((r) => r.current_turn_id || r.status === "starting")) continue
+      if (this.store.listTaskRows({ projectId: c.projectId }).some((r) => this.wantsTurn(r) && this.store.taskRunner(r) === "docker")) continue
+      const started = c.startedAt ? Date.parse(c.startedAt) || now : now
+      const lastUse = Math.max(started, ...residents.map((r) => r.last_active_at))
+      if (now - lastUse < s.idleMinutes * 60_000) continue
+      console.log(`[box-yard] stopping idle Docker container ${c.name}`)
+      await this.stopDockerContainer(c.boxId, {
+        actor: { kind: "janitor" },
+        reason: `Idle for ${Math.round((now - lastUse) / 60_000)} min (Settings › Docker stops containers after ${s.idleMinutes} min); its volume keeps every workspace.`,
+      }).catch((err) => console.warn(`[box-yard] stop Docker container ${c.name}: ${errorMessage(err)}`))
+    }
+  }
+
+  /** Progress while a GPU pod or Docker container starts: one line in the log of each task starting on it. */
+  startProgress(boxId: string, message: string) {
     for (const row of this.store.listTaskRows({ boxId })) {
       if (row.status === "starting") this.addEvent(row.id, `${message}…`)
     }
@@ -3056,7 +3381,7 @@ export class TaskManager {
     if (!this.gpu) throw new BadRequestError("RunPod GPU isn't available on this Box Yard")
     const residents = this.store.listTaskRows({ boxId })
     if (!opts.force && residents.some((r) => r.current_turn_id || r.status === "starting")) throw new ConflictError("An agent is running on that pod; stop it first")
-    for (const r of residents) if (r.session_started && !this.archiveHoldsWorkspace(r)) await this.archiveFresh(r.id).catch(() => {})
+    for (const r of residents) if (r.session_started) await this.archiveUnlessHeld(r.id).catch(() => {})
     const unsaved = this.store.listTaskRows({ boxId }).filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
     if (unsaved.length && !opts.force) throw new ConflictError(`Couldn't archive ${unsaved.map((r) => r.id).join(", ")}; the pod stays up so nothing is lost`)
     this.gpuTerminating.set(boxId, null)
@@ -3371,6 +3696,10 @@ export class TaskManager {
       const pod = this.gpu?.provider.cached(boxId)
       return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU" } }
     }
+    if (isDockerBox(boxId)) {
+      const d = this.docker?.settings()
+      return { memoryBytes: d ? d.memoryMb * 1024 * 1024 : null, slots, alone, docker: { cpus: d?.cpus ?? null } }
+    }
     return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots, alone }
   }
 
@@ -3403,7 +3732,7 @@ export class TaskManager {
     const agent = this.store.boxAgent(row.id)
     const block = agent ? limitBlock(agent, this.store.boxAgents(boxId, row.id)) : null
     if (!agent || !block) return null
-    const where = isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : `box ${boxId}`
+    const where = isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : isDockerBox(boxId) ? "its Docker container" : `box ${boxId}`
     return { text: boxBlockReason(agent, block, where), by: waitFor(block.by) }
   }
 
@@ -5226,6 +5555,17 @@ export class TaskManager {
     return Boolean(row.archive_path && (row.last_archived_at ?? 0) >= row.last_active_at - slack && fs.existsSync(row.archive_path))
   }
 
+  /**
+   * Archive a task unless its archive already holds its workspace, before its folder is destroyed. One being written
+   * right now (its last turn's, which starts as the turn ends) is waited for first: until it lands, the one before
+   * can pass for current within `hasFreshArchive`'s slack, and the folder would go while it's still being read.
+   */
+  private async archiveUnlessHeld(taskId: string) {
+    while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
+    const row = this.store.getTaskRow(taskId)
+    if (row && !this.archiveHoldsWorkspace(row)) await this.archiveFresh(taskId)
+  }
+
   /** Archive a task unless its archive is already fresh, waiting for one that's being written right now. */
   private async archiveFresh(taskId: string) {
     while (this.archiving.has(taskId)) await new Promise((r) => setTimeout(r, 100))
@@ -5255,6 +5595,7 @@ export class TaskManager {
     const keep = this.c.archiveWorkspaces && (!isLocalRunnerBox(row.box_id) || Boolean(opts.forMove))
     if (!keep && !push) return
     this.archiving.add(taskId)
+    const began = Date.now()
     const boxId = row.box_id
     const file = path.join(this.c.dataDir, "archives", `${taskId}.tgz`)
     const part = `${file}.part`
@@ -5308,7 +5649,11 @@ export class TaskManager {
       fs.renameSync(part, file)
       this.archiveErrors.delete(taskId)
       if (this.store.getTaskRow(taskId)) {
-        this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: Date.now() })
+        // A turn that started while this ran (the next one starts as soon as a turn ends) may have changed the
+        // folder after it was read, so the archive is only as new as its start: else it would pass for one from
+        // after that turn, and a delete or move would skip archiving it again.
+        const ranSince = (this.store.lastTurnStartedAt(taskId) ?? 0) >= began
+        this.store.updateTask(taskId, { archivePath: file, lastArchivedAt: ranSince ? began : Date.now() })
         if (kind === "thin") {
           const wip = res.wip === "clean" ? "nothing was uncommitted" : "uncommitted work comes back as uncommitted changes"
           this.addEvent(
@@ -5678,6 +6023,8 @@ export class TaskManager {
       if (!checkedBoxes.has(boxId)) checkedBoxes.set(boxId, await this.provider.health(boxId).catch(() => "unknown" as const))
       return checkedBoxes.get(boxId)!
     }
+    /** Docker boxes already recorded as lost this pass (one history row, however many turns ran there). */
+    const dockerLost = new Set<string>()
 
     for (const row of active) {
       if (!row.box_id || !row.current_turn_id) continue
@@ -5699,6 +6046,19 @@ export class TaskManager {
         if (h === "error") await this.gpu?.provider.destroy(row.box_id).catch(() => {})
         this.gpuPodEvent({ boxId: row.box_id, kind: "terminated", detail: `Pod ${h}`, actor: { kind: "provider" }, reason: `RunPod reports the pod ${h === "paused" ? "stopped" : h} while a turn ran.` })
         this.interrupt(this.requireRow(row.id), `its GPU pod ${h === "paused" ? "stopped" : `is ${h}`}`)
+        continue
+      }
+      if (isDockerBox(row.box_id) && h !== "running") {
+        // The container stopped (Docker restarted, or someone stopped it) or went with its volume, or Docker itself
+        // stopped: the turn died with it. The next turn starts the container again; a workspace that went with its
+        // volume comes back from its archive.
+        const why = h === "unknown" ? await this.docker?.problem() : null
+        if (h === "unknown" && !why) continue
+        if (h === "gone" && !dockerLost.has(row.box_id)) {
+          dockerLost.add(row.box_id)
+          this.dockerEvent({ boxId: row.box_id, kind: "lost", detail: "Its container and volume are gone", actor: { kind: "provider" }, reason: "Docker reports the container and its volume gone while a turn ran." })
+        }
+        this.interrupt(this.requireRow(row.id), h === "paused" ? "its Docker container stopped" : h === "gone" ? "its Docker container and volume are gone" : `Docker stopped (${why})`)
         continue
       }
       if (h === "gone" || h === "error") {
@@ -5761,6 +6121,7 @@ export class TaskManager {
     await this.sweepRootDisks(now)
     await this.routineUpkeep(now)
     await this.sweepGpuPods(now)
+    await this.sweepDocker(now)
     this.schedule()
   }
 

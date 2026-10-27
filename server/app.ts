@@ -11,7 +11,7 @@ import { Store, BadRequestError, NotFoundError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
-import { TaskManager, type GpuRunner, type TaskManagerDeps } from "./tasks.js"
+import { TaskManager, type DockerRunner, type GpuRunner, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
@@ -43,7 +43,10 @@ import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { RunPodService } from "./runpod/service.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
+import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
+import { DockerService } from "./docker/service.js"
+import { projectDockerPatch } from "./docker/settings.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
 import { CLOUD_PROVIDERS, MAX_TTS_CHARS } from "../shared/tts.js"
@@ -65,6 +68,7 @@ const projectBoxLimits = {
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
   gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
   gpuMachine: gpuMachinePatch.optional(),
+  docker: projectDockerPatch.optional(),
 }
 
 const projectNotesBudget = {
@@ -244,6 +248,8 @@ export interface BoxYard {
   hooks: HookEngine
   notes: ProjectNotes
   retro: NotesRetro
+  /** Settings › Docker and the containers behind "Runs on: Docker container" (docs/docker.md). */
+  docker: DockerService
   start(): Promise<void>
   stop(): void
 }
@@ -257,6 +263,10 @@ export function createBoxYard(
     localRunner?: BoxProvider
     /** Stands in for RunPod GPU pods (tests): `runpod-*` boxes route to its provider, and placement asks it. */
     gpu?: GpuRunner
+    /** Stands in for the Docker runner's placement (tests): `docker-*` boxes route to its provider, and placement asks it. */
+    docker?: DockerRunner
+    /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
+    realDocker?: { claudeBin: string }
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -275,27 +285,54 @@ export function createBoxYard(
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
   // RunPod GPU pods, for projects that run on "RunPod GPU" (docs/runpod.md). Idle until a RunPod key is set.
+  const install = () => {
+    let id = store.getKv("install_id")
+    if (!id) store.setKv("install_id", (id = randomUUID().slice(0, 8)))
+    return id
+  }
   const runpod = new RunPodService({
     store,
     credentials: settings.credentials,
     dataDir: c.dataDir,
-    install: () => {
-      let id = store.getKv("install_id")
-      if (!id) store.setKv("install_id", (id = randomUUID().slice(0, 8)))
-      return id
-    },
+    install,
     git: { name: c.gitUserName, email: c.gitUserEmail },
   })
-  // Every box provider gets the local runner and the GPU pods beside it (shared/runner.ts).
+  // Docker containers on this computer, for projects that run on "Docker container" (docs/docker.md). Docker is only
+  // asked when one is needed; in mock mode the containers are folders.
+  const dockerService = new DockerService({
+    store,
+    credentials: settings.credentials,
+    install,
+    git: { name: c.gitUserName, email: c.gitUserEmail },
+    bin: c.dockerBin || null,
+    mock: c.mock && !opts.realDocker ? { dir: path.join(c.dataDir, "docker-boxes"), claudeBin: c.claudeBin } : null,
+    claudeBin: opts.realDocker?.claudeBin,
+  })
+  // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
-  // A task's GPU pod as its placement shows it: the GPU type and pod id this process last saw (no API call).
+  const docker = opts.docker ?? dockerService
+  // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
+  // as this process last saw them (no API or Docker call).
   store.placeExtra = (boxId) => {
+    if (isDockerBox(boxId)) {
+      const name = docker.provider.cached().find((x) => x.boxId === boxId)?.name
+      return name ? { container: name } : null
+    }
     if (!isGpuBox(boxId)) return null
     const pod = gpu?.provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider)
-  const setup = new Setup({ c, store, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider)
+  const setup = new Setup({
+    c,
+    store,
+    credentials: settings.credentials,
+    settings,
+    provider: () => provider.name,
+    githubFetch: opts.github?.fetch,
+    dockerProblem: () => docker.problem(),
+    ...opts.setup,
+  })
   const ttsSettings = new TtsSettingsStore(store, c)
   const tts = new TtsService({
     settings: ttsSettings,
@@ -305,11 +342,14 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker })
   tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
-  runpod.onProgress = (boxId, message) => tasks.gpuProgress(boxId, message)
+  runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
+  dockerService.onEvent = (e) => tasks.dockerEvent(e)
+  dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
+  dockerService.images.onChange(() => hub.broadcast({ type: "docker.build", build: dockerService.images.status() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
@@ -400,6 +440,10 @@ export function createBoxYard(
     runpod.store.update(patch)
     applyPoolChange()
   }
+  const saveDockerSettings = (patch: unknown) => {
+    dockerService.store.update(patch)
+    applyPoolChange()
+  }
   const saveTtsSettings = (patch: unknown) => {
     const info = ttsSettings.update(patch)
     hub.broadcast({ type: "tts", info })
@@ -407,7 +451,7 @@ export function createBoxYard(
   }
   const saveRunner = async (runner: unknown) => {
     setup.setRunner(runner)
-    if (setup.runnerChoice() === "local") await setup.refreshLocal()
+    if (setup.onThisComputer()) await setup.refreshLocal()
     const status = setup.status()
     hub.broadcast({ type: "setup", status })
     // A gh login may now stand in for the GitHub token, and /api/health's problems change.
@@ -418,6 +462,7 @@ export function createBoxYard(
     settings,
     tts: ttsSettings,
     runpod: runpod.store,
+    docker: dockerService.store,
     runner: () => setup.runnerChoice(),
     credentials: () => setup.status().credentials,
     server: () => ({
@@ -427,7 +472,7 @@ export function createBoxYard(
       boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else Upstash once an Upstash key is saved in Settings › Credentials" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
-    save: { settings: saveSettings, runpod: saveRunpodSettings, voice: saveTtsSettings, runner: saveRunner },
+    save: { settings: saveSettings, runpod: saveRunpodSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },
   })
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
@@ -532,7 +577,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker].some((v) => v !== undefined)) tasks.schedule()
     res.json(project)
   })
   api.delete("/projects/:id", async (req, res) => {
@@ -750,7 +795,7 @@ export function createBoxYard(
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.
   api.get("/setup", async (_req, res) => {
-    if (setup.runnerChoice() === "local") await setup.refreshLocal()
+    if (setup.onThisComputer()) await setup.refreshLocal()
     res.json(setup.status())
   })
   /** The setup choice of where agents run: "local" (This computer, no Upstash key needed) or "box". New projects follow it. */
@@ -815,6 +860,31 @@ export function createBoxYard(
   api.delete("/runpod/volumes/:id", async (req, res) => {
     await runpod.deleteVolume(String(req.params.id))
     res.json(await runpodStatus())
+  })
+
+  // ---- Docker (Settings › Docker): settings, containers and the image build. No secrets go out. Deleting a container
+  // (and its volume) is DELETE /boxes/docker-<projectId>, which archives its workspaces first like any box.
+  const dockerStatus = () =>
+    dockerService.status({
+      name: (id) => store.getProjectName(id),
+      running: (boxId) => store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length,
+      tasks: (boxId) => store.listTaskRows({ boxId }).length,
+    })
+  api.get("/docker", async (_req, res) => {
+    res.json(await dockerStatus())
+  })
+  api.put("/docker/settings", async (req, res) => {
+    saveDockerSettings(req.body)
+    res.json(await dockerStatus())
+  })
+  /** Build Box Yard's agent image now (docker/Dockerfile), in the background; SSE docker.build follows. */
+  api.post("/docker/image/build", async (_req, res) => {
+    res.json(await dockerService.buildImage())
+  })
+  /** Stop a project's container; its volume keeps every workspace. 409 while an agent runs in it. */
+  api.post("/docker/containers/:boxId/stop", async (req, res) => {
+    await tasks.stopDockerContainer(String(req.params.boxId), { actor: { kind: "owner" }, reason: "Stopped from Settings › Docker." })
+    res.json(await dockerStatus())
   })
 
   // ---- text-to-speech (Settings › Voice): settings, the provider proxy and voice lists
@@ -1153,9 +1223,10 @@ export function createBoxYard(
     hooks,
     notes,
     retro,
+    docker: dockerService,
     async start() {
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
-      if (setup.runnerChoice() === "local") await setup.refreshLocal()
+      if (setup.onThisComputer()) await setup.refreshLocal()
       await tasks.start()
       scheduler.start()
       orchestrator.resumeScheduled()
