@@ -36,6 +36,12 @@ import { RUNNERS, type Runner } from "../shared/runner.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
+import type { Identities } from "./identity/identities.js"
+import { IdentityDetector } from "./identity/detect.js"
+import { applyRefs, createWithRefs, importDetected, type IdentityRefs } from "./identity/setup.js"
+import { ownGithubToken } from "./turnCredentials.js"
+import { redact } from "./credentials.js"
+import { COORDINATOR_SEES, IDENTITY_COLORS, identityPhrase, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -59,6 +65,10 @@ export interface McpDeps {
   coordinatorCompactionsDir?: string
   /** Where new projects run (the setup choice). Without it, Upstash boxes. */
   defaultRunner?: () => Runner
+  /** Settings › Identities (docs/identities.md). Without it, the identity tools aren't offered. */
+  identities?: Identities
+  /** How detect_identities and the gh:, file: and agent: references read this computer (tests: a fake one). */
+  identityDetector?: IdentityDetector
 }
 
 /** Who is calling the MCP server. Captains only see and touch their own project. */
@@ -1881,6 +1891,280 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           return ok({ changed: changes, next: "Applies from the next turn on; the pool already uses new limits." })
         }),
       ),
+    )
+  }
+
+  // ---------------------------------------------------------------- identities (docs/identities.md)
+  // Which GitHub account, git author, signing key and Claude login each project's agents use. No value passes through
+  // here: the tools take references (gh:<login>, file:~/.ssh/<key>, agent:<fingerprint>) that the server reads itself,
+  // and return logins, emails, owners and fingerprints only. A Captain sees every identity (a name and a login aren't
+  // another project's data) but only its own project in them, and changes only an identity no other project uses.
+  const identities = deps.identities
+  if (identities) {
+    const detector = deps.identityDetector ?? new IdentityDetector()
+    /** safe(), with any token or key shape taken out of the error: one may echo a path or name the model passed in. */
+    const guarded = <A,>(fn: (args: A) => Promise<ToolResult> | ToolResult) =>
+      safe(async (a: A) => {
+        try {
+          return await fn(a)
+        } catch (err) {
+          throw new Error(redact(errorMessage(err)))
+        }
+      })
+    const identity = (ref: string): Identity => {
+      const i = identities.find(ref)
+      if (!i) throw new Error(`No identity "${ref}". Use list_identities.`)
+      return i
+    }
+    /** A Captain's view: its own project only, and no check lines (they can name other projects' repos). */
+    const identityView = (i: Identity) => {
+      if (!scopeId) return i
+      const yours = i.projectIds.includes(scopeId)
+      return { ...i, yours, projectIds: yours ? [scopeId] : [], otherProjects: i.projectIds.filter((id) => id !== scopeId).length, lastCheck: i.lastCheck && { at: i.lastCheck.at, ok: i.lastCheck.ok } }
+    }
+    /** A Captain changes only an identity that no other project uses. */
+    const mayChange = (i: Identity) => {
+      if (!scopeId) return
+      if (i.isDefault) throw outOfScope("the Default identity is every project's fallback, so only the Coordinator changes it")
+      if (i.projectIds.some((id) => id !== scopeId)) throw outOfScope(`the ${i.name} identity is used by other projects too`)
+    }
+    /** Give a project an identity: its runner has to fit, and no turn of it may be running (it'd switch accounts halfway). */
+    const assignProject = (ref: string, identityId: string): string => {
+      const p = project(ref)
+      const i = identities.require(identityId)
+      if (p.identityId === i.id) return `${p.name}: uses ${identityPhrase(i)} already.`
+      const busy = store.listTasks({ projectId: p.id }).find((t) => t.status === "starting" || t.status === "working")
+      if (busy) throw new Error(`${p.name} has a task running (${busy.id}, "${busy.title}"). Assign it when the task rests, so no turn switches accounts halfway.`)
+      const problem = identities.runnerProblem(i.id, p.runner ?? "box")
+      if (problem) throw new Error(`${p.name} can't use it: ${problem}.`)
+      identities.assign(p.id, i.id)
+      const updated = store.getProject(p.id)
+      if (updated) hub.broadcast({ type: "project", project: updated })
+      tasks.schedule()
+      return `${p.name}: now uses ${identityPhrase(i)}; its resting tasks move to its boxes on their next turn.`
+    }
+    /** detect_identities and import_detected_identity: a Captain maps its own project only. */
+    const detect = async (online: boolean) => {
+      const projects = scopeId ? [ownProject()] : store.listProjects()
+      const source = deps.settings?.credentials.source("githubToken")
+      return detector.detect({
+        projects: projects.map((p) => ({ id: p.id, name: p.name, repo: p.repo, identityId: p.identityId })),
+        identities: identities.list(),
+        online,
+        defaultLogin: source === "gh" ? undefined : online ? await identities.defaultLogin() : null,
+      })
+    }
+    const runnersInput = z.array(z.enum(RUNNERS)).min(1).nullable().optional().describe("Where its projects may run: box (Upstash), local (this computer), gpu (RunPod), docker. null: every runner.")
+    const authorInput = z
+      .object({ name: z.string(), email: z.string() })
+      .nullable()
+      .optional()
+      .describe("The git author its commits get, e.g. {name: \"Ada Lovelace\", email: \"ada@acme.dev\"}. Use one of the account's verified emails, or GitHub won't link the commits to it. null: Settings' GIT_USER_NAME / GIT_USER_EMAIL.")
+    const fieldsInput = {
+      color: z.enum(IDENTITY_COLORS).optional(),
+      owners: z.array(z.string()).optional().describe('GitHub owners (users and orgs) whose repos it\'s for, e.g. ["acme-corp"].'),
+      author: authorInput,
+      runners: runnersInput,
+      coordinator_sees: z.enum(COORDINATOR_SEES).optional().describe("everything (default), or status: the Coordinator sees only the status of its projects; their Captains still see everything."),
+    }
+    const refsInput = {
+      github_token_ref: z.string().optional().describe("gh:<login>: the token gh keeps on this computer for that account (detect_identities lists them). The server reads it. Never pass a token itself: a pasted one goes in Settings › Identities."),
+      token_owner: z.string().optional().describe("The owner (user or org) that token is for. Leave it out for every owner the identity serves."),
+      signing_key_ref: z
+        .string()
+        .nullable()
+        .optional()
+        .describe("Its commit signing key: file:~/.ssh/<key> (a key file without a passphrase in ~/.ssh; Box Yard keeps an encrypted copy) or agent:<SHA256 fingerprint> (a key only this computer's SSH agent or 1Password holds, so its projects run only here). null removes it. Never pass a key itself."),
+      signing_program: z.string().nullable().optional().describe("For an agent key, the program git signs with, as a full path (1Password: /Applications/1Password.app/Contents/MacOS/op-ssh-sign)."),
+      require_signed: z.boolean().optional().describe("Stop a push when one of its commits isn't signed by the identity's key."),
+    }
+    type FieldsArgs = { color?: IdentityColor; owners?: string[]; author?: { name: string; email: string } | null; runners?: Runner[] | null; coordinator_sees?: CoordinatorSees }
+    type RefsArgs = { github_token_ref?: string; token_owner?: string; signing_key_ref?: string | null; signing_program?: string | null; require_signed?: boolean }
+    const fieldsOf = (a: FieldsArgs & { name?: string }) =>
+      Object.fromEntries(Object.entries({ name: a.name, color: a.color, owners: a.owners, author: a.author, runners: a.runners, coordinatorSees: a.coordinator_sees }).filter(([, v]) => v !== undefined))
+    const refsOf = (a: RefsArgs): IdentityRefs => ({ githubTokenRef: a.github_token_ref, tokenOwner: a.token_owner, signingKeyRef: a.signing_key_ref, signingProgram: a.signing_program, requireSigned: a.require_signed })
+
+    server.registerTool(
+      "list_identities",
+      {
+        description:
+          "Every identity: the GitHub account (login) it acts as, the owners it serves, its git author (and whether that email is verified on the account), signing key fingerprint, Claude login kind, runners, what the Coordinator sees, the projects that use it and its last test. Never a token or key: those show as fingerprints. " +
+          "Each project has exactly one identity; the Default identity is Settings › Credentials (env vars, saved values, gh's account)." +
+          (scopeId ? " yours marks your project's; other projects that use one show only as a count." : ""),
+        inputSchema: {},
+      },
+      guarded(async () => okCompact({ identities: identities.list().map(identityView), ...(scopeId ? { yours: identities.idOf(scopeId) } : {}) })),
+    )
+
+    server.registerTool(
+      "detect_identities",
+      {
+        description:
+          "Read this computer's GitHub and git setup and propose identities, with the evidence: the accounts gh is signed in to, the global git author, each includeIf block's author, signing key and repo owners, and ~/.ssh/config hosts for GitHub. " +
+          "online (the default) also asks GitHub, with each account's own token, for its orgs, verified emails, SSH keys and push access to each project's repo, so projects map to the right account. " +
+          (scopeId ? "It maps your project only. " : "It maps every project. ") +
+          "Proposals name references (tokenRef gh:…, signing ref file:… or agent:…), never values. Changes nothing: propose a setup to Cody in one message, and import only after Cody says yes. " +
+          "Use it when a clone, fetch or push fails with 401, 403 or 404, or when Cody asks about GitHub accounts.",
+        inputSchema: { online: z.boolean().optional().describe("Ask GitHub too (default true). false reads this computer only.") },
+      },
+      guarded(async (a: { online?: boolean }) => {
+        const d = await detect(a.online ?? true)
+        return okCompact({
+          ...d,
+          next: owner(
+            d.proposals.length
+              ? "Nothing changed. Tell Cody in one message which identity each project should use and why (logins, owners, author, signing key), then call import_detected_identity for each one Cody agrees to."
+              : "Nothing changed, and there's nothing to import: see notes.",
+          ),
+        })
+      }),
+    )
+
+    server.registerTool(
+      "import_detected_identity",
+      {
+        description:
+          "Turn one of detect_identities' proposals into an identity, only after Cody agreed to it: the server reads the account's token from gh and the signing key by reference again, checks the token with GitHub, keeps both encrypted, and gives the identity the proposal's projects. " +
+          "When Box Yard has an identity for that login already, it's updated instead. Override any of the proposal's choices with the other fields. A signing key detection warned about (it also logs this computer in to servers) is left out unless you name one. " +
+          (scopeId ? "You can give it your own project only." : "projects: the projects to move (ids or names); the proposal's when left out."),
+        inputSchema: {
+          login: z.string().describe("The gh account of the proposal (its login)."),
+          name: z.string().optional().describe("Its name in Box Yard (the login when left out)."),
+          ...fieldsInput,
+          signing_key_ref: refsInput.signing_key_ref,
+          signing_program: refsInput.signing_program,
+          require_signed: refsInput.require_signed,
+          projects: z.array(z.string()).optional().describe(scopeId ? "Your project, or [] to move none." : "Projects to give it; [] moves none."),
+        },
+      },
+      guarded(async (a: { login: string; name?: string; projects?: string[]; signing_key_ref?: string | null; signing_program?: string | null; require_signed?: boolean } & FieldsArgs) => {
+        const detection = detector.recent() ?? (await detect(true))
+        const proposal = detection.proposals.find((p) => p.login.toLowerCase() === a.login.toLowerCase())
+        // A Captain's default is its own project, whoever ran the detection.
+        const projects = a.projects ?? (scopeId ? (proposal?.projects ?? []).filter((p) => p.id === scopeId).map((p) => p.id) : undefined)
+        const r = await importDetected(
+          identities,
+          detector,
+          detection,
+          { login: a.login, name: a.name, color: a.color, owners: a.owners, author: a.author, runners: a.runners, coordinatorSees: a.coordinator_sees, signingKeyRef: a.signing_key_ref, signingProgram: a.signing_program, requireSigned: a.require_signed, projects },
+          assignProject,
+          { mayUpdate: mayChange },
+        )
+        return ok({ identity: identityView(r.identity), created: r.created, done: r.lines, next: "test_identity checks it with GitHub (tokens, push access, author email, signing key)." })
+      }),
+    )
+
+    server.registerTool(
+      "create_identity",
+      {
+        description:
+          "Make an identity, only when Cody asked for it: a name, the owners it serves, a git author, runners, and by reference a GitHub token (github_token_ref gh:<login>) and a signing key (signing_key_ref). The server reads and checks each reference itself; when one can't be read, nothing is made. " +
+          "For an account on this computer, import_detected_identity does all of this from a proposal. A token or key Cody wants to paste goes in Settings › Identities, never through you.",
+        inputSchema: { name: z.string().describe('Its name, e.g. "Acme".'), ...fieldsInput, ...refsInput },
+      },
+      guarded(async (a: { name: string } & FieldsArgs & RefsArgs) => {
+        const r = await createWithRefs(identities, detector, fieldsOf(a), refsOf(a))
+        return ok({ identity: identityView(r.identity), done: r.lines, next: "assign_identity gives a project this identity; test_identity checks it with GitHub." })
+      }),
+    )
+
+    server.registerTool(
+      "update_identity",
+      {
+        description:
+          "Change an identity: its fields, and by reference its token (github_token_ref) or signing key (signing_key_ref; null removes it). remove_token drops the token for one owner (\"\" for the every-owner one); remove_claude drops its own Claude login. " +
+          (scopeId ? "You can change only an identity no other project uses (not Default)." : "The Default identity keeps its name, and its token and Claude login are Settings › Credentials."),
+        inputSchema: {
+          identity: z.string().describe("Identity id or name."),
+          name: z.string().optional(),
+          ...fieldsInput,
+          ...refsInput,
+          remove_token: z.string().optional().describe('Remove the token for this owner ("" for the every-owner one).'),
+          remove_claude: z.boolean().optional().describe("Remove its own Claude login, so its projects use the global one."),
+        },
+      },
+      guarded(async (a: { identity: string; name?: string; remove_token?: string; remove_claude?: boolean } & FieldsArgs & RefsArgs) => {
+        const i = identity(a.identity)
+        mayChange(i)
+        const fields = fieldsOf(a)
+        const done: string[] = []
+        if (Object.keys(fields).length) {
+          identities.update(i.id, fields)
+          done.push(`Changed ${Object.keys(fields).join(", ")}.`)
+        }
+        if (a.remove_token !== undefined) {
+          identities.removeToken(i.id, a.remove_token)
+          done.push(`Removed the token for ${a.remove_token || "every owner"}.`)
+        }
+        if (a.remove_claude) {
+          identities.removeClaude(i.id)
+          done.push("Removed its Claude login.")
+        }
+        done.push(...(await applyRefs(identities, detector, i.id, refsOf(a))))
+        return ok({ identity: identityView(identities.require(i.id)), done: done.length ? done : ["Nothing to change."] })
+      }),
+    )
+
+    server.registerTool(
+      "delete_identity",
+      {
+        description:
+          "Remove an identity and its saved token, key and Claude login. Refused while projects use it, unless move_projects_to_default moves them to the Default identity first. " +
+          (scopeId ? "You can remove only an identity no other project uses." : ""),
+        inputSchema: { identity: z.string().describe("Identity id or name."), move_projects_to_default: z.boolean().optional() },
+      },
+      guarded(async (a: { identity: string; move_projects_to_default?: boolean }) => {
+        const i = identity(a.identity)
+        mayChange(i)
+        const { movedProjectIds } = identities.delete(i.id, { moveProjects: a.move_projects_to_default })
+        for (const id of movedProjectIds) {
+          const p = store.getProject(id)
+          if (p) hub.broadcast({ type: "project", project: p })
+        }
+        if (movedProjectIds.length) tasks.schedule()
+        return ok({ deleted: i.name, movedToDefault: movedProjectIds.map((id) => store.getProject(id)?.name ?? id) })
+      }),
+    )
+
+    server.registerTool(
+      "assign_identity",
+      {
+        description:
+          "Give a project an identity, when Cody asked for it or agreed: its next turns use that account's token, author, signing key and Claude login. The identity has to allow the project's runner, and no task of the project may be running (wait for it to rest). Resting tasks move to the identity's boxes on their next turn.",
+        inputSchema: {
+          project: z.string().optional().describe(scopeId ? "Your project (the default)." : "Project id or name."),
+          identity: z.string().describe("Identity id or name (Default for the global credentials)."),
+        },
+      },
+      guarded(async (a: { project?: string; identity: string }) => {
+        if (!a.project && !scopeId) return fail("Name the project.")
+        return ok({ done: assignProject(a.project ?? ownProject().id, identity(a.identity).id) })
+      }),
+    )
+
+    server.registerTool(
+      "test_identity",
+      {
+        description:
+          "Check an identity with GitHub: each token (whose it is, scopes, expiry), push access to " +
+          (scopeId ? "your project's repo" : "each of its projects' repos") +
+          " (404, SAML SSO and read-only show as problems), whether its author email is verified on the account, and whether its signing key is on GitHub as a signing key. Never shows a secret." +
+          (scopeId ? " You can test your project's identity only." : " The result is saved as its last test."),
+        inputSchema: { identity: z.string().optional().describe(scopeId ? "Your project's identity (the default)." : "Identity id or name.") },
+      },
+      guarded(async (a: { identity?: string }) => {
+        if (!a.identity && !scopeId) return fail("Name the identity.")
+        const i = a.identity ? identity(a.identity) : identities.of(scopeId!)
+        if (scopeId && i.id !== identities.idOf(scopeId)) throw outOfScope(`test_identity checks your project's identity (${identities.of(scopeId).name})`)
+        const repos = i.projectIds
+          .filter((id) => !scopeId || id === scopeId)
+          .flatMap((id) => {
+            const p = store.getProject(id)
+            return p ? [{ name: p.name, repo: p.repo, ownToken: Boolean(ownGithubToken(store.projectEnv(p.id))) }] : []
+          })
+        const r = await identities.test(i.id, repos, { save: !scopeId })
+        return ok({ identity: i.name, ok: r.ok, lines: r.lines })
+      }),
     )
   }
 
