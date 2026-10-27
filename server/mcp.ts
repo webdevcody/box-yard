@@ -298,7 +298,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         settled || fresh
           ? undefined
           : owner(
-              `GitHub hasn't confirmed this PR's state ${checkedAt === null ? "since Box Yard started" : `since ${ago(checkedAt)}`}${error ? ` (${error})` : ""}. ` +
+              `${checkedAt === null ? "GitHub hasn't confirmed this PR's state since Box Yard started" : `GitHub last confirmed this PR's state ${ago(checkedAt)}`}${error ? ` (${error})` : ""}. ` +
                 "It may be merged or closed already: don't tell Cody it's waiting on him. Have the task's agent check it with gh.",
             ),
     }

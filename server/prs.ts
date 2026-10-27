@@ -167,7 +167,7 @@ export class PrTracker {
     this.deps = deps
     this.store = deps.store
     this.fetch = deps.fetch ?? ((...args) => fetch(...args))
-    this.now = deps.now ?? Date.now
+    this.now = deps.now ?? (() => Date.now())
     this.intervalMs = deps.intervalMs ?? PR_POLL_MS
   }
 
