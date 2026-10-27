@@ -311,7 +311,7 @@ describe("taking a project snapshot", () => {
 
     const busy = await takeSnapshot(r, p.id, boxId)
     expect(busy.status).toBe(409)
-    expect(busy.data.error).toBe(`1 agent is running on ${boxId}: stop it first.`)
+    expect(busy.data.error).toBe(`1 task is running on ${boxId}: stop it first.`)
     expect(r.yard.tasks.snapshotJob(p.id)).toBeNull()
     expect(r.provider.snapshots).toEqual([])
     expect((await getTask(r, hang.id)).status).toBe("working")

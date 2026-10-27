@@ -163,13 +163,13 @@ describe("project box settings: API", () => {
     const listed = JSON.parse((await coordinator.tool("list_projects")).content[0]!.text) as { id: string; boxSettings: Record<string, string> }[]
     expect(listed.find((p) => p.id === a.id)!.boxSettings).toEqual({
       boxSize: "large (this project)",
-      agentsPerBox: "1 of its agents at a time on a box or this computer; other projects unaffected (this project)",
+      agentsPerBox: "1 of its tasks at a time on a box or this computer; other projects unaffected (this project)",
       tasksPerBox: "5 (this project)",
       maxBoxes: "2 (this project; it uses 0 boxes now)",
     })
     const beta = listed.find((p) => p.id === b.id)!.boxSettings
     expect(beta.boxSize).toMatch(/^global: \w+ \(Settings › Worker size\)$/)
-    expect(beta.agentsPerBox).toBe("global: 2 (Settings › Agents per box)")
+    expect(beta.agentsPerBox).toBe("global: 2 (Settings › Tasks running at once per box)")
     expect(beta.maxBoxes).toBe("global: only the pool's Max boxes (3)")
 
     // null clears, and what's left out stays.
@@ -213,7 +213,7 @@ describe("project box settings: placement on shared boxes", () => {
     // Its second agent waits, naming (and linking) the one running.
     const h2 = await task(r, heavy.id, "h2", "keep going [hang]")
     const held = await waits(r, h2.id)
-    expect(held.waitReason).toBe(`Waiting: heavy allows 1 of its agents at a time on a box, and h1 is running on box ${box}`)
+    expect(held.waitReason).toBe(`Waiting: heavy allows 1 of its tasks at a time on a box, and h1 is running on box ${box}`)
     expect(held.waitFor).toEqual([{ taskId: h1.id, title: "h1" }])
     // Another project's agent joins the box: the limit isn't its.
     const l1 = await hang(r, light.id, "l1")
@@ -266,7 +266,7 @@ describe("project box settings: placement on shared boxes", () => {
     // alpha's 2 are running: its third waits, naming both.
     const a3 = await task(r, alpha.id, "a3", "keep going [hang]")
     const held = await waits(r, a3.id)
-    expect(held.waitReason).toBe(`Waiting: alpha allows 2 of its agents at a time on a box, and a1 and a2 are running on box ${box}`)
+    expect(held.waitReason).toBe(`Waiting: alpha allows 2 of its tasks at a time on a box, and a1 and a2 are running on box ${box}`)
     expect(held.waitFor.map((w) => w.title)).toEqual(["a1", "a2"])
     // beta's agents don't count against alpha's 2, and alpha's don't against beta's 3: the box's 4 fills up.
     const b1 = await hang(r, beta.id, "b1")
@@ -381,7 +381,7 @@ describe("project box settings: placement on shared boxes", () => {
     const alpha = await project(r, "alpha", { agentsPerBox: 1 })
     const a1 = await hang(r, alpha.id, "a1")
     const a2 = await task(r, alpha.id, "a2", "keep going [hang]")
-    expect((await waits(r, a2.id)).waitReason).toMatch(/^Waiting: alpha allows 1 of its agents at a time on a box/)
+    expect((await waits(r, a2.id)).waitReason).toMatch(/^Waiting: alpha allows 1 of its tasks at a time on a box/)
 
     // Cleared: the global Agents per box (2) applies straight away.
     await patch(r, alpha.id, { agentsPerBox: null })

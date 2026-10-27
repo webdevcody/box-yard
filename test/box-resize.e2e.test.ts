@@ -255,7 +255,7 @@ describe("running agents", () => {
     expect(plan.refusal).toBeNull()
     const refused = await send(r, "POST", `/api/boxes/${boxId}/resize`, { size: "medium" })
     expect(refused.status).toBe(409)
-    expect(refused.data.error).toBe(`1 agent is running on ${boxId}: stop it first.`)
+    expect(refused.data.error).toBe(`1 task is running on ${boxId}: stop it first.`)
     expect((await getTask(r, t.id)).status).toBe("working")
     expect(r.provider.created).toEqual(["small"])
 
@@ -362,7 +362,7 @@ describe("resize_box over MCP", () => {
     await status(r, hang.id, (x) => x.status === "working", "the agent to start working")
     const busy = await coordinator("resize_box", { box: t.boxId, size: "medium", reason: "more room" })
     expect(busy.isError).toBe(true)
-    expect(busy.content[0]!.text).toBe(`1 agent is running on ${t.boxId}: stop it first.`)
+    expect(busy.content[0]!.text).toBe(`1 task is running on ${t.boxId}: stop it first.`)
     expect((await getTask(r, hang.id)).status).toBe("working")
   })
 
