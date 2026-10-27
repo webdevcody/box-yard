@@ -40,3 +40,16 @@ export function turnEnv(own: Record<string, string>, global: { claude: Record<st
   const unsetEnv = [...CLAUDE_CREDENTIAL_VARS, ...GITHUB_TOKEN_VARS].filter((v) => !(v in env))
   return { env, unsetEnv, claudeFrom: Object.keys(ownClaude).length ? "project" : Object.keys(claude).length ? "global" : null }
 }
+
+/** The credential set of a project with no Claude login or GitHub token of its own, and of every box from before the wall. */
+export const GLOBAL_CREDENTIALS = "global"
+
+/**
+ * The credential set a project's turns use, for the box wall: tasks of two sets never share a pool box, since an agent
+ * can read everything on its box (other workspaces, their task.json, the repo mirrors). A project with its own Claude
+ * login or GitHub token in its env has a set of its own; every other project uses the global one. A task's own env
+ * doesn't count: its tasks share their project's boxes.
+ */
+export function credentialSet(projectId: string, projectEnv: Record<string, string>): string {
+  return [...CLAUDE_CREDENTIAL_VARS, ...GITHUB_TOKEN_VARS].some((v) => projectEnv[v]) ? `project:${projectId}` : GLOBAL_CREDENTIALS
+}
