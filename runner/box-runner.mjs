@@ -342,12 +342,15 @@ function turnBaseEnv() {
 // ---------------------------------------------------------------------------
 // Commit signing (docs/identities.md). task.json's `signing` says how this task's identity signs; a key Box Yard
 // keeps arrives as signing.key for one turn. The turn moves it to a 0700 folder outside the task (no archive takes
-// it), git gets its signing settings from env (GIT_CONFIG_COUNT), so they reach this turn's processes and nothing
-// else, and the folder is removed when the turn ends. With requireSigned, core.hooksPath points at hooks that stop
-// a push of commits its key didn't sign and otherwise run the repo's own hooks.
+// it), or into the box's memory when it has a tmpfs for secrets (task.json `secretsDir`, Docker's). git gets its
+// signing settings from env (GIT_CONFIG_COUNT), so they reach this turn's processes and nothing else, and the folder
+// and key are removed when the turn ends. With requireSigned, core.hooksPath points at hooks that stop a push of
+// commits its key didn't sign and otherwise run the repo's own hooks (in the folder: the tmpfs is noexec).
 
 const signingDir = path.join(os.tmpdir(), `boxyard-sign-${task.taskId ?? "none"}`)
 const signingKeyFile = path.join(taskDir, "signing.key")
+/** The private key while the turn signs with it. */
+const signingKeyPath = task.secretsDir ? path.join(task.secretsDir, `sign-${task.taskId ?? "none"}.key`) : path.join(signingDir, "key")
 const allowedSigners = path.join(signingDir, "allowed_signers")
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
 /** Every hook git runs from core.hooksPath on this side of a push. */
@@ -366,7 +369,7 @@ function setupSigning() {
   try {
     key = fs.readFileSync(signingKeyFile, "utf8")
   } catch {}
-  fs.rmSync(signingKeyFile, { force: true })
+  takeDelivered(signingKeyFile)
   const s = task.signing
   if (!s) return null
   const problem = signingProblem(s, key)
@@ -377,7 +380,7 @@ function setupSigning() {
     // never written into.
     fs.mkdirSync(signingDir, { mode: 0o700 })
     if (!problem) {
-      if (s.kind === "file") fs.writeFileSync(path.join(signingDir, "key"), key, { mode: 0o600, flag: "wx" })
+      if (s.kind === "file") fs.writeFileSync(signingKeyPath, key, { mode: 0o600, flag: "wx" })
       fs.writeFileSync(path.join(signingDir, "signs"), "")
     }
     if (s.requireSigned) writeSigningHooks(s)
@@ -385,7 +388,7 @@ function setupSigning() {
     fs.writeFileSync(allowedSigners, `box-yard namespaces="git" ${s.publicKey}\n`)
   } catch (err) {
     cleanupSigning()
-    return stopped || `the folder for its signing key couldn't be made (${signingDir}: ${err.code ?? err.message})`
+    return stopped || `the folder for its signing key couldn't be made (${err.path ?? signingDir}: ${err.code ?? err.message})`
   }
   return stopped || null
 }
@@ -455,7 +458,7 @@ function signingEnv(env) {
     ...(signs
       ? [
           ["gpg.format", "ssh"],
-          ["user.signingKey", s.kind === "file" ? path.join(signingDir, "key") : `key::${s.publicKey}`],
+          ["user.signingKey", s.kind === "file" ? signingKeyPath : `key::${s.publicKey}`],
           ["commit.gpgSign", "true"],
           ...(s.program ? [["gpg.ssh.program", s.program]] : []),
         ]
@@ -473,9 +476,27 @@ function signingEnv(env) {
 }
 
 function cleanupSigning() {
+  for (const p of [signingDir, signingKeyPath]) {
+    try {
+      fs.rmSync(p, { recursive: true, force: true })
+    } catch {}
+  }
+}
+
+/**
+ * Remove a file Box Yard delivered to the task folder. In a box with a tmpfs for secrets it's a link to the copy kept
+ * there (DockerProvider.writeFile), which goes too; a link anywhere else is only unlinked.
+ */
+function takeDelivered(file) {
+  let held = null
   try {
-    fs.rmSync(signingDir, { recursive: true, force: true })
+    if (task.secretsDir && fs.lstatSync(file).isSymbolicLink()) {
+      const real = fs.realpathSync(file)
+      if (path.dirname(real) === fs.realpathSync(task.secretsDir)) held = real
+    }
   } catch {}
+  fs.rmSync(file, { force: true })
+  if (held) fs.rmSync(held, { force: true })
 }
 
 /** On this computer, an identity's own git and gh config folders (task.json identityHome), made on first use. */

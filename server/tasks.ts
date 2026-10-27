@@ -4365,8 +4365,11 @@ export class TaskManager {
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
-      // A key sent for a turn that never started doesn't stay on the box.
-      if (keyWaiting && !this.stopped) await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      // A key sent for a turn that never started doesn't stay on the box. Emptied first: in Docker that's the tmpfs copy.
+      if (keyWaiting && !this.stopped) {
+        await this.provider.writeFile(boxId, `${dir}/signing.key`, "").catch(() => {})
+        await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      }
       // Box Yard is stopping, and its database may be closed already: the next start picks the task up.
       if (this.stopped) {
         try {
@@ -4597,6 +4600,8 @@ export class TaskManager {
           }
         : null,
       identityHome: home,
+      // Where the runner keeps the turn's signing key: the box's memory when it has a tmpfs for secrets (Docker).
+      secretsDir: provider.secretsDir ?? null,
       publicUrl: this.c.publicUrl || null,
       redis: this.redis ? { url: this.c.redisUrl, token: this.c.redisToken, key: redisEventsKey(row.id) } : null,
     }
