@@ -100,7 +100,7 @@ describe("identities over the API", () => {
     expect(await r.raw("PUT", `/api/identities/${DEFAULT_IDENTITY_ID}/claude`, { kind: "api_key", value: "sk-ant-api03-xyz" })).toMatchObject({ status: 400 })
 
     const withClaude = await r.call<Identity>("PUT", `/api/identities/${acme.id}/claude`, { kind: "oauth_token", value: "acme-oauth-0001" })
-    expect(withClaude.claude).toEqual({ kind: "oauth_token", fingerprint: expect.stringMatching(/^[0-9a-f]{12}$/) })
+    expect(withClaude.claude).toEqual({ kind: "oauth_token", fingerprint: expect.stringMatching(/^[0-9a-f]{12}$/), readable: true })
 
     const listed = await r.raw("GET", "/api/identities")
     for (const secret of ["tok-acme-0001", "acme-oauth-0001"]) expect(listed.text).not.toContain(secret)

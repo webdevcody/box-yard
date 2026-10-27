@@ -170,7 +170,16 @@ export class Identities {
     const secrets = this.secretRows(r.id)
     const tokens: IdentityToken[] = secrets
       .filter((s) => s.kind === "github_token")
-      .map((s) => ({ owner: s.owner, fingerprint: s.fingerprint, login: s.login ?? "", scopes: json<string[] | null>(s.scopes_json, null), expiresAt: s.expires_at, source: s.source, savedAt: s.created_at }))
+      .map((s) => ({
+        owner: s.owner,
+        fingerprint: s.fingerprint,
+        login: s.login ?? "",
+        scopes: json<string[] | null>(s.scopes_json, null),
+        expiresAt: s.expires_at,
+        source: s.source,
+        savedAt: s.created_at,
+        readable: this.d.secrets.open(s.ciphertext) !== null,
+      }))
     const claude = secrets.find((s) => s.kind === "claude")
     const projectIds = (this.d.db.prepare("SELECT id FROM projects WHERE identity_id = ? ORDER BY name COLLATE NOCASE").all(r.id) as { id: string }[]).map((p) => p.id)
     return {
@@ -184,7 +193,7 @@ export class Identities {
       tokens,
       author: r.author_name && r.author_email ? { name: r.author_name, email: r.author_email, emailCheck: (r.email_check as EmailCheck | null) ?? "unknown" } : null,
       signing: json<IdentitySigning | null>(r.signing_json, null),
-      claude: claude && r.claude_kind ? { kind: r.claude_kind as IdentityClaudeKind, fingerprint: claude.fingerprint } : null,
+      claude: claude && r.claude_kind ? { kind: r.claude_kind as IdentityClaudeKind, fingerprint: claude.fingerprint, readable: this.d.secrets.open(claude.ciphertext) !== null } : null,
       runners: json<Runner[] | null>(r.runners_json, null),
       coordinatorSees: r.coordinator_sees === "status" ? "status" : "everything",
       projectIds,

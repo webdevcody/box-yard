@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import fs from "node:fs"
+import { randomBytes } from "node:crypto"
 import path from "node:path"
 import { openDb, MIGRATIONS, migrate } from "../server/db.js"
 import Database from "better-sqlite3"
@@ -131,6 +132,21 @@ describe("Identities", () => {
     const file = fs.readFileSync(path.join(dir, "box-yard.sqlite"))
     expect(file.includes("plaintext_marker")).toBe(false)
     expect(identities.secretValues().sort()).toEqual(["ghp_plaintext_marker_123", "sk-ant-oat-plaintext_marker"])
+  })
+
+  it("a secret this server's key can't open is shown unreadable, and no turn gets it", async () => {
+    const { identities, store, db, dir } = setup({ github: { "tok-alice-001": { login: "alice", id: 1 } } })
+    const a = identities.create({ name: "Alice" })
+    await identities.saveToken(a.id, { token: "tok-alice-001" })
+    identities.saveClaude(a.id, { kind: "api_key", value: "alice-key-0001" })
+    const p = store.createProject({ name: "site" })
+    identities.assign(p.id, a.id)
+    expect(identities.require(a.id)).toMatchObject({ tokens: [{ readable: true }], claude: { readable: true } })
+    // The key file is replaced (a restore without it): the identity stays, its secrets can't be read.
+    fs.writeFileSync(path.join(dir, "secret.key"), randomBytes(32).toString("base64"))
+    const after = new Identities({ db, secrets: new SecretBox({ dataDir: dir }), credentials: { get: () => "", claudeEnv: () => ({ ANTHROPIC_API_KEY: "global-key" }) } })
+    expect(after.require(a.id)).toMatchObject({ githubLogin: "alice", tokens: [{ readable: false }], claude: { readable: false } })
+    expect(after.base(p.id, null)).toMatchObject({ githubToken: "", claude: { ANTHROPIC_API_KEY: "global-key" } })
   })
 
   it("an identity's Claude login wins over the global one; without one the global login applies", () => {

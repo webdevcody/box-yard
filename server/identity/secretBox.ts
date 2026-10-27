@@ -6,8 +6,8 @@ import path from "node:path"
  * Encryption at rest for identity secrets (GitHub tokens, Claude logins, signing keys): AES-256-GCM, stored as
  * `v1:<iv>:<tag>:<data>` (base64). The key is BOXYARD_SECRET_KEY when it's set, else a random 32 bytes in
  * `<data dir>/secret.key` (0600), made on first use. It's never in the database, so a copy of box-yard.sqlite (or a
- * backup of it alone) holds no usable token. Losing the key file loses the secrets, not the identities: they show as
- * "needs a new token".
+ * backup of it alone) holds no usable token. Losing the key file loses the secrets, not the identities: their
+ * tokens and Claude login show `readable: false` until they're saved again.
  */
 export class SecretBox {
   private key: Buffer | null = null

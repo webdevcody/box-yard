@@ -36,6 +36,8 @@ export interface IdentityToken {
   expiresAt: number | null
   /** Where it came from: "pasted", or a reference like "gh:github.com:octocat" (provenance only). */
   source: string
+  /** False when this server's secret key can't open it (the key changed): it needs saving again, and turns don't get it. */
+  readable: boolean
   savedAt: number
 }
 
@@ -76,7 +78,7 @@ export interface Identity {
   author: { name: string; email: string; emailCheck: EmailCheck } | null
   signing: IdentitySigning | null
   /** null: Settings › Credentials' Claude login. */
-  claude: { kind: IdentityClaudeKind; fingerprint: string } | null
+  claude: { kind: IdentityClaudeKind; fingerprint: string; readable: boolean } | null
   /** Runners its projects may use; null for every runner. */
   runners: Runner[] | null
   coordinatorSees: CoordinatorSees
