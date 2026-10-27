@@ -183,6 +183,18 @@ describe("the message toolbar", () => {
     expect(bar!.hasAttribute("data-open")).toBe(false)
   })
 
+  it("hides a tapped toolbar and closes its ··· menu when the app goes to the background", () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q === "(hover: none)", media: q, addEventListener() {}, removeEventListener() {} }))
+    inChat(ORCH, () => {}, line(chat("chat_reply0001", "assistant", "A reply")))
+    const bar = toolbars()[0]!
+    click(host.querySelector("[data-testid=chat-reply] p")!)
+    click(bar.querySelector("[data-testid=message-more]")!)
+    expect(document.querySelector("[role=menu]")).not.toBeNull()
+    act(() => void window.dispatchEvent(new Event("pagehide")))
+    expect(document.querySelector("[role=menu]")).toBeNull()
+    expect(bar.hasAttribute("data-open")).toBe(false)
+  })
+
   it("has no Respond where there's nowhere to send it, but still Copy", () => {
     inChat(null, () => {}, line(chat("chat_reply0001", "assistant", "A reply")))
     expect(host.querySelector("[data-testid=message-respond]")).toBeNull()
