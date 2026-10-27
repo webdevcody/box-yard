@@ -39,6 +39,9 @@ import type {
   ScheduleRun,
   ScheduleRunStatus,
   ScheduleTarget,
+  SideThread,
+  SideThreadMessage,
+  SideThreadRole,
   Task,
   WaitFor,
   TaskCompactionRecord,
@@ -54,6 +57,30 @@ import type {
 } from "../shared/types.js"
 
 export const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`
+
+interface SideThreadRow {
+  id: string
+  project_id: string | null
+  anchor_id: string
+  quote: string
+  created_at: number
+  updated_at: number
+  context: string | null
+}
+
+/** busy is the runner's to say (SideThreads.decorate); a row alone is never busy. */
+function sideThreadFrom(r: SideThreadRow): SideThread {
+  return {
+    id: r.id,
+    projectId: r.project_id,
+    anchorId: r.anchor_id,
+    quote: r.quote,
+    context: r.context === "fork" || r.context === "summary" ? r.context : null,
+    busy: false,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }
+}
 
 /** Parse JSON text, or return the fallback when it's empty or invalid. */
 export const json = <T>(text: string | null | undefined, fallback: T): T => {
@@ -2011,6 +2038,87 @@ export class Store {
     this.db.transaction(() => {
       for (const id of taskIds) stmt.run(id)
     })()
+  }
+
+  // ---------- side threads ----------
+
+  /**
+   * A chat's messages up to and including `anchorId`, oldest first (at most the last `limit`): the Coordinator chat
+   * for projectId null, else that project's Captain chat. A side thread's context is cut here: nothing after the
+   * anchor. null when the chat has no such message.
+   */
+  chatUpTo(projectId: string | null, anchorId: string, limit = 60): ChatMessage[] | null {
+    const table = projectId ? "captain_messages" : "chat_messages"
+    const scope = projectId ? "AND project_id = ?" : ""
+    const args = projectId ? [projectId] : []
+    const anchor = this.db.prepare(`SELECT created_at, rowid AS rid FROM ${table} WHERE id = ? ${scope}`).get(anchorId, ...args) as { created_at: number; rid: number } | undefined
+    if (!anchor) return null
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid FROM ${table} WHERE (created_at < ? OR (created_at = ? AND rowid <= ?)) ${scope}
+         ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC`,
+      )
+      .all(anchor.created_at, anchor.created_at, anchor.rid, ...args, limit) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({ id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
+  }
+
+  createSideThread(input: { id?: string; projectId: string | null; anchorId: string; quote: string; sessionId: string }): SideThread {
+    const now = Date.now()
+    const id = input.id ?? newId("thr")
+    this.db
+      .prepare("INSERT INTO side_threads (id, project_id, anchor_id, quote, session_id, started, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)")
+      .run(id, input.projectId, input.anchorId, input.quote, input.sessionId, now, now)
+    return this.getSideThread(id)!
+  }
+
+  getSideThread(id: string): SideThread | null {
+    const r = this.db.prepare("SELECT * FROM side_threads WHERE id = ?").get(id) as SideThreadRow | undefined
+    return r ? sideThreadFrom(r) : null
+  }
+
+  /** The thread's Claude session, and whether a run has created it yet. */
+  sideThreadSession(id: string): { sessionId: string; started: boolean } | null {
+    const r = this.db.prepare("SELECT session_id, started FROM side_threads WHERE id = ?").get(id) as { session_id: string; started: number } | undefined
+    return r ? { sessionId: r.session_id, started: r.started === 1 } : null
+  }
+
+  /** A chat's side threads, oldest first. */
+  listSideThreads(projectId: string | null): SideThread[] {
+    const rows = (
+      projectId
+        ? this.db.prepare("SELECT * FROM side_threads WHERE project_id = ? ORDER BY created_at ASC, rowid ASC").all(projectId)
+        : this.db.prepare("SELECT * FROM side_threads WHERE project_id IS NULL ORDER BY created_at ASC, rowid ASC").all()
+    ) as SideThreadRow[]
+    return rows.map(sideThreadFrom)
+  }
+
+  /** A run created the thread's session (and how it got its context). */
+  startSideThread(id: string, context: "fork" | "summary", sessionId?: string) {
+    this.db
+      .prepare("UPDATE side_threads SET started = 1, context = ?, session_id = COALESCE(?, session_id), updated_at = ? WHERE id = ?")
+      .run(context, sessionId ?? null, Date.now(), id)
+  }
+
+  deleteSideThread(id: string): boolean {
+    return this.db.prepare("DELETE FROM side_threads WHERE id = ?").run(id).changes > 0
+  }
+
+  addSideThreadMessage(threadId: string, role: SideThreadRole, content: string, meta: Record<string, unknown> | null = null, id?: string): SideThreadMessage {
+    const msg: SideThreadMessage = { id: id ?? newId("thm"), threadId, role, content, meta, createdAt: Date.now() }
+    this.db.transaction(() => {
+      this.db
+        .prepare("INSERT INTO side_thread_messages (id, thread_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(msg.id, threadId, role, content, meta ? JSON.stringify(meta) : null, msg.createdAt)
+      this.db.prepare("UPDATE side_threads SET updated_at = ? WHERE id = ?").run(msg.createdAt, threadId)
+    })()
+    return msg
+  }
+
+  listSideThreadMessages(threadId: string): SideThreadMessage[] {
+    const rows = this.db
+      .prepare("SELECT * FROM side_thread_messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC")
+      .all(threadId) as { id: string; thread_id: string; role: SideThreadRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({ id: r.id, threadId: r.thread_id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
   }
 
   // ---------- project captains ----------

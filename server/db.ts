@@ -714,6 +714,33 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN docker_image TEXT;
   ALTER TABLE projects ADD COLUMN docker_dockerfile TEXT;
   `,
+  `
+  -- Side threads (server/sideThreads.ts): a question about a passage highlighted in the Coordinator chat (project_id
+  -- NULL) or a project Captain's chat (that project). anchor_id is the chat message the passage is in; session_id the
+  -- thread's own Claude session, forked from the chat's at that message (context 'fork') or started fresh from the
+  -- last compaction summary (context 'summary'). started: that session exists, so later turns resume it.
+  CREATE TABLE side_threads (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    anchor_id TEXT NOT NULL,
+    quote TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    started INTEGER NOT NULL DEFAULT 0,
+    context TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX side_threads_chat ON side_threads(project_id, created_at);
+  CREATE TABLE side_thread_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES side_threads(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    meta_json TEXT,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX side_thread_messages_thread ON side_thread_messages(thread_id, created_at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
