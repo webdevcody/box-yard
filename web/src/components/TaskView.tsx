@@ -109,6 +109,7 @@ export function TaskView({ id }: { id: string }) {
         className={cx(COMPOSER_FOOTER, "mt-3")}
         onSubmit={submit}
         panelRef={panel}
+        historyKey={`task:${id}`}
         placeholder={
           task.status === "needs_input"
             ? "Answer the agent…"
