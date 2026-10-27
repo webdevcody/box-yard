@@ -40,19 +40,26 @@ const KEY_SHAPES = [
   /\b(api[_-]?key|token|secret|password)\s*[=:]\s*["']?[A-Za-z0-9_\-./+]{20,}/i,
 ]
 
+/** The 1-based lines of `text` shaped like a key or token, or holding one of `secrets`. Empty: clean. */
+export function keyLines(text: string, secrets: readonly string[] = []): number[] {
+  const hits: number[] = []
+  text.split("\n").forEach((line, i) => {
+    if (KEY_SHAPES.some((re) => re.test(line)) || secrets.some((s) => s.length >= 8 && line.includes(s))) hits.push(i + 1)
+  })
+  return hits
+}
+
 /** Files in the image's context that look like they hold a secret, with the line. Empty: clean. */
-export function scanForKeys(dir = runpodDir(), secrets: readonly string[] = []): string[] {
+export function scanForKeys(dir = runpodDir(), secrets: readonly string[] = [], files: readonly string[] = IMAGE_FILES): string[] {
   const hits: string[] = []
-  for (const f of IMAGE_FILES) {
+  for (const f of files) {
     let text = ""
     try {
       text = fs.readFileSync(path.join(dir, f), "utf8")
     } catch {
       continue
     }
-    text.split("\n").forEach((line, i) => {
-      if (KEY_SHAPES.some((re) => re.test(line)) || secrets.some((s) => s.length >= 8 && line.includes(s))) hits.push(`${f}:${i + 1}`)
-    })
+    for (const n of keyLines(text, secrets)) hits.push(`${f}:${n}`)
   }
   return hits
 }
