@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -204,6 +205,11 @@ export interface Task {
    * later message. It wins over the project's setting for every turn; null follows the project.
    */
   runsOn: Runner | null
+  /**
+   * Where it actually runs (shared/placement.ts): the box its workspace is on now, where it last ran once that box
+   * let it go, and where its next turn goes and which setting chose that. Always set by the server.
+   */
+  placement?: TaskPlacement | null
   /** Cody pressed "Merge PR" and the agent hasn't finished that turn yet (null otherwise). */
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
