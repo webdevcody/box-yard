@@ -1952,6 +1952,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         identities: identities.list(),
         online,
         defaultLogin: source === "gh" ? undefined : online ? await identities.defaultLogin() : null,
+        scope: scopeId ?? "",
       })
     }
     const runnersInput = z.array(z.enum(RUNNERS)).min(1).nullable().optional().describe("Where its projects may run: box (Upstash), local (this computer), gpu (RunPod), docker. null: every runner.")
@@ -2038,7 +2039,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         },
       },
       guarded(async (a: { login: string; name?: string; projects?: string[]; signing_key_ref?: string | null; signing_program?: string | null; require_signed?: boolean } & FieldsArgs) => {
-        const detection = detector.recent() ?? (await detect(true))
+        const detection = detector.recent(scopeId ?? "") ?? (await detect(true))
         const proposal = detection.proposals.find((p) => p.login.toLowerCase() === a.login.toLowerCase())
         // A Captain's default is its own project, whoever ran the detection.
         const projects = a.projects ?? (scopeId ? (proposal?.projects ?? []).filter((p) => p.id === scopeId).map((p) => p.id) : undefined)

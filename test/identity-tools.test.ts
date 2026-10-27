@@ -191,6 +191,8 @@ describe("identity tools, as a Captain", () => {
     expect(imported.json().done.join("\n")).toMatch(/app: now uses the Acme identity/)
     expect((await tool("import_detected_identity", { login: "octocat", projects: ["site"] })).json().done.join("\n")).toMatch(/site: not moved: Out of scope/)
     expect(r.yard.store.getProject(r.projects.site.id)!.identityId).toBe(DEFAULT_IDENTITY_ID)
+    // The Coordinator imports from a detection of its own, not the Captain's one-project one.
+    expect((await coordinator("import_detected_identity", { login: "octocat" })).json().done.join("\n")).toMatch(/site: now uses the octocat identity/)
 
     // Its own identity it may change and test; the test isn't saved as the identity's last check.
     expect((await tool("update_identity", { identity: "Acme", color: "rose" })).ok).toBe(true)

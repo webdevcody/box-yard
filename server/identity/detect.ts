@@ -756,12 +756,13 @@ export interface ResolvedSigning {
 }
 
 export class IdentityDetector {
-  private last: IdentityDetection | null = null
+  /** The last detection per scope ("" for every project, else a Captain's project id). */
+  private readonly last = new Map<string, IdentityDetection>()
 
   constructor(private readonly o: DetectOptions = {}) {}
 
-  /** Read this computer (and GitHub, when online) and propose identities for `projects`. */
-  async detect(i: { projects: DetectProject[]; identities: ProposalInput["identities"]; online: boolean; defaultLogin?: ProposalInput["defaultLogin"] }): Promise<IdentityDetection> {
+  /** Read this computer (and GitHub, when online) and propose identities for `projects`; `scope` names what they are. */
+  async detect(i: { projects: DetectProject[]; identities: ProposalInput["identities"]; online: boolean; defaultLogin?: ProposalInput["defaultLogin"]; scope?: string }): Promise<IdentityDetection> {
     const c = ctx(this.o)
     const facts = await readComputer(this.o)
     const asked = i.online ? await askGithub(facts, i.projects, c) : null
@@ -777,13 +778,14 @@ export class IdentityDetector {
       unmatched: p.unmatched,
       notes: [...facts.notes, ...(asked?.notes ?? []), ...p.notes],
     }
-    this.last = detection
+    this.last.set(i.scope ?? "", detection)
     return detection
   }
 
-  /** The last detection, when it's recent: import_detected_identity starts from it. */
-  recent(maxAgeMs = 30 * 60_000): IdentityDetection | null {
-    return this.last && Date.now() - this.last.at < maxAgeMs ? this.last : null
+  /** The scope's last detection, when it's recent: import_detected_identity starts from it. */
+  recent(scope = "", maxAgeMs = 30 * 60_000): IdentityDetection | null {
+    const d = this.last.get(scope)
+    return d && Date.now() - d.at < maxAgeMs ? d : null
   }
 
   /** A gh: reference's token, read from gh now. */
