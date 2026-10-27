@@ -5502,6 +5502,21 @@ export class TaskManager {
       this.schedule()
       return
     }
+    // Coordinator sees: status only. A message across that line would leave one side's words where the Coordinator
+    // reads them (the open task's transcript and queue), so agents don't message between a sealed project and an open one.
+    if (target.project_id !== from.project_id && this.identities.statusOnly(from.project_id) !== this.identities.statusOnly(target.project_id)) {
+      say(from.id, `Message to ${to} not delivered: status only.`, { to, blocked: true })
+      this.store.queueInput(
+        from.id,
+        "system",
+        withOwner(
+          `Your message to "${to}" was not delivered: Cody set ${this.identities.statusOnly(from.project_id) ? "your project" : "its project"} to show the Coordinator its status only, so agents don't message between it and other projects. Ask your Captain with message_captain if you need something from there.`,
+          this.owner(),
+        ),
+      )
+      this.schedule()
+      return
+    }
     const label = `Message from agent ${from.id} ("${from.title}")`
     const replyHint = expectReply ? ` They are waiting for your answer: reply with message_agent to "${from.id}".` : ""
     this.store.queueInput(target.id, `agent:${from.id}`, `${label}.${replyHint}\n\n${message}`)

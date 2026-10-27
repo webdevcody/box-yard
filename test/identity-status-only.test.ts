@@ -297,6 +297,33 @@ describe("what else reaches the Coordinator", () => {
   })
 })
 
+describe("agents across the seal", () => {
+  it("don't message between a sealed project and an open one; within either side they still do", async () => {
+    const r = await start()
+    const message = (from: string, to: string, text: string) =>
+      r.yard.tasks.apply(from, { seq: 0, ts: Date.now(), turnId: null, t: "message_agent", to, message: text, expectReply: true })
+    const words = (taskId: string) => [...r.yard.store.listTaskMessages(taskId).map((m) => m.content), ...r.yard.store.listQueuedInputs(taskId).map((q) => q.content)].join("\n")
+
+    // Out of the sealed project: refused, and only the sender hears why.
+    await message(r.hidden.id, r.visible.id, "What I found: CHAT-WORDS")
+    expect(words(r.visible.id)).not.toContain("CHAT-WORDS")
+    expect(words(r.hidden.id)).toMatch(/was not delivered: Cody set your project to show the Coordinator its status only[\s\S]*message_captain/)
+    // Into it: refused too, since the reply would come back out.
+    await message(r.visible.id, r.hidden.id, "Tell me what you found")
+    expect(words(r.hidden.id)).not.toContain("Tell me what you found")
+    expect(words(r.visible.id)).toMatch(/was not delivered: Cody set its project to show the Coordinator its status only/)
+
+    // Inside the sealed project, and between two open projects, messages go through as before.
+    const sibling = r.yard.store.createTask({ projectId: r.secret.id, title: "Private sibling", prompt: "x", branch: "boxyard/sib-1a2b" })
+    await message(r.hidden.id, sibling.id, "Sibling note CHAT-WORDS")
+    expect(words(sibling.id)).toContain("Sibling note CHAT-WORDS")
+    const other = r.yard.store.createProject({ name: "other" })
+    const otherTask = r.yard.store.createTask({ projectId: other.id, title: "Other build", prompt: "x", branch: "boxyard/other-1a2b" })
+    await message(r.visible.id, otherTask.id, "Open note")
+    expect(words(otherTask.id)).toContain("Open note")
+  })
+})
+
 describe("status-only guidance in the prompts", () => {
   it("tells a sealed project's Captain to answer the Coordinator with state, and the Coordinator to ask that Captain", async () => {
     const r = await start()
