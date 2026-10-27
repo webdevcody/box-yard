@@ -279,4 +279,20 @@ describe("pace and the fan-out question", () => {
     await waitFor(() => working(r) === 5, "5 agents")
     expect(tasks).toHaveLength(5)
   })
+
+  it("lets a task whose new box waits on the OK take a free slot beside another project meanwhile", async () => {
+    const r = await start({ maxBoxes: 20, slotsPerBox: 2, boxCreateConcurrency: 10 }, { freePerHour: 1 })
+    const town = r.yard.store.createProject({ name: "town" })
+    queue(r, town.id, 1)
+    await finish(r, 1)
+    await waitFor(() => working(r) === 1, "town's agent")
+    const [lot] = queue(r, r.yard.store.createProject({ name: "harbor" }).id, 1, "Pier")
+    // The hour's one free box is made: harbor's task shares town's box rather than wait for Cody.
+    await waitFor(() => working(r) === 2, "harbor's agent on town's box")
+    const t = r.yard.store.getTask(lot!.id)!
+    expect(t.boxId).toBe(r.yard.store.listTasks().find((x) => x.projectId === town.id)!.boxId)
+    expect(t.placement?.now?.how).toBe("shared")
+    expect(r.provider.starts).toHaveLength(1)
+    expect((await r.yard.tasks.cloudStatus()).fanout.wanted).toBe(0)
+  })
 })
