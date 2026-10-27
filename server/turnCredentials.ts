@@ -75,6 +75,14 @@ export const ownGithubToken = (env: Record<string, string>) => env.GITHUB_TOKEN 
 export const GLOBAL_CREDENTIALS = "global"
 
 /**
+ * On this computer, what keeps a non-Default identity's git off the owner's own config and gh login: git reads the
+ * identity's own global config (in `home`) and no system config, and gh its own folder (docs/identities.md).
+ */
+export function identityHomeEnv(home: string): Record<string, string> {
+  return { GIT_CONFIG_GLOBAL: `${home}/gitconfig`, GIT_CONFIG_NOSYSTEM: "1", GH_CONFIG_DIR: `${home}/gh` }
+}
+
+/**
  * The credential set a project's turns use, for the box wall: tasks of two sets never share a pool box, since an agent
  * can read everything on its box (other workspaces, their task.json, the repo mirrors). A project with its own Claude
  * login or GitHub token in its env has a set of its own; the projects of another identity share that identity's; the

@@ -73,6 +73,8 @@ export interface GitPrepOptions {
   git: string
   /** Exports GITHUB_TOKEN and GIT_TERMINAL_PROMPT. */
   env: string
+  /** The project's identity requires signed commits: the branch isn't pushed while one of its new commits isn't signed with this key. */
+  requireSigned?: { identity: string; publicKey: string; fingerprint: string } | null
 }
 
 export type GitPrepStatus = "pushed" | "skipped" | "failed"
@@ -110,10 +112,11 @@ export function gitPrepScript(o: GitPrepOptions): string {
   const t = `"$bys"/${q(id)}`
   const branch = o.branch && o.branch !== o.baseBranch ? o.branch : ""
   const push = (args: string) => `$byto ${g} push -q --no-verify ${args}`
+  const signer = o.requireSigned ?? null
   return [
     o.env,
     `export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0`,
-    `bys=; bystatus=; bywhy=; byhead=-; bycur=-; byW=-; byI=-; bypw=-; bypack=-; bybp=-; bydirty=0`,
+    `bys=; bystatus=; bywhy=; byhead=-; bycur=-; byW=-; byI=-; bypw=-; bypack=-; bybp=-; bybpwhy=; bydirty=0`,
     `byout() { echo "${GIT_PREP_MARK} status=$bystatus stage=\${bys:--} head=$byhead branch=$bycur wip=$byW index=$byI pushed=$bypw dirty=$bydirty pack=$bypack branchpush=$bybp why=$(printf '%s' "$bywhy" | tail -c 600 | base64 | tr -d '\\n')"; }`,
     `byend() { bystatus=$1; bywhy=$2; byout; exit 0; }`,
     `byerr() { tail -c 400 "$bys/err" 2>/dev/null; }`,
@@ -148,8 +151,16 @@ export function gitPrepScript(o: GitPrepOptions): string {
       ? [
           `if bytip=$(git rev-parse -q --verify ${q(`refs/heads/${branch}^{commit}`)}); then`,
           `  if [ -z "$(git rev-list -n 1 "$bytip" --not --remotes 2>/dev/null)" ]; then bybp=up-to-date`,
+          // requireSigned: GitHub never gets a branch with a commit the identity's key didn't sign; the WIP ref (a
+          // hidden ref, not a branch) still carries them, so nothing is lost.
+          signer
+            ? [
+                `  elif printf '%s\\n' ${q(`box-yard namespaces="git" ${signer.publicKey}`)} > "$bys/allowed" && byuns=$(git -c gpg.ssh.allowedSignersFile="$bys/allowed" log --format='%h %G?' "$bytip" --not --remotes 2>/dev/null | awk '$2 != "G" { n++; if (n <= 5) printf " %s", $1 }') && [ -n "$byuns" ]; then`,
+                `    bybp=unsigned; bybpwhy=${q(`the ${signer.identity} identity requires signed commits, and its key (${signer.fingerprint}) didn't sign`)}"$byuns"${q(`, so the branch wasn't pushed (the WIP ref carries it). Sign them again, e.g. git rebase --force-rebase --gpg-sign origin/${o.baseBranch}, and push`)}`,
+              ].join("\n")
+            : ``,
           `  elif ${push(`origin ${q(`refs/heads/${branch}:refs/heads/${branch}`)}`)} 2>"$bys/err"; then bybp=yes`,
-          `  elif grep -qiE 'non-fast-forward|fetch first|\\(rejected\\)' "$bys/err"; then bybp=rejected; bybpwhy="$(byerr)"`,
+          `  elif grep -qiE 'non-fast-forward|fetch first|\\(rejected\\)' "$bys/err"; then bybp=rejected; bybpwhy="origin rejected the branch push, so the WIP ref carries its commits: $(byerr)"`,
           `  else byend failed "git push: $(byerr)"; fi`,
           `fi`,
         ].join("\n")
@@ -203,7 +214,7 @@ export function gitPrepScript(o: GitPrepOptions): string {
     `{ echo "version 1"; echo "head $byhead"; echo "branch $bycur"; echo "dirty $bydirty"; echo "wip $byW"; echo "index $byI"`,
     `  [ "$bypw" = "$byW" ] && echo "wipref ${ref}"; printf '%s\\n' "$byx" | sed '/^$/d; s/^/extra /'; } > ${t}/${GIT_MANIFEST} || byend failed "couldn't write the manifest"`,
     `rm -rf ${t}/objects "$bys/err" "$bys/out"`,
-    `[ -n "$bybpwhy" ] && bybpwhy="origin rejected the branch push, so the WIP ref carries its commits: $bybpwhy"; byend pushed "$bybpwhy"`,
+    `rm -f "$bys/allowed"; byend pushed "$bybpwhy"`,
   ]
     .filter(Boolean)
     .join("\n")

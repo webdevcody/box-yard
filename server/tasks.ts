@@ -58,8 +58,8 @@ import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpo
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { GLOBAL_CREDENTIALS, credentialSet, ownGithubToken, turnEnv } from "./turnCredentials.js"
-import type { Identities } from "./identity/identities.js"
+import { GLOBAL_CREDENTIALS, credentialSet, identityHomeEnv, ownGithubToken, turnEnv } from "./turnCredentials.js"
+import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
@@ -4250,7 +4250,11 @@ export class TaskManager {
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
       await this.dropBoxGitCredential(boxId)
-      await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId), null, 2))
+      // A key Box Yard keeps goes to the box for this one turn: the runner moves it out of the task folder and
+      // removes it when the turn ends (box-runner.mjs setupSigning).
+      const signing = this.identities.signingFor(project.id)
+      if (signing?.privateKey) await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
+      await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId, signing), null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
         boxId,
@@ -4304,7 +4308,7 @@ export class TaskManager {
       // pid someone else holds now is never hit. The runner writes run.json and turn.pid itself.
       const start = await this.provider.exec(
         boxId,
-        `${TURN_SH}\ncd ${q(dir)} && ${helper}(by_turn_kill . TERM; rm -f turn.pid run.json; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
+        `${TURN_SH}\ncd ${q(dir)} && ([ ! -f signing.key ] || chmod 600 signing.key) && ${helper}(by_turn_kill . TERM; rm -f turn.pid run.json; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       if (superseded()) {
@@ -4530,11 +4534,15 @@ export class TaskManager {
     else console.warn(`[box-yard] couldn't reset the git credential on ${boxId}: ${errorTail(res?.stderr ?? "") || "no result"}`)
   }
 
-  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
+  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null) {
     // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
-    const { env, unsetEnv, claudeFrom } = turnEnv({ ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }, this.identities.base(project.id, project.repo))
+    const own = { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }
+    const { env, unsetEnv, claudeFrom } = turnEnv(own, this.identities.base(project.id, project.repo))
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
+    // On this computer, an identity other than Default doesn't get the owner's git config or gh login.
+    const home = this.identityHome(boxId, project.id)
+    if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in own)) env[k] = v
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
     return {
       taskId: row.id,
@@ -4552,6 +4560,19 @@ export class TaskManager {
       ownerName: this.owner(),
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
+      // How its commits are signed: never the private key, which comes as signing.key for one turn.
+      signing: signing
+        ? {
+            identity: signing.identity,
+            kind: signing.kind,
+            publicKey: signing.publicKey,
+            fingerprint: signing.fingerprint,
+            program: signing.program,
+            requireSigned: signing.requireSigned,
+            problem: signing.kind === "file" && !signing.privateKey ? `the ${signing.identity} identity's signing key can't be read with this server's secret key: save it again in Settings › Identities` : null,
+          }
+        : null,
+      identityHome: home,
       publicUrl: this.c.publicUrl || null,
       redis: this.redis ? { url: this.c.redisUrl, token: this.c.redisToken, key: redisEventsKey(row.id) } : null,
     }
@@ -4765,7 +4786,19 @@ export class TaskManager {
       partial: this.partialClone(project),
       git: gitWithHelper(helper, only),
     }
-    return { spec, helper, only, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0` }
+    const home = this.identityHome(boxId, project.id)
+    const walls = home ? ` ${Object.entries(identityHomeEnv(home)).map(([k, v]) => `${k}=${q(v)}`).join(" ")}` : ""
+    return { spec, helper, only, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0${walls}` }
+  }
+
+  /**
+   * On this computer, the folder of a non-Default identity's own git config and gh login, which its turns and Box
+   * Yard's git work for its projects use instead of the owner's (~/.gitconfig, the system config, ~/.config/gh). Null
+   * on boxes (no one else's config is there) and for the Default identity (the owner's own, as before).
+   */
+  private identityHome(boxId: string, projectId: string): string | null {
+    const id = this.identities.idOf(projectId)
+    return isLocalRunnerBox(boxId) && id !== DEFAULT_IDENTITY_ID ? `${this.provider.root(boxId)}/.boxyard/identities/${id}` : null
   }
 
   /** See mirrorSpec's `only`. */
@@ -5048,6 +5081,8 @@ export class TaskManager {
         if (ev.action === "failed") return say("event", `Dependency cache step failed: ${String(ev.error ?? "unknown error")}`, { kind: "deps" })
         return
       }
+      case "signing":
+        return say("event", `This turn's commits aren't signed: ${String(ev.error ?? "signing isn't set up")}.`, { kind: "signing" })
       case "session_reset":
         this.store.updateTask(taskId, { sessionId: String(ev.sessionId) })
         return say("event", "Claude session was missing on this box, so the agent started a new one with a recap.")
@@ -5756,6 +5791,7 @@ export class TaskManager {
       packMaxBytes: o.packMaxBytes,
       git: spec.git,
       env,
+      requireSigned: this.identities.requiredSigner(project.id),
     })
     try {
       const res = await this.provider.exec(boxId, script)
@@ -5804,7 +5840,7 @@ export class TaskManager {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     // A thin archive is a partial one that also leaves out the history GitHub has.
     const partial = Boolean(mode.partial || mode.thin)
-    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/run.json`, `${taskId}/events.lock`, `${taskId}/mcp.json`]
+    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/run.json`, `${taskId}/events.lock`, `${taskId}/mcp.json`, `${taskId}/signing.key`]
     const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
     const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
     const script = archiveScript({ root: tasksRootOf(this.provider, boxId), boxRoot: this.provider.root(boxId), taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })
