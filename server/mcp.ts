@@ -38,10 +38,9 @@ import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } f
 import { compactionTime } from "./compactions.js"
 import type { Identities } from "./identity/identities.js"
 import { IdentityDetector } from "./identity/detect.js"
-import { applyRefs, createWithRefs, importDetected, type IdentityRefs } from "./identity/setup.js"
-import { ownGithubToken } from "./turnCredentials.js"
+import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
-import { COORDINATOR_SEES, IDENTITY_COLORS, identityPhrase, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
+import { COORDINATOR_SEES, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -1931,30 +1930,17 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     /** Give a project an identity: its runner has to fit, and no turn of it may be running (it'd switch accounts halfway). */
     const assignProject = (ref: string, identityId: string): string => {
       const p = project(ref)
-      const i = identities.require(identityId)
-      if (p.identityId === i.id) return `${p.name}: uses ${identityPhrase(i)} already.`
-      const busy = store.listTasks({ projectId: p.id }).find((t) => t.status === "starting" || t.status === "working")
-      if (busy) throw new Error(`${p.name} has a task running (${busy.id}, "${busy.title}"). Assign it when the task rests, so no turn switches accounts halfway.`)
-      const problem = identities.runnerProblem(i.id, p.runner ?? "box")
-      if (problem) throw new Error(`${p.name} can't use it: ${problem}.`)
-      identities.assign(p.id, i.id)
-      const updated = store.getProject(p.id)
-      if (updated) hub.broadcast({ type: "project", project: updated })
-      tasks.schedule()
-      return `${p.name}: now uses ${identityPhrase(i)}; its resting tasks move to its boxes on their next turn.`
+      const r = assignChecked(identities, store, p, identityId)
+      if (r.changed) {
+        const updated = store.getProject(p.id)
+        if (updated) hub.broadcast({ type: "project", project: updated })
+        tasks.schedule()
+      }
+      return r.line
     }
     /** detect_identities and import_detected_identity: a Captain maps its own project only. */
-    const detect = async (online: boolean) => {
-      const projects = scopeId ? [ownProject()] : store.listProjects()
-      const source = deps.settings?.credentials.source("githubToken")
-      return detector.detect({
-        projects: projects.map((p) => ({ id: p.id, name: p.name, repo: p.repo, identityId: p.identityId })),
-        identities: identities.list(),
-        online,
-        defaultLogin: source === "gh" ? undefined : online ? await identities.defaultLogin() : null,
-        scope: scopeId ?? "",
-      })
-    }
+    const detect = async (online: boolean) =>
+      detectFor(identities, detector, scopeId ? [ownProject()] : store.listProjects(), { online, scope: scopeId ?? "", defaultIsGh: deps.settings?.credentials.source("githubToken") === "gh" })
     const runnersInput = z.array(z.enum(RUNNERS)).min(1).nullable().optional().describe("Where its projects may run: box (Upstash), local (this computer), gpu (RunPod), docker. null: every runner.")
     const authorInput = z
       .object({ name: z.string(), email: z.string() })
@@ -2157,13 +2143,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (!a.identity && !scopeId) return fail("Name the identity.")
         const i = a.identity ? identity(a.identity) : identities.of(scopeId!)
         if (scopeId && i.id !== identities.idOf(scopeId)) throw outOfScope(`test_identity checks your project's identity (${identities.of(scopeId).name})`)
-        const repos = i.projectIds
-          .filter((id) => !scopeId || id === scopeId)
-          .flatMap((id) => {
-            const p = store.getProject(id)
-            return p ? [{ name: p.name, repo: p.repo, ownToken: Boolean(ownGithubToken(store.projectEnv(p.id))) }] : []
-          })
-        const r = await identities.test(i.id, repos, { save: !scopeId })
+        const r = await identities.test(i.id, testRepos(store, i, scopeId), { save: !scopeId })
         return ok({ identity: i.name, ok: r.ok, lines: r.lines })
       }),
     )
