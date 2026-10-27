@@ -10,11 +10,17 @@ import { announceSnapshot, type ProjectSnapshotState } from "./projectSnapshot"
 import { placeMessage } from "./queued"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
+import { onResume } from "./resume"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 import type { RunPodStatus } from "../../../shared/runpod"
 import type { DockerStatus } from "../../../shared/docker"
 
 export type Connection = "connecting" | "live" | "offline"
+
+/** Back after this long away, the stream is reopened even if it says it's open: iOS leaves dead ones that never error. */
+export const STALE_STREAM_MS = 30_000
+/** A batch waiting for a frame is applied after this long anyway (frames can stop coming, e.g. a page iOS just thawed). */
+const FLUSH_FALLBACK_MS = 250
 
 /**
  * Subscribe to server events and write them straight into the TanStack Query
@@ -34,9 +40,15 @@ export function useServerEvents(enabled: boolean): Connection {
     let closed = false
     let queue: UiEvent[] = []
     let scheduled = false
+    let frame = 0
+    let fallback: ReturnType<typeof setTimeout> | null = null
 
     const flush = () => {
+      if (!scheduled) return
       scheduled = false
+      cancelAnimationFrame(frame)
+      if (fallback) clearTimeout(fallback)
+      fallback = null
       const events = queue
       queue = []
       notifyManager.batch(() => {
@@ -55,9 +67,9 @@ export function useServerEvents(enabled: boolean): Connection {
       queue.push(ev)
       if (scheduled) return
       scheduled = true
-      // Background tabs get no animation frames; still apply events, just less often.
-      if (document.hidden) setTimeout(flush, 250)
-      else requestAnimationFrame(flush)
+      // Background tabs get no animation frames; still apply events, just less often. Whichever comes first wins.
+      if (!document.hidden) frame = requestAnimationFrame(flush)
+      fallback = setTimeout(flush, FLUSH_FALLBACK_MS)
     }
 
     const connect = () => {
@@ -243,11 +255,27 @@ export function useServerEvents(enabled: boolean): Connection {
       }
     }
 
+    // Back from the background: a stream that isn't open, or one that sat frozen a while, is replaced now
+    // (and everything refetched) instead of waiting for an error that may never come.
+    const offResume = onResume((away) => {
+      if (closed || !es) return
+      if (es.readyState === EventSource.OPEN && away < STALE_STREAM_MS) return
+      es.close()
+      if (retry) clearTimeout(retry)
+      retry = null
+      wasOffline = true
+      setState("connecting")
+      connect()
+    })
+
     connect()
     return () => {
       closed = true
       queue = []
+      offResume()
       if (retry) clearTimeout(retry)
+      if (fallback) clearTimeout(fallback)
+      cancelAnimationFrame(frame)
       es?.close()
     }
   }, [enabled, qc])

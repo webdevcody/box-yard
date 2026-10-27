@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import {
   DictationMachine,
+  STOP_TIMEOUT_MS,
   TAP_MS,
   defaultDictationKey,
   dictationDefaults,
@@ -256,6 +257,50 @@ describe("DictationMachine", () => {
     expect(send).not.toHaveBeenCalled()
     rec().end()
     expect(send).toHaveBeenCalledOnce()
+  })
+
+  // iOS sometimes never sends `end` after stop() (a home-screen app thawed mid-session). Stuck in "stopping",
+  // Send, Enter and the mic all did nothing until the app was force-closed.
+  it("gives up waiting for the end after STOP_TIMEOUT_MS: keeps the words, sends if asked, and listens again", () => {
+    vi.useFakeTimers()
+    try {
+      const { m, send, finals, rec } = setup()
+      m.toggle()
+      rec().emit(0, [["merge it", false]])
+      m.stopAndSend()
+      expect(m.state.phase).toBe("stopping")
+      vi.advanceTimersByTime(STOP_TIMEOUT_MS - 1)
+      expect(m.state.phase).toBe("stopping")
+      vi.advanceTimersByTime(1)
+      expect(m.state.phase).toBe("idle")
+      expect(rec().aborted).toBe(1)
+      expect(finals).toEqual(["merge it"])
+      expect(send).toHaveBeenCalledOnce()
+      // A late `end` from the old session changes nothing, and the mic works again.
+      rec().end()
+      expect(send).toHaveBeenCalledOnce()
+      m.toggle()
+      expect(m.state.phase).toBe("listening")
+      expect(FakeRecognition.all).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("an end that comes in time cancels the give-up", () => {
+    vi.useFakeTimers()
+    try {
+      const { m, rec } = setup()
+      m.toggle()
+      m.toggle()
+      rec().end()
+      m.toggle()
+      vi.advanceTimersByTime(STOP_TIMEOUT_MS * 2)
+      expect(m.state.phase).toBe("listening")
+      expect(FakeRecognition.all[0]!.aborted).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("restarts when the browser ends the session while still wanted, up to a limit", () => {

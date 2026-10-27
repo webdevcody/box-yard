@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, Container, Cpu, DollarSign, ExternalLink, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, Container, Cpu, DollarSign, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -1252,14 +1252,14 @@ function AboutPanel() {
         <AboutRow label="Max upload">{server.data ? `${server.data.maxUploadMb} MB` : "…"}</AboutRow>
         <AboutRow label="Links">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <NewTabLink className={link} href="https://github.com/webdevcody/box-yard">
-              GitHub <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://github.com/webdevcody/box-yard">
+              GitHub
             </NewTabLink>
-            <NewTabLink className={link} href="https://upstash.com/docs/box">
-              Upstash Box docs <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://upstash.com/docs/box">
+              Upstash Box docs
             </NewTabLink>
-            <NewTabLink className={link} href="https://console.upstash.com">
-              Upstash console <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://console.upstash.com">
+              Upstash console
             </NewTabLink>
           </div>
         </AboutRow>

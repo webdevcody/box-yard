@@ -49,6 +49,8 @@ const click = (el: Element, init: MouseEventInit = {}) => {
   return { prevented: e.defaultPrevented }
 }
 const link = (text: string) => [...host.querySelectorAll("a")].find((a) => a.textContent === text)!
+const linkTo = (href: string) => host.querySelector<HTMLAnchorElement>(`a[href="${href}"]`)!
+const hasMark = (a: Element) => Boolean(a.querySelector("[data-external-mark]"))
 const isNewTab = (a: HTMLAnchorElement) => a.target === "_blank" && a.rel === "noopener noreferrer"
 
 describe("links in rendered markdown", () => {
@@ -56,8 +58,7 @@ describe("links in rendered markdown", () => {
 
   it("opens a bare URL in a new tab", () => {
     md(`PR #66: ${PR} Before each new workspace…`)
-    const a = link(PR)
-    expect(a.getAttribute("href")).toBe(PR)
+    const a = linkTo(PR)
     expect(isNewTab(a)).toBe(true)
     expect(click(a).prevented).toBe(false)
     expect(location.pathname).toBe("/")
@@ -91,7 +92,7 @@ describe("links in rendered markdown", () => {
   it("never lets a link's click reach a clickable card around it", () => {
     const card = vi.fn()
     render(createElement("div", { onClick: card }, createElement(Markdown, null, `${PR} and [a task](/tasks/task_abcdef123456)`)))
-    click(link(PR))
+    click(linkTo(PR))
     click(link("a task"))
     click(link("a task"), { metaKey: true })
     expect(card).not.toHaveBeenCalled()
@@ -109,7 +110,7 @@ describe("task notices in the Coordinator chat", () => {
 
   it("opens the PR link in a new tab instead of the task", () => {
     render(createElement(ChatLine, { m: notice, onFollowUp: () => {} }))
-    const a = link(PR)
+    const a = linkTo(PR)
     // Not nested inside another link, which would swallow the click.
     expect(a.parentElement!.closest("a")).toBeNull()
     expect(isNewTab(a)).toBe(true)
@@ -128,12 +129,82 @@ describe("task notices in the Coordinator chat", () => {
   })
 })
 
+describe("internal vs external at a glance", () => {
+  const md = (text: string) => render(createElement(Markdown, null, text))
+
+  it("marks a link to another site with ↗ and its full URL on hover; in-app links and files get neither", () => {
+    md("[docs](https://upstash.com/docs/box), [the task](/tasks/task_abcdef123456), [the yard](/projects/prj_abcdef) and [a shot](/artifacts/art_abcdef/shot.png)")
+    const docs = link("docs")
+    expect(hasMark(docs)).toBe(true)
+    expect(docs.title).toBe("https://upstash.com/docs/box")
+    expect(docs.querySelector("[data-external-mark]")!.getAttribute("aria-label")).toBe("(opens in a new tab)")
+    for (const a of [link("the task"), link("the yard")]) {
+      expect(hasMark(a)).toBe(false)
+      expect(a.target).toBe("")
+    }
+    // An artifact opens in the app's preview, so it's in-app too.
+    expect(hasMark(link("a shot"))).toBe(false)
+    expect(click(link("a shot")).prevented).toBe(true)
+    expect(location.pathname).toBe("/")
+  })
+
+  it("shortens a pasted GitHub PR or issue URL and keeps the URL in the href and tooltip", () => {
+    md(`Opened ${PR} for https://github.com/webdevcody/box-yard/issues/12.`)
+    expect(linkTo(PR).textContent).toBe("PR #66")
+    expect(linkTo(PR).title).toBe(PR)
+    expect(linkTo("https://github.com/webdevcody/box-yard/issues/12").textContent).toBe("webdevcody/box-yard#12")
+    // Text the model chose stays as written.
+    md(`See [the fix](${PR}).`)
+    expect(linkTo(PR).textContent).toBe("the fix")
+  })
+
+  it("keeps the ↗ on one line with the link's last word", () => {
+    md("Read [the Upstash Box docs](https://upstash.com/docs/box).")
+    const glued = link("the Upstash Box docs").querySelector("[data-external-mark]")!.parentElement!
+    expect(glued.className).toContain("whitespace-nowrap")
+    expect(glued.textContent).toBe("docs")
+  })
+
+  it("colors a PR link by its task's PR state: merged is purple", () => {
+    qc.setQueryData(keys.tasks, [{ id: "task_abcdef123456", title: "Fix", status: "done", projectId: "prj_abcdef", prUrl: PR, prState: "merged" }])
+    md(`Merged ${PR}.`)
+    const a = linkTo(PR)
+    expect(a.dataset.prLink).toBe("merged")
+    expect(a.className).toContain("text-merged-fg")
+    expect(hasMark(a)).toBe(true)
+  })
+})
+
+describe("shortened notices", () => {
+  const long: ChatMessage = {
+    id: "chat_notice2",
+    role: "notice",
+    content: `💬 **PR tracker misses manual merges** finished its turn: I opened the PR: ${PR}. A 403 fro [truncated: 2821 more chars — full reply: call wait_for_tasks or get_task]`,
+    meta: { taskId: "task_848359a52eb2" },
+    createdAt: Date.now(),
+  }
+
+  it("never shows the model's truncation hint, and links the task's full reply instead", () => {
+    render(createElement(ChatLine, { m: long, onFollowUp: () => {} }))
+    expect(host.textContent).not.toContain("[truncated")
+    expect(host.textContent).not.toContain("wait_for_tasks")
+    expect(host.textContent).toContain("A 403 fro…")
+    const more = link("Read the full reply")
+    expect(more.getAttribute("href")).toBe("/tasks/task_848359a52eb2")
+    expect(hasMark(more)).toBe(false)
+    expect(click(more).prevented).toBe(true)
+    expect(location.pathname).toBe("/tasks/task_848359a52eb2")
+  })
+})
+
 describe("PR chip", () => {
   it("opens the PR in a new tab, not the card it sits on", () => {
     const card = vi.fn()
     render(createElement("div", { onClick: card }, createElement(PrChip, { task: { status: "pr_ready", prUrl: PR, prState: "open" } })))
     const a = host.querySelector<HTMLAnchorElement>("a[data-pr-state]")!
     expect(isNewTab(a)).toBe(true)
+    expect(hasMark(a)).toBe(true)
+    expect(a.title).toContain(PR)
     expect(click(a).prevented).toBe(false)
     expect(card).not.toHaveBeenCalled()
   })

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement, createRef } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { StickyScroll, type StickyScrollHandle } from "../web/src/components/StickyScroll.js"
+import { useTail } from "../web/src/lib/tail.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -397,6 +398,62 @@ describe("StickyScroll", () => {
       dispatched = top
       act(() => void viewport.dispatchEvent(new Event("resize")))
       expect(atBottom()).toBe(true)
+    })
+  })
+
+  // A phone's home-screen app stays open for days: a thread that kept every message that arrived ended up
+  // rendering hundreds of them, and every layout (keyboard, rotation, a dialog) froze the app for seconds.
+  describe("with useTail, as the chats use it", () => {
+    let items: { id: string }[]
+
+    function TailThread({ items }: { items: { id: string }[] }) {
+      const tail = useTail(items, "chat")
+      return createElement(StickyScroll, {
+        handle,
+        count: items.length,
+        hidden: tail.hidden,
+        onLoadEarlier: tail.loadEarlier,
+        onTrim: tail.trim,
+        children: tail.visible.map((m) => createElement("div", { key: m.id, "data-h": 100 }, m.id)),
+      })
+    }
+    const renderTail = () => act(() => root.render(createElement(TailThread, { items: [...items] })))
+    // The rendered messages (the list also holds the "load earlier" sentinel).
+    const messages = () => rows().filter((r) => r.dataset.h)
+    const arrive = () => {
+      items.push({ id: `m${items.length}` })
+      renderTail()
+      frame()
+    }
+
+    beforeEach(() => {
+      act(() => root.render(null))
+      items = Array.from({ length: 200 }, (_, i) => ({ id: `m${i}` }))
+      renderTail()
+      installLayout()
+      scroller.scrollTop = max()
+      frame()
+    })
+
+    it("starts with the newest 60", () => {
+      expect(messages()).toHaveLength(60)
+      expect(messages().at(-1)!.textContent).toBe("m199")
+    })
+
+    it("stays at most twice that while new messages arrive at the bottom", () => {
+      for (let i = 0; i < 300; i++) arrive()
+      expect(messages().length).toBeLessThanOrEqual(120)
+      expect(messages().at(-1)!.textContent).toBe("m499")
+      expect(atBottom()).toBe(true)
+    })
+
+    it("keeps every row while scrolled up reading, so nothing moves", () => {
+      userScroll(-1000)
+      flush()
+      const reading = messages().find((r) => rowTop(r) >= 0)!.textContent
+      for (let i = 0; i < 100; i++) arrive()
+      expect(messages()).toHaveLength(160)
+      expect(messages().find((r) => rowTop(r) >= 0)!.textContent).toBe(reading)
     })
   })
 })

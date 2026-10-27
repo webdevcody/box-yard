@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
-import { AlertTriangle, Boxes, Camera, Laptop, ChevronRight, Eraser, ExternalLink, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
+import { AlertTriangle, Boxes, Camera, Laptop, ChevronRight, Eraser, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
 import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useSetup, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
@@ -10,7 +10,7 @@ import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { memoryMeter, memoryShort } from "../lib/memoryMeter"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
+import { Button, Empty, ExternalMark, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
@@ -558,10 +558,10 @@ function BoxMenu({ box, tasks, onOpen, onAction }: { box: BoxInfo; tasks: Task[]
           ))}
           {previews.length > 0 && <div className="mx-2 mt-1.5 mb-1 text-[11px] font-medium tracking-wide text-zinc-500 uppercase">Previews</div>}
           {previews.map((p) => (
-            <NewTabLink key={`${p.port}-${p.url}`} role="menuitem" href={p.url} title={p.taskTitle} className={menuItem} onClick={() => setOpen(false)}>
+            <NewTabLink key={`${p.port}-${p.url}`} role="menuitem" href={p.url} title={p.taskTitle} mark={false} className={menuItem} onClick={() => setOpen(false)}>
               <Globe className="h-4 w-4 shrink-0 text-sky-400" />
               <span className="truncate">{p.label}</span>
-              <ExternalLink className="ml-auto h-3 w-3 shrink-0 text-zinc-500" />
+              <ExternalMark className="ml-auto h-3 w-3 text-zinc-500" />
             </NewTabLink>
           ))}
         </div>
@@ -729,10 +729,10 @@ function BoxDetails({
                   key={`${p.port}-${p.url}`}
                   href={p.url}
                   title={p.taskTitle}
+                  mark="end"
                   className="inline-flex min-h-11 items-center gap-1 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-sky-400 hover:border-sky-500/40 hover:text-sky-300 sm:min-h-0"
                 >
                   <Globe className="h-3.5 w-3.5" /> {p.label}
-                  <ExternalLink className="h-3 w-3" />
                 </NewTabLink>
               ))}
             </div>

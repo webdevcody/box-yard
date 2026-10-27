@@ -189,7 +189,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
       <div className={showSetup ? "hidden" : "contents"}>
         <SelectionToTask source={selectionSource} onPrompt={submit}>
-          <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+          <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
             {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
               <TryFirst
                 ready={!setup.needed}

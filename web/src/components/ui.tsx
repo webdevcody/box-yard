@@ -1,16 +1,18 @@
-import { memo, useEffect, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
+import { Children, memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type ButtonHTMLAttributes, type ComponentProps, type MouseEvent, type ReactNode } from "react"
 import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
-import { useQueryClient } from "@tanstack/react-query"
-import { Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
+import { useQuery, useQueryClient } from "@tanstack/react-query"
+import { ArrowUpRight, Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
-import { followAppLink, linkTarget, remarkEntityLinks, type EntityIndex } from "../lib/linkify"
+import { followAppLink, githubRef, linkTarget, remarkEntityLinks, shortGithubLabel, type EntityIndex } from "../lib/linkify"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { api } from "../lib/api"
+import { keys } from "../lib/queries"
 import { copyText } from "../lib/clipboard"
 import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
-import type { BoxSize, PrState, TaskStatus } from "../../../shared/types"
+import type { BoxSize, PrState, Task, TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -139,6 +141,7 @@ export function PrChip({
   return (
     <NewTabLink
       href={task.prUrl}
+      mark="end"
       title={(activity ? `${activity.title}\n${tooltip}` : tooltip) ?? undefined}
       data-pr-state={state}
       className={cx(
@@ -260,11 +263,14 @@ export const Markdown = memo(function Markdown({ children, linkify = true, live 
 const MARKDOWN_COMPONENTS: Components = {
   a: ({ href = "", title, children }) => (
     <AppLink href={href} title={title}>
-      {children}
+      {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
+      {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
     </AppLink>
   ),
   pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
 }
+
+const isRawUrl = (text: string, href: string) => text === href || text.replace(/\/$/, "") === href.replace(/\/$/, "")
 
 /** A code block's text as written: markdown adds one newline after a fenced block's last line, which isn't the code's. */
 export const codeBlockText = (pre: HTMLElement) => (pre.textContent ?? "").replace(/\n$/, "")
@@ -333,20 +339,145 @@ export function CopyButton({ text, label, className }: { text: string | (() => s
 export const COPIED_MS = 1500
 
 /**
- * A link to another site (a GitHub PR, a preview, docs): always opens in a new tab without access to this one.
+ * The ↗ after every link that leaves Box Yard (NewTabLink), so a link that opens another site in a new tab never
+ * looks like one that stays in the app. Screen readers hear "opens in a new tab".
+ */
+export function ExternalMark({ className }: { className?: string }) {
+  return (
+    <ArrowUpRight
+      data-external-mark=""
+      role="img"
+      aria-label="(opens in a new tab)"
+      aria-hidden={false}
+      className={cx("ml-px inline-block h-[0.95em] w-[0.95em] shrink-0 align-[-0.125em] opacity-70", className)}
+    />
+  )
+}
+
+/** How many trailing characters of a long last word stay glued to the ↗ (a whole long URL can't stay on one line). */
+const GLUE_MAX = 12
+
+/**
+ * `children` with `mark` glued to the end of the last word, in one nowrap span, so the ↗ never wraps onto a line by
+ * itself. A long unbroken word (a URL) keeps only its last few characters with the mark, so it still wraps.
+ */
+export function glueMark(children: ReactNode, mark: ReactNode): ReactNode {
+  const parts = Children.toArray(children)
+  const last = parts.pop()
+  if (typeof last === "string" || typeof last === "number") {
+    const text = String(last)
+    const space = text.search(/\s\S*$/) + 1
+    let cut = Math.max(space, text.length - GLUE_MAX)
+    // Never split a surrogate pair (an emoji).
+    if (cut > 0 && cut < text.length && /[\uDC00-\uDFFF]/.test(text[cut]!)) cut--
+    return (
+      <>
+        {parts}
+        {text.slice(0, cut)}
+        <span className="whitespace-nowrap">
+          {text.slice(cut)}
+          {mark}
+        </span>
+      </>
+    )
+  }
+  return (
+    <>
+      {parts}
+      <span className="whitespace-nowrap">
+        {last}
+        {mark}
+      </span>
+    </>
+  )
+}
+
+/**
+ * A link to another site (a GitHub PR, a preview, docs): always opens in a new tab without access to this one, ends
+ * in the ↗ mark and shows its full URL on hover. `mark`: "glued" (default) for links in running text, "end" for a
+ * flex chip or row (the mark is its last item), false for an icon-only button that already says where it goes.
  * Cards are often clickable themselves, so the click stops here and opens the link, not the card.
  */
-export function NewTabLink({ onClick, ...rest }: ComponentProps<"a">) {
+export function NewTabLink({ onClick, mark = "glued", title, href, children, ...rest }: ComponentProps<"a"> & { mark?: "glued" | "end" | false }) {
+  const tip = !href || (title && title.includes(href)) ? title : title ? `${title}\n${href}` : href
   return (
     <a
       {...rest}
+      href={href}
+      title={tip}
       target="_blank"
       rel="noopener noreferrer"
+      data-external=""
       onClick={(e) => {
         e.stopPropagation()
         onClick?.(e)
       }}
-    />
+    >
+      {mark === "glued" ? (
+        glueMark(children, <ExternalMark />)
+      ) : mark === "end" ? (
+        <>
+          {children}
+          <ExternalMark className="h-3 w-3" />
+        </>
+      ) : (
+        children
+      )}
+    </a>
+  )
+}
+
+/** The task whose PR this is, as a PrState ("" when no task has it), so a PR link in text can wear its state's colors. */
+function usePrStateFor(url: string): PrState | "" {
+  // A string, so the link re-renders only when that PR's state changes, not on every task update.
+  const select = useCallback((tasks: Task[]) => prStateOfUrl(tasks, url) ?? "", [url])
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? ""
+}
+
+/** PR_STYLE's link colors, `!` so they beat `.prose-chat a` (unlayered) and a caller's own color. */
+const PR_TEXT: Record<PrState, string> = {
+  open: "text-emerald-400!",
+  draft: "text-zinc-400!",
+  merged: "text-merged-fg!",
+  closed: "text-red-400/80!",
+}
+
+const samePr = (a: string, b: string) => a.replace(/\/$/, "") === b.replace(/\/$/, "")
+function prStateOfUrl(tasks: Task[], url: string): PrState | null {
+  const t = tasks.find((t) => t.prUrl && samePr(t.prUrl, url))
+  return t ? prStateOf(t) : null
+}
+
+/**
+ * A GitHub pull request mentioned in text: the PR glyph and, when a task has that PR, GitHub's state colors (merged is
+ * purple) like PrChip, then the ↗. Hovering shows the state and the URL.
+ */
+function PrTextLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
+  const qc = useQueryClient()
+  const state = usePrStateFor(href)
+  const Icon = state ? PR_STYLE[state].icon : GitPullRequest
+  const onMouseEnter = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (title) return
+    const task = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.prUrl && samePr(t.prUrl, href))
+    const tip = task ? prTooltip(task) : null
+    if (tip) e.currentTarget.title = tip
+  }
+  return (
+    <NewTabLink
+      href={href}
+      title={title}
+      data-pr-link={state || "unknown"}
+      onMouseEnter={onMouseEnter}
+      className={cx(
+        className,
+        // "⎇ PR #154 ↗" stays on one line; longer link text wraps and keeps only its last word with the ↗.
+        typeof children === "string" && children.length <= 24 && "whitespace-nowrap",
+        state && cx(PR_TEXT[state], "decoration-current/40! hover:decoration-current!"),
+      )}
+    >
+      <Icon aria-hidden className="mr-0.5 inline-block h-[0.95em] w-[0.95em] align-[-0.125em]" />
+      {children}
+    </NewTabLink>
   )
 }
 
@@ -370,12 +501,19 @@ export function AppLink({ href, title, className, children }: { href: string; ti
         {children}
       </FileLink>
     )
-  if (target.kind !== "app")
+  if (target.kind !== "app") {
+    if (githubRef(target.href)?.kind === "pull")
+      return (
+        <PrTextLink href={target.href} title={title} className={className}>
+          {children}
+        </PrTextLink>
+      )
     return (
       <NewTabLink href={target.href} title={title} className={className}>
         {children}
       </NewTabLink>
     )
+  }
   const onClick = (e: MouseEvent<HTMLAnchorElement>) => {
     // A link inside a clickable card (a notice, a row) goes where it points, not where the card does.
     e.stopPropagation()

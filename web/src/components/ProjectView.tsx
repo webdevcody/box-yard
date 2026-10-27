@@ -202,7 +202,7 @@ function ProjectHeader({
         <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">{project.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
           {project.repo ? (
-            <NewTabLink href={repoUrl(project.repo)} className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
+            <NewTabLink href={repoUrl(project.repo)} mark="end" className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
               <FolderGit2 className="h-4 w-4 shrink-0" /> <span className="truncate">{project.repo}</span>
             </NewTabLink>
           ) : (
