@@ -193,7 +193,8 @@ describe("restores never send one file over the box's upload limit", () => {
   })
 
   it("an archive that can't be uploaded restarts from a recap on the pushed branch and work, after one try", async () => {
-    // The box refuses the archive and doesn't say its limit, so it can't be split: like the old single upload.
+    // The box refuses the archive without advertising its limit, and refuses the parts under the limit its refusal
+    // states (100 MB) too: no upload can work.
     const r = await start({ limit: 512 * KB, advertise: false })
     const root = tmpDir("box-yard-origin-")
     const bare = path.join(root, "origin.git")
@@ -224,8 +225,11 @@ describe("restores never send one file over the box's upload limit", () => {
     park(r, t)
 
     const back = await nextTurn(r, t.id)
-    // One try: a file over the limit is refused the same way every time.
-    expect(r.provider.restoreUploads(t.id)).toEqual([expect.objectContaining({ ok: false })])
+    // One try: the whole archive, then its first part, are refused, and a refusal for size isn't retried.
+    expect(r.provider.restoreUploads(t.id)).toEqual([
+      expect.objectContaining({ ok: false, dest: expect.stringMatching(/\.tgz$/) }),
+      expect.objectContaining({ ok: false, dest: expect.stringMatching(/\.boxyard-part$/) }),
+    ])
     const moved = path.join(taskDir(r, back.boxId!, t.id), "work")
     expect(fs.readFileSync(path.join(moved, "lobby.ts"), "utf8")).toBe("export const wipe = true\n")
     expect(git(moved, "log", "-1", "--format=%s")).toBe("lobby")

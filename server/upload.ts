@@ -24,21 +24,40 @@ export function isUploadTooBig(err: unknown): boolean {
 /** Bash: the size of a file in bytes, 0 when it's missing (`wc -c` pads it with spaces on macOS). */
 const SIZE_FN = `bysz() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi; }`
 
+/** The per-file limit a size refusal states ("file exceeds maximum size of 100 MB"), in bytes (decimal units), or null. */
+export function statedUploadLimit(err: unknown): number | null {
+  const m = errorMessage(err).match(/maximum (?:file )?size (?:of |is )?([\d.]+)\s*(B|KB|MB|GB)\b/i)
+  if (!m) return null
+  const n = Number(m[1]) * { B: 1, KB: 1e3, MB: 1e6, GB: 1e9 }[m[2]!.toUpperCase() as "B" | "KB" | "MB" | "GB"]
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null
+}
+
 /**
  * Put a file from this machine on a box. A file over the provider's per-file upload limit (`maxUploadBytes`) goes up in
  * parts and is joined on the box: each part is uploaded next to the destination, appended to `<destination>.boxyard-join`
  * and deleted, so the box needs room for the file plus one part, and so does this machine. Each append checks the join's
  * size first, so an exec that runs twice doesn't append twice; the whole file is moved into place only when its size is
- * right (any older file there is removed first). A failure leaves neither the join nor a part behind. Returns how many uploads it took.
+ * right (any older file there is removed first). A failure leaves neither the join nor a part behind. A box that
+ * refuses one upload for its size without advertising a limit (or advertising too high a one) gets the file again in
+ * parts under the limit the refusal states, else Upstash's 100 MB. Returns how many uploads it took.
  */
 export async function putFile(p: BoxProvider, boxId: string, localPath: string, destination: string): Promise<{ parts: number }> {
   const size = fs.statSync(localPath).size
   const limit = providerOf(p, boxId).maxUploadBytes
   const part = limit ? uploadPartBytes(limit) : Infinity
-  if (size <= part) {
+  if (size > part) return putParts(p, boxId, localPath, destination, size, part)
+  try {
     await p.uploadFile(boxId, localPath, destination)
     return { parts: 1 }
+  } catch (err) {
+    if (!isUploadTooBig(err) || size < 2) throw err
+    const stated = Math.min(statedUploadLimit(err) ?? UPSTASH_MAX_UPLOAD_BYTES, size - 1)
+    console.warn(`[box-yard] ${boxId} refused ${destination} (${size} bytes) for its size; sending it in parts of ${uploadPartBytes(stated)} bytes`)
+    return putParts(p, boxId, localPath, destination, size, uploadPartBytes(stated))
   }
+}
+
+async function putParts(p: BoxProvider, boxId: string, localPath: string, destination: string, size: number, part: number): Promise<{ parts: number }> {
   const join = `${destination}.boxyard-join`
   const piece = `${destination}.boxyard-part`
   const parts = Math.ceil(size / part)
