@@ -56,6 +56,7 @@ import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../s
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
+import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -3790,6 +3791,7 @@ export class TaskManager {
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
+      await this.dropBoxGitCredential(boxId)
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId), null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
@@ -4045,6 +4047,21 @@ export class TaskManager {
       this.runnerCache = fs.readFileSync(file, "utf8")
     }
     return this.runnerCache
+  }
+
+  /** Upstash boxes whose git config has Box Yard's credential helper and no stored token, this server run. */
+  private readonly boxGitChecked = new Set<string>()
+
+  /**
+   * An Upstash box made before credentials left Box.create still has the global GitHub token stored in its git config,
+   * where it answers before a project's own: replace it with Box Yard's helper, once per box per server run.
+   * Best effort: a box it fails on is tried again on its next turn.
+   */
+  private async dropBoxGitCredential(boxId: string) {
+    if (this.boxGitChecked.has(boxId) || providerOf(this.provider, boxId).name !== "upstash") return
+    const res = await this.provider.exec(boxId, BOX_GIT_CREDENTIAL_SCRIPT).catch(() => null)
+    if (res?.exitCode === 0) this.boxGitChecked.add(boxId)
+    else console.warn(`[box-yard] couldn't reset the git credential on ${boxId}: ${errorTail(res?.stderr ?? "") || "no result"}`)
   }
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
