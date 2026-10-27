@@ -62,6 +62,8 @@ import { SleepWatch, sleepLength } from "./sleep.js"
 import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
+import { TurnMeter, type MeasuredTurn } from "./turnPeaks.js"
+import { pickAutoSize, type AutoBoxSize, type TurnPeak } from "../shared/autoSize.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -522,6 +524,10 @@ export class TaskManager {
   private cleanupBy = new Map<string, BoxActor>()
   /** Latest df per box, so a scheduling pass doesn't run df for every task. */
   private diskCache = new Map<string, { at: number; space: DiskSpace }>()
+  /** Auto-sizing: what each running turn uses on its Upstash box, from the probes (server/turnPeaks.ts). */
+  private meter = new TurnMeter()
+  /** Auto-sizing: each project's measured turns (table turn_peaks), read once and dropped when another lands. */
+  private turnPeakCache = new Map<string, TurnPeak[]>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
   private reserved = new Map<string, Map<string, number>>()
   /** The box's slot limit when each running turn claimed its slot, by turn id (see limitLoweredFrom). */
@@ -1261,9 +1267,33 @@ export class TaskManager {
     return was > slots ? was : null
   }
 
-  /** Size for a new box made for a project: its preferred size, else Settings → Worker size. */
+  /** Size for a new box made for a project: its own box size, else the size auto-sizing picked, else Settings → Worker size. */
   newBoxSize(projectId?: string | null): BoxSize {
-    return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? this.settings.get().workerSize
+    return (projectId ? (this.store.getProject(projectId)?.boxSize ?? this.autoSizeOf(projectId)) : null) ?? this.settings.get().workerSize
+  }
+
+  /**
+   * Auto-sizing (shared/autoSize.ts): the size a project's measured turns of the last 14 days call for, held to
+   * Settings › Max size it may choose. `size` is null until 3 runs are measured. `enabled`: Settings › Resize boxes
+   * (autoResizeEnabled) is on, so the size applies where the project has no box size of its own (`override`).
+   */
+  autoBoxSize(projectId: string): AutoBoxSize & { enabled: boolean; override: BoxSize | null } {
+    let peaks = this.turnPeakCache.get(projectId)
+    if (!peaks) {
+      peaks = this.store.turnPeaks(projectId)
+      this.turnPeakCache.set(projectId, peaks)
+    }
+    const s = this.settings.get()
+    const diskTotal = (size: BoxSize) => {
+      const n = Number(this.store.getKv(diskTotalKey(size)) ?? NaN)
+      return Number.isFinite(n) && n > 0 ? n : null
+    }
+    return { ...pickAutoSize(peaks, { maxSize: s.autoResizeMaxSize, diskTotal }), enabled: s.autoResizeEnabled, override: this.store.getProject(projectId)?.boxSize ?? null }
+  }
+
+  /** The size auto-sizing picked for a project's boxes, when it's on and has one. */
+  private autoSizeOf(projectId: string): BoxSize | null {
+    return this.settings.get().autoResizeEnabled ? this.autoBoxSize(projectId).size : null
   }
 
   /**
@@ -1313,12 +1343,20 @@ export class TaskManager {
     const own = (v: number | string) => `${v} (this project)`
     const used = this.projectBoxCap(p.id)?.used.size ?? 0
     return {
-      boxSize: p.boxSize ? own(p.boxSize) : `global: ${s.workerSize} (Settings › Worker size)`,
+      boxSize: p.boxSize ? own(p.boxSize) : this.autoSizeLine(p.id),
       agentsPerBox: p.agentsPerBox !== null ? own(`${p.agentsPerBox} of its tasks at a time on a box or this computer; other projects unaffected`) : global("slotsPerBox", "Tasks running at once per box"),
       tasksPerBox: p.tasksPerBox !== null ? own(p.tasksPerBox) : global("maxResidentPerBox", "Task folders kept per box"),
       maxBoxes: p.maxBoxes !== null ? `${p.maxBoxes} (this project; it uses ${boxCount(used)} now)` : `global: only the pool's Max boxes (${s.maxBoxes})`,
       ...(p.wholeMachine ? { wholeMachine: "yes: no other project's task starts on a box or this computer while one of its tasks runs there" } : {}),
     }
+  }
+
+  /** A project's box size when it has none of its own: what auto-sizing picked, else Settings › Worker size. */
+  private autoSizeLine(projectId: string): string {
+    const worker = `${this.settings.get().workerSize} (Settings › Worker size)`
+    const auto = this.autoBoxSize(projectId)
+    if (!auto.enabled) return `global: ${worker}`
+    return auto.size ? `auto: ${auto.label}` : `global: ${worker}; auto-sizing has it ${auto.label}`
   }
 
   /**
@@ -3758,10 +3796,11 @@ export class TaskManager {
 
   /**
    * The smallest box a project's tasks may run on: the project's own box size (projects.box_size, set on the
-   * project's settings), or null when it has none and any box will do. Boxes go small < medium < large.
+   * project's settings), else the size auto-sizing picked from its runs (`autoBoxSize`), or null when neither says and
+   * any box will do. Boxes go small < medium < large.
    */
   private minBoxSize(projectId?: string | null): BoxSize | null {
-    return (projectId ? this.store.getProject(projectId)?.boxSize : null) ?? null
+    return (projectId ? (this.store.getProject(projectId)?.boxSize ?? this.autoSizeOf(projectId)) : null) ?? null
   }
 
   /**
@@ -4046,6 +4085,7 @@ export class TaskManager {
       })
       // The box's own CPU time, which is what Upstash bills (a shared cgroup's, like local folders', says nothing).
       if (typeof mem?.cpuUsageUsec === "number" && providerOf(this.provider, boxId).ownCgroup) this.store.accrueBoxCpu(boxId, "cgroup", mem.cpuUsageUsec, now)
+      if (mem && providerOf(this.provider, boxId).ownCgroup) this.measureTurns(boxId, size, space, mem, now)
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
       const changed =
@@ -4056,6 +4096,18 @@ export class TaskManager {
       if (changed || now - (before?.disk_checked_at ?? 0) > 60_000) this.emitBoxes()
     }
     return space
+  }
+
+  /**
+   * Auto-sizing: a probe's reading for the turns running on the box (server/turnPeaks.ts). Its disk counts for a
+   * project only while the task folders on the box are all its own.
+   */
+  private measureTurns(boxId: string, boxSize: BoxSize, space: DiskSpace, memory: BoxMemory, now: number) {
+    const residents = this.store.listTaskRows({ boxId })
+    const turns = residents.filter((r) => r.current_turn_id).map((r) => ({ turnId: r.current_turn_id!, taskId: r.id, projectId: r.project_id }))
+    const owners = new Set(residents.map((r) => r.project_id))
+    const diskOwner = owners.size === 1 ? [...owners][0]! : null
+    this.meter.sample({ boxId, boxSize, memory, diskUsedBytes: Math.max(0, space.totalBytes - space.freeBytes), turns, diskOwner, now })
   }
 
   /** Free disk a new workspace for `row` needs (Settings: the floor, or cloneFactor x its repo's last clone size). */
@@ -4531,7 +4583,7 @@ export class TaskManager {
       // What started the turn (mixed queues: the highest-ranked sender, server/turnTrigger.ts), and the PR as it began.
       // A retry keeps the retried turn's, and a first turn counts as whoever started the task.
       const before = this.store.turnFlags(row)
-      const retry = Boolean(before.interrupts || before.sleeps)
+      const retry = Boolean(before.interrupts || before.sleeps || before.oomRetries)
       const trigger = compact
         ? null
         : turnTrigger(
@@ -4581,7 +4633,7 @@ export class TaskManager {
         status: "working",
         sessionStarted: true,
         ...(compact ? { compacting: true, compactPending: false } : { turnCount: row.turn_count + 1 }),
-        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, ...(hookIds.length ? { hookIds } : {}), ...(trigger ? { trigger, prBefore } : {}) } as TurnFlags,
+        turnFlags: { interrupts: flags.interrupts, sleeps: flags.sleeps, oomRetries: flags.oomRetries, ...(hookIds.length ? { hookIds } : {}), ...(trigger ? { trigger, prBefore } : {}) } as TurnFlags,
         lastActiveAt: Date.now(),
         question: null,
       })
@@ -4589,6 +4641,8 @@ export class TaskManager {
       this.emitTask(taskId)
       this.publishDirectory()
       this.holdOpen(taskId, boxId)
+      // Auto-sizing: the box's memory, CPU and out-of-memory count as the turn begins, to measure it against.
+      if (providerOf(this.provider, boxId).ownCgroup) void this.probeDisk(boxId, 0).catch(() => null)
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
@@ -5400,6 +5454,8 @@ export class TaskManager {
       case "turn_end": {
         // The agent may have merged or closed its PR during the turn; ask GitHub.
         const pr = row.pr_url && row.current_turn_id ? await this.prs.check(taskId) : null
+        // A failed turn on an Upstash box: read the box now, so a process its cgroup killed for memory counts (auto-sizing).
+        if (!ev.ok && !ev.stopped && row.box_id && row.current_turn_id && providerOf(this.provider, row.box_id).ownCgroup) await this.probeDisk(row.box_id, 0).catch(() => null)
         return this.finishTurn(this.store.getTaskRow(taskId) ?? row, ev, pr)
       }
       default:
@@ -5433,6 +5489,8 @@ export class TaskManager {
     this.captainWaits.delete(row.id)
     // A Captain reply handed to a wait the agent didn't take: queued (and editable) again, for the next turn.
     this.store.releaseInputs(handoffClaim(row.current_turn_id))
+    // Auto-sizing: what the turn used on its box, and whether it ran out of memory there.
+    const measured = this.recordTurnPeak(row.current_turn_id, ev, !ev.ok && !ev.stopped && !this.stopRequested.has(row.id))
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -5443,6 +5501,8 @@ export class TaskManager {
       const slept = this.sleptBeforeEnd(row, ev)
       if (slept > 0) return this.resumeAfterSleep(row, ev, flags, slept)
     }
+    const oom = !stopped && !ev.ok && measured?.oom ? this.oomRetry(row, flags, measured.boxSize) : null
+    if (oom && "to" in oom) return this.retryAfterOom(row, ev, flags, measured!.boxSize, oom.to)
 
     // A merged PR means the work landed; a closed one means there's no PR to review.
     // (The tracker already wrote "Pull request ... was merged" to the transcript when it saw the change.)
@@ -5453,6 +5513,7 @@ export class TaskManager {
     else if (!ev.ok) {
       status = "failed"
       error = String(ev.error ?? "The agent exited with an error.")
+      if (oom && "why" in oom) error = `It ran out of memory on its ${measured!.boxSize} box, and isn't retried on a bigger one: ${oom.why}. ${error}`
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
@@ -5508,6 +5569,65 @@ export class TaskManager {
     this.publishDirectory()
     void this.archive(row.id).finally(() => this.schedule())
     this.schedule()
+  }
+
+  /**
+   * Auto-sizing: a finished turn's measurements into turn_peaks (server/turnPeaks.ts), or null when no probe measured
+   * it. `failed`: an out-of-memory kill while other projects' turns shared the box counts for it, and so does its
+   * agent being killed outright (exit 137).
+   */
+  private recordTurnPeak(turnId: string, ev: WorkerEvent, failed: boolean): MeasuredTurn | null {
+    const m = this.meter.take(turnId, { failed, killed: failed && ev.exitCode === 137 })
+    if (!m) return null
+    this.store.recordTurnPeak(m)
+    this.turnPeakCache.delete(m.projectId)
+    return m
+  }
+
+  /**
+   * A turn that ran out of memory on a `from` box: retried on the size auto-sizing picks now (`to`), or why not. Once
+   * in a row, with Settings › Size and resize boxes automatically on and no box size of the project's own; a second
+   * one fails as usual.
+   */
+  private oomRetry(row: TaskRow, flags: TurnFlags, from: BoxSize): { to: BoxSize } | { why: string } {
+    if (flags.oomRetries) return { why: "it already had its retry on a bigger box" }
+    const auto = this.autoBoxSize(row.project_id)
+    if (auto.override) return { why: `its project's Box size is set to ${auto.override}, so Box Yard doesn't pick one (raise it in the project's settings)` }
+    if (!auto.enabled) return { why: "Settings › Size and resize boxes automatically is off" }
+    if (auto.size && compareSizes(auto.size, from) > 0) return { to: auto.size }
+    return { why: from === BOX_SIZES[BOX_SIZES.length - 1] ? "there's no bigger box" : `Settings › Max size it may choose is ${this.settings.get().autoResizeMaxSize}` }
+  }
+
+  /**
+   * A turn that ran out of memory on its Upstash box (auto-sizing, `oomRetry`): queued again to carry on in the same
+   * session on a `to` box. Its turn-end archive is written first, and `leaveSmallBox` then moves it there like any
+   * task below its project's size. The Captain gets a notice.
+   */
+  private retryAfterOom(row: TaskRow, ev: WorkerEvent, flags: TurnFlags, from: BoxSize, to: BoxSize) {
+    const error = String(ev.error ?? "The agent exited with an error.")
+    const turnCost = this.recordTaskClaudeUsage(row, ev)
+    this.store.finishTaskTurn(row.current_turn_id!, { status: "interrupted", costUsd: turnCost, error })
+    const ram = (size: BoxSize) => `${size}, ${BOX_SIZE_SPECS[size].ramGb} GB RAM`
+    this.store.queueInput(
+      row.id,
+      "system",
+      `Your previous turn ran out of memory on its box (${ram(from)}) and ended with: ${error.slice(0, 300)}. You carry on now on a bigger box (${ram(to)}). Check where things stand (git status, files, any server or build you started) and continue the task, running memory-hungry steps (builds, test suites, browsers) one at a time.`,
+    )
+    this.store.updateTask(row.id, {
+      status: "queued",
+      error: null,
+      currentTurnId: null,
+      ...usageFields(ev.usage),
+      sessionId: typeof ev.sessionId === "string" ? ev.sessionId : undefined,
+      turnFlags: { interrupts: flags.interrupts ?? 0, oomRetries: (flags.oomRetries ?? 0) + 1, ...(flags.hookIds ? { hookIds: flags.hookIds } : {}), ...carriedTrigger(flags) },
+    })
+    if (row.box_id) this.store.touchBox(row.box_id)
+    this.addEvent(row.id, `Turn ${row.turn_count} ran out of memory on its ${from} box ${row.box_id}; it carries on now on a ${to} box instead of failing.`)
+    this.notice(`⚠️ **${row.title}** ran out of memory: its ${from} box ${row.box_id} was too small, so it carries on on a ${to} box, and its project's tasks get ${to} boxes from now on.`, { taskId: row.id })
+    this.emitTask(row.id)
+    this.publishDirectory()
+    // The workspace goes to its archive first, so the move to the bigger box loses nothing.
+    void this.archive(row.id).finally(() => this.schedule())
   }
 
   /**
@@ -6419,6 +6539,7 @@ export class TaskManager {
     if (this.stopped) return
     const now = Date.now()
     this.meterBoxes(now)
+    this.meter.keepOnly(new Set(this.store.listTaskRows({ status: ["working", "starting"] }).flatMap((r) => (r.current_turn_id ? [r.current_turn_id] : []))))
     for (const box of this.store.listBoxes()) {
       void this.refreshBoxUsage(box.id)
       // A box running a turn has its CPU read every minute (one df there), so its spend and $/hour stay current.
@@ -6749,6 +6870,7 @@ export class TaskManager {
     this.store.setKv(boxOwnerKey(boxId), null)
     this.store.setKv(boxCredsKey(boxId), null)
     this.janitor.forget(boxId)
+    this.meter.forgetBox(boxId)
     this.diskCache.delete(boxId)
     this.unreachable.delete(boxId)
     this.reserved.delete(boxId)

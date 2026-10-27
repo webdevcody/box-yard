@@ -22,6 +22,7 @@
 
 import { spawn, execFile, execFileSync } from "node:child_process"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 
@@ -447,7 +448,7 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
     child.on("error", (err) => {
       stderr += `\n${err.message}`
     })
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (buf.trim()) {
         try {
           const msg = JSON.parse(buf)
@@ -459,7 +460,10 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
       pending.then(() => {
         const window = contextWindowOf(result?.modelUsage)
         if (usage && window) usage.window = window
-        resolve({ exitCode: code ?? 1, startedAt, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : ""].filter(Boolean).join("\n") })
+        // Killed by a signal: 128 + its number, as a shell says it (137 for SIGKILL, what a box's out-of-memory killer sends).
+        const killed = code === null && signal ? `claude was killed (${signal})` : ""
+        const exitCode = code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : 1)
+        resolve({ exitCode, startedAt, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : "", killed].filter(Boolean).join("\n") })
       })
     })
 
