@@ -11,6 +11,7 @@ import type { StoredUpload, Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
+import { placementLine } from "../shared/placement.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
@@ -300,6 +301,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
+    placement: placementLine(t),
     runsOn: t.runsOn ?? undefined,
     turns: t.turnCount,
     model: t.model ?? undefined,
