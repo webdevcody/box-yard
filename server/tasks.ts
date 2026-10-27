@@ -533,7 +533,11 @@ export class TaskManager {
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
-    this.sleep.start(5_000, (gap) => console.log(`[box-yard] this computer slept for ${Math.round(gap.ms / 1000)}s`))
+    this.sleep.start(5_000, (gap) => {
+      console.log(`[box-yard] this computer slept for ${Math.round(gap.ms / 1000)}s`)
+      // PRs may have been merged meanwhile, and requests that failed while asleep backed the tracker off.
+      this.prs.wake()
+    })
     this.schedule()
   }
 
