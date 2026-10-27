@@ -2867,7 +2867,7 @@ export class TaskManager {
 
   /** The identity's name when `creds` is an identity's set (`identity:<id>`), else null. */
   private credsIdentity(creds: string): string | null {
-    return creds.startsWith("identity:") ? (this.identities.get(creds.slice("identity:".length))?.name ?? "another") : null
+    return creds.startsWith("identity:") ? (this.identities.nameOf(creds.slice("identity:".length)) ?? "another") : null
   }
 
   /** The credential set a pool box's workspaces were made with: its project's when it was made, else the global one. */
@@ -4338,6 +4338,13 @@ export class TaskManager {
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
+      // Box Yard is stopping, and its database may be closed already: the next start picks the task up.
+      if (this.stopped) {
+        try {
+          this.store.releaseInputs(turnId)
+        } catch {}
+        return
+      }
       this.store.releaseInputs(turnId)
       // The task already moved on (failed by the start timeout, maybe started again): nothing here is ours to change.
       if (err instanceof TurnSuperseded) {
@@ -4744,7 +4751,7 @@ export class TaskManager {
    * The repo mirror on a box for a project, with the git command, env and credential helper that reach GitHub.
    * `only`: Box Yard's helper is the only one git asks, so a credential the box's own git config stores can't answer
    * before the token Box Yard gives it. That's every box but this computer, where the owner's own git login still
-   * answers first unless the project has a GITHUB_TOKEN of its own.
+   * answers first unless the project has a GITHUB_TOKEN of its own or an identity other than Default.
    */
   private mirrorSpec(boxId: string, project: NonNullable<ReturnType<Store["getProject"]>>) {
     const helper = GITHUB_HELPER

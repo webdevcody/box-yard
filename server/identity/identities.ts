@@ -443,9 +443,16 @@ export class Identities {
 
   /** Why a project of this identity can't run on `runner`, or null when it can. */
   runnerProblem(identityId: string, runner: Runner): string | null {
-    const i = this.get(identityId)
-    if (!i?.runners || i.runners.includes(runner)) return null
-    return `the ${i.name} identity runs only on ${i.runners.map((r) => RUNNER_PHRASE[r]).join(" or ")} (Settings › Identities)`
+    // Placement asks on every pass: the row alone, not the whole view (its secrets and projects).
+    const r = this.row(identityId)
+    const runners = r ? json<Runner[] | null>(r.runners_json, null) : null
+    if (!r || !runners || runners.includes(runner)) return null
+    return `the ${r.name} identity runs only on ${runners.map((x) => RUNNER_PHRASE[x]).join(" or ")} (Settings › Identities)`
+  }
+
+  /** An identity's name, or null when there's none with that id. */
+  nameOf(id: string): string | null {
+    return this.row(id)?.name ?? null
   }
 
   /** Every identity secret in effect, for redact(); cached until one changes. */
