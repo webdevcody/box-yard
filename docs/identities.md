@@ -53,6 +53,7 @@ An identity can sign every commit its turns make with an SSH key (git 2.34 or la
 How a turn signs:
 
 - A key file goes to the box for one turn as `signing.key` beside `task.json` (never in it, and never in an archive). The runner moves it to a fresh 0700 folder in the box's temp dir, `boxyard-sign-<task id>`, and removes that folder when the turn ends.
+- In a Docker container the key never touches a disk: `signing.key` is a link to a copy on the container's tmpfs (`/run/boxyard`, in memory, like `task.json`), and the runner keeps the key there for the turn (`/run/boxyard/sign-<task id>.key`, mode 0600). Both copies go when the turn ends, and the tmpfs when the container stops. The push guard's hooks stay in `boxyard-sign-<task id>`, since the tmpfs is `noexec`.
 - git gets `gpg.format=ssh`, `user.signingKey` and `commit.gpgSign=true` from the env (`GIT_CONFIG_COUNT`), which beats any repo or global config and reaches only the turn's processes: the repo's `.git/config` is never changed, and Box Yard's own work-in-progress snapshots stay unsigned.
 - When a turn can't sign (the key can't be read with this server's secret key, the program is gone, git is too old), its commits go unsigned and the task says why: "This turn's commits aren't signed: …".
 

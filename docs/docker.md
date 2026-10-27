@@ -62,7 +62,7 @@ Box Yard runs every command with `docker exec -i <container> bash -c 'eval "$(ca
 
 ## Credentials and isolation
 
-- **In the container only, in memory only.** A turn's credentials (the Claude key, `GITHUB_TOKEN`, the project's env) reach the container in `task.json`, as on boxes. On Docker, `task.json` is written to a tmpfs (`/run/boxyard/<task>.json`, mode 0700, in the container's memory) and linked from the task folder.
+- **In the container only, in memory only.** A turn's credentials (the Claude key, `GITHUB_TOKEN`, the project's env) reach the container in `task.json`, as on boxes. On Docker, `task.json` is written to a tmpfs (`/run/boxyard/<task>.json`, mode 0700, in the container's memory) and linked from the task folder. So is an identity's signing key (`/run/boxyard/<task>.signing.key`), which the runner keeps on the tmpfs while the turn signs and removes after (docs/identities.md).
   - Credentials are never in the image or a layer: the build context is only the Dockerfile, and a Dockerfile holding something shaped like a key, or any credential value in effect (Settings › Credentials and every identity's), is refused. The build log never shows one.
   - They're never in `docker run -e`, `docker inspect` or a command line.
   - The tmpfs is gone when the container stops or is deleted.
