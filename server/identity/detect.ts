@@ -618,8 +618,8 @@ export interface ProposalInput {
   push: PushMap | null
   projects: DetectProject[]
   identities: Pick<Identity, "id" | "name" | "isDefault" | "githubLogin">[]
-  /** The login the Default identity's token is, when known. */
-  defaultLogin: string | null
+  /** The login the Default identity's token is: undefined when it's gh's (its active account), null when unknown. */
+  defaultLogin?: string | null
 }
 
 /**
@@ -634,7 +634,7 @@ export function proposeIdentities(i: ProposalInput): Pick<IdentityDetection, "pr
   for (const a of i.facts.accounts) if (a.host !== "github.com") notes.push(`gh is also signed in to ${a.host} (${a.login}): Box Yard's identities are for github.com only, so it isn't proposed.`)
   const global = i.facts.authors.find((a) => a.scope === "global") ?? null
   const blocks = i.facts.authors.filter((a) => a.scope !== "global")
-  const defaultLogin = (i.defaultLogin ?? accounts.find((a) => a.active)?.login ?? null)?.toLowerCase() ?? null
+  const defaultLogin = (i.defaultLogin === undefined ? accounts.find((a) => a.active)?.login : i.defaultLogin)?.toLowerCase() ?? null
   const identityName = (id: string) => i.identities.find((x) => x.id === id)?.name ?? "Default"
 
   const why = (a: DetectedAccount, b: DetectedAuthor): string[] => {
@@ -761,11 +761,11 @@ export class IdentityDetector {
   constructor(private readonly o: DetectOptions = {}) {}
 
   /** Read this computer (and GitHub, when online) and propose identities for `projects`. */
-  async detect(i: { projects: DetectProject[]; identities: ProposalInput["identities"]; online: boolean; defaultLogin?: string | null }): Promise<IdentityDetection> {
+  async detect(i: { projects: DetectProject[]; identities: ProposalInput["identities"]; online: boolean; defaultLogin?: ProposalInput["defaultLogin"] }): Promise<IdentityDetection> {
     const c = ctx(this.o)
     const facts = await readComputer(this.o)
     const asked = i.online ? await askGithub(facts, i.projects, c) : null
-    const p = proposeIdentities({ facts, online: i.online, push: asked?.push ?? null, projects: i.projects, identities: i.identities, defaultLogin: i.defaultLogin ?? null })
+    const p = proposeIdentities({ facts, online: i.online, push: asked?.push ?? null, projects: i.projects, identities: i.identities, defaultLogin: i.defaultLogin })
     const detection: IdentityDetection = {
       at: Date.now(),
       online: i.online,
@@ -789,7 +789,7 @@ export class IdentityDetector {
   /** A gh: reference's token, read from gh now. */
   async tokenFromRef(ref: string): Promise<{ host: string; login: string; token: string }> {
     const r = parseTokenRef(ref)
-    if (!r) throw new BadRequestError(`"${ref}" isn't a token reference: it looks like gh:octocat, an account gh is signed in to here (detect_identities lists them). A token itself goes in Settings › Identities, never through a chat.`)
+    if (!r) throw new BadRequestError(`That isn't a token reference: one looks like gh:octocat, an account gh is signed in to here (detect_identities lists them). A token itself goes in Settings › Identities, never through a chat.`)
     if (r.host !== "github.com") throw new BadRequestError("Identities are for github.com accounts only.")
     return tokenFromGh(r.host, r.login, ctx(this.o))
   }
@@ -802,7 +802,7 @@ export class IdentityDetector {
   async signingFromRef(ref: string, o: { program?: string | null; requireSigned?: boolean } = {}): Promise<ResolvedSigning> {
     const c = ctx(this.o)
     const m = /^(file|agent):(.+)$/.exec(ref.trim())
-    if (!m) throw new BadRequestError(`"${ref}" isn't a signing key reference: use file:~/.ssh/<key> (a key file without a passphrase) or agent:<fingerprint> (a key in this computer's SSH agent or 1Password). A key itself goes in Settings › Identities, never through a chat.`)
+    if (!m) throw new BadRequestError(`That isn't a signing key reference: use file:~/.ssh/<key> (a key file without a passphrase) or agent:<fingerprint> (a key in this computer's SSH agent or 1Password). A key itself goes in Settings › Identities, never through a chat.`)
     const facts = await readGitConfig(c)
     const signingKeys = facts.scopes.flatMap((s) => {
       const k = s.values.get("user.signingkey")?.trim()
