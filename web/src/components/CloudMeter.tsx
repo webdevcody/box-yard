@@ -16,7 +16,7 @@ const VARIANT = { inline: "min-h-11 px-2 sm:h-6 sm:min-h-0 sm:px-1.5 @max-[26rem
 
 /**
  * The meter, read by the header's width (the header is a container). `inline` sits beside the title from 26rem:
- * "$8.50 of $10 · 3 boxes · $0.49/h" from 56rem, "$8.50 of $10 · 3 boxes" from 30rem (Zen's column is 48rem),
+ * "$8.50 of $10 · 3 boxes · $0.49/h" from 56rem, "$8.50 of $10 · 3 boxes" from 34rem (Zen's column is 48rem),
  * "$8.50/$10 · 3" below, its text truncating when the header is full. `strip` is the full reading as a row under the
  * header below 26rem (phones), where the header's buttons leave no room. Calm, then amber from 80% of a limit, rose at
  * it. Either opens the sheet.
@@ -47,10 +47,10 @@ export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inli
         {variant === "inline" ? (
           <>
             <span className="truncate @max-[56rem]:hidden">{full}</span>
-            <span className="truncate @max-[30rem]:hidden @min-[56rem]:hidden">
+            <span className="truncate @max-[34rem]:hidden @min-[56rem]:hidden">
               {todayLine(s.spend)} · {boxes}
             </span>
-            <span className="truncate @min-[30rem]:hidden">{short}</span>
+            <span className="truncate @min-[34rem]:hidden">{short}</span>
           </>
         ) : (
           <>
@@ -90,7 +90,11 @@ function CloudSheet({ status: s, onClose }: { status: CloudStatus; onClose: () =
       }
       footer={
         <>
-          <Link href="/boxes" onClick={onClose} className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm text-yard-300 hover:bg-zinc-800 sm:min-h-0 sm:py-1.5">
+          <Link
+            href="/boxes"
+            onClick={onClose}
+            className="inline-flex min-h-11 items-center justify-center rounded-lg px-3.5 py-2 text-sm font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 max-sm:w-full sm:min-h-0"
+          >
             All boxes
           </Link>
           <Button variant="subtle" onClick={settings}>

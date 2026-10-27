@@ -34,12 +34,14 @@ export function todaysRaise(store: Pick<Store, "getKv">, now = Date.now()): numb
   }
 }
 
-/** What raises add up to after one more: today's limit, or today's spend if that's past it already. */
-const nextRaise = (limit: number, todayUsd: number) => Math.round(Math.max(limit, todayUsd) * 100) / 100
+/** What raises add up to after one more: today's limit, or today's spend (up to the next dollar) if that's past it. */
+const nextRaise = (limit: number, todayUsd: number) => cents(todayUsd > limit ? Math.ceil(todayUsd) : limit)
+const cents = (n: number) => Math.round(n * 100) / 100
 
 /**
- * "Raise today's limit": one more day's worth (Settings' daily limit) on top of today's limit, or of today's spend if
- * that's past it already (boxes that ran on go over a little), so a raise always leaves room for new boxes. It lapses
+ * "Raise today's limit": one more day's worth (Settings' daily limit) on top of today's limit, or of today's spend
+ * rounded up to a dollar if that's past it already (boxes that ran on go over a little), so a raise always leaves room
+ * for new boxes. It lapses
  * at local midnight. Returns the new total raise. Nothing to raise without a daily limit.
  */
 export function raiseToday(store: Pick<Store, "getKv" | "setKv">, budget: BudgetSettings, todayUsd: number, now = Date.now()): number {
@@ -71,7 +73,7 @@ export function cloudSpend(store: Pick<Store, "getKv" | "boxSpendSince">, budget
     todayUsd: today.costUsd,
     dailyLimitUsd,
     raisedUsd,
-    raiseToUsd: dailyLimitUsd > 0 ? nextRaise(dailyLimitUsd, today.costUsd) + budget.dailyUsd : null,
+    raiseToUsd: dailyLimitUsd > 0 ? cents(nextRaise(dailyLimitUsd, today.costUsd) + budget.dailyUsd) : null,
     monthUsd,
     monthlyLimitUsd,
     state: blockedReason ? "reached" : warning ? "warning" : "ok",

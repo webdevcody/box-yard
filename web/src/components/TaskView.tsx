@@ -88,12 +88,9 @@ export function TaskView({ id }: { id: string }) {
         <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
           <WaitIcon task={task} className="h-4 w-4 shrink-0 text-amber-300" />
           <span className="min-w-0 flex-1">
-            <WaitReason task={task} />.{" "}
-            {task.waitFix === "raise-cloud-limit"
-              ? "It starts at midnight, or as soon as today's limit is raised."
-              : task.waitFix === "cloud-settings"
-                ? "It starts once the last 30 days' cloud spend is under the monthly limit."
-                : `It starts on its own once there is room${task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.`}
+            {/* A wait with a fix says when it ends itself ("…, or it resets at midnight"). */}
+            <WaitReason task={task} />.
+            {!task.waitFix && ` It starts on its own once there is room${task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.`}
           </span>
           <WaitFixButton task={task} className="shrink-0" />
         </div>

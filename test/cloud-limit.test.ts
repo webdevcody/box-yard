@@ -63,6 +63,11 @@ describe("cloud spend", () => {
     expect(todaysRaise(store, noon + 13 * H)).toBe(0) // tomorrow
     expect(JSON.parse(store.getKv(CLOUD_RAISE_KEY)!)).toEqual({ day: localDay(noon), usd: 22 })
     expect(raiseToday(store, { dailyUsd: 0, monthlyUsd: 0 }, 12, noon)).toBe(0)
+    // Past the limit by cents: the raise starts from the next whole dollar.
+    const other = memStore()
+    spend(other, 10.13, noon)
+    expect(cloudSpend(other, budget, rates, noon)).toMatchObject({ state: "reached", raiseToUsd: 21 })
+    expect(raiseToday(other, budget, 10.13, noon)).toBe(11)
   })
 })
 
