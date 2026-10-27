@@ -6,7 +6,7 @@ import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 // Opt-in, and read-only: it changes nothing, makes no identity, and stays offline (GitHub isn't asked; `gh auth status`
 // checks its own tokens as it always does). It prints only logins, owners, emails and fingerprints.
 //
-//   BOXYARD_DETECT_E2E=1 npx vitest run test/identity-detect-here.e2e.test.ts
+//   npm run test:detect          (BOXYARD_DETECT_E2E=1 vitest run test/identity-detect-here.e2e.test.ts)
 //
 // BOXYARD_DETECT_E2E_ONLINE=1 also asks GitHub with each gh account's own token (orgs, emails, keys, push access).
 
