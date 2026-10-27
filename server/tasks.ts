@@ -736,6 +736,12 @@ export class TaskManager {
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
+  /** Throws a clear 400 when the project's identity doesn't allow `runner` (Identity.runners). */
+  private requireIdentityRunner(projectId: string, runner: Runner) {
+    const problem = this.identities.runnerProblem(this.identities.idOf(projectId), runner)
+    if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
+  }
+
   /**
    * Pin a task to a runner from its next turn on (send_to_task runs_on). Placement moves its workspace there when
    * nothing would be lost (toLocal / fromLocal), else it stays where it is and its log says why. Check with
@@ -744,6 +750,7 @@ export class TaskManager {
   setRunsOn(taskId: string, runner: Runner) {
     const row = this.requireRow(taskId)
     if (row.runs_on === runner) return
+    this.requireIdentityRunner(row.project_id, runner)
     this.store.updateTask(row.id, { runsOn: runner })
     this.addEvent(row.id, `Runs on ${RUNNER_PHRASE[runner]} from its next turn on (this task only, over its project's "Runs on").`)
     this.emitTask(row.id)
@@ -761,6 +768,7 @@ export class TaskManager {
       if (!project) throw new NotFoundError(`Project ${input.projectId} not found`)
       if (!input.title.trim()) throw new BadRequestError("title is required")
       if (!input.prompt.trim()) throw new BadRequestError("prompt is required")
+      if (input.runsOn) this.requireIdentityRunner(project.id, input.runsOn)
       return project
     })
     const ids = this.store.db.transaction(() =>
@@ -2683,6 +2691,12 @@ export class TaskManager {
     // The task's runs_on, else its project's "Runs on": it moves to (or off) this computer, its GPU pod or its Docker
     // container when nothing would be lost.
     const runner = this.store.taskRunner(row)
+    // Its identity doesn't allow that runner (its runners changed after the task asked for it): it never runs there.
+    const notAllowed = this.identities.runnerProblem(this.identities.idOf(row.project_id), runner)
+    if (notAllowed) {
+      this.setWaitReason(row.id, `Waiting: ${notAllowed}`)
+      return null
+    }
     const on = ownRunnerOf(row.box_id)
     if (on && !this.onOwnBox(row, runner)) {
       const moved = await this.fromOwnBox(row, runner)

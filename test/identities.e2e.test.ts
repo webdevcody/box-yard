@@ -195,6 +195,11 @@ describe("identities over the API", () => {
     // Now that a project on a box uses it, the identity can't be narrowed to Docker.
     expect(await r.raw("PATCH", `/api/identities/${acme.id}`, { runners: ["docker"] })).toMatchObject({ status: 400 })
 
+    // A task can't ask for a runner its identity doesn't allow either.
+    await r.call("PATCH", `/api/identities/${acme.id}`, { runners: ["box"] })
+    const refused = await r.raw("POST", "/api/tasks", { projectId: project.id, title: "Here", prompt: "Say hi", runsOn: "docker" })
+    expect(refused).toMatchObject({ status: 400, text: expect.stringContaining("the Acme identity runs only on") })
+
     expect(await r.raw("DELETE", `/api/identities/${acme.id}`)).toMatchObject({ status: 409 })
     expect(await r.call("DELETE", `/api/identities/${acme.id}?moveProjects=1`)).toEqual({ ok: true, movedProjectIds: [project.id] })
     expect(r.yard.store.getProject(project.id)?.identityId).toBe(DEFAULT_IDENTITY_ID)

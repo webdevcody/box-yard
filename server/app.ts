@@ -373,7 +373,11 @@ export function createBoxYard(
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   dockerService.images.onChange(() => hub.broadcast({ type: "docker.build", build: dockerService.images.status() }))
-  identities.onChange(() => hub.broadcast({ type: "identities", identities: identities.list() }))
+  // Waiting tasks look again: a new token, Claude login or runner list can change where (and whether) they run.
+  identities.onChange(() => {
+    hub.broadcast({ type: "identities", identities: identities.list() })
+    tasks.schedule()
+  })
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
