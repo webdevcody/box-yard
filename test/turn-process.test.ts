@@ -83,6 +83,16 @@ describe.skipIf(process.platform === "win32")("a turn's process", () => {
     await new Promise((r) => setTimeout(r, 200))
     expect(alive(other)).toBe(true)
 
+    // A turn.pid that isn't one pid (an agent can write its folder): "-1" would be every process.
+    for (const bad of ["-1", "0", `${other} 1`, ""]) {
+      const dir = taskDir(other)
+      fs.writeFileSync(path.join(dir, "turn.pid"), bad)
+      expect(probe(dir)?.alive).toBe(false)
+      sh(turnKillScript(dir))
+    }
+    await new Promise((r) => setTimeout(r, 200))
+    expect(alive(other)).toBe(true)
+
     // A newer turn in the folder: not this one's to stop.
     const turn = sleeper()
     const dir = taskDir(turn, processIdent(turn))

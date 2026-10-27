@@ -8,10 +8,11 @@ import { q } from "./providers/types.js"
  * lines as `by_boot`/`by_start` here), its turn id and where its events start in events.jsonl. A pid alone can't be
  * trusted once Box Yard restarts: after a reboot or a box resume another process may hold it, and Box Yard would wait
  * on that process forever, or stop it. A runner from before run records has only its pid, which is checked as before.
+ * A turn.pid that isn't a plain pid (empty, 0, "-1": every process) is never signalled.
  */
 export const TURN_SH = String.raw`by_boot() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null || true; }
 by_start() { if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; else LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//;s/ *$//'; fi; }
-by_turn_alive() { p=$(cat "$1/turn.pid" 2>/dev/null); [ -n "$p" ] && kill -0 "$p" 2>/dev/null || return 1; grep -qF "\"pid\":$p,\"ident\":\"" "$1/run.json" 2>/dev/null || return 0; grep -qF "\"pid\":$p,\"ident\":\"$(by_boot)|$(by_start "$p")\"" "$1/run.json"; }
+by_turn_alive() { p=$(cat "$1/turn.pid" 2>/dev/null); case "$p" in ''|0*|*[!0-9]*) return 1;; esac; kill -0 "$p" 2>/dev/null || return 1; grep -qF "\"pid\":$p,\"ident\":\"" "$1/run.json" 2>/dev/null || return 0; grep -qF "\"pid\":$p,\"ident\":\"$(by_boot)|$(by_start "$p")\"" "$1/run.json"; }
 by_turn_kill() { if by_turn_alive "$1"; then kill -"$2" -- -"$p" 2>/dev/null || kill -"$2" "$p" 2>/dev/null; fi; true; }`
 
 /**
