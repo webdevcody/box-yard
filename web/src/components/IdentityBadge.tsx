@@ -30,12 +30,12 @@ export function IdentityDot({ color, className }: { color: IdentityColor; classN
 export function IdentityBadge({ identity, fold, className }: { identity: Pick<Identity, "name" | "color" | "isDefault" | "githubLogin">; fold?: boolean; className?: string }) {
   return (
     <span
-      className={cx("inline-flex min-w-0 items-center gap-1.5 rounded-full border border-zinc-700/80 text-[11px] text-zinc-400", fold ? "p-[3px] @min-[16rem]:px-1.5 @min-[16rem]:py-px" : "px-1.5 py-px", className)}
+      className={cx("inline-flex min-w-0 items-center gap-1.5 rounded-full border border-zinc-700/80 text-[11px] text-zinc-400", fold ? "p-[3px] @min-[13rem]:px-1.5 @min-[13rem]:py-px" : "px-1.5 py-px", className)}
       title={identityTitle(identity)}
       data-identity={identity.name}
     >
       <IdentityDot color={identity.color} />
-      <span className={cx("truncate", fold && "hidden @min-[16rem]:inline")}>{identity.name}</span>
+      <span className={cx("truncate", fold && "hidden @min-[13rem]:inline")}>{identity.name}</span>
       {fold && <span className="sr-only">{identityTitle(identity)}</span>}
     </span>
   )
