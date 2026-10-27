@@ -155,7 +155,7 @@ export function gitPrepScript(o: GitPrepOptions): string {
           // hidden ref, not a branch) still carries them, so nothing is lost.
           signer
             ? [
-                `  elif printf '%s\\n' ${q(`box-yard namespaces="git" ${signer.publicKey}`)} > "$bys/allowed" && byuns=$(git -c gpg.ssh.allowedSignersFile="$bys/allowed" log --format='%h %G?' "$bytip" --not --remotes 2>/dev/null | awk '$2 != "G" { n++; if (n <= 5) printf " %s", $1 }') && [ -n "$byuns" ]; then`,
+                `  elif printf '%s\\n' ${q(`box-yard namespaces="git" ${signer.publicKey}`)} > "$bys/allowed" && byuns=$(git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$bys/allowed" log --format='%h %G?' "$bytip" --not --remotes 2>/dev/null | awk '$2 != "G" { n++; if (n <= 5) printf " %s", $1 }') && [ -n "$byuns" ]; then`,
                 `    bybp=unsigned; bybpwhy=${q(`the ${signer.identity} identity requires signed commits, and its key (${signer.fingerprint}) didn't sign`)}"$byuns"${q(`, so the branch wasn't pushed (the WIP ref carries it). Sign them again, e.g. git rebase --force-rebase --gpg-sign origin/${o.baseBranch}, and push`)}`,
               ].join("\n")
             : ``,

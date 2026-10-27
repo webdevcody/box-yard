@@ -100,15 +100,17 @@ afterEach(async () => {
   }
 })
 
-async function start() {
+async function start(o: { boxes?: (p: LocalProvider) => void } = {}) {
   const dir = tmpDir("signing-e2e-")
   const log = path.join(dir, "claude.log")
   const claude = wrapper(dir, log)
   const port = await freePort()
   const config = testConfig({ port, claudeBin: claude, anthropicApiKey: "global-key", maxBoxes: 4 })
+  const boxes = new LocalProvider(path.join(dir, "boxes"), claude)
+  o.boxes?.(boxes)
   const yard = createBoxYard(config, {
     webDir: "/nonexistent",
-    provider: new LocalProvider(path.join(dir, "boxes"), claude),
+    provider: boxes,
     localRunner: new LocalRunnerProvider(config.localDir, claude),
   })
   const server = await new Promise<Server>((resolve) => {
@@ -217,6 +219,32 @@ describe("commit signing", () => {
     expect(lines).toContain("SIG signed by the turn G")
     // An agent key can't sign on a box.
     await expect(r.call("PATCH", `/api/projects/${p.id}`, { runner: "box" })).rejects.toThrow(/-> 400: .*only on this computer/)
+  })
+
+  it("takes the key off the box again when the turn's runner doesn't start", async () => {
+    let keyAtStart: boolean | null = null
+    let taskDir = ""
+    const r = await start({
+      boxes: (boxes) => {
+        const exec = boxes.exec.bind(boxes)
+        boxes.exec = (boxId, command) => {
+          const m = /^cd '([^']+)' && .*box-runner\.mjs' turn /m.exec(command)
+          if (!m || keyAtStart !== null) return exec(boxId, command)
+          taskDir = m[1]!
+          keyAtStart = fs.existsSync(path.join(taskDir, "signing.key"))
+          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "no node here" })
+        }
+      },
+    })
+    const key = keyPair()
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+    await r.call("PUT", `/api/identities/${acme.id}/signing`, { kind: "file", privateKey: key.privateKey })
+    const p = await r.project("acme-app", acme.id)
+    const task = await r.call<Task>("POST", "/api/tasks", { projectId: p.id, title: "Work", prompt: "Hi" })
+    await waitFor(() => keyAtStart !== null, "the runner's start")
+    expect(keyAtStart).toBe(true)
+    expect(path.basename(taskDir)).toBe(task.id)
+    await waitFor(() => !fs.existsSync(path.join(taskDir, "signing.key")), "the key to go")
   })
 
   it("with requireSigned, a turn that can't sign can't push either, and says why", async () => {

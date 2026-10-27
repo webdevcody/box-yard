@@ -4193,6 +4193,8 @@ export class TaskManager {
     const launchedAt = Date.now()
     /** The workspace is being made fresh, so a failure leaves nothing worth keeping in its folder. */
     let fresh = false
+    /** signing.key is on the box and no runner has taken it yet. */
+    let keyWaiting = false
     try {
       await this.provider.wake(boxId)
       const project = this.store.getProject(row.project_id)
@@ -4253,7 +4255,10 @@ export class TaskManager {
       // A key Box Yard keeps goes to the box for this one turn: the runner moves it out of the task folder and
       // removes it when the turn ends (box-runner.mjs setupSigning).
       const signing = this.identities.signingFor(project.id)
-      if (signing?.privateKey) await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
+      if (signing?.privateKey) {
+        keyWaiting = true
+        await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
+      }
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId, signing), null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
@@ -4311,6 +4316,7 @@ export class TaskManager {
         `${TURN_SH}\ncd ${q(dir)} && ([ ! -f signing.key ] || chmod 600 signing.key) && ${helper}(by_turn_kill . TERM; rm -f turn.pid run.json; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
+      keyWaiting = false
       if (superseded()) {
         await this.provider.exec(boxId, turnKillScript(dir)).catch(() => {})
         this.store.finishTaskTurn(turnId, { status: "stopped", error: "Its start timed out." })
@@ -4342,6 +4348,8 @@ export class TaskManager {
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
+      // A key sent for a turn that never started doesn't stay on the box.
+      if (keyWaiting && !this.stopped) await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
       // Box Yard is stopping, and its database may be closed already: the next start picks the task up.
       if (this.stopped) {
         try {
