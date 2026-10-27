@@ -114,7 +114,9 @@ export class Setup {
    */
   async runnerProblem(runner: Runner): Promise<string | null> {
     const { c, credentials } = this.d
-    if (c.mock) return null
+    // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
+    const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
+    if (c.mock || docker) return docker
     const creds = credentials.status()
     if (runner === "gpu") {
       return creds.runpodApiKey.state === "set" ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
@@ -123,10 +125,7 @@ export class Setup {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
     }
     const keySet = creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set"
-    if (runner === "docker") {
-      const docker = this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
-      return docker ?? (keySet ? null : DOCKER_NEEDS_CLAUDE_KEY)
-    }
+    if (runner === "docker") return keySet ? null : DOCKER_NEEDS_CLAUDE_KEY
     await this.refreshLocal()
     const local = this.local?.result.check
     if (!local) return "Box Yard couldn't check this computer's tools (claude --version didn't answer)"
