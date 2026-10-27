@@ -110,7 +110,7 @@ type CheckedTask = BoxContents["tasks"][number]
 /** What TaskManager.destroyBox did. */
 export interface BoxDeleteResult {
   boxId: string
-  kind: "box" | "pod"
+  kind: "box" | "pod" | "container"
   label: string
   /** Tasks whose workspace went into (or already had) a fresh archive. */
   archived: string[]

@@ -301,7 +301,7 @@ export function createBoxYard(
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu })
   tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
-  runpod.onProgress = (boxId, message) => tasks.gpuProgress(boxId, message)
+  runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")

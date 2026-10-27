@@ -28,11 +28,14 @@ export function workerSystemPrompt(input: {
   const { project, task, branch, port } = input
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
+  const docker = Boolean(input.box?.docker)
   const header = [
     local
       ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
       : gpu
       ? `You are a Box Yard agent: a headless Claude Code worker running on a RunPod GPU pod of your project's own (Linux, as root).`
+      : docker
+      ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running in an isolated Docker container of your project's own (Linux) on Cody's computer.`, input.ownerName)
       : `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
@@ -50,6 +53,8 @@ export function workerSystemPrompt(input: {
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
       : gpu
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
+      : docker
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is published to Cody's computer, on another port there (report_preview gives Cody the right http://localhost link); ${port + 1}-${port + 9} work inside the container only.`
       : `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}.`,
     `- publish_artifact: for any deliverable file (report, page, image, export) so Cody can open it.`,
     `- mark_done: when the task is finished and there is nothing left to do. A scheduled run that found nothing to do and changed nothing passes outcome "noop".`,
@@ -97,6 +102,8 @@ export interface BoxPromptInfo {
   local?: boolean
   /** A RunPod GPU pod of the project's own (shared/runpod.ts): its GPU, e.g. "RTX A5000". */
   gpu?: { name: string }
+  /** A Docker container of the project's own on the computer running Box Yard (shared/docker.ts): its CPU limit. */
+  docker?: { cpus: number | null }
 }
 
 /** How much memory the box has and who may share it, so agents don't run test suites and headless browsers in parallel. */
@@ -107,6 +114,15 @@ function boxLines(b: BoxPromptInfo): string[] {
       `Your pod has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
       `The pod is stopped when your project has been idle a while and started again (a new pod) for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the pod's disk goes. /workspace/data is the project's network volume: put large downloads, datasets and model weights there to keep them across pods.`,
       `Run heavy jobs one at a time and stop servers you no longer need.`,
+    ]
+  }
+  if (b.docker) {
+    const mem = b.memoryBytes ? `${formatBytes(b.memoryBytes)} of memory` : `limited memory`
+    const cpus = b.docker.cpus ? ` and ${b.docker.cpus} CPUs` : ""
+    const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    return [
+      `Your container has ${mem}${cpus}${others}. Run heavy jobs (full test suites, headless browsers, big builds) one at a time, not in parallel, and stop servers you no longer need: running out of memory kills every agent in the container.`,
+      `The container is stopped when your project has been idle a while and started again for the next turn. /workspace is a volume, so your working directory stays; packages installed elsewhere (apt, global npm) may go when the container is made again from a newer image. Box Yard's image runs as the user "agent" with sudo, and has Node, git, gh, build tools and Chromium (CHROME_PATH).`,
     ]
   }
   if (b.local) {

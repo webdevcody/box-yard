@@ -468,8 +468,9 @@ export const deleteAtRisk = <T extends { verdict: BoxDeleteVerdict }>(tasks: T[]
 /** What Clear box and Delete box would touch, for their confirmations, and the safety check delete_box runs. */
 export interface BoxContents {
   boxId: string
-  /** A worker box (deleted at its provider) or a RunPod GPU pod (terminated; its network volume stays). */
-  kind: "box" | "pod"
+  /** A worker box (deleted at its provider), a RunPod GPU pod (terminated; its network volume stays), or a Docker
+   * project's container (deleted with its workspace volume). */
+  kind: "box" | "pod" | "container"
   /** The box id, or "GPU pod #1 · project" for a pod. */
   label: string
   tasks: {

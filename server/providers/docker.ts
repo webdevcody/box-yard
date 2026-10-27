@@ -25,7 +25,7 @@ const STOP_TIMEOUT_S = 10
 export interface DockerContainerState {
   boxId: string
   projectId: string
-  /** The container's name, e.g. boxyard-by-1a2b3c4d-prj_ab12cd. */
+  /** The container's name, e.g. boxyard-1a2b3c4d-prj_ab12cd. */
   name: string
   /** running, exited, created, paused, restarting, dead; "missing" when only its volume is left. */
   state: string
@@ -46,7 +46,7 @@ export interface DockerProviderDeps {
   engine: DockerEngine
   images: Pick<DockerImages, "ensure">
   settings: () => DockerSettings
-  /** This install's label (TaskManager.installLabel, "by-…"): containers and volumes carry it, and Box Yard only touches those. */
+  /** This install's id (TaskManager.installLabel without "by-"): containers and volumes carry it, and Box Yard only touches those. */
   install: () => string
   git: { name: string; email: string }
   /** Box Yard created or started a container (box history). Stops and deletes are TaskManager's own. */
@@ -85,7 +85,7 @@ export class DockerProvider implements BoxProvider {
   }
 
   containerName(boxId: string): string {
-    return `boxyard-${this.d.install()}-${dockerBoxProject(boxId)}`
+    return `boxyard-${this.d.install()}-${dockerBoxProject(boxId).toLowerCase().replace(/[^a-z0-9_.-]/g, "-")}`
   }
 
   volumeName(boxId: string): string {

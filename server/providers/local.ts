@@ -14,7 +14,7 @@ import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult
  * There is no isolation between local boxes, so only run agents you trust.
  */
 export class LocalProvider implements BoxProvider {
-  readonly name = "local"
+  readonly name: string = "local"
   readonly nodeBin = process.execPath
   constructor(
     private readonly baseDir: string,

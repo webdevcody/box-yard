@@ -70,8 +70,9 @@ export function localBlockReason(agent: BoxAgent, b: LimitBlock): string {
  * new box: …": "heavy allows 1 of its agents at a time on a box, and Merge PR #78 is running on box box-1".
  */
 export function boxBlockReason(agent: BoxAgent, b: LimitBlock, where: string): string {
-  const one = where.startsWith("GPU pod") ? "a pod" : "a box"
-  const running = (own: string) => `${agentRefs(b.by, own)} ${b.by.length === 1 ? "is" : "are"} running on ${where}`
-  if (b.kind === "own") return `${agent.projectName} allows ${ofIts(b.cap)} at a time on ${one}, and ${running(agent.projectName)}`
+  const container = where.endsWith("Docker container")
+  const one = where.startsWith("GPU pod") ? "a pod" : container ? "a container" : "a box"
+  const running = (own: string) => `${agentRefs(b.by, own)} ${b.by.length === 1 ? "is" : "are"} running ${container ? "in" : "on"} ${where}`
+  if (b.kind === "own") return `${agent.projectName} allows ${ofIts(b.cap)} at a time ${container ? "in" : "on"} ${one}, and ${running(agent.projectName)}`
   return `${b.project.projectName} needs the whole machine, and ${running(b.project.projectName)}`
 }
