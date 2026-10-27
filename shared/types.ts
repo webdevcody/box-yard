@@ -9,6 +9,7 @@ import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
+import type { Identity } from "./identities.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -551,6 +552,8 @@ export type UiEvent =
   | { type: "runpod.build"; build: RunPodImageBuild }
   /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
   | { type: "docker.build"; build: DockerImageBuild }
+  /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
+  | { type: "identities"; identities: Identity[] }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

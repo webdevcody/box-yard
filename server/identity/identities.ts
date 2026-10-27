@@ -115,10 +115,14 @@ export class Identities {
       /** Settings › Credentials: the Default identity's missing parts. */
       credentials: Pick<CredentialStore, "get" | "claudeEnv">
       github?: GithubFetch
-      /** Mock mode: tokens aren't checked with GitHub. */
+      /** Mock mode: tokens aren't checked with GitHub, unless a stand-in for it is given (tests). */
       mock?: boolean
     },
   ) {}
+
+  private get offline() {
+    return Boolean(this.d.mock && !this.d.github)
+  }
 
   // ---------- reading ----------
 
@@ -271,7 +275,7 @@ export class Identities {
     const current = this.requireOwnSecrets(id, "GitHub token")
     const body = parse(tokenInput, input)
     let info: { login: string; id: number; scopes: string[] | null; expiresAt: number | null }
-    if (this.d.mock) info = { login: current.githubLogin ?? "mock-user", id: current.githubId ?? 1, scopes: null, expiresAt: null }
+    if (this.offline) info = { login: current.githubLogin ?? "mock-user", id: current.githubId ?? 1, scopes: null, expiresAt: null }
     else {
       try {
         info = await githubTokenInfo(body.token, this.d.github)
@@ -288,7 +292,7 @@ export class Identities {
       this.putSecret(id, "github_token", body.owner, body.token, { login: info.login, scopes: info.scopes, expiresAt: info.expiresAt, source })
       this.d.db.prepare("UPDATE identities SET github_login = ?, github_id = ?, updated_at = ? WHERE id = ?").run(info.login, info.id, now, id)
     })()
-    if (current.author && !this.d.mock) await this.checkEmail(id, body.token, info).catch(() => {})
+    if (current.author && !this.offline) await this.checkEmail(id, body.token, info).catch(() => {})
     this.changed()
     return this.require(id)
   }

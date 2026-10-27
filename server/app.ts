@@ -40,7 +40,8 @@ import { HookEngine } from "./hooks.js"
 import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../shared/hooks.js"
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
+import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
 import { SecretBox } from "./identity/secretBox.js"
@@ -117,6 +118,7 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
+    identityId: z.string().min(1).max(64).optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),
@@ -133,6 +135,7 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
+    identityId: z.string().min(1).max(64).optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),
@@ -252,6 +255,8 @@ export interface BoxYard {
   retro: NotesRetro
   /** Settings › Docker and the containers behind "Runs on: Docker container" (docs/docker.md). */
   docker: DockerService
+  /** Settings › Identities: the GitHub account, author and Claude login each project's agents use (docs/identities.md). */
+  identities: Identities
   start(): Promise<void>
   stop(): void
 }
@@ -294,6 +299,11 @@ export function createBoxYard(
     github: opts.github?.fetch,
     mock: c.mock,
   })
+  /** A project's identity has to allow where it runs (Identity.runners). */
+  const requireIdentityRunner = (identityId: string, runner: Runner) => {
+    const problem = identities.runnerProblem(identities.require(identityId).id, runner)
+    if (problem) throw new BadRequestError(`Can't run there: ${problem}.`)
+  }
   // RunPod GPU pods, for projects that run on "RunPod GPU" (docs/runpod.md). Idle until a RunPod key is set.
   const install = () => {
     let id = store.getKv("install_id")
@@ -360,6 +370,7 @@ export function createBoxYard(
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   dockerService.images.onChange(() => hub.broadcast({ type: "docker.build", build: dockerService.images.status() }))
+  identities.onChange(() => hub.broadcast({ type: "identities", identities: identities.list() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
@@ -569,7 +580,9 @@ export function createBoxYard(
     const body = parse(schemas.project, req.body)
     if (store.findProject(body.name)) throw new BadRequestError(`A project named "${body.name}" already exists.`)
     // Unless it says otherwise, a new project runs where setup chose (This computer or Upstash boxes).
-    const project = store.createProject({ ...body, runner: body.runner ?? setup.defaultRunner() })
+    const runner = body.runner ?? setup.defaultRunner()
+    requireIdentityRunner(body.identityId ?? DEFAULT_IDENTITY_ID, runner)
+    const project = store.createProject({ ...body, runner })
     hub.broadcast({ type: "project", project })
     res.status(201).json(project)
   })
@@ -582,13 +595,51 @@ export function createBoxYard(
   })
   api.patch("/projects/:id", (req, res) => {
     const body = parse(schemas.projectPatch, req.body)
+    const before = store.getProject(req.params.id!)
+    if (before && (body.identityId !== undefined || body.runner !== undefined)) requireIdentityRunner(body.identityId ?? before.identityId, body.runner ?? before.runner ?? "box")
     const project = store.updateProject(req.params.id!, body)
     hub.broadcast({ type: "project", project })
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
+    if (body.identityId !== undefined && body.identityId !== before?.identityId) hub.broadcast({ type: "identities", identities: identities.list() })
     res.json(project)
+  })
+
+  // ---- identities (shared/identities.ts, docs/identities.md): values go in, only fingerprints come out
+  api.get("/identities", (_req, res) => {
+    res.json(identities.list())
+  })
+  api.post("/identities", (req, res) => {
+    res.status(201).json(identities.create(req.body))
+  })
+  api.patch("/identities/:id", (req, res) => {
+    res.json(identities.update(req.params.id!, req.body))
+  })
+  /** ?moveProjects=1 moves its projects to Default first; without it, an identity a project uses is refused (409). */
+  api.delete("/identities/:id", (req, res) => {
+    const { movedProjectIds } = identities.delete(req.params.id!, { moveProjects: req.query.moveProjects === "1" })
+    for (const id of movedProjectIds) {
+      const project = store.getProject(id)
+      if (project) hub.broadcast({ type: "project", project })
+    }
+    if (movedProjectIds.length) tasks.schedule()
+    res.json({ ok: true, movedProjectIds })
+  })
+  /** Save a GitHub token for one owner ({owner, token}; owner "" serves every owner). GitHub must accept it. */
+  api.put("/identities/:id/tokens", async (req, res) => {
+    res.json(await identities.saveToken(req.params.id!, req.body))
+  })
+  api.delete("/identities/:id/tokens", (req, res) => {
+    res.json(identities.removeToken(req.params.id!, typeof req.query.owner === "string" ? req.query.owner : ""))
+  })
+  /** Save the identity's own Claude login ({kind: "api_key" | "oauth_token", value}). */
+  api.put("/identities/:id/claude", (req, res) => {
+    res.json(identities.saveClaude(req.params.id!, req.body))
+  })
+  api.delete("/identities/:id/claude", (req, res) => {
+    res.json(identities.removeClaude(req.params.id!))
   })
   api.delete("/projects/:id", async (req, res) => {
     const id = req.params.id!
@@ -1234,6 +1285,7 @@ export function createBoxYard(
     notes,
     retro,
     docker: dockerService,
+    identities,
     async start() {
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
       if (setup.onThisComputer()) await setup.refreshLocal()
