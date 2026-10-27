@@ -86,7 +86,7 @@ describe("LocalRunnerProvider", () => {
   })
 
   it("agentEnv keeps the user's own environment", () => {
-    const env = agentEnv({ PATH: "/usr/bin", HOME: "/Users/cody", LANG: "en_US.UTF-8", BOXYARD_DATA_DIR: "/x", PORT: "3000", ANTHROPIC_API_KEY: "k", OPENAI_API_KEY: "o", CLAUDE_CODE_SESSION_ID: "s" })
+    const env = agentEnv({ PATH: "/usr/bin", HOME: "/Users/cody", LANG: "en_US.UTF-8", BOXYARD_DATA_DIR: "/x", PORT: "3000", ANTHROPIC_API_KEY: "k", OPENAI_API_KEY: "o", CLAUDE_CODE_SESSION_ID: "s", GH_TOKEN: "g", GITHUB_TOKEN: "t" })
     expect(env).toEqual({ PATH: "/usr/bin", HOME: "/Users/cody", LANG: "en_US.UTF-8" })
   })
 })

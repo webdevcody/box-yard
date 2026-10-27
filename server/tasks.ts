@@ -56,6 +56,7 @@ import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../s
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
+import { turnEnv } from "./turnCredentials.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
@@ -4065,13 +4066,12 @@ export class TaskManager {
   }
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
-    const env: Record<string, string> = { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }
     // Read on every turn, so a credential saved in Settings › Credentials reaches the next turn without a restart.
     const creds = this.settings.credentials
-    const claude = creds.claudeEnv()
-    Object.assign(env, claude)
-    const githubToken = creds.get("githubToken")
-    if (githubToken) env.GITHUB_TOKEN = env.GITHUB_TOKEN ?? githubToken
+    const { env, unsetEnv, claudeFrom } = turnEnv(
+      { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) },
+      { claude: creds.claudeEnv(), githubToken: creds.get("githubToken") },
+    )
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
@@ -4080,11 +4080,12 @@ export class TaskManager {
       projectId: project.id,
       boxId,
       env,
+      unsetEnv,
       claudeBin,
       claudeArgs,
       // A local `claude` login lives in the default config dir, so only
       // isolate when we have a token to log in with.
-      isolateConfig: !local || Object.keys(claude).length > 0,
+      isolateConfig: !local || claudeFrom !== null,
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),

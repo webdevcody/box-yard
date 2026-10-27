@@ -236,8 +236,7 @@ function claudeEnv() {
   const claudeConfigDir = path.join(taskDir, "claude")
   const isolate = task.isolateConfig !== false
   return {
-    ...process.env,
-    ...task.env,
+    ...turnBaseEnv(),
     ...(isolate ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
     IS_SANDBOX: "1",
     DISABLE_AUTOUPDATER: "1",
@@ -245,6 +244,16 @@ function claudeEnv() {
     BOXYARD_TASK_ID: task.taskId,
     BOXYARD_TASK_DIR: taskDir,
   }
+}
+
+/**
+ * The runner's own environment with the turn's credentials: task.unsetEnv first drops the ones this turn mustn't use
+ * (a box's env can still hold another login, see server/turnCredentials.ts), then task.env sets its own.
+ */
+function turnBaseEnv() {
+  const env = { ...process.env }
+  for (const k of task.unsetEnv ?? []) delete env[k]
+  return { ...env, ...task.env }
 }
 
 /** Tokens in the context after one API call: its prompt side plus what it just wrote. */
@@ -534,7 +543,7 @@ const text = (t, isError = false) => ({ content: [{ type: "text", text: t }], ..
 
 function sh(cmd, args, opts = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { cwd: path.join(taskDir, "work"), env: { ...process.env, ...task.env }, maxBuffer: 10 << 20, ...opts }, (err, stdout, stderr) =>
+    execFile(cmd, args, { cwd: path.join(taskDir, "work"), env: turnBaseEnv(), maxBuffer: 10 << 20, ...opts }, (err, stdout, stderr) =>
       resolve({ code: err ? (typeof err.code === "number" ? err.code : 1) : 0, stdout: String(stdout), stderr: String(stderr) }),
     )
   })
