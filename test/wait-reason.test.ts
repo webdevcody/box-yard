@@ -92,15 +92,17 @@ describe("WaitReason", () => {
     expect(location.pathname).toBe("/tasks/task_17063f203d7d")
   })
 
-  it("shows where a waiting task will go in the card's footer, muted, and pinned when it overrides its project", () => {
+  it("marks where a waiting task will go with a muted icon in the card's footer, pinned when it overrides its project", () => {
     render(createElement(TaskCard, { task: task({ placement: { now: null, last: null, runner: "local", chosenBy: "task", projectRunner: "box" } }) }))
     const chip = host.querySelector<HTMLElement>("[data-testid=card-placement]")!
-    expect(chip.textContent).toBe("→ This computer")
+    // Only the icon (and the pin): the words are in the label and tooltip.
+    expect(chip.textContent).toBe("")
+    expect(chip.querySelectorAll("svg")).toHaveLength(2)
+    expect(chip.getAttribute("aria-label")).toBe("Runs on: → This computer, pinned")
     expect(chip.dataset.state).toBe("next")
-    expect(chip.querySelector('[aria-label="pinned"]')).not.toBeNull()
     expect(chip.title).toContain("This task's Runs on: this computer")
     render(createElement(TaskCard, { task: task({ status: "working", boxId: "pure-lobster", placement: { now: { kind: "box", boxId: "pure-lobster", provider: "upstash", size: "small" }, last: null, runner: "box", chosenBy: "project", projectRunner: "box" } }) }))
-    expect(host.querySelector<HTMLElement>("[data-testid=card-placement]")!.textContent).toBe("Upstash · small")
+    expect(host.querySelector<HTMLElement>("[data-testid=card-placement]")!.getAttribute("aria-label")).toBe("Runs on: Upstash · pure-lobster · small")
     expect(host.querySelector<HTMLElement>("[data-testid=card-placement]")!.title).toContain("Upstash · pure-lobster · small")
   })
 

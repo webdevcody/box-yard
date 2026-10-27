@@ -19,15 +19,24 @@ const tone = (v: PlacementView) => (v.state !== "here" ? "text-zinc-500" : v.kin
 /** The full tooltip: every line the header's popover shows. */
 export const placementTitle = (v: PlacementView) => [v.label, v.setting, v.pinned ? "Pinned: this task overrides its project" : "", v.reason ?? "", v.kind === "local" ? LOCAL_UNSANDBOXED : ""].filter(Boolean).join("\n")
 
-/** The card's compact chip: icon, "Upstash · small" / "→ This computer", and a pin when the task overrides its project. */
+/**
+ * The card's mark: just the provider's icon (muted while it's only where it will go or went), and a pin when the
+ * task overrides its project. The full label and why are in the tooltip; the task page has the words.
+ */
 export const PlacementCardChip = memo(function PlacementCardChip({ task }: { task: Task }) {
   const v = placementView(task)
   const Icon = PLACE_ICON[v.kind]
   return (
-    <span data-testid="card-placement" data-state={v.state} className={cx("inline-flex max-w-48 min-w-0 shrink-0 items-center gap-1", tone(v))} title={placementTitle(v)}>
-      <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="min-w-0 truncate">{v.short}</span>
-      {v.pinned && <Pin className="h-3 w-3 shrink-0 text-zinc-500" aria-label="pinned" />}
+    <span
+      role="img"
+      aria-label={`Runs on: ${v.label}${v.pinned ? ", pinned" : ""}`}
+      data-testid="card-placement"
+      data-state={v.state}
+      className={cx("inline-flex shrink-0 items-center gap-0.5", tone(v))}
+      title={placementTitle(v)}
+    >
+      <Icon className="h-3.5 w-3.5" aria-hidden />
+      {v.pinned && <Pin className="h-3 w-3 text-zinc-500" aria-hidden />}
     </span>
   )
 })
