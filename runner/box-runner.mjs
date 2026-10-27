@@ -735,7 +735,9 @@ function githubApi(token) {
 const ASSETS_BRANCH = "boxyard-assets"
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|avif|svg)$/i
 /** A relative /artifacts/ link, or one on any host (BOXYARD_PUBLIC_URL, or github.com where a relative link landed). Sentence punctuation after it isn't part of it. */
-const ARTIFACT_LINK = /(?<![\w.\-/:])(?:https?:\/\/[^\s/)"'<>\]]+)?\/artifacts\/(art_[a-z0-9]+)\/([^\s)"'<>\]]*[^\s)"'<>\].,;:!?])/gi
+const ARTIFACT_LINK = /(?<![\w.\-/:])(?:https?:\/\/[^\s/)"'`<>\]]+)?\/artifacts\/(art_[a-z0-9]+)\/([^\s)"'`<>\]]*[^\s)"'`<>\].,;:!?])/gi
+/** Code: a fenced block or an inline span. Links written there are about the link, so they stay as written. */
+const CODE = /(```[\s\S]*?(?:```|$)|`[^`\n]*`)/
 
 /** Artifacts this task published: id to { path, size, sha256 } from the event log. */
 function publishedArtifacts() {
@@ -816,7 +818,9 @@ function unchanged(e) {
 
 /** The PR body with every link to an artifact this task published pointed at its copy on the assets branch, and notes on any it couldn't move. */
 async function hostArtifacts(gh, slug, body) {
-  const links = [...body.matchAll(ARTIFACT_LINK)]
+  // split() with a capture group: odd parts are code.
+  const parts = body.split(CODE)
+  const links = parts.flatMap((part, i) => (i % 2 ? [] : [...part.matchAll(ARTIFACT_LINK)]))
   if (!links.length) return { body, notes: [] }
   const known = publishedArtifacts()
   const files = new Map()
@@ -839,13 +843,14 @@ async function hostArtifacts(gh, slug, body) {
   if (missing.size) {
     notes.push(`GitHub can't show ${[...missing].join(", ")}: this task didn't publish it, or the file is gone or has changed since. Publish the file again with publish_artifact, use the new link, and call create_pull_request again.`)
   }
-  const out = body.replace(ARTIFACT_LINK, (link, id) => {
+  const rewrite = (link, id) => {
     const f = files.get(id)
     if (!f) return link
     const url = `https://github.com/${slug}/blob/${ASSETS_BRANCH}/${f.repoPath.split("/").map(encodeURIComponent).join("/")}`
     // ?raw=true serves the file itself, which an image needs; other files open on GitHub's file page.
     return IMAGE_FILE.test(f.repoPath) ? `${url}?raw=true` : url
-  })
+  }
+  const out = parts.map((part, i) => (i % 2 ? part : part.replace(ARTIFACT_LINK, rewrite))).join("")
   if (files.size) notes.unshift(`Copied ${files.size} file${files.size === 1 ? "" : "s"} to the ${ASSETS_BRANCH} branch so GitHub shows ${files.size === 1 ? "it" : "them"}.`)
   return { body: out, notes }
 }

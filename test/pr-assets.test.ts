@@ -229,6 +229,25 @@ describe("create_pull_request with screenshots", () => {
     expect(gh!.refs.has("boxyard-assets")).toBe(false)
   })
 
+  it("leaves links inside code as written", async () => {
+    const { dir } = await taskFolder()
+    publish(dir, "art_aaa111", "cards.png", "PNG-1")
+    const body = [
+      "Linked as `/artifacts/art_aaa111/cards.png` in the body:",
+      "![cards](/artifacts/art_aaa111/cards.png)",
+      "```md",
+      "![example](/artifacts/art_aaa111/cards.png)",
+      "```",
+    ].join("\n")
+    const r = await createPr(dir, body)
+    expect(r.text).toContain("Copied 1 file")
+    const out = gh!.pulls[0]!.body
+    expect(out).toContain("Linked as `/artifacts/art_aaa111/cards.png` in the body:")
+    expect(out).toContain(`![cards](https://github.com/${SLUG}/blob/boxyard-assets/task_abc/art_aaa111/cards.png?raw=true)`)
+    expect(out).toContain("```md\n![example](/artifacts/art_aaa111/cards.png)\n```")
+    expect(gh!.fileOn("boxyard-assets", "task_abc/art_aaa111/cards.png")?.toString()).toBe("PNG-1")
+  })
+
   it("doesn't touch a body without artifact links", async () => {
     const { dir } = await taskFolder()
     const r = await createPr(dir, "No pictures: see https://example.com/foo/artifacts/art_fff666/y.png")
