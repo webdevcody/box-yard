@@ -125,7 +125,7 @@ const underWay = (r: Running, id: string) =>
   status(r, id, (t) => t.status === "working" && messages(r, id, "assistant").some((m) => m.includes("Working on it slowly.")), `task ${id} to be under way`)
 
 /** The turn's run record: its process, and the events.jsonl offset its events start at. */
-const runRecord = (r: Running, t: Task) => JSON.parse(fs.readFileSync(path.join(dirOf(r, t), "run.json"), "utf8")) as { pid: number; ident: string; turnId: string; eventsOffset: number }
+const runRecord = (r: Running, t: Task) => JSON.parse(fs.readFileSync(path.join(dirOf(r, t), "run.json"), "utf8")) as { pid: number; ident: string; turnId: string; startedAt: number; eventsOffset: number }
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0)
@@ -231,7 +231,9 @@ describe.skipIf(process.platform !== "linux")("restarting Box Yard mid-turn", ()
     await shutdown(r)
     killTurn(rec.pid)
     await waitFor(() => !alive(rec.pid), "the turn to die")
-    // After a reboot, another process has the turn's pid: here one started now, written in as if it had.
+    // After a reboot, another process has the turn's pid: here one started now, written in as if it had. In a later
+    // second than the turn's: macOS start times are whole seconds (`ps -o lstart`).
+    await new Promise((r) => setTimeout(r, Math.max(0, rec.startedAt + 1100 - Date.now())))
     const stranger = spawn("sleep", ["300"], { stdio: "ignore", detached: true })
     strangers.push(stranger)
     const pid = stranger.pid!

@@ -47,7 +47,9 @@ function taskDir(pid: number, ident?: string | null) {
 const probe = (dir: string) => parseTurnProbe(sh(turnProbeScript(dir)))
 
 describe.skipIf(process.platform === "win32")("a turn's process", () => {
-  it("has an identity: this boot and its start time", () => {
+  it("has an identity: this boot and its start time", async () => {
+    // macOS start times are whole seconds (`ps -o lstart`): start the sleeper in a later second than this process.
+    await new Promise((r) => setTimeout(r, Math.max(0, 1100 - process.uptime() * 1000)))
     const pid = sleeper()
     const ident = processIdent(pid)
     expect(ident).toMatch(/^[^|]+\|.+$/)
