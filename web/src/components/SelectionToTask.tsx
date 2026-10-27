@@ -1,7 +1,8 @@
 // Select text in a chat or transcript and "Start new task" turns it into work: the shared New task popover opens
 // with the quote and a box for instructions. Enter sends both to whoever routes the work (the Coordinator, or the
 // project's Captain in its chat); "More options" starts the task directly from the full New task dialog.
-import { useEffect, useId, useRef, useState, type MouseEvent, type ReactNode } from "react"
+// A message's own toolbar (MessageActions) opens the same popover on the whole message through useQuoteToTask.
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type MouseEvent, type ReactNode, type RefObject } from "react"
 import { MessageSquarePlus } from "lucide-react"
 import { buildSelectionTaskBrief, buildSelectionTaskPrompt, selectionTarget, type SelectionTaskSource } from "../lib/selectionTask"
 import { saveDraft, selectionScope } from "../lib/newTask"
@@ -22,6 +23,21 @@ interface SelectionInfo {
   y: number
 }
 
+/** A popover opened from a selection hangs from where its action button was; a message's hangs from its own button. */
+type Draft = { text: string; whole: false; rect: Rect } | { text: string; whole: true; trigger: RefObject<HTMLElement | null>; onClose?: () => void }
+
+export interface QuoteToTask {
+  /** The New task popover on the whole message `text`, hanging from `trigger`; pressing the same trigger again closes it. */
+  open: (text: string, trigger: HTMLElement, onClose?: () => void) => void
+  /** Straight to the full New task dialog with the message (the toolbar's "More options"). */
+  dialog: (text: string) => void
+}
+
+const QuoteContext = createContext<QuoteToTask | null>(null)
+
+/** What a message's toolbar calls; null outside a SelectionToTask or where there's nowhere to send (no source yet). */
+export const useQuoteToTask = () => useContext(QuoteContext)
+
 export function SelectionToTask({
   source,
   onPrompt,
@@ -33,8 +49,10 @@ export function SelectionToTask({
 }) {
   const root = useRef<HTMLDivElement>(null)
   const [selection, setSelection] = useState<SelectionInfo | null>(null)
-  /** The popover is open on this selection, hanging from where its action button was. */
-  const [draft, setDraft] = useState<(SelectionInfo & { rect: Rect }) | null>(null)
+  /** The popover is open on this selection or message. */
+  const [draft, setDraft] = useState<Draft | null>(null)
+  const draftRef = useRef(draft)
+  draftRef.current = draft
   /** "More options": the full New task dialog for this selection and the instructions typed so far. */
   const [dialog, setDialog] = useState<{ text: string; instructions: string } | null>(null)
   const anchor = useRef<HTMLSpanElement>(null)
@@ -71,18 +89,46 @@ export function SelectionToTask({
   const open = (e: MouseEvent<HTMLButtonElement>) => {
     if (!selection) return
     const r = e.currentTarget.getBoundingClientRect()
-    setDraft({ ...selection, rect: { left: r.left, top: r.top, width: r.width, height: r.height } })
+    setDraft({ text: selection.text, whole: false, rect: { left: r.left, top: r.top, width: r.width, height: r.height } })
     setSelection(null)
   }
 
-  const finish = () => {
+  /** Closes the popover; a message's toolbar hears it, and Esc puts focus back on its button (never the composer). */
+  const close = useCallback((refocus = false) => {
+    const d = draftRef.current
+    if (d?.whole) {
+      d.onClose?.()
+      if (refocus) d.trigger.current?.focus({ preventScroll: true })
+    }
     setDraft(null)
+  }, [])
+
+  const finish = () => {
+    close()
     window.getSelection()?.removeAllRanges()
   }
 
+  // Stable, so the memo'd message rows that read it never re-render for it.
+  const quote = useMemo<QuoteToTask>(
+    () => ({
+      open: (text, el, onClose) => {
+        const d = draftRef.current
+        close()
+        if (d?.whole && d.trigger.current === el) return
+        setSelection(null)
+        setDraft({ text, whole: true, trigger: { current: el }, onClose })
+      },
+      dialog: (text) => {
+        close()
+        setDialog({ text, instructions: "" })
+      },
+    }),
+    [close],
+  )
+
   return (
     <div ref={root} className="contents">
-      {children}
+      <QuoteContext.Provider value={source ? quote : null}>{children}</QuoteContext.Provider>
       {source && selection && !draft && (
         <>
           <button
@@ -112,25 +158,26 @@ export function SelectionToTask({
       {source && draft && (
         <>
           {/* Where the action button was: the popover hangs from it (the button itself goes once the selection does). */}
-          <span ref={anchor} aria-hidden className="pointer-events-none fixed" style={draft.rect} />
+          {!draft.whole && <span ref={anchor} aria-hidden className="pointer-events-none fixed" style={draft.rect} />}
           <NewTaskPopover
+            key={draft.whole ? draft.text : "selection"}
             id={popoverId}
-            trigger={anchor}
-            heading="New task from selection"
+            trigger={draft.whole ? draft.trigger : anchor}
+            heading={draft.whole ? "New task from message" : "New task from selection"}
             quote={draft.text}
             placeholder="Additional instructions (optional)"
             scope={selectionScope(draft.text)}
-            align="center"
+            align={draft.whole ? "end" : "center"}
             defaultProjectId={source.project?.id}
             onStart={(instructions) => {
               onPrompt(buildSelectionTaskPrompt({ source, selectedText: draft.text, instructions, ownerName }))
               finish()
               toast.info(`Sent to ${selectionTarget(source)}`, "It will decide where this task belongs.")
             }}
-            onClose={() => setDraft(null)}
+            onClose={close}
             onMore={(_, instructions) => {
               setDialog({ text: draft.text, instructions })
-              setDraft(null)
+              close()
             }}
           />
         </>

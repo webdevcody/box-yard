@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { PR_BATCH, PR_MAX_BACKOFF_MS, PrTracker, RATE_FLOOR, parsePrUrl, type PrChange } from "../server/prs.js"
+import { PR_BATCH, PR_MAX_BACKOFF_MS, PR_REPORT_FRESH_MS, PrTracker, RATE_FLOOR, parsePrUrl, type PrChange } from "../server/prs.js"
 import type { TaskStatus } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
@@ -13,37 +13,53 @@ function fakeGithub() {
   const calls: { token: string; asked: string[] }[] = []
   let remaining = 4000
   let fail: Response | null = null
+  /** Answers for one token only ("Bearer <token>"), like a revoked project token. */
+  const failFor = new Map<string, Response>()
+  /** Repos ("owner/name") a token can't see: GitHub answers NOT_FOUND for them. */
+  const hidden = new Map<string, Set<string>>()
   const fetch = (async (_url: string, init: RequestInit) => {
     const { variables } = JSON.parse(String(init.body)) as { query: string; variables: Record<string, string | number> }
     const n = Object.keys(variables).filter((k) => k.startsWith("p")).length
     const asked = Array.from({ length: n }, (_, i) => `${variables[`o${i}`]}/${variables[`n${i}`]}#${variables[`p${i}`]}`)
-    calls.push({ token: String((init.headers as Record<string, string>).Authorization), asked })
+    const token = String((init.headers as Record<string, string>).Authorization)
+    calls.push({ token, asked })
     if (fail) return fail.clone()
+    if (failFor.has(token)) return failFor.get(token)!.clone()
     const data: Record<string, unknown> = { rateLimit: { remaining, resetAt: new Date(Date.now() + 30 * 60_000).toISOString() } }
-    asked.forEach((key, i) => (data[`p${i}`] = prs.has(key) ? { pullRequest: prs.get(key) } : null))
-    return new Response(JSON.stringify({ data }), { status: 200, headers: { "content-type": "application/json" } })
+    const errors: unknown[] = []
+    asked.forEach((key, i) => {
+      const repo = key.split("#")[0]!
+      if (hidden.get(token)?.has(repo)) {
+        data[`p${i}`] = null
+        errors.push({ type: "NOT_FOUND", path: [`p${i}`], message: `Could not resolve to a Repository with the name '${repo}'.` })
+      } else data[`p${i}`] = prs.has(key) ? { pullRequest: prs.get(key) } : null
+    })
+    return new Response(JSON.stringify({ data, ...(errors.length ? { errors } : {}) }), { status: 200, headers: { "content-type": "application/json" } })
   }) as unknown as typeof globalThis.fetch
   return {
     prs,
     calls,
     fetch,
+    hidden,
     setRemaining: (n: number) => (remaining = n),
     failWith: (res: Response | null) => (fail = res),
+    failFor: (token: string, res: Response | null) => (res ? failFor.set(`Bearer ${token}`, res) : failFor.delete(`Bearer ${token}`)),
   }
 }
 
-function setup(opts: { token?: (projectId: string) => string | null } = {}) {
+function setup(opts: { token?: (projectId: string) => string | null; now?: () => number } = {}) {
   const store = new Store(openDb(tmpDir()))
   const gh = fakeGithub()
   const changes: PrChange[] = []
+  const logs: string[] = []
   const project = store.createProject({ name: "site" })
-  const tracker = new PrTracker({ store, token: opts.token ?? (() => "tok"), fetch: gh.fetch, onChange: (c) => changes.push(c) })
+  const tracker = new PrTracker({ store, token: opts.token ?? (() => "tok"), fetch: gh.fetch, now: opts.now, onChange: (c) => changes.push(c), log: (m) => logs.push(m) })
   const task = (n: number, status: TaskStatus = "pr_ready", extra: Parameters<Store["updateTask"]>[1] = {}) => {
     const t = store.createTask({ projectId: project.id, title: `Task ${n}`, prompt: "p" })
     store.updateTask(t.id, { status, prUrl: `https://github.com/acme/site/pull/${n}`, ...extra }, { quiet: true })
     return t.id
   }
-  return { store, gh, changes, tracker, task, project }
+  return { store, gh, changes, tracker, task, project, logs }
 }
 
 describe("parsePrUrl", () => {
@@ -160,42 +176,101 @@ describe("PR state tracking", () => {
     expect(gh.calls).toHaveLength(0)
   })
 
-  it("backs off on errors and recovers", async () => {
-    const { gh, tracker, task } = setup()
+  it("backs off on errors and recovers, per token", async () => {
+    let now = Date.now()
+    const { gh, tracker, task } = setup({ now: () => now })
     task(1)
     gh.prs.set("acme/site#1", { state: "OPEN" })
-    expect(tracker.nextDelay()).toBe(60_000)
     gh.failWith(new Response("boom", { status: 502 }))
     await tracker.pollAll()
-    expect(tracker.nextDelay()).toBe(120_000)
-    await tracker.pollAll()
-    await tracker.pollAll()
-    expect(tracker.nextDelay()).toBe(480_000)
-    for (let i = 0; i < 5; i++) await tracker.pollAll()
-    expect(tracker.nextDelay()).toBe(PR_MAX_BACKOFF_MS)
+    expect(tracker.tokenHealth("tok")).toMatchObject({ failures: 1, retryAt: now + 120_000 })
+    await tracker.pollAll() // backing off: no request
+    expect(gh.calls).toHaveLength(1)
+    for (let i = 0; i < 8; i++) {
+      now = tracker.tokenHealth("tok").retryAt
+      await tracker.pollAll()
+    }
+    expect(tracker.tokenHealth("tok").retryAt - now).toBe(PR_MAX_BACKOFF_MS)
     gh.failWith(null)
+    now = tracker.tokenHealth("tok").retryAt
     await tracker.pollAll()
-    expect(tracker.nextDelay()).toBe(60_000)
+    expect(tracker.tokenHealth("tok")).toMatchObject({ failures: 0, retryAt: 0 })
   })
 
-  it("pauses until the reset when rate limited, and when the budget runs low", async () => {
+  it("one project's broken or rate-limited token never holds back another project's PRs", async () => {
+    const tokens: Record<string, string> = {}
+    const { store, gh, tracker, task } = setup({ token: (projectId) => tokens[projectId] ?? "tok" })
+    // The broken token's PR is the oldest, so it comes first in every round.
+    const other = store.createProject({ name: "other" })
+    tokens[other.id] = "bad"
+    const t = store.createTask({ projectId: other.id, title: "x", prompt: "p" })
+    store.updateTask(t.id, { status: "pr_ready", prUrl: "https://github.com/acme/other/pull/1" })
+    const id = task(2, "done", { prState: "open" })
+    gh.prs.set("acme/site#2", { state: "MERGED" })
+    gh.failFor("bad", new Response("{}", { status: 403 })) // a secondary limit without a hint
+    await tracker.pollAll()
+    expect(store.getTask(id)).toMatchObject({ prState: "merged" })
+    expect(tracker.tokenHealth("bad").pausedUntil).toBeGreaterThan(Date.now())
+    expect(tracker.tokenHealth("tok").pausedUntil).toBe(0)
+
+    const id2 = task(3, "idle", { prState: "open" })
+    gh.prs.set("acme/site#3", { state: "MERGED" })
+    gh.failFor("bad", new Response("nope", { status: 401 }))
+    tracker.tokenHealth("bad").pausedUntil = 0
+    await tracker.pollAll()
+    expect(store.getTask(id2)).toMatchObject({ prState: "merged" })
+    expect(tracker.tokenHealth("bad").failures).toBe(1)
+    expect(tracker.tokenHealth("tok").failures).toBe(0)
+    expect(tracker.prCheck(t.id).error).toMatch(/HTTP 401/)
+  })
+
+  it("says why it can't check a PR the token can't see, and logs it once", async () => {
+    const { gh, tracker, task, logs } = setup()
+    const id = task(91, "done", { prState: "open" })
+    gh.hidden.set("Bearer tok", new Set(["acme/site"]))
+    await tracker.pollAll()
+    await tracker.pollAll()
+    expect(tracker.prCheck(id)).toMatchObject({ checkedAt: null, error: expect.stringMatching(/can't see it.*NOT_FOUND/) })
+    expect(logs.filter((l) => l.includes("pull/91"))).toHaveLength(1)
+    gh.hidden.clear()
+    gh.prs.set("acme/site#91", { state: "OPEN" })
+    await tracker.pollAll()
+    expect(tracker.prCheck(id)).toMatchObject({ checkedAt: expect.any(Number), error: null })
+  })
+
+  it("pauses one token until the reset when rate limited, and when the budget runs low", async () => {
     const { gh, tracker, task } = setup()
     task(1)
     gh.prs.set("acme/site#1", { state: "OPEN" })
     const reset = Math.floor(Date.now() / 1000) + 600
     gh.failWith(new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }))
     await tracker.pollAll()
-    expect(tracker.pausedUntil).toBe(reset * 1000)
-    expect(tracker.nextDelay()).toBeGreaterThan(590_000)
+    expect(tracker.tokenHealth("tok").pausedUntil).toBe(reset * 1000)
     await tracker.pollAll() // still paused: no request
+    await tracker.ensureFresh(null) // not even on demand
     expect(gh.calls).toHaveLength(1)
 
-    tracker.pausedUntil = 0
+    tracker.tokenHealth("tok").pausedUntil = 0
     gh.failWith(null)
     gh.setRemaining(RATE_FLOOR - 1)
     await tracker.pollAll()
     expect(gh.calls).toHaveLength(2)
-    expect(tracker.pausedUntil).toBeGreaterThan(Date.now() + 25 * 60_000)
+    expect(tracker.tokenHealth("tok").pausedUntil).toBeGreaterThan(Date.now() + 25 * 60_000)
+  })
+
+  it("wake() drops error backoffs and polls right away", async () => {
+    const { gh, tracker, task, store } = setup()
+    const id = task(1, "done", { prState: "open" })
+    gh.failWith(new Response("offline", { status: 502 }))
+    await tracker.pollAll()
+    expect(tracker.tokenHealth("tok").failures).toBe(1)
+    gh.failWith(null)
+    gh.prs.set("acme/site#1", { state: "MERGED" })
+    tracker.wake()
+    await new Promise((r) => setTimeout(r, 30))
+    tracker.stop()
+    expect(store.getTask(id)).toMatchObject({ prState: "merged" })
+    expect(tracker.tokenHealth("tok").failures).toBe(0)
   })
 
   it("check() asks right away (turn end), re-checks closed PRs and never asks about merged ones", async () => {
@@ -231,5 +306,68 @@ describe("PR state tracking", () => {
     tracker.apply(id, "https://github.com/acme/site/pull/1", { state: "merged", mergedAt: null, mergedBy: null })
     expect(store.getTask(id)).toMatchObject({ status: "pr_ready", prState: null })
     expect(changes).toHaveLength(0)
+  })
+
+  it("polls the PRs of done, idle and failed tasks too, not only pr_ready ones", async () => {
+    const { store, gh, tracker, task, changes } = setup()
+    const done = task(1, "done", { prState: "open" })
+    const idle = task(2, "idle", { prState: "open" })
+    const failed = task(3, "failed", { prState: "draft" })
+    for (const n of [1, 2, 3]) gh.prs.set(`acme/site#${n}`, { state: "MERGED", mergedBy: { login: "cody" } })
+    await tracker.pollAll()
+    expect(gh.calls[0]!.asked).toEqual(["acme/site#1", "acme/site#2", "acme/site#3"])
+    expect([done, idle, failed].map((id) => store.getTask(id)!.prState)).toEqual(["merged", "merged", "merged"])
+    // Statuses other than pr_ready are left alone; the change still reaches the UI and hooks (onChange).
+    expect(store.getTask(idle)!.status).toBe("idle")
+    expect(changes.map((c) => [c.taskId, c.prev, c.info.state])).toEqual([
+      [done, "open", "merged"],
+      [idle, "open", "merged"],
+      [failed, "draft", "merged"],
+    ])
+  })
+})
+
+describe("ensureFresh (before a PR state is reported)", () => {
+  it("asks GitHub about states older than PR_REPORT_FRESH_MS, in one batch, and leaves fresh ones alone", async () => {
+    let now = 1_000_000
+    const { store, gh, tracker, task } = setup({ now: () => now })
+    const a = task(1, "pr_ready", { prState: "open" })
+    const b = task(2, "pr_ready", { prState: "open" })
+    gh.prs.set("acme/site#1", { state: "OPEN" })
+    gh.prs.set("acme/site#2", { state: "OPEN" })
+    await tracker.pollAll()
+    expect(tracker.prCheck(a).checkedAt).toBe(now)
+
+    now += PR_REPORT_FRESH_MS - 1
+    await tracker.ensureFresh([a, b])
+    expect(gh.calls).toHaveLength(1) // still fresh: no request
+
+    // The scheduled poll missed a merge (it was backing off, the laptop slept...): the report asks first.
+    gh.prs.set("acme/site#2", { state: "MERGED", mergedBy: { login: "cody" } })
+    now += 2
+    await tracker.ensureFresh([a, b])
+    expect(gh.calls).toHaveLength(2)
+    expect(gh.calls[1]!.asked).toEqual(["acme/site#1", "acme/site#2"])
+    expect(store.getTask(b)).toMatchObject({ status: "done", prState: "merged" })
+    expect(tracker.prCheck(b).checkedAt).toBe(now)
+  })
+
+  it("asks even while the scheduled poll backs off, and never waits longer than the timeout", async () => {
+    const { store, gh, tracker, task } = setup()
+    const id = task(1, "pr_ready", { prState: "open" })
+    gh.failWith(new Response("boom", { status: 502 }))
+    await tracker.pollAll()
+    gh.failWith(null)
+    gh.prs.set("acme/site#1", { state: "MERGED" })
+    await tracker.ensureFresh([id])
+    expect(store.getTask(id)!.prState).toBe("merged")
+
+    const slow = setup()
+    const hung = new PrTracker({ store: slow.store, token: () => "tok", fetch: (() => new Promise(() => {})) as unknown as typeof fetch })
+    const stuck = slow.task(5, "pr_ready", { prState: "open" })
+    const started = Date.now()
+    await hung.ensureFresh([stuck], { timeoutMs: 50 })
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(hung.prCheck(stuck).checkedAt).toBeNull()
   })
 })

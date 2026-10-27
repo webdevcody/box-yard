@@ -71,7 +71,7 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 | `UPSTASH_BOX_API_KEY` | Worker boxes. Without it, agents run in folders on this machine (`BOX_PROVIDER=local`). |
 | `GITHUB_TOKEN` | Clone private repos, push branches, open PRs. A fine-grained token with Contents and Pull requests (read/write) is enough. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and Box Yard. |
-| `BOXYARD_PASSWORD` | Web UI password. Leave it empty to keep Box Yard on this computer; set it to open it to your phone, LAN or Tailscale (see below). |
+| `BOXYARD_PASSWORD` | Web UI password. Leave it empty to keep Box Yard on this computer; set it to open it to your phone, LAN or Tailscale (see below). `./yard password` makes a strong one. |
 
 **Who can reach it.** With no `BOXYARD_PASSWORD` there's no login, so Box Yard listens on `127.0.0.1` and only this computer can open it. Set a password and it listens on `0.0.0.0`, and the startup log lists every URL it answers on, LAN and Tailscale (`100.64.0.0/10`) included:
 
@@ -83,6 +83,17 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 ```
 
 `HOST` picks the address yourself (e.g. `HOST=100.101.102.103` for Tailscale only). A `HOST` other devices can reach with no password refuses to start, unless you set `BOXYARD_ALLOW_OPEN=1` (only behind your own auth, since anyone who reaches it can drive your agents). The dev server (`./yard dev`, port 5173) stays on localhost either way. Changes to these take a restart.
+
+**The password rule.** Box Yard won't start with a weak `BOXYARD_PASSWORD`, and the error says which rule it broke. Following NIST SP 800-63B rev 4, a password needs at least 15 characters (counted as Unicode characters), any characters and any length are fine, and there are no "one digit, one symbol" rules. It's refused when it's on the bundled list of common and leaked passwords (also with a few characters added or swapped, like `!!football2024!!`), one character or a short pattern repeated, a simple sequence (`abcdef…`, `987654…`, a keyboard row), or when it contains `password`, `boxyard` or the username Box Yard runs as. There's no override; `BOXYARD_ALLOW_OPEN` is only for running with no password at all.
+
+```bash
+./yard password         # write a random 24-character password into .env and print it once (asks before replacing one)
+./yard password check   # does the one in .env pass? (never prints it)
+```
+
+Or pick a passphrase of four or more random words. Restart Box Yard after changing it; every device logs in again.
+
+**Logging in.** Only wrong passwords count against you. After 3 wrong tries from one device, each next try waits a little longer (1 s, 2 s, 4 s … 30 s), and 10 wrong tries in 15 minutes lock that device out for 15 minutes ("Too many attempts, try again in N minutes"); other devices keep working. Failed logins are logged with their address. A login keeps you signed in for 90 days with a random, httpOnly session cookie (Secure over https).
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
 
@@ -100,7 +111,7 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 - On a paid Upstash plan the box is keep-alive. On the free plan keep-alive isn't allowed, so it falls back to a normal box: while agents are running or queued, the server holds its own box awake, and when the yard is idle it lets go. Opening the URL wakes a paused box, and the init command restarts the server, which picks running agents back up.
 - Talk to a deployed yard from the terminal with `YARD_URL=<url> YARD_PASSWORD=<password> npx tsx scripts/yardctl.ts say "..."` (also `status`, `wait`, `task <id>`, `chat`).
 
-**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume. It needs `BOXYARD_PASSWORD` in `.env`: the container listens on `0.0.0.0` (the image sets `HOST=0.0.0.0`), so without a password it won't start (or set `BOXYARD_ALLOW_OPEN=1`). `deploy-box` always sets a password (yours from `.env`, the last deploy's, or a generated one).
+**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume. It needs a `BOXYARD_PASSWORD` in `.env` that passes the rule (it runs `./yard password check` first): the container listens on `0.0.0.0` (the image sets `HOST=0.0.0.0`), so without a password it won't start (or set `BOXYARD_ALLOW_OPEN=1`). `deploy-box` always sets a password that passes: yours from `.env` (it stops if that one is too weak), the last deploy's, or a generated 24-character one. A box from an older deploy whose 12-character password no longer passes gets a new one, printed at the end.
 
 ## How it works
 
