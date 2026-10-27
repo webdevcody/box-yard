@@ -8,7 +8,7 @@ import { announceResize, withResize } from "./boxResize"
 import type { ProjectSnapshotState } from "./projectSnapshot"
 import type { SnapshotJob } from "../../../shared/snapshots"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
-import { DEFAULT_IDENTITY_ID } from "../../../shared/identities"
+import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type IdentityDetection, type IdentityInput, type IdentitySigningInput, type IdentityClaudeKind } from "../../../shared/identities"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
@@ -100,6 +100,7 @@ export const keys = {
   noteSuggestions: (projectId: string) => ["note-suggestions", projectId] as const,
   /** A project's snapshot and its running or last snapshot job. */
   projectSnapshot: (projectId: string) => ["project-snapshot", projectId] as const,
+  identities: ["identities"] as const,
 }
 
 /** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
@@ -140,6 +141,17 @@ export const QUIET: Quiet = { notifyOnChangeProps: ["status"] }
 
 export const useProjects = (o?: Quiet) => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects"), notifyOnChangeProps: o?.notifyOnChangeProps })
 export const useTasks = (o?: Quiet) => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), notifyOnChangeProps: o?.notifyOnChangeProps })
+/** The project's task whose turn is running (starting or working), as id and title. Re-renders only when that changes. */
+export function useRunningTask(projectId: string) {
+  const select = useCallback(
+    (list: Task[]) => {
+      const t = list.find((x) => x.projectId === projectId && (x.status === "starting" || x.status === "working"))
+      return t ? { id: t.id, title: t.title } : null
+    },
+    [projectId],
+  )
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
+}
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
@@ -458,6 +470,39 @@ export function useDockerAction<T>(title: string, call: (input: T) => Promise<Do
   })
 }
 
+// ------------------------------------------------------------------ identities (Settings › Identities)
+
+/** Every identity, its secrets as fingerprints only. The "identities" event keeps it live. */
+export const useIdentities = (o?: Quiet) => useQuery({ queryKey: keys.identities, queryFn: () => api<Identity[]>("/api/identities"), notifyOnChangeProps: o?.notifyOnChangeProps })
+
+/** The calls Settings › Identities makes; every one answers with fingerprints, never a secret. */
+export const identityApi = {
+  create: (input: IdentityInput & { name: string }) => api<Identity>("/api/identities", { body: input }),
+  update: (id: string, patch: IdentityInput) => api<Identity>(`/api/identities/${id}`, { method: "PATCH", body: patch }),
+  remove: (id: string) => api<{ movedProjectIds: string[] }>(`/api/identities/${id}?moveProjects=1`, { method: "DELETE" }),
+  saveToken: (id: string, owner: string, token: string) => api<Identity>(`/api/identities/${id}/tokens`, { method: "PUT", body: { owner, token } }),
+  removeToken: (id: string, owner: string) => api<Identity>(`/api/identities/${id}/tokens?owner=${encodeURIComponent(owner)}`, { method: "DELETE" }),
+  saveClaude: (id: string, kind: IdentityClaudeKind, value: string) => api<Identity>(`/api/identities/${id}/claude`, { method: "PUT", body: { kind, value } }),
+  removeClaude: (id: string) => api<Identity>(`/api/identities/${id}/claude`, { method: "DELETE" }),
+  saveSigning: (id: string, input: IdentitySigningInput) => api<Identity>(`/api/identities/${id}/signing`, { method: "PUT", body: input }),
+  setRequireSigned: (id: string, requireSigned: boolean) => api<Identity>(`/api/identities/${id}/signing`, { method: "PATCH", body: { requireSigned } }),
+  removeSigning: (id: string) => api<Identity>(`/api/identities/${id}/signing`, { method: "DELETE" }),
+  /** One detection proposal becomes an identity (or updates the one for its login); `lines` say what happened. */
+  importDetected: (input: { login: string; projects?: string[] }) => api<{ identity: Identity; created: boolean; lines: string[] }>("/api/identities/import", { body: input }),
+}
+
+/** Read this computer's gh, git and ssh (and, online, GitHub) for proposals. Changes nothing. */
+export const useDetectIdentities = () => useMutation({ mutationFn: (online: boolean) => api<IdentityDetection>("/api/identities/detect", { body: { online } }) })
+
+/** Check an identity with GitHub; the result is saved as its last test (the "identities" event brings it). */
+export function useTestIdentity() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api<IdentityCheckResult>(`/api/identities/${id}/test`, { method: "POST" }),
+    onSuccess: (lastCheck, id) => qc.setQueryData<Identity[]>(keys.identities, (list) => list?.map((i) => (i.id === id ? { ...i, lastCheck } : i))),
+  })
+}
+
 // ------------------------------------------------------------------ hooks (automations on task events)
 
 export const useHooks = (scope: string) => useQuery({ queryKey: keys.hooks(scope), queryFn: () => api<HookWithLastRun[]>(`/api/hooks?${hookQuery(scope)}`) })
@@ -579,6 +624,7 @@ export function useUpdateProject() {
       maxBoxes?: number | null
       /** Both fields: the optimistic update replaces the project's whole `docker`. */
       docker?: ProjectDocker
+      identityId?: string
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
