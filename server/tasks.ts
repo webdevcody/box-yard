@@ -4399,6 +4399,7 @@ export class TaskManager {
         if (!row?.current_turn_id || row.box_id !== boxId) break
         // The process ended (turn_end is on its way) or the stream dropped.
         await this.pollTask(row)
+        if (ctrl.signal.aborted || this.stopped) break
         // Ended without a turn_end (killed, crashed): settle it now rather than at the next stall check.
         const after = this.store.getTaskRow(taskId)
         if (!ctrl.signal.aborted && after?.status === "working" && after.current_turn_id === row.current_turn_id) {
