@@ -736,6 +736,11 @@ export const MIGRATIONS: string[] = [
   -- The one-click fix a queued task's wait reason offers (Task.waitFix), e.g. raise-cloud-limit.
   ALTER TABLE tasks ADD COLUMN wait_fix TEXT;
   `,
+  `
+  -- How placement picked a task's box (Task.placement.now.how): a new box, another project's idle box reused, or a
+  -- slot beside another project's tasks. Null for its project's own box; cleared when the task leaves the box.
+  ALTER TABLE tasks ADD COLUMN placed_how TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

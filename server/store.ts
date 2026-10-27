@@ -5,7 +5,7 @@ import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
-import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
+import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
@@ -141,6 +141,7 @@ export interface TaskRow {
   runs_on?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
+  placed_how?: string | null
   /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
   source: string | null
   pr_head_sha: string | null
@@ -437,6 +438,7 @@ type TaskPatch = Partial<{
   prLabels: string[]
   mergeRequest: StoredMergeRequest | null
   pushState: PushState | null
+  placedHow: BoxPick | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -481,6 +483,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
   pushState: "push_state_json",
+  placedHow: "placed_how",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -1151,7 +1154,7 @@ export class Store {
     const projectRunner = this.projectRunner(row.project_id)
     const own = taskRunsOn(row)
     return {
-      now: row.box_id ? this.placeOf(row.box_id) : null,
+      now: row.box_id ? { ...this.placeOf(row.box_id), ...(isBoxPick(row.placed_how) ? { how: row.placed_how } : {}) } : null,
       last: row.box_id ? null : json<(Place & { leftAt: number }) | null>(row.last_place_json ?? null, null),
       runner: own ?? projectRunner,
       chosenBy: own ? "task" : "project",
@@ -1342,13 +1345,15 @@ export class Store {
         : undefined
     const sets: string[] = []
     const args: unknown[] = []
-    // A box letting the task go: remember where it ran, so a resting, archived task still says where (Task.placement.last).
-    if (patch.boxId === null) {
+    if (patch.boxId !== undefined) {
       const was = (this.db.prepare("SELECT box_id FROM tasks WHERE id = ?").get(id) as { box_id: string | null } | undefined)?.box_id
-      if (was) {
+      // A box letting the task go: remember where it ran, so a resting, archived task still says where (Task.placement.last).
+      if (patch.boxId === null && was) {
         sets.push("last_place_json = ?")
         args.push(JSON.stringify({ ...this.placeOf(was), leftAt: Date.now() }))
       }
+      // How its box was picked is about that box only.
+      if (patch.placedHow === undefined && was !== patch.boxId) sets.push("placed_how = NULL")
     }
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
       if (value === undefined) continue

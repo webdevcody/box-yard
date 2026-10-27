@@ -63,6 +63,7 @@ import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
+import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
 import { SCRATCH_MARKER, depsSaveScript, depsSaveSummary, stripCounts, stripScript, stripSummary } from "./boxSnapshot.js"
 import { TURN_SH, parseRunRecord, parseTurnProbe, turnKillScript, turnProbeScript, whileTurnRuns, type TurnProbe } from "./turnProcess.js"
@@ -478,6 +479,15 @@ export class TaskManager {
   private fanout = { wanted: 0, upToHourlyUsd: 0, noticedAt: 0 }
   /** Tasks that wait for those boxes: their wait reason says so, with the "allow-boxes" fix. */
   private fanoutHeld = new Set<string>()
+  /**
+   * Placement: another project's box idle this long (no turn, every workspace archived, nothing of its projects
+   * waiting) is given to a project that needs one rather than a new box being made. Tests change it.
+   */
+  readonly placementTuning = { reuseIdleMs: 5 * 60_000 }
+  /** How pickBox picked the box it just returned for a task, for `assign` to keep (Task.placement.now.how). */
+  private pickedHow = new Map<string, BoxPick>()
+  /** New boxes and the tasks that were waiting when each was made: one of them landing there is on a "new box". */
+  private madeFor = new Map<string, Set<string>>()
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
   /** Each task's last archive error, until an archive succeeds. */
@@ -2691,9 +2701,12 @@ export class TaskManager {
         held.add(row.id)
       }
     }
+    // A newly held task may take a free slot beside another project meanwhile (pickBox): one more pass to let it.
+    const fresh = [...held].some((id) => !this.fanoutHeld.has(id))
     this.fanout.wanted = wanted
     this.fanout.upToHourlyUsd = upTo
     this.fanoutHeld = held
+    if (fresh) this.schedule()
     if (!wanted) return
     const wait = this.fanoutWait()
     for (const id of held) {
@@ -3629,8 +3642,9 @@ export class TaskManager {
    * Pick a box for a task. A project keeps its work together, so the order is:
    * 1. a box that already hosts this project (warm repo mirror, shared files),
    * 2. an empty box,
-   * 3. nothing yet, when the pool has room: a new box is made for the project,
-   * 4. a free slot on a box another project uses (the pool is full).
+   * 3. another project's idle box, given to this project (`reuseIdleBox`),
+   * 4. nothing yet, when the pool has room: a new box is made for the project,
+   * 5. a free slot on a box another project uses (no new box can be made, or the new one waits on Cody's OK).
    * Only boxes of at least the project's box size count (`minBoxSize`); when none has a free slot and the pool
    * is full, `ensureSizedBox` grows an idle box or the task waits with the reason. A project at its own Max boxes
    * only uses the boxes it already has, and a box's agents and task folders are capped by the strictest of its own
@@ -3641,6 +3655,7 @@ export class TaskManager {
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
   private async pickBox(taskId: string, exclude?: string, busyHere: Wait | null = null, waitHere: string | null = null): Promise<string | null> {
+    this.pickedHow.delete(taskId)
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -3673,9 +3688,24 @@ export class TaskManager {
     const busy: Wait[] = busyHere ? [busyHere] : []
     // A new box may be made for it: the pool has room, and so does its project (its own Max boxes).
     const canGrow = this.poolHasRoom() && !cap?.full
+    // How the box it lands on was picked: a new one made while it waited, or a slot beside another project.
+    const how = (b: { id: string; rank: number }): BoxPick | null => (b.rank === 2 ? "shared" : this.madeFor.get(b.id)?.has(taskId) ? "new" : null)
+    let reuseTried = false
     for (const b of candidates) {
-      if (b.rank === 2 && canGrow) {
-        // Rather than crowd another project's box, make one for this project.
+      if (b.rank === 2 && !reuseTried && row) {
+        // Its project has no box with room: another project's idle box goes to it before a new one is made.
+        reuseTried = true
+        const reused = await this.reuseIdleBox(row, candidates.filter((c) => c.rank === 2).map((c) => c.id))
+        if (reused) {
+          this.wantsBox.delete(taskId)
+          this.holdForDisk(taskId, [])
+          this.pickedHow.set(taskId, "reused")
+          return reused
+        }
+      }
+      // Rather than crowd another project's box, make one for this project. One whose new box waits on Cody's OK
+      // (past the hour's free ones) takes a free slot beside another project meanwhile.
+      if (b.rank === 2 && canGrow && !this.fanoutHeld.has(taskId)) {
         this.wantsBox.add(taskId)
         this.holdForDisk(taskId, low, busy[0], waitHere)
         return null
@@ -3694,6 +3724,8 @@ export class TaskManager {
       if (b.residents < b.maxResidentPerBox || this.evictOne(b.id, taskId)) {
         this.wantsBox.delete(taskId)
         this.holdForDisk(taskId, [])
+        const picked = how(b)
+        if (picked) this.pickedHow.set(taskId, picked)
         return b.id
       }
     }
@@ -3704,6 +3736,8 @@ export class TaskManager {
       const cleaned = this.diskRetried.has(taskId) ? candidates.find((c) => c.id === low.find((l) => l.state === "exhausted")?.boxId) : undefined
       if (cleaned && (cleaned.residents < cleaned.maxResidentPerBox || this.evictOne(cleaned.id, taskId))) {
         this.holdForDisk(taskId, [])
+        const picked = how(cleaned)
+        if (picked) this.pickedHow.set(taskId, picked)
         return cleaned.id
       }
       // No box of the project's size has a free slot and the pool (or the project) can't grow.
@@ -4222,7 +4256,11 @@ export class TaskManager {
     )
     let port = PORT_BASE
     while (used.has(port)) port += 10
-    this.store.updateTask(taskId, { boxId, portBase: port }, opts)
+    const placedHow = this.pickedHow.get(taskId) ?? null
+    this.pickedHow.delete(taskId)
+    this.store.updateTask(taskId, { boxId, portBase: port, placedHow }, opts)
+    const made = this.madeFor.get(boxId)
+    if (made?.delete(taskId) && !made.size) this.madeFor.delete(boxId)
     const projectId = this.store.getTaskRow(taskId)?.project_id
     if (projectId) this.store.setKv(projectBoxKey(projectId), boxId)
     return boxId
@@ -4254,6 +4292,75 @@ export class TaskManager {
     this.addEvent(victim.id, `Workspace parked in the archive to make room on box ${boxId}. It comes back on the next message.`)
     this.emitTask(victim.id)
     return true
+  }
+
+  /**
+   * Give another project's idle box to `row`'s project rather than make a new one: of `boxIds` (boxes of the same
+   * credential set with a free slot, from pickBox), the least recently used one that can go. Its workspaces are parked
+   * in the archive (they come back on their next message, on any box) and the box is this project's from now on.
+   * Returns the box, or null when none can go.
+   */
+  private async reuseIdleBox(row: TaskRow, boxIds: string[]): Promise<string | null> {
+    const now = Date.now()
+    const boxes = boxIds
+      .map((id) => this.store.getBox(id))
+      .filter((b): b is BoxRow => Boolean(b) && this.canReuse(b!, row, now))
+      .sort((a, b) => a.last_used_at - b.last_used_at)
+    for (const box of boxes) {
+      if (await this.memoryBlock(box.id, row.id)) continue
+      if ((await this.diskRoom(box.id, row)) !== "ok") continue
+      // Checked again: the disk and memory probes awaited, and a turn may have started there meanwhile.
+      if (!this.canReuse(box, row, Date.now())) continue
+      this.repurposeBox(box, row)
+      return box.id
+    }
+    return null
+  }
+
+  /**
+   * A box that may go to `row`'s project: ready and untouched by any operation, idle for `reuseIdleMs`, every task
+   * on it resting with nothing queued and its workspace in the archive, and nothing of the projects it hosts
+   * waiting for a turn (that work would want this box back). pickBox only offers boxes of the project's credential
+   * set, so the box wall holds.
+   */
+  private canReuse(box: BoxRow, row: TaskRow, now: number): boolean {
+    if (box.status !== "ready" || this.boxOps.has(box.id) || this.janitor.isRunning(box.id)) return false
+    if (now - box.last_used_at < this.placementTuning.reuseIdleMs) return false
+    if (this.boxCreds(box.id) !== this.projectCreds(row.project_id)) return false
+    const residents = this.store.listTaskRows({ boxId: box.id }).filter((r) => r.id !== row.id)
+    const resting = (r: TaskRow) =>
+      !r.current_turn_id && RESTING.includes(r.status) && !this.wantsTurn(r) && !this.archiving.has(r.id) && (!r.session_started || this.archiveHoldsWorkspace(r))
+    if (!residents.every(resting)) return false
+    const hosted = this.projectsOnBox(box.id).filter((p) => p !== row.project_id)
+    return !hosted.some((p) => this.store.listTaskRows({ projectId: p }).some((r) => (r.box_id === null || r.box_id === box.id) && this.wantsTurn(r)))
+  }
+
+  /** Hand an idle box to `row`'s project: park its workspaces in the archive and make it the project's box. */
+  private repurposeBox(box: BoxRow, row: TaskRow) {
+    const residents = this.store.listTaskRows({ boxId: box.id }).filter((r) => r.id !== row.id)
+    const name = (id: string) => this.store.getProjectName(id) ?? id
+    const from = this.projectsOnBox(box.id).filter((p) => p !== row.project_id)
+    const to = name(row.project_id)
+    const idleMin = Math.max(1, Math.round((Date.now() - box.last_used_at) / 60_000))
+    // Recorded first, so the history row names the projects it hosted.
+    this.recordBoxEvent({
+      boxId: box.id,
+      type: "reused",
+      actor: { kind: "scheduler" },
+      reason: `Idle for ${idleMin} min and ${to} needed a box: reusing it instead of making a new one.`,
+      detail: `From ${from.map(name).join(", ") || "no project"} to ${to}${residents.length ? `; ${residents.length === 1 ? "1 workspace" : `${residents.length} workspaces`} parked in the archive` : ""}.`,
+    })
+    for (const r of residents) {
+      this.store.updateTask(r.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+      void this.removeTaskDir(box.id, r.id).catch(() => {})
+      this.addEvent(r.id, `Workspace parked in the archive: box ${box.id} was idle and went to project ${to}. It comes back on the next message.`)
+      this.emitTask(r.id)
+    }
+    // The box is this project's now: the others' tasks look for a box of their own next time.
+    for (const p of this.store.listProjects()) if (p.id !== row.project_id && this.store.getKv(projectBoxKey(p.id)) === box.id) this.store.setKv(projectBoxKey(p.id), null)
+    this.store.setKv(boxOwnerKey(box.id), row.project_id)
+    this.addEvent(row.id, `Placed on box ${box.id}, idle for ${idleMin} min, rather than making a new box.`)
+    this.emitBoxes()
   }
 
   private boxLabels(projectId?: string | null) {
@@ -4293,6 +4400,8 @@ export class TaskManager {
         detail: createdDetail(made, project?.name),
         taskIds: waiting,
       })
+      for (const box of this.madeFor.keys()) if (!this.store.getBox(box)) this.madeFor.delete(box)
+      if (waiting.length) this.madeFor.set(id, new Set(waiting))
       this.afterCreateFor(id, projectId, made, { kind: "scheduler" })
       void this.refreshBoxUsage(id, true).finally(() => {
         this.emitBoxes()
