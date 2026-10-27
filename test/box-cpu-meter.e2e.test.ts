@@ -79,6 +79,9 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
   return data as T
 }
 
+/** As if the box's last meter tick was a minute ago, so the next one writes an interval. */
+const backdateMeter = (r: Running, boxId: string) => r.yard.store.meterBox(boxId, { lastMeteredAt: Date.now() - 60_000 })
+
 /** A project with one agent turn that keeps running ([hang]); resolves with the box it runs on. */
 async function busyBox(r: Running): Promise<string> {
   const p = await call<Project>(r, "POST", "/api/projects", { name: "cpu" })
@@ -97,7 +100,7 @@ describe("box CPU metering", () => {
     // A new box: its counter started with it, so all of it counts. 2 cores busy for an hour = 2 CPU hours.
     r.provider.cpu.set(boxId, 2 * H * 1000)
     await r.yard.tasks.probeDisk(boxId, 0)
-    await new Promise((res) => setTimeout(res, 1100)) // the meter ticks at most once a second
+    backdateMeter(r, boxId) // the meter ticks at most every 15 seconds
     const box = r.yard.tasks.boxes().find((b) => b.id === boxId)!
     expect(box.usageSource).toBe("measured")
     expect(box.activeMs).toBeGreaterThanOrEqual(2 * H)
@@ -111,7 +114,7 @@ describe("box CPU metering", () => {
     const boxId = await busyBox(r)
     r.provider.cpu.set(boxId, 2 * H * 1000)
     await r.yard.tasks.probeDisk(boxId, 0)
-    await new Promise((res) => setTimeout(res, 1100))
+    backdateMeter(r, boxId)
     const box = r.yard.tasks.boxes().find((b) => b.id === boxId)!
     expect(box.usageSource).toBe("estimated")
     expect(box.activeMs).toBeLessThan(H)

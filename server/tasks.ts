@@ -136,6 +136,11 @@ interface Wait {
 const asWait = (text: string | null): Wait | null => (text ? { text, by: [] } : null)
 /** The tasks a reason names (agentRefs: the first two, then "and N more"). */
 const waitFor = (agents: BoxAgent[]): WaitFor[] => named(agents).map((a) => ({ taskId: a.taskId, title: a.title }))
+/**
+ * The shortest usage interval meterBoxes writes. CPU counters are read about once a minute, so finer rows would only
+ * make the cloud spend sums (placement asks often) slower.
+ */
+const METER_MIN_MS = 15_000
 /** How long a cloud spend reading serves placement before it's summed again. */
 const CLOUD_SPEND_CACHE_MS = 5_000
 /** The cloud meter's $/hour is the boxes' spend over this window, as an hourly rate. */
@@ -5828,7 +5833,7 @@ export class TaskManager {
     this.meterBoxes()
     const now = Date.now()
     const s = this.settings.get()
-    const spend = cloudSpend(this.store, s.budget, s.costRates, now, { month: true })
+    const spend = cloudSpend(this.store, s.budget, s.costRates, now)
     this.cloudCache = { at: now, key: JSON.stringify([s.budget, s.costRates]), spend }
     const today = this.store.boxSpendSince(startOfLocalDay(now), s.costRates).byBox
     const recent = this.store.boxSpendSince(now - CLOUD_RATE_WINDOW_MS, s.costRates).totals.costUsd
@@ -5940,7 +5945,7 @@ export class TaskManager {
       if (box.status === "deleting" || box.status === "lost") continue
       const last = box.last_metered_at ?? box.created_at
       const elapsed = Math.max(0, now - last)
-      if (elapsed < 1000) continue
+      if (elapsed < METER_MIN_MS) continue
       const running = this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id)
       const size = normalizeBoxSize(box.size)
       const tick = meterTick(box, rates.boxActiveCpuHourlyUsd[size], elapsed, running)
