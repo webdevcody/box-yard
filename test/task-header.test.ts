@@ -87,10 +87,10 @@ describe("TaskHeader", () => {
   const meta = () => document.querySelector<HTMLElement>('[data-testid="task-meta"]')!
   const metaText = () => meta().textContent!.replace(/\s+/g, " ")
 
-  it("keeps the meta row in a fixed order: status, PR, files, preview, context", () => {
+  it("keeps the meta row in a fixed order: status, PR, files, preview, placement, context", () => {
     render(task(), [file(1), file(2)])
     const text = metaText()
-    const order = ["Working", "PR #76", "2 files", "Preview :4020", "58%"].map((s) => text.indexOf(s))
+    const order = ["Working", "PR #76", "2 files", "Preview :4020", "Upstash · pleasing-shepherd-27426", "58%"].map((s) => text.indexOf(s))
     expect(order.every((i) => i >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
     // Details live in the ⋯ popover, not the header.
@@ -145,57 +145,76 @@ describe("TaskHeader", () => {
     expect(panel.querySelector('button[aria-label="Copy task id"]')).not.toBeNull()
   })
 
-  it("warns that a local task is unsandboxed, in full on a tap", () => {
-    render(task({ boxId: "this-computer" }))
-    const chip = document.querySelector<HTMLButtonElement>('[data-testid="local-warning"]')!
-    expect(chip.textContent).toContain("This computer · unsandboxed")
-    expect(chip.title).toBe(LOCAL_UNSANDBOXED)
-    expect(chip.getAttribute("aria-expanded")).toBe("false")
-    expect(document.getElementById("local-warning-note")).toBeNull()
-    act(() => chip.click())
-    expect(chip.getAttribute("aria-expanded")).toBe("true")
-    expect(document.getElementById("local-warning-note")!.textContent).toBe(LOCAL_UNSANDBOXED)
-    act(() => chip.click())
-    expect(document.getElementById("local-warning-note")).toBeNull()
-  })
-
-  it("shows the chip for a queued task of a local project, and never on a box task", () => {
-    render(task({ boxId: null, status: "queued" }))
-    expect(document.querySelector('[data-testid="local-warning"]')).toBeNull()
+  const header = (t: Task, runner: "box" | "local" | "gpu") =>
     act(() =>
       root.render(
         createElement(
           QueryClientProvider,
           { client: new QueryClient() },
-          createElement(TaskHeader, { task: task({ boxId: null, status: "queued" }), project: { ...project, runner: "local" }, schedule: null, files: [], showTools: false, onShowTools: () => {} }),
+          createElement(TaskHeader, { task: t, project: { ...project, runner }, schedule: null, files: [], showTools: false, onShowTools: () => {} }),
         ),
       ),
     )
-    expect(document.querySelector('[data-testid="local-warning"]')).not.toBeNull()
+  const chip = () => document.querySelector<HTMLButtonElement>('[data-testid="task-placement"]')!
+  const popover = () => document.querySelector('[role="dialog"][aria-label="Where this task runs"]')
+
+  it("shows where it runs, and on a tap the box, its size, the setting that chose it and why", () => {
+    render(task({ placement: { now: { kind: "box", boxId: "pure-lobster", provider: "upstash", size: "small" }, last: null, runner: "box", chosenBy: "project", projectRunner: "box" } }))
+    expect(chip().textContent).toBe("Upstash · pure-lobster · small")
+    expect(chip().dataset.state).toBe("here")
+    expect(popover()).toBeNull()
+    act(() => chip().click())
+    const text = popover()!.textContent!
+    for (const s of ["pure-lobster", "Small · 2 CPU, 4 GB", "Project's Runs on: an Upstash box"]) expect(text).toContain(s)
+    expect(document.getElementById("local-warning-note")).toBeNull()
+    act(() => chip().click())
+    expect(popover()).toBeNull()
   })
 
-  it("follows the task's own runs_on over its project's, both ways, and names it in the details", async () => {
-    const header = (t: Task, runner: "box" | "local") =>
-      act(() =>
-        root.render(
-          createElement(
-            QueryClientProvider,
-            { client: new QueryClient() },
-            createElement(TaskHeader, { task: t, project: { ...project, runner }, schedule: null, files: [], showTools: false, onShowTools: () => {} }),
-          ),
-        ),
-      )
-    const chip = () => document.querySelector('[data-testid="local-warning"]')
-    // Pinned here in a box project: the chip shows before it has a place.
+  it("names a RunPod pod by GPU and short pod id", () => {
+    render(task({ boxId: "runpod-prj_demo01", placement: { now: { kind: "gpu", boxId: "runpod-prj_demo01", gpu: "RTX A5000", podId: "3x9k2aqz7wplm1" }, last: null, runner: "gpu", chosenBy: "project", projectRunner: "gpu" } }))
+    expect(chip().textContent).toBe("RunPod · RTX A5000 · pod 3x9k2a")
+    act(() => chip().click())
+    expect(popover()!.textContent).toContain("3x9k2aqz7wplm1")
+  })
+
+  it("warns that a local task is unsandboxed, in full on a tap", () => {
+    render(task({ boxId: "this-computer" }))
+    expect(chip().textContent).toContain("This computer")
+    expect(chip().title).toContain(LOCAL_UNSANDBOXED)
+    expect(chip().getAttribute("aria-expanded")).toBe("false")
+    expect(document.getElementById("local-warning-note")).toBeNull()
+    act(() => chip().click())
+    expect(chip().getAttribute("aria-expanded")).toBe("true")
+    expect(document.getElementById("local-warning-note")!.textContent).toBe(LOCAL_UNSANDBOXED)
+  })
+
+  it("shows where a queued task will go, muted, from its project's runner", () => {
+    render(task({ boxId: null, status: "queued" }))
+    expect(chip().textContent).toBe("→ Upstash")
+    expect(chip().dataset.state).toBe("next")
+    header(task({ boxId: null, status: "queued" }), "local")
+    expect(chip().textContent).toBe("→ This computer")
+  })
+
+  it("shows the last place of a resting, archived task", () => {
+    render(task({ boxId: null, status: "idle", lastArchivedAt: 1, placement: { now: null, last: { kind: "box", boxId: "pure-lobster", size: "small", leftAt: 1 }, runner: "box", chosenBy: "project", projectRunner: "box" } }))
+    expect(chip().textContent).toBe("Upstash · pure-lobster · small · archived")
+    expect(chip().dataset.state).toBe("last")
+  })
+
+  it("follows the task's own runs_on over its project's, both ways, marks it pinned and names it in the details", async () => {
+    // Pinned here in a box project: it shows where it goes before it has a place, and that it's pinned.
     render(task({ boxId: null, status: "queued", runsOn: "local" }))
-    expect(chip()).not.toBeNull()
-    // Pinned to a box in a local project: no chip.
+    expect(chip().textContent).toBe("→ This computer · pinned")
+    // Pinned to a box in a local project.
     header(task({ boxId: null, status: "queued", runsOn: "box" }), "local")
-    expect(chip()).toBeNull()
-    // The ⋯ details say it's this task's own choice. The chip keeps its slot: first, before the PR chip.
+    expect(chip().textContent).toBe("→ Upstash · pinned")
+    // Its own runs_on, the same as the project's: not pinned.
+    header(task({ boxId: "this-computer", runsOn: "local" }), "local")
+    expect(chip().textContent).toBe("This computer")
+    // The ⋯ details say it's this task's own choice.
     header(task({ boxId: "this-computer", runsOn: "local", prUrl: "https://github.com/o/r/pull/7" }), "box")
-    const chips = document.querySelector('[data-testid="task-chips"]')!
-    expect(chips.firstElementChild?.getAttribute("data-testid")).toBe("local-warning")
     await act(async () => void document.querySelector<HTMLButtonElement>('button[aria-label="Task details and more actions"]')!.click())
     expect(document.querySelector('[data-testid="task-runs-on"]')!.textContent).toBe("This computer · this task only")
   })

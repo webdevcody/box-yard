@@ -62,7 +62,9 @@ export function PlacementHeaderChip({ task, project }: { task: Task; project: Pr
         <span className="min-w-0 truncate">{v.label}</span>
         {v.pinned && (
           <span className="inline-flex shrink-0 items-center gap-0.5 text-zinc-500">
-            · <Pin className="h-3 w-3" aria-hidden /> pinned
+            {" · "}
+            <Pin className="h-3 w-3" aria-hidden />
+            pinned
           </span>
         )}
       </button>
