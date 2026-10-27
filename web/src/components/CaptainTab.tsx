@@ -127,6 +127,7 @@ export function CaptainTab({ project }: { project: Project }) {
           restoreKey="captain"
           hidden={tail.hidden}
           onLoadEarlier={tail.loadEarlier}
+          onTrim={tail.trim}
           className="px-3 py-4 sm:px-4"
           contentClassName="mx-auto max-w-3xl space-y-3"
         >

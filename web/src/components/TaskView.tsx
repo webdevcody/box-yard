@@ -161,6 +161,7 @@ const TaskThread = memo(function TaskThread({
         restoreKey="task"
         hidden={tail.hidden}
         onLoadEarlier={tail.loadEarlier}
+        onTrim={tail.trim}
         className="rounded-xl border border-zinc-900 bg-zinc-950 p-4"
         contentClassName="space-y-2.5"
       >

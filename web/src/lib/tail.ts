@@ -7,6 +7,15 @@ export function tailStart(items: { id: string }[], pinnedId: string | null, init
 }
 
 /**
+ * Where the tail should start after trimming, or null to leave it: once more than twice `initial` items are
+ * rendered, back to the newest `initial`. The slack keeps a list that loaded a page of older items from
+ * trimming on every new item.
+ */
+export function trimmedStart(length: number, start: number, initial: number): number | null {
+  return length - start > initial * 2 ? length - initial : null
+}
+
+/**
  * Render only the newest part of a long list and grow it towards older items on
  * demand (StickyScroll calls `loadEarlier` as you scroll near the top).
  *
@@ -14,6 +23,10 @@ export function tailStart(items: { id: string }[], pinnedId: string | null, init
  * push older ones out from under someone who is reading. A new `resetKey`
  * (another task) starts over from the newest `initial` items, and so does a
  * pinned item that's gone (e.g. tool calls hidden).
+ *
+ * Pinning alone would let the rendered part grow for as long as the page stays open (a phone's home-screen
+ * app stays open for days), until every layout, keyboard and rotation takes seconds. So `trim` drops back to
+ * the newest items; StickyScroll calls it while the reader is at the bottom, where nothing moves.
  */
 export function useTail<T extends { id: string }>(items: T[], resetKey: unknown, initial = 60, step = 50) {
   const pinned = useRef<{ key: unknown; id: string | null }>({ key: resetKey, id: null })
@@ -36,6 +49,15 @@ export function useTail<T extends { id: string }>(items: T[], resetKey: unknown,
     rerender()
   }, [step])
 
+  /** Render only the newest `initial` items again, if many more than that are rendered. */
+  const trim = useCallback(() => {
+    const { items, start } = latest.current
+    const to = trimmedStart(items.length, start, initial)
+    if (to === null) return
+    pinned.current.id = items[to]!.id
+    rerender()
+  }, [initial])
+
   /** Make sure the item with this id is rendered. Returns false if it isn't in the list at all. */
   const reveal = useCallback((id: string) => {
     const { items, start } = latest.current
@@ -48,5 +70,5 @@ export function useTail<T extends { id: string }>(items: T[], resetKey: unknown,
     return true
   }, [])
 
-  return { visible, hidden: start, loadEarlier, reveal }
+  return { visible, hidden: start, loadEarlier, trim, reveal }
 }
