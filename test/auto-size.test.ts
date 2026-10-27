@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { AUTO_SIZE_WINDOW_MS, autoSizeLabel, pickAutoSize, type TurnPeak } from "../shared/autoSize.js"
-import { parseMemory } from "../shared/memory.js"
+import { parseMemory, type BoxMemory } from "../shared/memory.js"
+import { TurnMeter } from "../server/turnPeaks.js"
 
 // Auto-sizing's rule (shared/autoSize.ts): the smallest size with RAM for 1.25 × the 14-day peak, from 3 runs; bigger
 // for disk, for CPU kept busy, or above a box a turn ran out of memory on; held to Settings › Max size it may choose.
@@ -85,5 +86,55 @@ describe("the box probe's out-of-memory count", () => {
     const base = ["@@boxyard-mem", "memory.current 1073741824", "memory.max 4294967296", "loadavg 0.5 0.4 0.3 1/1 1", "nproc 2"]
     expect(parseMemory([...base, "oom_kill 2"].join("\n"))?.oomKills).toBe(2)
     expect(parseMemory(base.join("\n"))?.oomKills).toBeUndefined()
+  })
+})
+
+describe("TurnMeter (server/turnPeaks.ts)", () => {
+  const mem = (usedBytes: number, extra: Partial<BoxMemory> = {}): BoxMemory => ({ usedBytes, totalBytes: 4 * GB, load1: 0, cpus: 2, ...extra })
+  const a1 = { turnId: "turn-a1", taskId: "task-a1", projectId: "a" }
+  const a2 = { turnId: "turn-a2", taskId: "task-a2", projectId: "a" }
+  const b1 = { turnId: "turn-b1", taskId: "task-b1", projectId: "b" }
+  const reading = (turns: (typeof a1)[], memory: BoxMemory, now: number, diskOwner: string | null = "a") =>
+    ({ boxId: "box-1", boxSize: "small" as const, memory, diskUsedBytes: 2 * GB, turns, diskOwner, now })
+
+  it("measures a turn while only its project's turns run on the box", () => {
+    const m = new TurnMeter()
+    m.sample(reading([a1, a2], mem(1 * GB), 0))
+    m.sample(reading([a1, b1], mem(3 * GB), 60_000, null)) // another project's build: not a's
+    m.sample(reading([a1], mem(2 * GB), 120_000))
+    expect(m.take("turn-a1", { failed: false })).toMatchObject({ projectId: "a", taskId: "task-a1", boxId: "box-1", boxSize: "small", memPeakBytes: 2 * GB, diskPeakBytes: 2 * GB, oom: false })
+    // b ran only beside a: nothing measured, nothing recorded.
+    expect(m.take("turn-b1", { failed: false })).toBeNull()
+  })
+
+  it("reads the cores in use between readings 30 s or more apart, the busiest and the median", () => {
+    const m = new TurnMeter()
+    const at = (s: number, usageUsec: number) => m.sample(reading([a1], mem(GB, { cpuUsageUsec: usageUsec }), s * 1000))
+    at(0, 0)
+    at(10, 15_000_000) // too soon after the last: the next rate runs from 0 s
+    at(60, 60_000_000) // 1 core over the minute
+    at(120, 60_000_000 + 2 * 60_000_000 * 0.9) // 1.8 cores
+    at(180, 60_000_000 + 2 * 60_000_000 * 0.9 + 60_000_000 * 0.2) // 0.2
+    expect(m.take("turn-a1", { failed: false })).toMatchObject({ cpuPeakCores: 1.8, cpuBusyCores: 1 })
+  })
+
+  it("counts an out-of-memory kill for a turn alone on the box, and for one beside another project's only when it failed", () => {
+    const m = new TurnMeter()
+    m.sample(reading([a1], mem(GB, { oomKills: 0 }), 0))
+    m.sample(reading([a1], mem(GB, { oomKills: 1 }), 60_000))
+    expect(m.take("turn-a1", { failed: false })?.oom).toBe(true)
+
+    m.sample(reading([a2, b1], mem(GB, { oomKills: 1 }), 120_000, null))
+    m.sample(reading([a2, b1], mem(GB, { oomKills: 2 }), 180_000, null))
+    expect(m.take("turn-a2", { failed: true })).toMatchObject({ oom: true, memPeakBytes: null })
+    expect(m.take("turn-b1", { failed: false })).toBeNull()
+  })
+
+  it("takes an agent killed outright (exit 137) as out of memory, and forgets turns that ended without finishing", () => {
+    const m = new TurnMeter()
+    m.sample(reading([a1, a2], mem(GB), 0))
+    expect(m.take("turn-a1", { failed: true, killed: true })?.oom).toBe(true)
+    m.keepOnly(new Set())
+    expect(m.take("turn-a2", { failed: false })).toBeNull()
   })
 })

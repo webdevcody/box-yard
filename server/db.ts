@@ -744,9 +744,10 @@ export const MIGRATIONS: string[] = [
   `
   -- Auto-sizing (shared/autoSize.ts): what each measured turn used on its Upstash box, read by the box probe while only
   -- its project's turns ran there, and whether the box's cgroup killed a process for memory meanwhile. 14 days kept.
+  -- A deleted task's runs still count for its project.
   CREATE TABLE turn_peaks (
     turn_id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     task_id TEXT NOT NULL,
     box_id TEXT NOT NULL,
     box_size TEXT NOT NULL,
