@@ -15,11 +15,11 @@
  */
 import { Box } from "@upstash/box"
 import { execFileSync } from "node:child_process"
-import { randomBytes } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { config } from "../server/config.js"
+import { generatePassword, machineUsername, passwordProblems } from "../server/password.js"
 
 const NAME = process.env.BOXYARD_BOX_NAME ?? "box-yard-orchestrator"
 const HOME = "/workspace/home"
@@ -136,7 +136,14 @@ async function main() {
         .then((env) => /^BOXYARD_PASSWORD=(.*)$/m.exec(env)?.[1]?.replace(/^"|"$/g, "") ?? "")
         .catch(() => "")
     : ""
-  const password = config.password || existingPassword || randomBytes(9).toString("base64url")
+  // Box Yard refuses a weak password at startup (server/password.ts), so check before deploying; root stands in for the box's user.
+  const users = { usernames: [machineUsername(), "root"] }
+  const weak = config.password ? passwordProblems(config.password, users) : []
+  if (weak.length) die(`BOXYARD_PASSWORD in .env is too weak, so Box Yard won't start with it:\n${weak.map((p) => `  - ${p}`).join("\n")}\nRun ./yard password for a strong one, or remove it to let deploy-box make one.`)
+  // An older deploy made 12-character passwords: those no longer pass, so that box gets a new one.
+  const keptPassword = existingPassword && !passwordProblems(existingPassword, users).length ? existingPassword : ""
+  if (existingPassword && !keptPassword && !config.password) log("The password from the last deploy is too weak for the new password rules, so here's a new one.")
+  const password = config.password || keptPassword || generatePassword(users)
   const initCommand = `bash ${APP}/scripts/box-start.sh`
 
   if (!box) {
@@ -193,7 +200,7 @@ async function main() {
   console.log(`
 \x1b[32m✓ Box Yard is live\x1b[0m
   URL:       ${publicUrl}
-  Password:  ${password}${config.password ? " (from your .env)" : existingPassword ? " (kept from the last deploy)" : "  ← generated; it's kept on redeploys"}
+  Password:  ${password}${config.password ? " (from your .env)" : keptPassword ? " (kept from the last deploy)" : "  ← generated; it's kept on redeploys"}
   Box:       ${box.id}
   Data:      ${DATA} on the box disk, plus automatic box snapshots
 

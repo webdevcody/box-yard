@@ -35,7 +35,8 @@ class GatedBoxes extends LocalProvider {
     else c.resolve()
   }
   override exec(boxId: string, command: string) {
-    const turn = /^cd ('[^']*') && .*box-runner\.mjs'? turn /.exec(command)
+    // The launch line, after the shell helpers it starts with (server/turnProcess.ts TURN_SH).
+    const turn = /^cd ('[^']*') && .*box-runner\.mjs'? turn /m.exec(command)
     if (turn) return super.exec(boxId, `cd ${turn[1]} && (nohup sleep 300 > /dev/null 2>&1 < /dev/null & echo $! > turn.pid) && cat turn.pid`)
     return super.exec(boxId, command)
   }

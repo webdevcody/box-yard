@@ -71,7 +71,7 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 | `UPSTASH_BOX_API_KEY` | Worker boxes. Without it, agents run in folders on this machine (`BOX_PROVIDER=local`). |
 | `GITHUB_TOKEN` | Clone private repos, push branches, open PRs. A fine-grained token with Contents and Pull requests (read/write) is enough. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and Box Yard. |
-| `BOXYARD_PASSWORD` | Web UI password. Leave it empty to keep Box Yard on this computer; set it to open it to your phone, LAN or Tailscale (see below). |
+| `BOXYARD_PASSWORD` | Web UI password. Leave it empty to keep Box Yard on this computer; set it to open it to your phone, LAN or Tailscale (see below). `./yard password` makes a strong one. |
 
 **Who can reach it.** With no `BOXYARD_PASSWORD` there's no login, so Box Yard listens on `127.0.0.1` and only this computer can open it. Set a password and it listens on `0.0.0.0`, and the startup log lists every URL it answers on, LAN and Tailscale (`100.64.0.0/10`) included:
 
@@ -83,6 +83,17 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 ```
 
 `HOST` picks the address yourself (e.g. `HOST=100.101.102.103` for Tailscale only). A `HOST` other devices can reach with no password refuses to start, unless you set `BOXYARD_ALLOW_OPEN=1` (only behind your own auth, since anyone who reaches it can drive your agents). The dev server (`./yard dev`, port 5173) stays on localhost either way. Changes to these take a restart.
+
+**The password rule.** Box Yard won't start with a weak `BOXYARD_PASSWORD`, and the error says which rule it broke. Following NIST SP 800-63B rev 4, a password needs at least 15 characters (counted as Unicode characters), any characters and any length are fine, and there are no "one digit, one symbol" rules. It's refused when it's on the bundled list of common and leaked passwords (also with a few characters added or swapped, like `!!football2024!!`), one character or a short pattern repeated, a simple sequence (`abcdef…`, `987654…`, a keyboard row), or when it contains `password`, `boxyard` or the username Box Yard runs as. There's no override; `BOXYARD_ALLOW_OPEN` is only for running with no password at all.
+
+```bash
+./yard password         # write a random 24-character password into .env and print it once (asks before replacing one)
+./yard password check   # does the one in .env pass? (never prints it)
+```
+
+Or pick a passphrase of four or more random words. Restart Box Yard after changing it; every device logs in again.
+
+**Logging in.** Only wrong passwords count against you. After 3 wrong tries from one device, each next try waits a little longer (1 s, 2 s, 4 s … 30 s), and 10 wrong tries in 15 minutes lock that device out for 15 minutes ("Too many attempts, try again in N minutes"); other devices keep working. Failed logins are logged with their address. A login keeps you signed in for 90 days with a random, httpOnly session cookie (Secure over https).
 
 Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI if it's missing.
 
@@ -100,7 +111,7 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 - On a paid Upstash plan the box is keep-alive. On the free plan keep-alive isn't allowed, so it falls back to a normal box: while agents are running or queued, the server holds its own box awake, and when the yard is idle it lets go. Opening the URL wakes a paused box, and the init command restarts the server, which picks running agents back up.
 - Talk to a deployed yard from the terminal with `YARD_URL=<url> YARD_PASSWORD=<password> npx tsx scripts/yardctl.ts say "..."` (also `status`, `wait`, `task <id>`, `chat`).
 
-**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume. It needs `BOXYARD_PASSWORD` in `.env`: the container listens on `0.0.0.0` (the image sets `HOST=0.0.0.0`), so without a password it won't start (or set `BOXYARD_ALLOW_OPEN=1`). `deploy-box` always sets a password (yours from `.env`, the last deploy's, or a generated one).
+**`deploy-vps`** copies the app and `.env` over SSH, installs Docker if needed, and runs `docker compose up -d --build`. Data lives in the `box-yard-data` volume. It needs a `BOXYARD_PASSWORD` in `.env` that passes the rule (it runs `./yard password check` first): the container listens on `0.0.0.0` (the image sets `HOST=0.0.0.0`), so without a password it won't start (or set `BOXYARD_ALLOW_OPEN=1`). `deploy-box` always sets a password that passes: yours from `.env` (it stops if that one is too weak), the last deploy's, or a generated 24-character one. A box from an older deploy whose 12-character password no longer passes gets a new one, printed at the end.
 
 ## How it works
 
@@ -160,7 +171,7 @@ A project whose box has all its slots busy gets a second box while there's room.
 
 **Local runner.** A project can run its agents on the computer running Box Yard instead of on boxes: project Settings › Runs on › This computer. Use it for work a box can't do, such as a real GPU, a local browser, or long benchmarks.
 - **No sandbox.** Tasks on this computer run unsandboxed, as the user running Box Yard, with that user's files, network, logged-in `claude` and `gh`, and keychain. The setting and every local task's header say so.
-- **Where they run.** Each task works in `~/boxyard-workspaces/<task_id>` (`BOXYARD_LOCAL_DIR` moves it; a leading `~` is the home folder). Keep it out of Box Yard's checkout and any other folder with a `CLAUDE.md`: Claude Code reads every `CLAUDE.md` above the folder it runs in, so Box Yard's own agent rules would reach every local agent. A turn is Box Yard's runner as a child process of the server, so it survives a server restart.
+- **Where they run.** Each task works in `~/boxyard-workspaces/<task_id>` (`BOXYARD_LOCAL_DIR` moves it; a leading `~` is the home folder). Keep it out of Box Yard's checkout and any other folder with a `CLAUDE.md`: Claude Code reads every `CLAUDE.md` above the folder it runs in, so Box Yard's own agent rules would reach every local agent. A turn is Box Yard's runner in a process group of its own, detached from the server, so it keeps running through a server restart or upgrade (see below).
 - **Limits.** `BOXYARD_LOCAL_AGENTS` (Settings › Boxes & limits › Tasks running at once on this computer, default 2) caps how many tasks run at once here. They have their own queue and never take a box slot or count toward `BOX_MAX_AGENTS`.
 - **Previews.** Previews are on `http://localhost:<port>`.
 - **Sleep.** While a turn runs, `caffeinate` keeps a Mac out of idle sleep (and out of system sleep on AC power), but a closed lid still sleeps. A turn that sleep cut off carries on once the Mac wakes instead of failing.
@@ -186,7 +197,12 @@ A project whose box has all its slots busy gets a second box while there's room.
 - If a resize fails, the box it made for the move is deleted (and the resize report says so). If the provider won't delete it yet, it stays on the Boxes page as "Deleting" and Box Yard retries. Boxes at the provider that Box Yard has no record of are swept every hour.
 - If a box disappears, its tasks are restored from their archives onto another box. A turn that dies mid-run is retried with a "you were interrupted, check where things stand" message, up to two times.
 - If a Claude session can't be found, the agent starts a fresh one with a recap of the conversation.
-- When the server restarts, it reattaches to turns that are still running inside boxes.
+- **Restarts and upgrades.** Stopping or upgrading Box Yard (Ctrl-C, `./yard local` again) doesn't stop task turns: each one runs detached from the server, in its box or on this computer, and writes its events to `events.jsonl` in the task folder. Its `run.json` names its process by pid, the machine's boot and the process's start time, so a pid another process took later (after a reboot) is never mistaken for it or stopped. On startup Box Yard checks every running turn:
+  - Still running: picked back up where it left off ("Box Yard restarted and picked this turn back up"). Stop, Send now and queued messages work as before.
+  - Finished while the server was down: what it wrote is read and the turn ends as usual.
+  - Gone (it died, or this computer or its box restarted): its last output is read, and it's retried in the same Claude session with a "you were interrupted" message.
+  - Coordinator and Captain turns are the exception: they run inside the server, so one in progress during a restart is lost. Their sessions carry on with the next message.
+- **One server per data folder.** `<BOXYARD_DATA_DIR>/server.lock` keeps a second Box Yard off the same database: it waits 10 s for the first one to stop (a restart), then refuses to start and says which one has it. A lock left by a server that's gone is taken over.
 
 **Agents talk to each other.** Agents can call `list_agents` and `message_agent` (optionally waiting for a reply), `suggest_note` and `read_notes` for project notes, and `ask_user` to ask you. Mid-turn, `message_captain` sends their project's Captain a scope question, a conflict or an out-of-brief bug without ending the turn, optionally waiting up to 60 s for the answer; the Captain replies with `reply_to_agent` or `send_to_task`. Messages go through Box Yard, because boxes can't reach each other directly. Agent-to-agent and agent-to-Captain messages are rate limited to stop loops.
 - **Quiet agent wakes.** A turn that only other agents' messages started (no message from you, a Captain, the Coordinator, a hook or a schedule in it) is an agent wake. If it ends resting with no real change (no new or pushed PR, no merge, no failure, no question), its "done" / "finished its turn" update goes to the project's Captain (without waking it) and the task's transcript, not to the Coordinator chat, Zen or a toast, and `task.finished` hooks skip it unless they include agent wakes. A turn with mixed messages counts as its highest sender's (you > Coordinator > Captain > hook > schedule > Box Yard > agent), so an agent's message plus yours is your turn and notifies as usual. Each turn's trigger is recorded on `task_turns.trigger`.

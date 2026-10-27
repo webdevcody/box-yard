@@ -21,7 +21,8 @@
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
 // replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
-//   [ask] [fail] [slow] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
+//   [ask] [fail] [slow] [slow:<seconds>] [hang] [preview] [artifact] [agent:<taskId>] [note] [noop] [pr]
+// [slow:<seconds>] says "Working on it slowly." and then takes that long (a turn to restart Box Yard under).
 // [note] suggests a project note (suggest_note) for the Captain's notes retro.
 // A line "message captain: <msg>" sends <msg> with message_captain (fire-and-forget); "message captain wait: <msg>"
 // or "message captain wait <seconds>: <msg>" waits (default 30 s). The final reply quotes each tool result.
@@ -268,6 +269,12 @@ async function orchestrator(mcp, prompt) {
 async function worker(mcp, prompt) {
   const cwd = process.cwd()
   if (/\[slow\]/i.test(prompt)) await sleep(3000)
+  const slow = prompt.match(/\[slow:(\d+)\]/i)
+  if (slow) {
+    // Some output first, so a test can tell the turn is under way (a restart mid-turn, say).
+    await say("Working on it slowly. (mock Claude)")
+    await sleep(Number(slow[1]) * 1000)
+  }
   if (/\[hang\]/i.test(prompt)) await sleep(120_000)
   const noop = /\[noop\]/i.test(prompt)
   const markNoop = () => useTool(mcp, "mark_done", { summary: "Nothing to do this run.", outcome: "noop" })
@@ -342,6 +349,9 @@ process.stdin.on("end", async () => {
     out({ type: "result", subtype: "success", is_error: true, result: loginError, session_id: session.id })
     process.exit(1)
   }
+  // Like the real CLI, a session exists from its first turn's start: a turn killed halfway can be resumed. Its turns
+  // list gets this one at the end.
+  if (sessionFile && !resumeId) fs.writeFileSync(sessionFile, JSON.stringify(session))
   let result = ""
   let mcp = null
   if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")

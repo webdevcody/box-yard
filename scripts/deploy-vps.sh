@@ -16,10 +16,21 @@ if [ -z "$TARGET" ]; then
 fi
 cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "Create .env first (cp .env.example .env)." >&2; exit 1; }
-# The container listens on 0.0.0.0, and with no password Box Yard refuses to start there (server/bind.ts).
-if ! grep -q '^BOXYARD_PASSWORD=..*' .env && ! grep -q '^BOXYARD_ALLOW_OPEN=1' .env; then
-  echo "✗ Set BOXYARD_PASSWORD in .env first: without it anyone who finds the server can use it, so Box Yard won't start." >&2
+# The container listens on 0.0.0.0, and with no password Box Yard refuses to start there (server/bind.ts), as it
+# does with a weak one (server/password.ts). Check here, not in a container that restarts forever.
+command -v node >/dev/null || { echo "Install Node.js 20+ first (it checks your password): https://nodejs.org" >&2; exit 1; }
+set +e
+# The container runs as root, so that username is refused too.
+npx tsx scripts/password.ts check --user root
+pw_status=$?
+set -e
+if [ "$pw_status" -eq 2 ] && grep -q '^BOXYARD_ALLOW_OPEN=1' .env; then
+  echo "  (BOXYARD_ALLOW_OPEN=1: deploying with no login.)"
+elif [ "$pw_status" -eq 2 ]; then
+  echo "✗ Without BOXYARD_PASSWORD anyone who finds the server can use it, so Box Yard won't start there." >&2
   echo "  (Behind your own auth proxy? Set BOXYARD_ALLOW_OPEN=1 instead.)" >&2
+  exit 1
+elif [ "$pw_status" -ne 0 ]; then
   exit 1
 fi
 

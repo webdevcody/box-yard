@@ -509,9 +509,13 @@ export function createBoxYard(
   })
   app.post("/api/login", (req, res) => {
     const { password } = parse(schemas.login, req.body)
-    if (!auth.enabled || auth.check(password)) {
+    const result = auth.enabled ? auth.attempt(req, password) : ({ ok: true } as const)
+    if (result.ok) {
       auth.login(res, req.secure)
       res.json({ ok: true })
+    } else if (result.blocked) {
+      res.set("Retry-After", String(Math.ceil(result.blocked.retryAfterMs / 1000)))
+      res.status(429).json({ error: result.blocked.message })
     } else {
       res.status(401).json({ error: "Wrong password." })
     }
