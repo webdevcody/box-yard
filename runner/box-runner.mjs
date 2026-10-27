@@ -481,12 +481,12 @@ const TOOLS = [
   {
     name: "create_pull_request",
     description:
-      "Push the current branch and open a GitHub pull request (or return the open one). Commit your changes first.",
+      "Push the current branch and open a GitHub pull request; if one is open, update its title and body. Commit your changes first. Screenshots: publish them with publish_artifact and put their /artifacts/ links in the body; this copies them to the repo's boxyard-assets branch so GitHub shows them.",
     inputSchema: {
       type: "object",
       properties: {
         title: { type: "string" },
-        body: { type: "string", description: "Markdown summary of the change and how it was tested." },
+        body: { type: "string", description: "Markdown summary of the change and how it was tested. Images can link /artifacts/ URLs from publish_artifact." },
         draft: { type: "boolean", default: false },
       },
       required: ["title", "body"],
@@ -703,6 +703,141 @@ async function unpushedWork() {
   return Number.isFinite(n) ? n : null
 }
 
+/** GitHub's REST API with the task's token. `task.github.apiUrl` points it elsewhere (tests). */
+function githubApi(token) {
+  const base = (task.github?.apiUrl || "https://api.github.com").replace(/\/$/, "")
+  return async (method, url, body) => {
+    const res = await fetch(`${base}${url}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "box-yard",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(60_000),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) throw Object.assign(new Error(`GitHub ${res.status}: ${data.message ?? "request failed"} ${JSON.stringify(data.errors ?? "")}`), { status: res.status })
+    return data
+  }
+}
+
+// ---------------------------------------------------------------------------
+// PR screenshots. A published artifact's link (/artifacts/art_…/shot.png) is Box Yard's: GitHub can't reach it, and
+// it's behind Box Yard's login. So create_pull_request copies each file a PR body links to onto the repo's
+// boxyard-assets branch (never the base branch) and points the link there, where GitHub shows it.
+
+const ASSETS_BRANCH = "boxyard-assets"
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|avif|svg)$/i
+/** A relative /artifacts/ link, or one on any host (BOXYARD_PUBLIC_URL, or github.com where a relative link landed). Sentence punctuation after it isn't part of it. */
+const ARTIFACT_LINK = /(?<![\w.\-/:])(?:https?:\/\/[^\s/)"'<>\]]+)?\/artifacts\/(art_[a-z0-9]+)\/([^\s)"'<>\]]*[^\s)"'<>\].,;:!?])/gi
+
+/** Artifacts this task published: id to the file's path, from the event log. */
+function publishedArtifacts() {
+  const out = new Map()
+  let raw = ""
+  try {
+    raw = fs.readFileSync(eventsFile, "utf8")
+  } catch {
+    return out
+  }
+  for (const line of raw.split("\n")) {
+    if (!line.includes('"artifact"')) continue
+    try {
+      const e = JSON.parse(line)
+      if (e.t === "artifact" && e.id && e.path) out.set(e.id, e.path)
+    } catch {}
+  }
+  return out
+}
+
+const assetName = (name) => {
+  let decoded = name
+  try {
+    decoded = decodeURIComponent(name)
+  } catch {}
+  return decoded.replace(/[^\w.\-]+/g, "_").slice(0, 120) || "file"
+}
+
+/**
+ * Commit files onto the assets branch through GitHub's git API, so the agent's clone isn't touched. The ref only
+ * moves forward: when another agent got there first, it starts again from the new tip.
+ */
+async function pushAssets(gh, slug, files) {
+  const ref = `heads/${ASSETS_BRANCH}`
+  const blobs = []
+  for (const f of files) {
+    const blob = await gh("POST", `/repos/${slug}/git/blobs`, { content: fs.readFileSync(f.file).toString("base64"), encoding: "base64" })
+    blobs.push({ path: f.repoPath, mode: "100644", type: "blob", sha: blob.sha })
+  }
+  let lastErr
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let tip = null
+    try {
+      tip = (await gh("GET", `/repos/${slug}/git/ref/${ref}`)).object.sha
+    } catch (err) {
+      if (err.status !== 404) throw err
+    }
+    const baseTree = tip ? (await gh("GET", `/repos/${slug}/git/commits/${tip}`)).tree.sha : null
+    const tree = await gh("POST", `/repos/${slug}/git/trees`, { ...(baseTree ? { base_tree: baseTree } : {}), tree: blobs })
+    if (tree.sha === baseTree) return
+    const commit = await gh("POST", `/repos/${slug}/git/commits`, {
+      message: `Screenshots for task ${task.taskId}`,
+      tree: tree.sha,
+      parents: tip ? [tip] : [],
+    })
+    try {
+      if (tip) await gh("PATCH", `/repos/${slug}/git/refs/${ref}`, { sha: commit.sha, force: false })
+      else await gh("POST", `/repos/${slug}/git/refs`, { ref: `refs/${ref}`, sha: commit.sha })
+      return
+    } catch (err) {
+      // 422: the branch moved (or was just made) under us.
+      if (err.status !== 422) throw err
+      lastErr = err
+    }
+  }
+  throw lastErr
+}
+
+/** The PR body with every link to an artifact this task published pointed at its copy on the assets branch, and notes on any it couldn't move. */
+async function hostArtifacts(gh, slug, body) {
+  const links = [...body.matchAll(ARTIFACT_LINK)]
+  if (!links.length) return { body, notes: [] }
+  const known = publishedArtifacts()
+  const files = new Map()
+  const missing = new Set()
+  for (const [, id, name] of links) {
+    if (files.has(id) || missing.has(id)) continue
+    const file = known.get(id)
+    if (!file || !fs.existsSync(file)) missing.add(id)
+    else files.set(id, { file, repoPath: `${task.taskId}/${id}/${assetName(name)}` })
+  }
+  const notes = []
+  if (files.size) {
+    try {
+      await pushAssets(gh, slug, [...files.values()])
+    } catch (err) {
+      notes.push(`Couldn't copy the PR's files to the ${ASSETS_BRANCH} branch (${clip(err.message, 300)}), so their Box Yard links stay, and GitHub can't show them.`)
+      files.clear()
+    }
+  }
+  if (missing.size) {
+    notes.push(`GitHub can't show ${[...missing].join(", ")}: this task didn't publish it, or the file is gone. Publish the file again with publish_artifact, use the new link, and call create_pull_request again.`)
+  }
+  const out = body.replace(ARTIFACT_LINK, (link, id) => {
+    const f = files.get(id)
+    if (!f) return link
+    const url = `https://github.com/${slug}/blob/${ASSETS_BRANCH}/${f.repoPath.split("/").map(encodeURIComponent).join("/")}`
+    // ?raw=true serves the file itself, which an image needs; other files open on GitHub's file page.
+    return IMAGE_FILE.test(f.repoPath) ? `${url}?raw=true` : url
+  })
+  if (files.size) notes.unshift(`Copied ${files.size} file${files.size === 1 ? "" : "s"} to the ${ASSETS_BRANCH} branch so GitHub shows ${files.size === 1 ? "it" : "them"}.`)
+  return { body: out, notes }
+}
+
 async function createPullRequest(args) {
   const slug = task.github?.slug
   const token = task.env?.GITHUB_TOKEN
@@ -718,43 +853,25 @@ async function createPullRequest(args) {
   const push = await sh("git", ["push", "-u", "origin", branch])
   if (push.code !== 0) return text(`git push failed:\n${clip(push.stderr || push.stdout, 2000)}`, true)
 
-  const gh = async (method, url, body) => {
-    const res = await fetch(`https://api.github.com${url}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "box-yard",
-        ...(body ? { "Content-Type": "application/json" } : {}),
-      },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(20_000),
-    })
-    const data = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(`GitHub ${res.status}: ${data.message ?? "request failed"} ${JSON.stringify(data.errors ?? "")}`)
-    return data
-  }
-
+  const gh = githubApi(token)
   try {
+    const { body, notes } = await hostArtifacts(gh, slug, String(args.body ?? ""))
+    const fields = { title: String(args.title), body: `${body}\n\n---\n_Opened by a Box Yard agent (task ${task.taskId})._` }
     const owner = slug.split("/")[0]
     const open = await gh("GET", `/repos/${slug}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`)
     let pr = Array.isArray(open) ? open[0] : null
     let created = false
-    if (!pr) {
-      pr = await gh("POST", `/repos/${slug}/pulls`, {
-        title: String(args.title),
-        body: `${args.body ?? ""}\n\n---\n_Opened by a Box Yard agent (task ${task.taskId})._`,
-        head: branch,
-        base: task.baseBranch,
-        draft: Boolean(args.draft),
-      })
+    if (pr) {
+      // Calling it again updates the PR: the new title and body replace the old ones.
+      pr = await gh("PATCH", `/repos/${slug}/pulls/${pr.number}`, fields)
+    } else {
+      pr = await gh("POST", `/repos/${slug}/pulls`, { ...fields, head: branch, base: task.baseBranch, draft: Boolean(args.draft) })
       created = true
     }
     // The commit just pushed, so Box Yard hooks fire once per head commit (task.pr_ready).
     const headSha = (await sh("git", ["rev-parse", "HEAD"])).stdout.trim()
     await emit({ t: "pr", url: pr.html_url, number: pr.number, branch, ...(/^[0-9a-f]{40}$/.test(headSha) ? { headSha } : {}) })
-    return text(`${created ? "Opened" : "Updated (pushed to)"} PR #${pr.number}: ${pr.html_url}`)
+    return text([`${created ? "Opened" : "Updated (pushed to, with this title and body)"} PR #${pr.number}: ${pr.html_url}`, ...notes].join("\n"))
   } catch (err) {
     return text(String(err.message), true)
   }
