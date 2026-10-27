@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import { LocalProvider } from "../server/providers/local.js"
+import { uploadPartBytes, uploadSize } from "../server/upload.js"
 import type { BoxResize, Project, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
@@ -18,6 +19,8 @@ const KB = 1024
 const MB = 1024 * KB
 /** Upstash's own words. */
 const TOO_BIG = "file exceeds maximum size of 100 MB"
+/** Text to match literally in a RegExp. */
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 /** Local boxes whose uploads are refused over `limit` bytes. `advertise`: the provider says so (like Upstash's maxUploadBytes). */
 class LimitedProvider extends LocalProvider {
@@ -221,8 +224,13 @@ describe("restores never send one file over the box's upload limit", () => {
     fs.writeFileSync(path.join(work, "trace.bin"), random(1 * MB))
     const archive = await rearchive(r, t.id)
     expect(r.yard.store.getTask(t.id)!.pushState?.wip).toBeTruthy()
-    expect(fs.statSync(archive).size).toBeGreaterThan(512 * KB)
+    const size = fs.statSync(archive).size
+    expect(size).toBeGreaterThan(512 * KB)
     park(r, t)
+    // The reason names the step that failed: the box refused the whole archive, then its first part under the 100 MB
+    // its refusal states (capped at the archive's size).
+    const part = uploadPartBytes(size - 1)
+    const reason = `uploading its ${uploadSize(size)} archive to the box failed: part 1 of ${Math.ceil(size / part)} (${uploadSize(part)}) failed: ${TOO_BIG}`
 
     const back = await nextTurn(r, t.id)
     // One try: the whole archive, then its first part, are refused, and a refusal for size isn't retried.
@@ -240,16 +248,16 @@ describe("restores never send one file over the box's upload limit", () => {
 
     const turn = turnJson(r, back.boxId!, t.id)
     expect(turn.resume).toBe(false)
-    expect(turn.prompt).toContain(`Your old workspace couldn't be restored on this box (${TOO_BIG}), so it was set up again.`)
+    expect(turn.prompt).toContain(`Your old workspace couldn't be restored on this box (${reason}), so it was set up again.`)
     expect(turn.prompt).toContain("The uncommitted changes from the end of your last turn were put back")
     const kept = path.join(r.dataDir, "archives", `${t.id}.unrestored.tgz`)
     expect(fs.existsSync(kept)).toBe(true)
     expect(events(r, t.id)).toContain(
-      `Couldn't restore the workspace archive on box ${back.boxId} (${TOO_BIG}), so the task restarts from a recap on a fresh checkout of branch ${t.branch}, with the uncommitted work its last turn pushed. The archive is kept on the server as ${kept} (removed after 7 days).`,
+      `Couldn't restore the workspace archive on box ${back.boxId} (${reason}), so the task restarts from a recap on a fresh checkout of branch ${t.branch}, with the uncommitted work its last turn pushed. The archive is kept on the server as ${kept} (removed after 7 days).`,
     )
     expect(events(r, t.id)).toContain(`Resumed from a recap: its workspace archive couldn't be restored, so a new Claude session started on a fresh checkout of branch ${t.branch} with the task's summary, PR and recent messages.`)
     const notice = r.yard.store.listChat().find((m) => m.role === "notice" && m.content.includes("restarts from a recap"))
-    expect(notice?.content).toMatch(new RegExp(`^⚠️ \\*\\*wipe lobby items\\*\\* restarts from a recap: its workspace archive couldn't be restored on box ${back.boxId} \\(${TOO_BIG}\\)`))
+    expect(notice?.content).toMatch(new RegExp(`^⚠️ \\*\\*wipe lobby items\\*\\* restarts from a recap: its workspace archive couldn't be restored on box ${back.boxId} \\(${escape(reason)}\\)`))
   })
 
   it("a restore that keeps failing is tried twice, then restarts from a recap, and never again", async () => {
@@ -264,6 +272,8 @@ describe("restores never send one file over the box's upload limit", () => {
     expect(r.provider.restoreUploads(t.id).length).toBe(2)
     expect(turnJson(r, back.boxId!, t.id).resume).toBe(false)
     expect(events(r, t.id).filter((e) => e.startsWith("Couldn't restore the workspace archive"))).toHaveLength(1)
+    // The reason names the step: the upload worked, tar didn't.
+    expect(events(r, t.id).find((e) => e.startsWith("Couldn't restore the workspace archive"))).toMatch(/^Couldn't restore the workspace archive on box \S+ \(unpacking its archive on the box failed: \S/)
     expect(fs.existsSync(path.join(r.dataDir, "archives", `${t.id}.unrestored.tgz`))).toBe(true)
 
     // The folder is there now: the next turn doesn't touch the old archive again.

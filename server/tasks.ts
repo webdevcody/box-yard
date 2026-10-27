@@ -39,8 +39,8 @@ import { userMessageLabel } from "../shared/sender.js"
 import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
-import { errorMessage, isRateLimited } from "./util/retry.js"
-import { isUploadTooBig, putFile } from "./upload.js"
+import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
+import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
@@ -4435,7 +4435,9 @@ export class TaskManager {
         used.add(name)
         // Upload, not writeFile: Upstash rejects a base64 write body over ~10 MB,
         // so any attachment over ~7.5 MB failed with "invalid request body". putFile splits one over 100 MB.
-        await putFile(this.provider, boxId, file.path, `${folder}/${name}`)
+        await putFile(this.provider, boxId, file.path, `${folder}/${name}`).catch((err) => {
+          throw failedStep(`uploading the attached file ${file.name} (${uploadSize(file.size)}) to the box`, err)
+        })
         lines.push(`- ${folder}/${name} (${file.mime}, ${file.size} bytes)`)
       }
       const note = lines.length ? `\n\nAttached files (open images and other files with the Read tool):\n${lines.join("\n")}` : ""
@@ -4519,13 +4521,15 @@ export class TaskManager {
     const remote = `${root}/.boxyard/restore-${row.id}.tgz`
     let from: "git" | "partial" | null = null
     try {
-      // In parts when it's over the box's upload limit (Upstash: 100 MB per file).
-      await putFile(this.provider, boxId, row.archive_path!, remote)
+      // In parts when it's over the box's upload limit (Upstash: 100 MB per file). Each failure names its step.
+      await putFile(this.provider, boxId, row.archive_path!, remote).catch((err) => {
+        throw failedStep(`restoring workspace failed: uploading its ${uploadSize(fs.statSync(row.archive_path!).size)} archive to the box`, err)
+      })
       const res = await this.provider.exec(
         boxId,
         `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")} ${q(dir + "/run.json")}`,
       )
-      if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      if (res.exitCode !== 0) throw new Error(`restoring workspace failed: unpacking its archive on the box failed: ${(res.stderr || res.stdout).trim().slice(-500) || `exit code ${res.exitCode}`}`)
       // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
       if (mirror) await this.restoreThinGit(boxId, dir, mirror)
       if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
