@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
-import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
+import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxRowCost, meterTick, normalizeBoxSize, sourceOf } from "./store.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
 import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
@@ -1373,8 +1373,8 @@ export class TaskManager {
         cleanup: this.janitor.current(b.id),
         operation: this.boxOperation(b.id),
         resize: this.resizeReport(b.id),
-        estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
-        usageSource: b.usage_source ?? "estimated",
+        estimatedCostUsd: boxRowCost(b, rates, now),
+        usageSource: sourceOf(b.usage_source),
         createdAt: b.created_at,
         lastUsedAt: b.last_used_at,
         idleHeld: this.idleHeld.get(b.id) ?? null,
@@ -3783,6 +3783,8 @@ export class TaskManager {
         // A probe without the memory part (an old or fake df) keeps the last reading.
         ...(mem ? { memUsedBytes: mem.usedBytes, memTotalBytes: mem.totalBytes, loadAvg: mem.load1, cpuCount: mem.cpus } : {}),
       })
+      // The box's own CPU time, which is what Upstash bills (a shared cgroup's, like local folders', says nothing).
+      if (typeof mem?.cpuUsageUsec === "number" && providerOf(this.provider, boxId).ownCgroup) this.store.accrueBoxCpu(boxId, "cgroup", mem.cpuUsageUsec, now)
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
       const changed =
@@ -5808,27 +5810,31 @@ export class TaskManager {
     return hasCost ? cost : null
   }
 
+  /** Move each box's measured CPU (or, unmeasured, its running time) into a priced usage interval: see meterTick. */
   private meterBoxes(now = Date.now()) {
+    const rates = this.settings.get().costRates
     for (const box of this.store.listBoxes()) {
       if (box.status === "deleting" || box.status === "lost") continue
       const last = box.last_metered_at ?? box.created_at
       const elapsed = Math.max(0, now - last)
       if (elapsed < 1000) continue
       const running = this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id)
-      const activeMs = running ? elapsed : 0
+      const size = normalizeBoxSize(box.size)
+      const tick = meterTick(box, rates.boxActiveCpuHourlyUsd[size], elapsed, running)
       this.store.recordBoxUsageInterval({
         boxId: box.id,
         provider: box.provider,
-        size: normalizeBoxSize(box.size),
+        size,
         keepAlive: Boolean(box.keep_alive),
         startedAt: last,
         endedAt: now,
-        activeMs,
+        activeMs: tick.activeMs,
         uptimeMs: elapsed,
         diskBytes: box.disk_bytes,
-        source: box.usage_source ?? "estimated",
+        source: tick.source,
+        computeUsd: tick.computeUsd,
       })
-      this.store.meterBox(box.id, { activeMs: (box.active_ms ?? 0) + activeMs, lastMeteredAt: now })
+      this.store.meterBox(box.id, { ...tick.patch, lastMeteredAt: now })
     }
   }
 
@@ -5852,10 +5858,11 @@ export class TaskManager {
       ...(probe.size ? { size: normalizeBoxSize(probe.size) } : {}),
       ...(typeof probe.keepAlive === "boolean" ? { keepAlive: probe.keepAlive } : {}),
       ...(typeof probe.diskBytes === "number" ? { diskBytes: probe.diskBytes, diskUpdatedAt: now } : {}),
-      usageSource: probe.source,
     }
+    // The provider's running totals: meterBoxes prices what they grew by (see meterTick).
+    if (typeof probe.cpuNs === "number") this.store.accrueBoxCpu(boxId, "provider", probe.cpuNs, now)
+    if (typeof probe.computeUsd === "number") this.store.accrueBoxCompute(boxId, probe.computeUsd, now)
     const row = this.store.getBox(boxId)
-    if (row && typeof probe.activeMs === "number" && probe.activeMs > (row.active_ms ?? 0)) patch.activeMs = probe.activeMs
     if (row && patch.size && patch.size !== normalizeBoxSize(row.size) && !this.boxOps.has(boxId)) {
       this.recordBoxEvent({
         boxId,
@@ -5952,7 +5959,12 @@ export class TaskManager {
     if (this.stopped) return
     const now = Date.now()
     this.meterBoxes(now)
-    for (const box of this.store.listBoxes()) void this.refreshBoxUsage(box.id)
+    for (const box of this.store.listBoxes()) {
+      void this.refreshBoxUsage(box.id)
+      // A box running a turn has its CPU read every minute (one df there), so its spend and $/hour stay current.
+      if (box.status === "ready" && providerOf(this.provider, box.id).ownCgroup && this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id))
+        void this.probeDisk(box.id, 60_000).catch(() => null)
+    }
     const active = this.store.listTaskRows({ status: ["working", "starting"] })
     const checkedBoxes = new Map<string, Awaited<ReturnType<BoxProvider["health"]>>>()
     const health = async (boxId: string) => {

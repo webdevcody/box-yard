@@ -455,7 +455,7 @@ export interface BoxInfo {
   /** The running resize, or the last one (on a migrated-to box: the one that made it). */
   resize: BoxResize | null
   estimatedCostUsd: number
-  usageSource: "actual" | "estimated"
+  usageSource: UsageSource
   createdAt: number
   lastUsedAt: number
   /** Why an idle box outlives Settings › Idle box deletion: a workspace on it isn't archived yet (retried), or null. */
@@ -782,12 +782,22 @@ export interface ClaudeUsageTotals {
   durationMs: number
 }
 
+/**
+ * Where a box's cost comes from: "actual" is the provider's own figure (Upstash's Box.list total_compute_cost_usd),
+ * "measured" is CPU time Box Yard measured (the box's cgroup cpu.stat, or the provider's CPU total) priced with the
+ * Settings › Usage rates, and "estimated" is one CPU core for as long as a turn ran there.
+ */
+export type UsageSource = "actual" | "measured" | "estimated"
+const SOURCE_RANK: Record<UsageSource, number> = { actual: 0, measured: 1, estimated: 2 }
+/** The less exact of two sources: a total is only as exact as its weakest part. */
+export const weakerSource = (a: UsageSource, b: UsageSource): UsageSource => (SOURCE_RANK[a] >= SOURCE_RANK[b] ? a : b)
+
 export interface BoxUsageTotals {
   activeMs: number
   uptimeMs: number
   diskBytes: number
   costUsd: number
-  source: "actual" | "estimated"
+  source: UsageSource
 }
 
 export interface UsageWindow {
@@ -822,7 +832,7 @@ export interface UsageBoxTotal {
   uptimeMs: number
   diskBytes: number | null
   estimatedCostUsd: number
-  usageSource: "actual" | "estimated"
+  usageSource: UsageSource
 }
 
 export interface BudgetStatus {
@@ -886,7 +896,7 @@ export interface UsagePeriodBox {
   uptimeMs: number
   diskBytes: number | null
   costUsd: number
-  source: "actual" | "estimated"
+  source: UsageSource
 }
 
 export interface UsagePeriodReport {

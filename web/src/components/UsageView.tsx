@@ -427,7 +427,8 @@ function Row({ name, row, total, muted, nested }: { name: ReactNode; row: UsageB
 
 function BoxesTable({ period }: { period: UsagePeriodReport }) {
   const boxes = period.boxList.filter((b) => b.live || b.costUsd > 0)
-  const estimated = boxes.some((b) => b.source !== "actual")
+  const estimated = boxes.some((b) => b.source === "estimated")
+  const measured = !estimated && boxes.some((b) => b.source === "measured")
   return (
     <section className="min-w-0 rounded-xl border border-zinc-800/80 bg-zinc-900/30">
       <div className="flex items-baseline justify-between gap-3 px-4 pt-4 pb-3">
@@ -453,8 +454,10 @@ function BoxesTable({ period }: { period: UsagePeriodReport }) {
                     className="inline-flex cursor-help items-center gap-1 whitespace-nowrap"
                     title={
                       estimated
-                        ? "Estimated from your rates in Settings → Usage: active CPU hours, keep-alive time and disk. Upstash doesn't report per-box billing to Box Yard."
-                        : "Reported by the box provider."
+                        ? "Partly estimated: some boxes' CPU use wasn't measured, so the time turns ran on them counts, at your rates in Settings → Usage."
+                        : measured
+                          ? "The CPU time each box used (Upstash bills active CPU), at your rates in Settings → Usage, plus keep-alive and disk."
+                          : "Reported by the box provider."
                     }
                   >
                     {estimated ? "Est. cost" : "Cost"} {estimated && <Info className="h-3 w-3" />}
