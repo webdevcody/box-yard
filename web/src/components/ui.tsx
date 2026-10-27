@@ -468,7 +468,12 @@ function PrTextLink({ href, title, className, children }: { href: string; title?
       title={title}
       data-pr-link={state || "unknown"}
       onMouseEnter={onMouseEnter}
-      className={cx(className, state && cx(PR_TEXT[state], "decoration-current/40! hover:decoration-current!"))}
+      className={cx(
+        className,
+        // "⎇ PR #154 ↗" stays on one line; longer link text wraps and keeps only its last word with the ↗.
+        typeof children === "string" && children.length <= 24 && "whitespace-nowrap",
+        state && cx(PR_TEXT[state], "decoration-current/40! hover:decoration-current!"),
+      )}
     >
       <Icon aria-hidden className="mr-0.5 inline-block h-[0.95em] w-[0.95em] align-[-0.125em]" />
       {children}
