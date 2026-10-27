@@ -279,12 +279,20 @@ async function worker(mcp, prompt) {
   if (/\[hang\]/i.test(prompt)) await sleep(120_000)
   // FAKE_CLAUDE_GATE=<path>: each turn takes the next number n (a line in <path>.turns) and waits for <path>.<n>:
   // "fail" exits with an error, "kill" dies by SIGKILL (as the out-of-memory killer does), anything else carries on.
-  // A test acts on the box while the turn runs.
+  // A test acts on the box while the turn runs. A test that fails before it says gives up the turn after 2 minutes,
+  // so no fake agent is left waiting.
   const gate = process.env.FAKE_CLAUDE_GATE
   if (gate) {
     fs.appendFileSync(`${gate}.turns`, `${process.pid}\n`)
     const n = fs.readFileSync(`${gate}.turns`, "utf8").trim().split("\n").length
-    while (!fs.existsSync(`${gate}.${n}`)) await sleep(50)
+    const giveUp = Date.now() + 120_000
+    while (!fs.existsSync(`${gate}.${n}`)) {
+      if (Date.now() > giveUp) {
+        console.error(`FAKE_CLAUDE_GATE: nothing said how turn ${n} ends`)
+        process.exit(3)
+      }
+      await sleep(50)
+    }
     const verdict = fs.readFileSync(`${gate}.${n}`, "utf8").trim()
     if (verdict === "kill") process.kill(process.pid, "SIGKILL")
     if (verdict === "fail") {
