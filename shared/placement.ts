@@ -4,6 +4,7 @@
 import type { BoxSize } from "./types.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, type Runner } from "./runner.js"
 import { gpuBoxIndex, isGpuBox } from "./runpod.js"
+import { isDockerBox } from "./docker.js"
 
 /**
  * The kinds of place a workspace can be: this computer, a worker box (Upstash, or a folder box in mock mode), a
@@ -42,10 +43,10 @@ export interface TaskPlacement {
 }
 
 /** The kind of place a box id is. Worker boxes are everything that isn't one of the runners' virtual boxes. */
-export const placeKindOf = (boxId: string): PlaceKind => (boxId === LOCAL_BOX_ID ? "local" : isGpuBox(boxId) ? "gpu" : "box")
+export const placeKindOf = (boxId: string): PlaceKind => (boxId === LOCAL_BOX_ID ? "local" : isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : "box")
 
 /** The place a runner's turns go to. */
-export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "box", gpu: "gpu" }
+export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "box", gpu: "gpu", docker: "docker" }
 
 /** The provider's name, as the chip leads with it. */
 export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", box: "Upstash", gpu: "RunPod", docker: "Docker" }

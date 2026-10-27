@@ -1,7 +1,7 @@
 // First-run setup (the card Zen shows until the required keys are set) and Settings › Credentials. Keys go to the
 // server and never come back: a field shows only whether its key is set and where it comes from.
 import { useEffect, useId, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
-import { Check, Cloud, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, Undo2, X } from "lucide-react"
+import { Check, Cloud, Container, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, Undo2, X } from "lucide-react"
 import { useAgentSettings, useCheckLocal, useSaveCredentials, useSaveRunnerChoice, useSaveSettings, useSettings, useSetup, useTestCredential } from "../lib/queries"
 import { Button, LineIcon, NewTabLink, cx, inputClass } from "./ui"
 import { localFlag } from "../lib/localFlag"
@@ -320,7 +320,7 @@ function ClaudeChoice({ status, id }: { status: SetupStatus; id: string }) {
   )
 }
 
-// ------------------------------------------------------------------ where agents run: this computer or Upstash boxes
+// ------------------------------------------------------------------ where agents run: this computer, Upstash boxes or Docker
 
 const RUNNER_CHOICES: { runner: Runner; icon: typeof Laptop; title: string; body: string; needs: string }[] = [
   {
@@ -337,10 +337,17 @@ const RUNNER_CHOICES: { runner: Runner; icon: typeof Laptop; title: string; body
     body: "Each agent works in its own isolated cloud box.",
     needs: "Needs an Upstash Box API key",
   },
+  {
+    runner: "docker",
+    icon: Container,
+    title: "Docker containers",
+    body: "Each project's agents work in an isolated container on this computer.",
+    needs: "Needs Docker running and a Claude key",
+  },
 ]
 
 /**
- * Two cards, one per place agents can run; new projects follow the choice. In first-run setup picking one saves it
+ * A card per place agents can run; new projects follow the choice. In first-run setup picking one saves it
  * right away; in Settings it's a draft until the dialog's Save.
  */
 export function RunnerChoice({ status, compact }: { status: SetupStatus; compact?: boolean }) {
@@ -350,7 +357,7 @@ export function RunnerChoice({ status, compact }: { status: SetupStatus; compact
   const current = save.isPending && !drafted ? save.variables : choice
   return (
     <div className="space-y-2">
-      <div role="group" aria-label="Where agents run" className={cx("grid gap-2", !compact && "sm:grid-cols-2")}>
+      <div role="group" aria-label="Where agents run" className={cx("grid gap-2", !compact && "sm:grid-cols-3")}>
         {RUNNER_CHOICES.map((c) => {
           const on = current === c.runner
           return (
@@ -382,6 +389,12 @@ export function RunnerChoice({ status, compact }: { status: SetupStatus; compact
         <p role="note" className="flex items-start gap-2 text-xs leading-relaxed text-amber-200/90" data-testid="runner-choice-warning">
           <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
           <span>{LOCAL_UNSANDBOXED}</span>
+        </p>
+      )}
+      {current === "docker" && (
+        <p className="text-xs leading-relaxed text-zinc-500" data-testid="runner-choice-docker">
+          A container can't use this computer's own claude login: add a Claude key below (<code className="font-mono">claude setup-token</code> makes one). Limits and the image are in Settings ›
+          Docker.
         </p>
       )}
       {changed && <SourceHint changed />}
@@ -541,7 +554,9 @@ export function SetupCard({ status, className }: { status: SetupStatus; classNam
             ? "Pick where your agents run, sign in to Claude, and the Coordinator is ready."
             : local
               ? "Agents run on this computer, so there's no Upstash account to set up."
-              : status.boxes.required
+              : choice === "docker"
+                ? "Agents run in Docker containers on this computer, so there's no Upstash account to set up."
+                : status.boxes.required
                 ? "Two keys and the Coordinator is ready."
                 : "One key and the Coordinator is ready."}{" "}
           Keys stay on this server: the browser never sees them again.
@@ -634,7 +649,7 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
               id={fid(`cred-${k}`)}
               label={CREDENTIAL_INFO[k].label}
               help={
-                k === "upstashBoxApiKey" && s.runner.choice === "local" ? (
+                k === "upstashBoxApiKey" && (s.runner.choice === "local" || s.runner.choice === "docker") ? (
                   <>
                     Optional while agents run on this computer. Add one later to let projects run in isolated Upstash boxes. <CredentialHelp k={k} />
                   </>
@@ -644,7 +659,7 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
               }
             >
               <CredentialField k={k} status={s.credentials[k]} id={fid(`cred-${k}`)} />
-              {k === "upstashBoxApiKey" && s.runner.choice === "local" && s.credentials.upstashBoxApiKey.state === "set" && (
+              {k === "upstashBoxApiKey" && (s.runner.choice === "local" || s.runner.choice === "docker") && s.credentials.upstashBoxApiKey.state === "set" && (
                 <p className="text-xs leading-relaxed text-zinc-500" data-testid="upstash-ready">
                   Upstash boxes are ready: pick Upstash box in a project's Settings › Runs on, or make it the default above.
                 </p>

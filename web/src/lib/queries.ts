@@ -11,6 +11,7 @@ import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
+import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -84,6 +85,7 @@ export const keys = {
   setup: ["setup"] as const,
   runpod: ["runpod"] as const,
   runpodGpus: ["runpod-gpus"] as const,
+  docker: ["docker"] as const,
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
@@ -437,6 +439,24 @@ export function useRunPodAction<T>(title: string, call: (input: T) => Promise<Ru
   })
 }
 
+// ------------------------------------------------------------------ Docker (Settings › Docker)
+
+/** Docker on this computer, the settings, the image and its build, and Box Yard's containers. Polled while open: containers change in Docker, not here. */
+export const useDocker = (o: { enabled?: boolean; poll?: boolean } = {}) =>
+  useQuery({ queryKey: keys.docker, queryFn: () => api<DockerStatus>("/api/docker"), enabled: o.enabled, refetchInterval: o.poll ? 10_000 : false, staleTime: 5_000 })
+/** A Docker action: save settings, build the image, stop a container. */
+export function useDockerAction<T>(title: string, call: (input: T) => Promise<DockerStatus | DockerImageBuild>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => {
+      if ("settings" in r) qc.setQueryData(keys.docker, r)
+      else void qc.invalidateQueries({ queryKey: keys.docker })
+    },
+    onError: fail(title),
+  })
+}
+
 // ------------------------------------------------------------------ hooks (automations on task events)
 
 export const useHooks = (scope: string) => useQuery({ queryKey: keys.hooks(scope), queryFn: () => api<HookWithLastRun[]>(`/api/hooks?${hookQuery(scope)}`) })
@@ -514,6 +534,7 @@ export function useCreateProject() {
           maxBoxes: null,
           gpuMaxHourlyUsd: null,
           gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
+          docker: { image: null, dockerfile: null },
           snapshot: null,
           createdAt: now,
           updatedAt: now,
@@ -554,6 +575,8 @@ export function useUpdateProject() {
       wholeMachine?: boolean
       tasksPerBox?: number | null
       maxBoxes?: number | null
+      /** Both fields: the optimistic update replaces the project's whole `docker`. */
+      docker?: ProjectDocker
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {
@@ -1038,7 +1061,8 @@ export function useClearSnapshot() {
 }
 
 /**
- * Archive every workspace, then destroy the box at the provider, or terminate a RunPod GPU pod (its volume stays).
+ * Archive every workspace, then destroy the box at the provider, terminate a RunPod GPU pod (its volume stays), or
+ * delete a project's Docker container and its volume.
  * `stopAgents` stops running agents first; `override` deletes past the safety check (Delete anyway).
  */
 export function useDeleteBox() {
@@ -1046,17 +1070,19 @@ export function useDeleteBox() {
   return useMutation({
     mutationFn: (input: { boxId: string; stopAgents: boolean; override?: boolean }) => {
       const query = new URLSearchParams({ ...(input.stopAgents ? { stopAgents: "1" } : {}), ...(input.override ? { override: "1" } : {}) }).toString()
-      return api<{ ok: true; kind: "box" | "pod"; label: string }>(`/api/boxes/${encodeURIComponent(input.boxId)}${query ? `?${query}` : ""}`, { method: "DELETE" })
+      return api<{ ok: true; kind: "box" | "pod" | "container"; label: string }>(`/api/boxes/${encodeURIComponent(input.boxId)}${query ? `?${query}` : ""}`, { method: "DELETE" })
     },
     onSuccess: (res, input) => {
       qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => list?.filter((b) => b.id !== input.boxId))
       if (res.kind === "pod") toast.info(`Terminated ${res.label}`, "Every workspace was archived first and its network volume stays. Its tasks start a new pod on their next message.")
+      else if (res.kind === "container") toast.info(`Deleted ${res.label}`, "Every workspace was archived first, then the container and its volume went. Its tasks start a new container on their next message.")
       else toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
     },
     onSettled: () => {
       void qc.invalidateQueries({ queryKey: keys.boxes })
       void qc.invalidateQueries({ queryKey: keys.tasks })
       void qc.invalidateQueries({ queryKey: keys.runpod })
+      void qc.invalidateQueries({ queryKey: keys.docker })
     },
   })
 }

@@ -18,6 +18,10 @@ export const BOX_EVENT_TYPES = [
   { key: "snapshot", label: "Snapshot" },
   { key: "snapshot_failed", label: "Snapshot failed" },
   { key: "snapshot_fallback", label: "Snapshot not used" },
+  // A Docker project's container (shared/docker.ts) stopping when idle and starting again: its volume keeps the
+  // workspaces, so it isn't deleted and made again.
+  { key: "started", label: "Started" },
+  { key: "stopped", label: "Stopped" },
 ] as const
 export type BoxEventType = (typeof BOX_EVENT_TYPES)[number]["key"]
 

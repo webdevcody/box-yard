@@ -14,6 +14,7 @@ import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import { DOCKER_NEEDS_CLAUDE_KEY } from "../shared/docker.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
@@ -34,6 +35,8 @@ export interface SetupDeps {
   timeoutMs?: number
   /** Stand-in for looking at this computer's tools and logins (tests). */
   localCheck?: () => Promise<LocalCheckResult>
+  /** Why Docker containers can't start now (Docker missing or stopped), or null (DockerService.problem). */
+  dockerProblem?: () => Promise<string | null>
 }
 
 /** The setup choice of where agents run, in its own kv entry. */
@@ -51,8 +54,14 @@ export class Setup {
   private checking: Promise<boolean> | null = null
 
   constructor(private readonly d: SetupDeps) {
-    // With agents on this computer, its `gh auth` login stands in for a GitHub token nobody set.
-    d.credentials.setGhFallback(() => (this.runnerChoice() === "local" ? (this.local?.result.ghToken ?? "") : ""))
+    // With agents on this computer (or in Docker containers on it), its `gh auth` login stands in for a GitHub token nobody set.
+    d.credentials.setGhFallback(() => (this.onThisComputer() ? (this.local?.result.ghToken ?? "") : ""))
+  }
+
+  /** The setup choice runs agents on this computer: in its own folders ("local") or in Docker containers on it. */
+  onThisComputer(): boolean {
+    const choice = this.runnerChoice()
+    return choice === "local" || choice === "docker"
   }
 
   /** Where the owner chose to run agents, or null before they chose (and on installs from before the choice). */
@@ -100,11 +109,14 @@ export class Setup {
   /**
    * Why a task asked to run on `runner` (a per-task runs_on) can't, in plain words, or null when it can. "local" needs
    * this computer's `claude`, signed in or with a Claude key in Settings; "box" needs Upstash boxes (a key, or
-   * BOX_PROVIDER=local). Mock mode needs neither. Never a reason to run it somewhere else instead.
+   * BOX_PROVIDER=local); "docker" needs Docker running and a Claude key (a container can't use this computer's
+   * login). Mock mode needs none. Never a reason to run it somewhere else instead.
    */
   async runnerProblem(runner: Runner): Promise<string | null> {
     const { c, credentials } = this.d
-    if (c.mock) return null
+    // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
+    const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
+    if (c.mock || docker) return docker
     const creds = credentials.status()
     if (runner === "gpu") {
       return creds.runpodApiKey.state === "set" ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
@@ -112,11 +124,12 @@ export class Setup {
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
     }
+    const keySet = creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set"
+    if (runner === "docker") return keySet ? null : DOCKER_NEEDS_CLAUDE_KEY
     await this.refreshLocal()
     const local = this.local?.result.check
     if (!local) return "Box Yard couldn't check this computer's tools (claude --version didn't answer)"
     if (!local.tools.find((t) => t.key === "claude")?.found) return `Claude Code isn't installed on this computer (\`${c.claudeBin} --version\` failed). Install it, then try again`
-    const keySet = creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set"
     if (local.claudeLogin === false && !keySet) return "Claude Code on this computer isn't signed in: run `claude` and log in, or add a Claude key in Settings › Credentials"
     return null
   }
@@ -129,8 +142,9 @@ export class Setup {
     const choice = this.runnerChoice()
     const onComputer = choice === "local"
     const local = this.localCheck()
-    // "This computer" needs no box at all, so no Upstash key.
-    const boxesRequired = !mock && c.boxProvider !== "local" && !onComputer
+    // "This computer" and Docker containers on it need no box at all, so no Upstash key.
+    const boxesRequired = !mock && c.boxProvider !== "local" && !onComputer && choice !== "docker"
+    // A container can't use this computer's `claude` login: Docker needs a key.
     const claudeSet = set("claudeOauthToken") || set("anthropicApiKey") || (onComputer && local?.claudeLogin === true)
     const missing: string[] = []
     // Before the choice, a box key isn't the only way: "This computer" needs none.
