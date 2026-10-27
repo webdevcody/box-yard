@@ -59,7 +59,7 @@ export async function uploadFile(file: File): Promise<Attachment> {
 }
 
 /** Ids the server accepts from the client, so optimistic rows keep their id. */
-export function clientId(prefix: "prj" | "task" | "chat" | "sch") {
+export function clientId(prefix: "prj" | "task" | "chat" | "sch" | "thr" | "thm") {
   const bytes = crypto.getRandomValues(new Uint8Array(8))
   return `${prefix}_${Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 12)}`
 }
