@@ -103,6 +103,7 @@ It's a view, not a wall. What remains:
 - **Box Yard's API on this computer.** With no `BOXYARD_PASSWORD`, the API is open on loopback, and the Coordinator has `WebFetch`. Set a password to close that.
 - **What the Coordinator already knew.** Its earlier messages, its own compaction summaries and the compaction files it may `Read` keep what they held before the seal.
 - **Uploads.** The Coordinator may `Read` the uploads folder; an upload's path is random and only appears in content it no longer gets.
+- **GitHub.** The Coordinator gets each PR's URL, and for a public repo `WebFetch` can open the PR there. The seal covers Box Yard's views, not who can read the repo.
 
 ## In the web app
 
