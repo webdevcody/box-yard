@@ -244,13 +244,30 @@ export function searchHistory(readers: HistoryReaders, scope: HistoryScope, q: H
   }
   if (want.has("tasks")) hits.push(...taskHits(store, q, scope.projectId))
   if (want.has("transcripts")) hits.push(...transcriptHits(store, q, scope.projectId))
-  const shown = scope.statusOnly ? hits.filter((h) => !h.projectId || !scope.statusOnly!(h.projectId)) : hits
+  const shown = scope.statusOnly ? hits.filter((h) => !sealedHit(store, scope.statusOnly!, h)) : hits
   const perSource: Partial<Record<HitKind, number>> = {}
   for (const h of shown) perSource[h.kind] = (perSource[h.kind] ?? 0) + 1
   return { hits: shown.sort((a, b) => b.at - a.at).slice(0, q.limit), perSource }
 }
 
-type ChatRow = { id: string; role: string; content: string; created_at: number }
+/**
+ * A hit from a status-only project: its Captain chat, tasks and summaries, and the Coordinator chat's notices about its
+ * tasks (they carry questions, summaries and errors, and are kept even once its Captain handled them).
+ */
+function sealedHit(store: Store, statusOnly: (projectId: string) => boolean, h: HistoryHit): boolean {
+  if (h.projectId) return statusOnly(h.projectId)
+  return h.kind === "coordinator_chat" && h.where === "notice" && Boolean(h.taskIds?.some((id) => sealedTask(store, statusOnly, id)))
+}
+
+const sealedTask = (store: Store, statusOnly: (projectId: string) => boolean, taskId: unknown) => {
+  const projectId = typeof taskId === "string" ? store.getTaskRow(taskId)?.project_id : undefined
+  return Boolean(projectId && statusOnly(projectId))
+}
+
+/** What a sealed notice shows when it's opened next to a Coordinator chat hit. */
+export const SEALED_NOTICE = "(a notice about a task of a status-only project: ask its Captain)"
+
+type ChatRow = { id: string; role: string; content: string; created_at: number; meta_json?: string | null }
 
 /** A chat message in full (capped) with the messages just before and after it, for opening a chat hit. */
 export function chatAround(
@@ -262,13 +279,26 @@ export function chatAround(
   const before = opts.before ?? 3
   const after = opts.after ?? 3
   const max = opts.maxChars ?? 4000
-  const view = (r: ChatRow) => ({ id: r.id, role: r.role, at: r.created_at, content: r.content.length > max ? `${r.content.slice(0, max)}… [${r.content.length - max} more chars]` : r.content })
+  const sealed = (r: ChatRow) => {
+    if (r.role !== "notice" || !scope.statusOnly || !r.meta_json) return false
+    try {
+      return sealedTask(store, scope.statusOnly, (JSON.parse(r.meta_json) as { taskId?: unknown } | null)?.taskId)
+    } catch {
+      return false
+    }
+  }
+  const view = (r: ChatRow) => ({
+    id: r.id,
+    role: r.role,
+    at: r.created_at,
+    content: sealed(r) ? SEALED_NOTICE : r.content.length > max ? `${r.content.slice(0, max)}… [${r.content.length - max} more chars]` : r.content,
+  })
   const thread = (table: string, n: number, extra: string, args: string[]) => {
     const older = store.db
-      .prepare(`SELECT id, role, content, created_at FROM ${table} WHERE rowid < ? AND role IN ${CHAT_ROLES}${extra} ORDER BY rowid DESC LIMIT ?`)
+      .prepare(`SELECT id, role, content, created_at, meta_json FROM ${table} WHERE rowid < ? AND role IN ${CHAT_ROLES}${extra} ORDER BY rowid DESC LIMIT ?`)
       .all(n, ...args, before) as ChatRow[]
     const newer = store.db
-      .prepare(`SELECT id, role, content, created_at FROM ${table} WHERE rowid >= ? AND (role IN ${CHAT_ROLES} OR rowid = ?)${extra} ORDER BY rowid LIMIT ?`)
+      .prepare(`SELECT id, role, content, created_at, meta_json FROM ${table} WHERE rowid >= ? AND (role IN ${CHAT_ROLES} OR rowid = ?)${extra} ORDER BY rowid LIMIT ?`)
       .all(n, n, ...args, after + 1) as ChatRow[]
     return [...older.reverse(), ...newer].map(view)
   }

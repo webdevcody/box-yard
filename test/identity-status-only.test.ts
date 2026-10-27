@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { Artifacts } from "../server/artifacts.js"
 import { STATUS_ONLY_SNAPSHOT, compactionTaskSnapshots, liveTaskLines } from "../server/compactionTasks.js"
+import { SEALED_NOTICE } from "../server/history.js"
 import { HookStore } from "../server/hookStore.js"
 import { HookEngine, SUMMARY_WITHHELD, type HookMeta } from "../server/hooks.js"
 import { buildMcpServer, type McpCaller } from "../server/mcp.js"
@@ -169,6 +170,15 @@ describe("the Coordinator's view of a status-only project", () => {
     expect((await tool("list_artifacts")).text).not.toContain(r.art.id)
     const history = (await tool("search_history", { query: "launch quiet", sources: ["chat", "tasks"] })).json() as { hits: unknown[] }
     expect(history.hits).toEqual([])
+    // The Coordinator chat keeps every task notice, even ones the Captain handled: a sealed task's are left out of
+    // the hits and masked when a hit next to them is opened.
+    r.yard.store.addChat("notice", "❓ **Ship the private build** asks: Which colour? QUESTION-WORDS", { taskId: r.hidden.id })
+    const open = r.yard.store.addChat("notice", "❓ **Ship the open build** asks: Which colour?", { taskId: r.visible.id })
+    const asked = r.yard.store.addChat("user", "How is the colour question going?")
+    const found = (await tool("search_history", { query: "colour", sources: ["chat"] })).json() as { hits: { id: string }[] }
+    expect(found.hits.map((h) => h.id)).toEqual([asked.id, open.id])
+    const around = (await tool("search_history", { around: asked.id })).json() as { messages: { content: string }[] }
+    expect(around.messages.map((m) => m.content)).toEqual([SEALED_NOTICE, "❓ **Ship the open build** asks: Which colour?", "How is the colour question going?"])
     // Writes and controls still work: Cody can have the Coordinator add a rule or stop a task.
     expect((await tool("save_note", { project: "secret", content: "Use the staging account." })).ok).toBe(true)
     r.sealedFromCoordinator()
