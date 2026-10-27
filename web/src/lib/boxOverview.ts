@@ -63,12 +63,12 @@ export function boxAttention(box: AttentionBox): AttentionReason[] {
       key: "memory",
       level: mem.tone === "error" ? "error" : "warn",
       short: `Busy: ${memoryShort(mem)}${mem.load ? `, ${mem.load}` : ""}`,
-      detail: `Busy: ${mem.busy}. New agents go to other boxes (or wait) until it calms down; running agents keep going.`,
+      detail: `Busy: ${mem.busy}. New tasks go to other boxes (or wait) until it calms down; running tasks keep going.`,
     })
   if (box.cleanup?.status === "failed") out.push({ key: "cleanup", level: "warn", short: "Last cleanup failed", detail: cleanupLine(box.cleanup) })
   if (box.runningTurns > box.slots) {
-    const lowered = box.limitLoweredFrom ? `The limit was lowered from ${box.limitLoweredFrom} to ${box.slots} while ${box.runningTurns} agents were running. ` : ""
-    out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} agents: over its limit`, detail: `${lowered}${box.runningTurns} agents are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
+    const lowered = box.limitLoweredFrom ? `The limit was lowered from ${box.limitLoweredFrom} to ${box.slots} while ${box.runningTurns} tasks were running. ` : ""
+    out.push({ key: "over", level: "warn", short: `${box.runningTurns}/${box.slots} tasks running: over its limit`, detail: `${lowered}${box.runningTurns} tasks are running on ${box.slots} slots. Running work continues; nothing new is placed here until it drops.` })
   }
   return out
 }

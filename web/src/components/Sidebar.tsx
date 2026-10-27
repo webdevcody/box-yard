@@ -148,7 +148,7 @@ export const Sidebar = memo(function Sidebar({ connection, onNavigate, onOpenCha
             {boxes.data?.length ?? 0}/{pool?.maxBoxes ?? "?"} boxes · {health.data?.provider ?? "…"}
           </span>
           <span className={cx(overLimit && "text-amber-300")}>
-            {running}/{capacity || "?"} agents{overLimit && " · over limit"}
+            {running}/{capacity || "?"} tasks running{overLimit && " · over limit"}
           </span>
         </div>
         <div className="flex gap-1">

@@ -706,7 +706,7 @@ function LimitsPanel({
       <Row
         id={fid("are")}
         label="Allow the Coordinator to resize boxes automatically"
-        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running agents for it, and every resize they make sends you a notice with their reason."
+        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running tasks for it, and every resize they make sends you a notice with their reason."
         hint={hint("autoResizeEnabled")}
       >
         <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
@@ -770,19 +770,19 @@ function LimitsPanel({
       </Row>
       <Row
         id={fid("spb")}
-        label="Agents per box"
-        help={`Claude turns that may run at the same time inside one box, every project's together. A project's own Agents at once (project settings) limits only its own agents within this. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
+        label="Tasks running at once per box"
+        help={`Tasks that may run at the same time inside one box, every project's together (each task runs its own Claude Code agent). A project's own Tasks running at once (project settings) limits only its own tasks within this. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
         hint={hint("slotsPerBox")}
       >
         <BoxLimitInput id={fid("spb")} max={20} {...limitField("slotsPerBox")} />
       </Row>
-      <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
+      <Row id={fid("ma")} label="Max tasks running at once" help="A cap on tasks running at once across all boxes. 0 = boxes × tasks running at once per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
       </Row>
       <Row
         id={fid("la")}
-        label="Local agents"
-        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Agents at once limits only its own agents within this. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
+        label="Tasks running at once on this computer"
+        help={`Tasks of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Tasks running at once limits only its own tasks within this. They have their own queue: they never take a box slot or count toward Max tasks running at once. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
         hint={hint("localAgents")}
       >
         <input
@@ -798,8 +798,8 @@ function LimitsPanel({
       </Row>
       <Row
         id={fid("mr")}
-        label="Resident tasks per box"
-        help={`Task folders kept on one box before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
+        label="Task folders kept per box"
+        help={`Task folders kept on one box (running or not) before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
         hint={hint("maxResidentPerBox")}
       >
         <BoxLimitInput id={fid("mr")} max={200} {...limitField("maxResidentPerBox")} />
@@ -935,10 +935,10 @@ function LimitsPanel({
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
-          With these limits, up to <span className="font-medium text-zinc-100 tabular-nums">{capacity}</span> {capacity === 1 ? "agent runs" : "agents run"} at once on up to{" "}
+          With these limits, up to <span className="font-medium text-zinc-100 tabular-nums">{capacity}</span> {capacity === 1 ? "task runs" : "tasks run"} at once on up to{" "}
           <span className="font-medium text-zinc-100 tabular-nums">{s.maxBoxes}</span> {s.maxBoxes === 1 ? "box" : "boxes"}.
         </p>
-        <p>Saved changes apply right away. Lowering a limit never stops running boxes or agents: no new work is placed until usage drops.</p>
+        <p>Saved changes apply right away. Lowering a limit never stops running boxes or tasks: no new work is placed until usage drops.</p>
         {upstash && (
           <p className={cx(s.maxBoxes > UPSTASH_FREE_CONCURRENT_BOXES && "text-amber-300")}>
             Free plan: up to {UPSTASH_FREE_CONCURRENT_BOXES} concurrent boxes (
@@ -953,11 +953,11 @@ function LimitsPanel({
   )
 }
 
-/** Agents and resident folders per box for each worker size, so a small box's lower capacity is visible. */
+/** Tasks running at once and task folders kept per box for each worker size, so a small box's lower capacity is visible. */
 type BoxLimitKey = "slotsPerBox" | "maxResidentPerBox"
 
 /**
- * Agents or task folders per box. While each box follows its own size, the field shows every size's default
+ * Tasks running at once or task folders kept per box. While each box follows its own size, the field shows every size's default
  * instead of one number; typing a number overrides it for every box. A value saved here gets a "Use size default"
  * button, and one set by env says how to remove it.
  */
@@ -1051,8 +1051,8 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
         <thead className="bg-zinc-900/60 text-zinc-500">
           <tr>
             <th className="px-3 py-2 font-medium">Worker size</th>
-            <th className="px-3 py-2 font-medium">Agents per box</th>
-            <th className="px-3 py-2 font-medium">Resident tasks per box</th>
+            <th className="px-3 py-2 font-medium">Tasks running at once per box</th>
+            <th className="px-3 py-2 font-medium">Task folders kept per box</th>
           </tr>
         </thead>
         <tbody>
@@ -1079,8 +1079,8 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
       <p className="border-t border-zinc-900 px-3 py-2 leading-relaxed text-zinc-500">
         {overridden
           ? "Your saved or env values below replace the size defaults for every size."
-          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
-        Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} agents and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
+          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} task at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
+        Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} tasks at once and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
       </p>
     </div>
   )

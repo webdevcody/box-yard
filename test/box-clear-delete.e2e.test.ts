@@ -131,7 +131,7 @@ describe("delete box", () => {
 
     const refused = await send(r, "DELETE", `/api/boxes/${boxId}`)
     expect(refused.status).toBe(409)
-    expect(refused.data.error).toBe(`1 agent is running on ${boxId}: stop it first.`)
+    expect(refused.data.error).toBe(`1 task is running on ${boxId}: stop it first.`)
     expect((await boxes(r)).map((b) => b.id)).toContain(boxId)
     expect((await getTask(r, t.id)).status).toBe("working")
 
@@ -191,7 +191,7 @@ describe("clear box", () => {
 
     const refused = await send(r, "POST", `/api/boxes/${boxId}/clear`, {})
     expect(refused.status).toBe(409)
-    expect(refused.data.error).toBe(`1 agent is running on ${boxId}: stop it first.`)
+    expect(refused.data.error).toBe(`1 task is running on ${boxId}: stop it first.`)
     expect(fs.existsSync(r.yard.tasks.taskDir(boxId, done.id))).toBe(true)
 
     const report = await call<BoxCleanup>(r, "POST", `/api/boxes/${boxId}/clear`, { stopAgents: true })

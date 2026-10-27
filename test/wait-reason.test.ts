@@ -11,7 +11,7 @@ import type { Task } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const REASON = "Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer"
+const REASON = "Waiting for Merge PR #78: survive-the-night allows 1 of its tasks at a time on this computer"
 const BY = [{ taskId: "task_17063f203d7d", title: "Merge PR #78" }]
 
 const task = (over: Partial<Task> = {}) =>
@@ -58,7 +58,7 @@ const render = (node: ReactNode) => act(() => root.render(createElement(QueryCli
 
 describe("waitReasonParts", () => {
   it("cuts the reason around each named task, in order", () => {
-    expect(waitReasonParts(REASON, BY)).toEqual(["Waiting for ", BY[0], ": survive-the-night allows 1 of its agents at a time on this computer"])
+    expect(waitReasonParts(REASON, BY)).toEqual(["Waiting for ", BY[0], ": survive-the-night allows 1 of its tasks at a time on this computer"])
     const two = [
       { taskId: "task_a", title: "A" },
       { taskId: "task_b", title: "B" },

@@ -2,12 +2,12 @@
 // notice for installs whose capacity fell below the pre-size-default values (#48).
 import { SIZE_DEFAULTS, WORKER_SIZES, type SettingSource, type WorkerSize } from "../../../shared/types"
 
-/** Pool defaults before they became size-based: every box ran 2 agents and kept 12 task folders. */
+/** Pool defaults before they became size-based: every box ran 2 tasks at once and kept 12 task folders. */
 export const LEGACY_POOL_DEFAULTS = { slotsPerBox: 2, maxResidentPerBox: 12 } as const
 
 export interface SizeCapacity {
   size: WorkerSize
-  /** Agents per box that would apply with this size. */
+  /** Tasks running at once per box that would apply with this size. */
   slotsPerBox: number
   maxResidentPerBox: number
   /** The size's own defaults (SIZE_DEFAULTS). */
@@ -77,11 +77,11 @@ export function showCapacityNotice(notice: CapacityNotice | null, dismissed: str
   return Boolean(notice) && !dismissed
 }
 
-/** What changed, e.g. "runs 1 agent at a time (was 2) and keeps 3 resident task folders (was 12)". */
+/** What changed, e.g. "runs 1 task at a time (was 2) and keeps 3 task folders (was 12)". */
 export function capacityNoticeText(n: CapacityNotice): string {
   const parts: string[] = []
-  if (n.slotsPerBox) parts.push(`runs ${n.slotsPerBox.now} ${n.slotsPerBox.now === 1 ? "agent" : "agents"} at a time (was ${n.slotsPerBox.was})`)
+  if (n.slotsPerBox) parts.push(`runs ${n.slotsPerBox.now} ${n.slotsPerBox.now === 1 ? "task" : "tasks"} at a time (was ${n.slotsPerBox.was})`)
   if (n.maxResidentPerBox)
-    parts.push(`keeps ${n.maxResidentPerBox.now} resident task ${n.maxResidentPerBox.now === 1 ? "folder" : "folders"} (was ${n.maxResidentPerBox.was})`)
+    parts.push(`keeps ${n.maxResidentPerBox.now} task ${n.maxResidentPerBox.now === 1 ? "folder" : "folders"} (was ${n.maxResidentPerBox.was})`)
   return parts.join(" and ")
 }

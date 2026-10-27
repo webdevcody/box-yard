@@ -11,7 +11,7 @@ export interface SizeRow {
   ram: string
   disk: string
   price: string
-  /** Agents at once with the size's defaults (Settings may override). */
+  /** Tasks running at once with the size's defaults (Settings may override). */
   slots: number
   current: boolean
   target: boolean
