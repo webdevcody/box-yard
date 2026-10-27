@@ -37,6 +37,7 @@ import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { SelectionToTask } from "./SelectionToTask"
+import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
@@ -237,7 +238,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   // An agent's message is always message_captain, and "From task" says so: the room goes to the task title.
   const tool = source !== "agent" && typeof m.meta?.tool === "string" ? m.meta.tool : null
   const bubble = (
-    <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
+    <div className={cx(MESSAGE_BLOCK, "max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
       <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
         <Icon className="h-3 w-3 shrink-0" />{" "}
         {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
@@ -248,6 +249,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
       </div>
       {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
       <AttachmentList files={m.meta?.attachments} />
+      {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} />}
     </div>
   )
   // Queued (sent mid-turn): the bubble, then the Queued label with Edit and Delete under it.
@@ -299,6 +301,7 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       onClick={toggle}
       onKeyDown={toggle}
       className={cx(
+        MESSAGE_BLOCK,
         "flex min-w-0 cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900/60 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
       )}
       {...PREVIEW_GROUP}
@@ -334,6 +337,7 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
           </span>
         </div>
       </div>
+      <MessageActions text={m.content} />
     </div>
   )
 })
