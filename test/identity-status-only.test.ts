@@ -78,9 +78,9 @@ async function start() {
   yard.store.addCaptainMessage(secret.id, "user", "Keep the launch date quiet CHAT-WORDS")
 
   const seen: string[] = []
-  const as = async (caller: McpCaller) => {
+  const as = async (caller: McpCaller, extra: { hooks?: HookEngine } = {}) => {
     const y = yard
-    const deps = { store: y.store, tasks: y.tasks, hub: y.hub, artifacts, publicUrl: () => "", scheduler: y.scheduler, captains: y.captains, settings: y.settings, notes: y.notes, uploads: new Uploads(uploadsDir(config.dataDir), 1024 * 1024), identities: y.identities }
+    const deps = { store: y.store, tasks: y.tasks, hub: y.hub, artifacts, publicUrl: () => "", scheduler: y.scheduler, captains: y.captains, settings: y.settings, notes: y.notes, uploads: new Uploads(uploadsDir(config.dataDir), 1024 * 1024), identities: y.identities, ...extra }
     const mcp = buildMcpServer(deps, caller)
     const [a, b] = InMemoryTransport.createLinkedPair()
     await mcp.connect(a)
@@ -279,6 +279,21 @@ describe("what else reaches the Coordinator", () => {
       (r.yard.store.db.prepare("SELECT content FROM chat_messages WHERE role = 'notice' AND json_extract(meta_json, '$.taskId') = ?").get(taskId) as { content: string }).content
     expect(notice(r.hidden.id)).toBe('🪝 **Ship the private build** hook "Tell" (Needs input) messaged the Coordinator (PR #9)')
     expect(notice(r.visible.id)).toMatch(/messaged the Coordinator \(PR #9\): Ship the open build waits/)
+
+    // A new task's title is status too: a create_task hook's {summary} stays out of it, and its prompt keeps it.
+    for (const projectId of [r.secret.id, r.open.id]) {
+      engine.create({ name: "Follow up", projectId, trigger: "task.needs_input", action: "create_task", taskTitle: "Follow up: {summary}", prompt: "Pick up: {summary}", enabled: true, createdBy: "Cody" })
+    }
+    for (const t of [r.hidden, r.visible]) engine.handle({ type: "task.needs_input", taskId: t.id, turnId: `turn2_${t.id}`, originHookIds: [], sawPr: false })
+    const started = (projectId: string) => r.yard.store.listTasks({ projectId }).find((t) => t.title.startsWith("Follow up"))!
+    expect(started(r.secret.id)).toMatchObject({ title: `Follow up: ${SUMMARY_WITHHELD}`, prompt: "Pick up: Did the thing. SUMMARY-WORDS" })
+    expect(started(r.open.id).title).toBe("Follow up: Did the thing. SUMMARY-WORDS")
+    const coordinator = await r.as({ kind: "coordinator" }, { hooks: engine })
+    expect((await coordinator("list_tasks", { project: "secret" })).text).toContain(`Follow up: ${SUMMARY_WITHHELD}`)
+    const runs = await coordinator("list_hook_runs", { project: "secret" })
+    expect(runs.ok).toBe(true)
+    expect(runs.text).toContain(`Started task \\"Follow up: ${SUMMARY_WITHHELD}\\"`)
+    r.sealedFromCoordinator()
   })
 })
 

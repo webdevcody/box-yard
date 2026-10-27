@@ -379,7 +379,8 @@ export class HookEngine {
         this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) messaged the Coordinator: ${preview(prompt, 400, "see the Coordinator chat")}`, hook, run)
         this.notice(hook, task, `messaged the Coordinator${pr}${this.peek(task, prompt, 240, "see the Coordinator chat")}`, meta)
       } else {
-        const title = renderHookTemplate(hook.taskTitle ?? hook.name, vars).slice(0, 120).trim() || hook.name
+        // A title is status the Coordinator sees, so a status-only task's {summary} stays out of it (the prompt keeps it).
+        const title = renderHookTemplate(hook.taskTitle ?? hook.name, this.statusOnly(task) ? { ...vars, summary: SUMMARY_WITHHELD } : vars).slice(0, 120).trim() || hook.name
         const created = tasks.createTask({ projectId: task.projectId, title, prompt, source: `hook:${hook.id}` })
         target = created.id
         result = `Started task "${created.title}" (${created.id}).`
