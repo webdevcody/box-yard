@@ -724,7 +724,7 @@ export function proposeIdentities(i: ProposalInput): Pick<IdentityDetection, "pr
   if (!i.online) notes.push("Detected offline: GitHub wasn't asked, so orgs, verified emails, keys and push access aren't known. Detect online for a sharper match.")
   const loose = blocks.filter((b) => !proposals.some((x) => x.author?.from.startsWith(`includeIf "${b.scope}"`)))
   for (const b of loose) {
-    notes.push(`git's includeIf "${b.scope}" block${b.email ? ` (author ${b.email})` : ""}${b.repoOwners.length ? ` for ${b.repoOwners.join(", ")}` : ""} matches no gh account here. If it's another GitHub account, sign in to it with \`gh auth login\` and detect again, or paste a token for it in Settings › Identities.`)
+    notes.push(`git's includeIf "${b.scope}" block${b.email ? ` (author ${b.email})` : ""}${b.repoOwners.length ? ` for ${b.repoOwners.join(", ")}` : ""} matches no gh account here${i.online ? "" : " yet: GitHub wasn't asked, and its emails and keys are what tie a block to an account. Detect online first"}. If it's another GitHub account, sign in to it with \`gh auth login\` and detect again, or paste a token for it in Settings › Identities.`)
   }
   return { proposals, unmatched, notes }
 }

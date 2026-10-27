@@ -164,7 +164,7 @@ describe("detection on a made-up computer", () => {
       ["p_none", "it has no GitHub repo"],
     ])
     expect(r.notes.join("\n")).toMatch(/ghe\.acme\.dev.*github\.com only/)
-    expect(r.notes.join("\n")).toMatch(/includeIf "gitdir:~\/work\/acme\/" block \(author octo@acme\.dev\) for acme-corp matches no gh account/)
+    expect(r.notes.join("\n")).toMatch(/includeIf "gitdir:~\/work\/acme\/" block \(author octo@acme\.dev\) for acme-corp matches no gh account here yet: GitHub wasn't asked[\s\S]*Detect online first/)
     expect(d.recent()).toBe(r)
   })
 
