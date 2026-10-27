@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
-import { BOX_SIZES, shouldNotify, weakerSource } from "../shared/types.js"
+import { BOX_SIZES, WAIT_FIXES, shouldNotify, weakerSource } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
+import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
@@ -20,6 +21,7 @@ import type {
   BudgetSettings,
   BudgetStatus,
   UsageSource,
+  WaitFix,
   ChatMessage,
   ChatRole,
   ClaudeUsageTotals,
@@ -113,6 +115,7 @@ export interface TaskRow {
   wait_reason: string | null
   wait_box_size: string | null
   wait_for_json?: string | null
+  wait_fix?: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -411,6 +414,7 @@ type TaskPatch = Partial<{
   waitReason: string | null
   waitBoxSize: BoxSize | null
   waitFor: WaitFor[]
+  waitFix: WaitFix | null
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -454,6 +458,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   waitReason: "wait_reason",
   waitBoxSize: "wait_box_size",
   waitFor: "wait_for_json",
+  waitFix: "wait_fix",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -1101,6 +1106,7 @@ export class Store {
       waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
       waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
       waitFor: row.status === "queued" && row.wait_reason ? json<WaitFor[]>(row.wait_for_json ?? null, []) : [],
+      waitFix: row.status === "queued" && row.wait_reason && (WAIT_FIXES as readonly string[]).includes(row.wait_fix ?? "") ? (row.wait_fix as WaitFix) : null,
       turnCount: row.turn_count,
       pendingCount: pending.n,
       queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",
@@ -2391,7 +2397,7 @@ export class Store {
     return {
       generatedAt: now,
       rates: settings.costRates,
-      budget: budgetStatus(settings.budget, windows),
+      budget: budgetStatus(settings.budget, windows, todaysRaise(this, now)),
       windows,
       projects,
       tasks,
@@ -3085,16 +3091,17 @@ function usageWindows(now: number): Pick<UsageWindow, "key" | "label" | "since">
   ]
 }
 
-function budgetStatus(budget: BudgetSettings, windows: UsageWindow[]): BudgetStatus {
-  const today = windows.find((w) => w.key === "today")?.totalCostUsd ?? 0
-  const month = windows.find((w) => w.key === "30d")?.totalCostUsd ?? 0
+/** The cloud limits (Settings › Daily / Monthly cloud limit) against what boxes cost; today's raises count today. */
+function budgetStatus(budget: BudgetSettings, windows: UsageWindow[], raisedToday: number): BudgetStatus {
+  const today = windows.find((w) => w.key === "today")?.boxes.costUsd ?? 0
+  const month = windows.find((w) => w.key === "30d")?.boxes.costUsd ?? 0
   const state = (usedUsd: number, limitUsd: number) => ({
     limitUsd,
     usedUsd,
     exceeded: limitUsd > 0 && usedUsd >= limitUsd,
     warning: limitUsd > 0 && usedUsd >= limitUsd * 0.8,
   })
-  const daily = state(today, budget.dailyUsd)
+  const daily = state(today, budget.dailyUsd > 0 ? budget.dailyUsd + raisedToday : 0)
   const monthly = state(month, budget.monthlyUsd)
   return { daily, monthly, blocked: daily.exceeded || monthly.exceeded }
 }

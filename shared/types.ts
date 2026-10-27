@@ -147,6 +147,13 @@ export interface WaitFor {
   title: string
 }
 
+/**
+ * A one-click way out of a wait (Task.waitFix). "raise-cloud-limit": today's cloud limit blocks a new box (raise it
+ * until midnight); "cloud-settings": the monthly cloud limit does (Settings › Usage).
+ */
+export type WaitFix = "raise-cloud-limit" | "cloud-settings"
+export const WAIT_FIXES: readonly WaitFix[] = ["raise-cloud-limit", "cloud-settings"]
+
 export interface Task {
   id: string
   projectId: string
@@ -174,6 +181,8 @@ export interface Task {
   waitBoxSize: BoxSize | null
   /** The tasks holding it back that the wait reason names, in the order it names them (each `title` is in the text), so the UI links them. */
   waitFor: WaitFor[]
+  /** The one-click fix the UI offers next to the wait reason, when there is one (e.g. raise today's cloud limit). */
+  waitFix?: WaitFix | null
   turnCount: number
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
@@ -839,6 +848,61 @@ export interface BudgetStatus {
   daily: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
   monthly: { limitUsd: number; usedUsd: number; exceeded: boolean; warning: boolean }
   blocked: boolean
+}
+
+/**
+ * Cloud spend against Settings › Daily cloud limit (budget.dailyUsd) and Monthly cloud limit (budget.monthlyUsd):
+ * what the boxes cost (Upstash, by the CPU they used). RunPod pods have their own $/hour caps instead.
+ */
+export interface CloudSpend {
+  /** Box spend since local midnight. */
+  todayUsd: number
+  /** Today's limit: Settings' daily limit plus today's raises; 0 when there's no daily limit. */
+  dailyLimitUsd: number
+  /** What "Raise today's limit" added today. */
+  raisedUsd: number
+  /** Box spend over the last 30 days, and the limit on it (0: none). */
+  monthUsd: number
+  monthlyLimitUsd: number
+  /** "warning" from 80% of a limit; "reached" at 100%, when new boxes wait (running work goes on). */
+  state: "ok" | "warning" | "reached"
+  /** Why new boxes wait, when a limit is reached: "today's cloud spend is $10.02 of its $10 limit". */
+  blockedReason: string | null
+  /** How the spend was worked out: the weakest source among the boxes' intervals. */
+  source: UsageSource
+}
+
+/** One box in the cloud meter's list. */
+export interface CloudBox {
+  id: string
+  status: BoxInfo["status"]
+  size: BoxSize
+  /** Names of the projects with a workspace on it. */
+  projects: string[]
+  runningTurns: number
+  /** What it cost today, and since it was made. */
+  todayUsd: number
+  totalUsd: number
+  /** When it went idle (no turn running), and when the idle sweep deletes it; null while it's busy or never. */
+  idleSince: number | null
+  deletesAt: number | null
+  /** Kept past its idle time, and why (BoxInfo.idleHeld). */
+  idleHeld: string | null
+}
+
+/** The cloud meter on the Coordinator (GET /api/cloud). */
+export interface CloudStatus {
+  spend: CloudSpend
+  /** What the boxes cost per hour now: their spend over the last 15 minutes, as an hourly rate. */
+  hourlyUsd: number
+  boxes: { running: number; idle: number; creating: number; total: number }
+  /** Settings › Advanced › Box ceiling (maxBoxes): a safety stop, not a budget. */
+  ceiling: number
+  /** Settings › Idle box deletion, in minutes; 0: idle boxes stay. */
+  idleDeleteMinutes: number
+  list: CloudBox[]
+  /** RunPod GPU pods: their $/hour now against the cap for all pods; null when RunPod isn't set up. */
+  gpu: { pods: number; hourlyUsd: number; capUsd: number } | null
 }
 
 export interface UsageReport {

@@ -28,12 +28,13 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFor } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
+import { cloudSpend, localDay, raiseToday, startOfLocalDay, usd } from "./cloudLimit.js"
 import { userMessageLabel } from "../shared/sender.js"
 import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
@@ -135,6 +136,12 @@ interface Wait {
 const asWait = (text: string | null): Wait | null => (text ? { text, by: [] } : null)
 /** The tasks a reason names (agentRefs: the first two, then "and N more"). */
 const waitFor = (agents: BoxAgent[]): WaitFor[] => named(agents).map((a) => ({ taskId: a.taskId, title: a.title }))
+/** How long a cloud spend reading serves placement before it's summed again. */
+const CLOUD_SPEND_CACHE_MS = 5_000
+/** The cloud meter's $/hour is the boxes' spend over this window, as an hourly rate. */
+const CLOUD_RATE_WINDOW_MS = 15 * 60_000
+/** kv: the day and limits the cloud spend notices were last posted for ({ day, warned, reached }). */
+const CLOUD_NOTICED_KEY = "cloud_limit_noticed"
 const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)"
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
@@ -468,7 +475,7 @@ export class TaskManager {
   private idleHeld = new Map<string, string>()
   /** When the idle sweep may retry each task's failed archive (retryIdleArchives). */
   private idleArchiveRetryAt = new Map<string, number>()
-  private budgetNoticeAt = 0
+  private cloudCache: { at: number; key: string; spend: CloudSpend } | null = null
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
   /** Every box lifecycle event and who did it (server/boxHistory.ts); write it with recordBoxEvent. */
@@ -588,6 +595,18 @@ export class TaskManager {
 
   async start() {
     this.recover()
+    const upgraded = this.settings.upgradeForCloudLimit()
+    if (upgraded.length) {
+      const env = process.env.BOX_POOL_MAX ? ` BOX_POOL_MAX=${process.env.BOX_POOL_MAX} in Box Yard's environment still sets the ceiling; remove it to use Settings.` : ""
+      this.notice(
+        withOwner(
+          `⚙️ **Box limits** changed: boxes are made as work needs them, and a daily cloud limit keeps spend in check. ${upgraded.join("; ")}. Cody can change both in Settings.${env}`,
+          this.owner(),
+        ),
+        { kind: "cloud_limit" },
+        { coordinator: true },
+      )
+    }
     this.timers.push(setInterval(() => void this.poll(), this.c.pollMs))
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
     this.publishDirectory()
@@ -2532,7 +2551,7 @@ export class TaskManager {
 
   private async schedulePass() {
     this.meterBoxes()
-    if (this.budgetBlocked()) return
+    this.noticeCloudSpend()
     const waiting = this.store
       .listTaskRows()
       .filter((r) => this.wantsTurn(r))
@@ -3501,7 +3520,7 @@ export class TaskManager {
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
     const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : this.noNewBoxReason()) : null
-    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull)
+    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, !canGrow && !cap?.full ? this.cloudBlock() : null)
     return null
   }
 
@@ -3525,7 +3544,8 @@ export class TaskManager {
   private async ensureSizedBox(row: TaskRow, min: BoxSize, own: { max: number; used: Set<string> } | null = null) {
     const waitFor = `Waiting for a ${min} box`
     // A project at its own Max boxes waits for (or grows) one of its own boxes; a box on its way for another doesn't help.
-    const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : "the pool is full"
+    const cloud = own ? null : this.cloudBlock()
+    const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : (cloud?.text ?? "the pool is full")
     const pending = this.sizedBoxComing(min, own?.used)
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
     // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
@@ -3544,7 +3564,7 @@ export class TaskManager {
       }
       return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
     }
-    this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min)
+    this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min, [], cloud?.fix ?? null)
   }
 
   /**
@@ -3610,7 +3630,7 @@ export class TaskManager {
    * Say on a queued task why it's waiting when that's about disk space (or else `busy`: Agents per box, memory; or
    * else `waitHere`: no free slot on the box its workspace is on), or clear it.
    */
-  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: Wait | null, waitHere?: string | null) {
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: Wait | null, waitHere?: string | null, noBox?: { text: string; fix: WaitFix } | null) {
     const first = low[0]
     let reason: string | null = null
     if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy.text}` : `Waiting: ${busy.text}`
@@ -3621,17 +3641,22 @@ export class TaskManager {
         reason = `Waiting for disk cleanup on ${low.find((l) => this.janitor.isRunning(l.boxId))?.boxId ?? first.boxId}`
       } else reason = `Waiting for disk space on ${first.boxId}: cleanup couldn't free enough room`
     }
-    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [])
+    // A cloud limit is why no new box helps: the reason says so, and the task offers the fix.
+    if (reason && noBox && !reason.includes(noBox.text)) reason = `${reason}; no new box: ${noBox.text}`
+    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [], reason && noBox ? noBox.fix : null)
   }
 
   /** `by`: the tasks the reason names as holding it back, in its order (Task.waitFor), so the UI can link them. */
-  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null, by: WaitFor[] = []) {
+  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null, by: WaitFor[] = [], fix: WaitFix | null = null) {
     const row = this.store.getTaskRow(taskId)
     const waitFor = reason ? by : []
+    const waitFix = reason ? fix : null
     const same = (row?.wait_for_json ?? null) === (waitFor.length ? JSON.stringify(waitFor) : null)
-    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null) && same)) return
-    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null, waitFor }, { touch: false })
-    if (reason) this.addEvent(taskId, `${reason}.`)
+    const sameFix = (row?.wait_fix ?? null) === waitFix
+    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null) && same && sameFix)) return
+    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null, waitFor, waitFix }, { touch: false })
+    // A fix appearing or going with the same reason isn't news for the task's log.
+    if (reason && !((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === size && same)) this.addEvent(taskId, `${reason}.`)
     this.emitTask(taskId)
   }
 
@@ -3970,18 +3995,23 @@ export class TaskManager {
     return true
   }
 
-  /** Why a task with no free slot can't count on a new box: the pool is at Max boxes, or creating boxes keeps failing. */
+  /**
+   * Why a task with no free slot can't count on a new box: a cloud limit is reached, the pool is at its ceiling (Max
+   * boxes), or creating boxes keeps failing.
+   */
   private noNewBoxReason() {
+    const cloud = this.cloudBlock()
+    if (cloud) return `Waiting for a new box: ${cloud.text}`
     if (this.store.listBoxes().length < this.limits().maxBoxes && this.boxCreateFailing()) {
       return "Waiting for a free slot or a new box: creating boxes keeps failing, so Box Yard retries with backoff"
     }
     return "Waiting for a free slot: every box is full and the pool is at its limit"
   }
 
-  /** Room to create another box (and box creation isn't failing right now). */
+  /** Room to create another box: under the ceiling and today's cloud limit, and box creation isn't failing right now. */
   private poolHasRoom() {
     // listBoxes() includes the placeholders of boxes being created.
-    return !this.boxCreateFailing() && this.store.listBoxes().length < this.limits().maxBoxes
+    return !this.boxCreateFailing() && this.store.listBoxes().length < this.limits().maxBoxes && !this.cloudSpend().blockedReason
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */
@@ -5765,23 +5795,116 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ usage and budget
 
-  private budgetBlocked() {
-    const waiting = this.store
-      .listTaskRows()
-      .some((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
-    if (!waiting) return false
-    const budget = this.store.usageBudgetStatus(this.settings.get())
-    if (!budget.blocked) return false
+  /**
+   * Box spend against Settings › Daily cloud limit, cached for a few seconds (placement asks for every task).
+   * `fresh` reads it again (after a raise or a settings change).
+   */
+  cloudSpend(fresh = false): CloudSpend {
     const now = Date.now()
-    if (now - this.budgetNoticeAt > 30 * 60_000) {
-      this.budgetNoticeAt = now
-      const parts = [
-        budget.daily.exceeded ? `daily budget $${budget.daily.limitUsd.toFixed(2)} (used $${budget.daily.usedUsd.toFixed(2)})` : "",
-        budget.monthly.exceeded ? `monthly budget $${budget.monthly.limitUsd.toFixed(2)} (used $${budget.monthly.usedUsd.toFixed(2)})` : "",
-      ].filter(Boolean)
-      this.notice(`⚠️ Usage budget exceeded (${parts.join(", ")}). New agent turns are paused until you raise the budget in Settings or the window resets.`)
+    const s = this.settings.get()
+    // A change of limits or rates in Settings counts at once.
+    const key = JSON.stringify([s.budget, s.costRates])
+    if (!fresh && this.cloudCache?.key === key && now - this.cloudCache.at < CLOUD_SPEND_CACHE_MS) return this.cloudCache.spend
+    const spend = cloudSpend(this.store, s.budget, s.costRates, now)
+    this.cloudCache = { at: now, key, spend }
+    return spend
+  }
+
+  /** "Raise today's limit": one more day's worth until midnight. New boxes may be made again at once. */
+  raiseCloudLimit(by: "user" | "coordinator" | "captain" = "user"): CloudSpend {
+    const s = this.settings.get()
+    if (s.budget.dailyUsd <= 0) throw new BadRequestError("There's no daily cloud limit to raise (Settings › Usage › Daily cloud limit is off)")
+    const raised = raiseToday(this.store, s.budget, this.cloudSpend(true).todayUsd)
+    const spend = this.cloudSpend(true)
+    const who = by === "user" ? withOwner("Cody", this.owner()) : by === "coordinator" ? "The Coordinator" : "A Captain"
+    this.notice(`⚙️ **Cloud limit** raised: ${who} raised today's limit to ${usd(spend.dailyLimitUsd)} (Settings says ${usd(s.budget.dailyUsd)}; ${usd(raised)} more until midnight).`, { kind: "cloud_limit" })
+    this.schedule()
+    this.emitBoxes()
+    return spend
+  }
+
+  /** The cloud meter (GET /api/cloud): spend against the limits, $/hour now, and every box with what it cost today. */
+  async cloudStatus(): Promise<CloudStatus> {
+    this.meterBoxes()
+    const now = Date.now()
+    const s = this.settings.get()
+    const spend = cloudSpend(this.store, s.budget, s.costRates, now, { month: true })
+    this.cloudCache = { at: now, key: JSON.stringify([s.budget, s.costRates]), spend }
+    const today = this.store.boxSpendSince(startOfLocalDay(now), s.costRates).byBox
+    const recent = this.store.boxSpendSince(now - CLOUD_RATE_WINDOW_MS, s.costRates).totals.costUsd
+    const idleDelete = s.boxIdleDeleteMinutes
+    const list: CloudBox[] = [...this.store.listBoxes(), ...this.store.listDeletingBoxes()].map((b) => {
+      const residents = this.store.listTaskRows({ boxId: b.id })
+      const runningTurns = residents.filter(holdsSlot).length
+      const idleSince = b.status === "ready" && runningTurns === 0 ? b.last_used_at : null
+      return {
+        id: b.id,
+        status: b.status,
+        size: normalizeBoxSize(b.size),
+        projects: [...new Set(residents.map((r) => this.store.getProjectName(r.project_id) ?? r.project_id))],
+        runningTurns,
+        todayUsd: today.get(b.id)?.costUsd ?? 0,
+        totalUsd: boxRowCost(b, s.costRates, now),
+        idleSince,
+        deletesAt: idleSince !== null && idleDelete > 0 ? idleSince + idleDelete * 60_000 : null,
+        idleHeld: this.idleHeld.get(b.id) ?? null,
+      }
+    })
+    let gpu: CloudStatus["gpu"] = null
+    if (this.gpu?.enabled()) {
+      const pods = await this.gpu.provider.listPods().catch(() => null)
+      if (pods) gpu = { pods: pods.length, hourlyUsd: pods.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0), capUsd: this.gpu.settings().totalMaxHourlyUsd }
     }
-    return true
+    return {
+      spend,
+      hourlyUsd: (recent * 3_600_000) / CLOUD_RATE_WINDOW_MS,
+      boxes: {
+        running: list.filter((b) => b.runningTurns > 0).length,
+        idle: list.filter((b) => b.status === "ready" && b.runningTurns === 0).length,
+        creating: list.filter((b) => b.status === "creating").length,
+        total: list.filter((b) => b.status !== "deleting").length,
+      },
+      ceiling: s.maxBoxes,
+      idleDeleteMinutes: idleDelete,
+      list,
+      gpu,
+    }
+  }
+
+  /** Say once a day when cloud spend reaches 80% of today's limit, and when it reaches the limit (again after a raise). */
+  private noticeCloudSpend() {
+    const spend = this.cloudSpend()
+    if (spend.state === "ok") return
+    const day = localDay(Date.now())
+    let seen: { day?: string; warned?: number; reached?: number } = {}
+    try {
+      seen = JSON.parse(this.store.getKv(CLOUD_NOTICED_KEY) ?? "{}") ?? {}
+    } catch {}
+    if (seen.day !== day) seen = { day }
+    const limit = spend.dailyLimitUsd || spend.monthlyLimitUsd
+    if (spend.state === "reached") {
+      if (seen.reached === limit) return
+      seen.reached = seen.warned = limit
+      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Coordinator, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
+      this.notice(`⚠️ **Cloud spend** hit the limit: ${spend.blockedReason}. New boxes wait ${raise}; running agents keep going, and free slots on the boxes there are still used.`, { kind: "cloud_limit" }, { coordinator: true })
+    } else {
+      if (seen.warned === limit) return
+      seen.warned = limit
+      const what = spend.dailyLimitUsd > 0 && spend.todayUsd >= spend.dailyLimitUsd * 0.8 ? `${usd(spend.todayUsd)} of today's ${usd(spend.dailyLimitUsd)} limit` : `${usd(spend.monthUsd)} of the ${usd(spend.monthlyLimitUsd)} monthly limit`
+      this.notice(`⚠️ **Cloud spend** reached 80%: ${what}. At the limit new boxes wait; running work goes on.`, { kind: "cloud_limit" }, { coordinator: true })
+    }
+    this.store.setKv(CLOUD_NOTICED_KEY, JSON.stringify(seen))
+  }
+
+  /** A new box can't be made because a cloud limit is reached: the reason and its one-click fix, or null. */
+  private cloudBlock(): { text: string; fix: WaitFix } | null {
+    const spend = this.cloudSpend()
+    if (!spend.blockedReason) return null
+    const daily = spend.blockedReason.startsWith("today")
+    return {
+      text: daily ? `${spend.blockedReason} (raise today's limit, or it resets at midnight)` : `${spend.blockedReason} (raise it in Settings › Usage)`,
+      fix: daily ? "raise-cloud-limit" : "cloud-settings",
+    }
   }
 
   /** Logs the turn's Claude usage; returns the turn's own cost (the CLI reports the session's running total), or null when it reported none. */

@@ -19,7 +19,7 @@ import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { SETTINGS_GROUPS, changeLine, type SettingsGroup, type SettingsTools } from "./settingsTools.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type CloudSpend, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS, isGpuBox } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
@@ -27,6 +27,7 @@ import type { BoxActor } from "../shared/boxHistory.js"
 import { errorMessage } from "./util/retry.js"
 import { PR_REPORT_FRESH_MS } from "./prs.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
+import { usd } from "./cloudLimit.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 import { loadLine, memLine } from "../shared/memory.js"
@@ -181,6 +182,15 @@ interface BoxSettingsArgs {
   gpu_cloud?: "SECURE" | "COMMUNITY" | null
   gpu_min_ram_gb?: number | null
   gpu_min_vcpus?: number | null
+}
+
+/** pool_status's line on cloud spend: "today $3.20 of the $10 daily limit (32%)", and what happens at the limit. */
+function cloudLine(spend: CloudSpend): string {
+  const today = spend.dailyLimitUsd > 0 ? `today ${usd(spend.todayUsd)} of the ${usd(spend.dailyLimitUsd)} daily limit (${Math.round((spend.todayUsd / spend.dailyLimitUsd) * 100)}%)` : `today ${usd(spend.todayUsd)}, no daily limit`
+  const raised = spend.raisedUsd > 0 ? `, raised ${usd(spend.raisedUsd)} until midnight` : ""
+  const month = spend.monthlyLimitUsd > 0 ? `; last 30 days ${usd(spend.monthUsd)} of the ${usd(spend.monthlyLimitUsd)} monthly limit` : ""
+  const state = spend.blockedReason ? `. Limit reached: new boxes wait (running work goes on and free slots are still used); raise_cloud_limit raises today's` : spend.state === "warning" ? ". Over 80%" : ""
+  return `${today}${raised}${month}${state}`
 }
 
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
@@ -1824,6 +1834,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           ),
         },
         resize_box: resizeGuard(),
+        // What boxes cost today against Settings › Daily cloud limit: at the limit new boxes wait (running work goes on).
+        cloud: cloudLine(tasks.cloudSpend()),
         // RunPod GPU projects: their pods (each a box of its own, runpod-<project>[-<n>]), spend and $/hr caps.
         ...(await gpuPools()),
         // Docker projects: their one container each (docker-<project>), image and limits.
@@ -1837,6 +1849,21 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           }),
       })
     }),
+  )
+
+  coordinatorOnly(
+    server.registerTool(
+      "raise_cloud_limit",
+      {
+        description:
+          "Raise today's cloud limit (Settings › Daily cloud limit) by one more day's worth, until local midnight, so boxes waiting on it are made now. " +
+          "Use it when Cody asks to; pool_status's cloud line says where spend stands. To change the limit for good, use update_settings budget.dailyUsd.",
+      },
+      safe(async () => {
+        const spend = tasks.raiseCloudLimit("coordinator")
+        return ok({ raised: true, cloud: cloudLine(spend) })
+      }),
+    ),
   )
 
   // ---------------------------------------------------------------- global Settings

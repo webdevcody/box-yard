@@ -732,6 +732,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE boxes ADD COLUMN measured_usd REAL NOT NULL DEFAULT 0;
   ALTER TABLE box_usage_intervals ADD COLUMN compute_usd REAL;
   `,
+  `
+  -- The one-click fix a queued task's wait reason offers (Task.waitFix), e.g. raise-cloud-limit.
+  ALTER TABLE tasks ADD COLUMN wait_fix TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
