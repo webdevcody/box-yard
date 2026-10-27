@@ -224,7 +224,7 @@ function IdentityCard({ identity: i, projects, fid }: { identity: Identity; proj
           {i.isDefault && (
             <Fact label="Uses">
               The keys in{" "}
-              <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("credentials")}>
+              <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("credentials")}>
                 Settings › Credentials
               </button>{" "}
               (env vars, saved keys or this computer's gh login).
@@ -383,7 +383,7 @@ function IdentityForm({ fid, identity: i, edit, onEdit }: { fid: (k: string) => 
       {isDefault ? (
         <p className="text-xs leading-relaxed text-zinc-500">
           Its GitHub token and Claude login are the ones in{" "}
-          <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("credentials")}>
+          <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("credentials")}>
             Settings › Credentials
           </button>
           .
@@ -723,6 +723,7 @@ function Detection({
                       <input type="checkbox" className="mt-0.5" disabled={!on} checked={on && (picked[p.login] ?? []).includes(x.id)} onChange={(e) => toggleProject(p.login, x.id, e.target.checked)} />
                       <span>
                         <span className="text-zinc-200">{projects.get(x.id)?.name ?? x.name}</span> <Muted>· {x.why}</Muted>
+                        {existing && projects.get(x.id)?.identityId === existing.id && <Muted> · uses {existing.name} already</Muted>}
                       </span>
                     </label>
                   ))

@@ -690,7 +690,7 @@ function ProjectDockerSettings({ draft, setDraft }: { draft: DockerDraft; setDra
       <p className="text-xs text-zinc-500">
         Each task works in this project's own container on this computer: only its workspace volume is mounted (no folder of yours, no Docker socket), and the GitHub and Claude credentials from
         Settings › Credentials are put inside it, never in the image. Previews reach http://localhost.{" "}
-        <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("docker")}>
+        <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("docker")}>
           Settings › Docker
         </button>
       </p>
@@ -872,7 +872,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
             {runner === "gpu"
               ? "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."
               : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
-            <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
+            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
               Settings › RunPod GPU
             </button>
           </p>
@@ -902,7 +902,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           </div>
         </Field>
         <p className="text-xs text-zinc-500">
-          <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("identities")}>
+          <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("identities")}>
             Settings › Identities
           </button>{" "}
           adds accounts, or imports the ones on this computer.
