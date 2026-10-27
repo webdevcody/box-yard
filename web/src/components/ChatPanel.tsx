@@ -227,6 +227,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           textareaRef={box}
           handleRef={composer}
           panelRef={panel}
+          historyKey="coordinator"
           className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
         />
       </div>

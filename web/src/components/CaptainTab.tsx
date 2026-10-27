@@ -148,7 +148,7 @@ export function CaptainTab({ project }: { project: Project }) {
         </StickyScroll>
       </SelectionToTask>
 
-      <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} />
+      <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} historyKey={`captain:${project.id}`} />
     </section>
   )
 }

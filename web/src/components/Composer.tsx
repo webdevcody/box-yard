@@ -10,6 +10,7 @@ import { DictationStatus, MicButton } from "./Dictation"
 import { insertTranscript } from "../lib/dictation"
 import { useDictation } from "../lib/useDictation"
 import { primeSendSound } from "../lib/sendSound"
+import { browseStep, readHistory, rememberPrompt, type Browse } from "../lib/promptHistory"
 import type { Attachment } from "../../../shared/types"
 
 interface Pending {
@@ -39,12 +40,16 @@ export interface ComposerHandle {
 export const COMPOSER_FOOTER =
   "sticky bottom-0 z-10 border-t border-zinc-900 bg-zinc-950/95 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur"
 
+/** The text's box metrics, shared by the textarea and the history ghost drawn over it. */
+const TEXT = "px-3 pt-3 pb-1 text-base leading-6 sm:pt-2.5 sm:text-sm sm:leading-5"
+
 /**
  * The message box shared by the orchestrator chat and task threads: Enter
  * sends, Shift+Enter adds a line, files can be picked, dropped or pasted.
  * `onSubmit` gets the text and the uploaded files; the box then clears itself.
  * If it returns the send's promise, a failed send puts the text and files back (focus
  * never left), and a successful one on a touch device blurs the box to close the keyboard.
+ * With a `historyKey`, Up in the empty box shows the prompts sent from it (lib/promptHistory.ts).
  * The draft lives here, not in the parent, so typing re-renders only this box
  * and never the (long) message list next to it.
  */
@@ -55,6 +60,7 @@ export function Composer({
   textareaRef,
   panelRef,
   handleRef,
+  historyKey,
 }: {
   onSubmit: (text: string, attachments: Attachment[]) => void | Promise<unknown>
   placeholder: string
@@ -63,8 +69,13 @@ export function Composer({
   handleRef?: Ref<ComposerHandle>
   /** The panel that accepts dropped files, message list included. It must be `relative`. */
   panelRef: RefObject<HTMLElement | null>
+  /** Whose sent prompts Up/Down walk through ("coordinator", "captain:<projectId>", "task:<taskId>"). */
+  historyKey?: string
 }) {
   const [value, setValue] = useState("")
+  // An older prompt shown as a gray ghost while browsing with Up/Down; the value stays empty until Enter takes it.
+  const [browse, setBrowse] = useState<Browse>(null)
+  const ghost = useRef<HTMLDivElement>(null)
   const [files, setFiles] = useState<Pending[]>([])
   const [dragging, setDragging] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
@@ -134,7 +145,8 @@ export function Composer({
     // Hold the row's height while measuring so the panel (and the message list scroll) doesn't move.
     row.style.minHeight = `${row.offsetHeight}px`
     el.style.height = "auto"
-    const full = el.scrollHeight
+    // A ghost prompt sizes the box like real text would, so a long one shows in full.
+    const full = Math.max(el.scrollHeight, ghost.current?.scrollHeight ?? 0)
     el.style.height = `${Math.min(full, max)}px`
     row.style.minHeight = ""
     const over = full > max
@@ -145,7 +157,14 @@ export function Composer({
     if (over && document.activeElement === el && el.selectionEnd === el.value.length) el.scrollTop = el.scrollHeight
   }, [expanded])
 
-  useLayoutEffect(resize, [resize, value, files.length])
+  useLayoutEffect(resize, [resize, value, files.length, browse])
+
+  // Anything that puts text in the box (typing, paste, dictation, an example prompt) ends browsing, and so
+  // does another chat's history.
+  useEffect(() => {
+    if (value) setBrowse(null)
+  }, [value])
+  useEffect(() => setBrowse(null), [historyKey])
 
   useEffect(() => {
     const el = input.current
@@ -184,10 +203,14 @@ export function Composer({
     setValue("")
     setFiles([])
     const done = () => sent.forEach((f) => f.preview && URL.revokeObjectURL(f.preview))
-    if (!pending) return done()
+    if (!pending) {
+      rememberPrompt(historyKey, text)
+      return done()
+    }
     pending.then(
       () => {
         done()
+        rememberPrompt(historyKey, text)
         // The on-screen keyboard closes; the list (pinned by the send) follows the viewport as it grows.
         if (isTouchDevice() && input.current && document.activeElement === input.current) input.current.blur()
       },
@@ -366,23 +389,53 @@ export function Composer({
         <div className="px-1 pt-1.5 empty:hidden">
           <DictationStatus machine={dictation} />
         </div>
-        <textarea
-          ref={setTextarea}
-          rows={1}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onPaste={onPaste}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault()
-              submit()
-            }
-          }}
-          placeholder={placeholder}
-          // The text starts at the box's left padding and wraps under nothing. A long placeholder stays on
-          // one line (ellipsis) instead of growing an empty box on narrow screens.
-          className="scroll-thin block w-full resize-none overflow-y-hidden bg-transparent px-3 pt-3 pb-1 text-base leading-6 text-zinc-100 placeholder:text-zinc-600 placeholder-shown:truncate focus:outline-none sm:pt-2.5 sm:text-sm sm:leading-5"
-        />
+        <div className="relative">
+          <textarea
+            ref={setTextarea}
+            rows={1}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onPaste={onPaste}
+            onBlur={() => setBrowse(null)}
+            onKeyDown={(e) => {
+              // Mid-composition (IME), Enter and the arrows belong to the input method.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
+              const step = browseStep(browse, e, !value, () => readHistory(historyKey))
+              if (step.handled) {
+                e.preventDefault()
+                // Escape only clears the ghost: it doesn't also leave Zen or close a panel.
+                e.stopPropagation()
+              }
+              if (step.browse !== browse) setBrowse(step.browse)
+              if (step.select !== undefined) {
+                const text = step.select
+                flushSync(() => setValue(text))
+                e.currentTarget.setSelectionRange(text.length, text.length)
+              }
+              if (step.handled) return
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault()
+                submit()
+              }
+            }}
+            placeholder={browse ? "" : placeholder}
+            aria-description={browse ? `Earlier prompt: ${browse.text}. Enter to use it, Escape to clear.` : undefined}
+            // The text starts at the box's left padding and wraps under nothing. A long placeholder stays on
+            // one line (ellipsis) instead of growing an empty box on narrow screens.
+            className={cx(TEXT, "scroll-thin block w-full resize-none overflow-y-hidden bg-transparent text-zinc-100 placeholder:text-zinc-600 placeholder-shown:truncate focus:outline-none")}
+          />
+          {browse && (
+            // Same box metrics as the text, so taking it with Enter doesn't move a letter.
+            <div
+              ref={ghost}
+              aria-hidden
+              data-testid="history-ghost"
+              className={cx(TEXT, "pointer-events-none absolute inset-x-0 top-0 max-h-full overflow-hidden whitespace-pre-wrap wrap-anywhere text-zinc-500")}
+            >
+              {browse.text}
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-1 px-1.5 pb-1.5">
           <input
             ref={picker}
