@@ -1,7 +1,7 @@
 // The small toolbar on a chat message's top-right edge (as on claude.ai): respond, copy and a ··· menu. Respond opens
 // the same New task popover a text selection does (SelectionToTask), with the whole message as the quote. With a mouse
-// it shows on hover and keyboard focus; on touch it's always there, quietly, above the message (MESSAGE_BLOCK makes
-// room for it), so nothing new sits over the text or catches taps.
+// it shows on hover and keyboard focus; on touch a tap on the message shows it and a tap anywhere else hides it. It's
+// absolutely placed inside the message (no overlay, no portal), so it never moves the layout or catches other taps.
 import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject, type SyntheticEvent } from "react"
 import { createPortal } from "react-dom"
 import { Check, Copy, MessageSquarePlus, MoreHorizontal, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
@@ -9,15 +9,14 @@ import { useQuoteToTask } from "./SelectionToTask"
 import { toast } from "../lib/toast"
 import { cx } from "./ui"
 
-/**
- * The classes for the element a MessageActions sits in (a bubble, a reply, a notice card): the hover group, the
- * toolbar's positioning box and, on touch, room above it for the always-shown toolbar. Margin, so a bubble's own
- * background doesn't grow, and the same on every render, so nothing shifts.
- */
-export const MESSAGE_BLOCK = "group/msg relative [@media(hover:none)]:mt-[18px]"
+/** The classes for the element a MessageActions sits in (a bubble, a reply, a notice card): the hover group and the toolbar's positioning box. */
+export const MESSAGE_BLOCK = "group/msg relative"
+
+/** What a tap on a message means by itself; tapping one of these inside it doesn't show the toolbar. */
+const INTERACTIVE = "a, button, input, textarea, select, summary, label, [role=button], [role=link], [role=menuitem]"
 
 const BUTTON =
-  "grid h-6 w-7 place-items-center rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none aria-expanded:bg-zinc-800 aria-expanded:text-zinc-100"
+  "grid h-6 w-7 place-items-center [@media(pointer:coarse)]:h-8 [@media(pointer:coarse)]:w-9 rounded-md text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none aria-expanded:bg-zinc-800 aria-expanded:text-zinc-100"
 
 /** Keeps the toolbar's clicks and keys from the row under it (a notice card opens its task, a notice row folds). */
 const stop = (e: SyntheticEvent) => e.stopPropagation()
@@ -29,6 +28,30 @@ export const MessageActions = memo(function MessageActions({ text, className }: 
   const [responding, setResponding] = useState(false)
   const [menu, setMenu] = useState(false)
   const [copied, setCopied] = useState(false)
+  const bar = useRef<HTMLDivElement>(null)
+  /** Touch: shown by a tap on the message, until a tap anywhere else. */
+  const [tapped, setTapped] = useState(false)
+
+  useEffect(() => {
+    const block = bar.current?.parentElement
+    if (!block || !window.matchMedia?.("(hover: none)").matches) return
+    const tap = (e: Event) => {
+      const hit = (e.target as Element | null)?.closest?.(INTERACTIVE)
+      if ((hit && hit !== block && block.contains(hit)) || !window.getSelection()?.isCollapsed) return
+      setTapped(true)
+    }
+    block.addEventListener("click", tap)
+    return () => block.removeEventListener("click", tap)
+  }, [])
+
+  useEffect(() => {
+    if (!tapped) return
+    const away = (e: Event) => {
+      if (!bar.current?.parentElement?.contains(e.target as Node)) setTapped(false)
+    }
+    document.addEventListener("pointerdown", away, true)
+    return () => document.removeEventListener("pointerdown", away, true)
+  }, [tapped])
 
   useEffect(() => {
     if (!copied) return
@@ -46,19 +69,19 @@ export const MessageActions = memo(function MessageActions({ text, className }: 
 
   return (
     <div
+      ref={bar}
       role="toolbar"
       aria-label="Message actions"
       data-message-actions
-      data-open={responding || menu || undefined}
+      data-open={responding || menu || tapped || undefined}
       onClick={stop}
       onAuxClick={stop}
       onKeyDown={stop}
       className={cx(
-        "absolute -top-5 right-2 z-10 flex items-center gap-px rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 shadow-lg shadow-black/40 transition-opacity",
-        // Touch: always shown, quieter, wholly above the message in the room MESSAGE_BLOCK keeps.
-        "[@media(hover:none)]:-top-[30px] [@media(hover:none)]:right-0 [@media(hover:none)]:bg-zinc-950 [@media(hover:none)]:shadow-none",
-        // Mouse: hidden (and not catching clicks) until the message is hovered or focused, or its popover is open.
-        "[@media(hover:hover)]:pointer-events-none [@media(hover:hover)]:opacity-0",
+        // On the message's top edge, mostly in the gap above it, like claude.ai's.
+        "absolute -top-3.5 right-2 z-10 flex items-center gap-px rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 shadow-lg shadow-black/40 transition-opacity",
+        // Hidden (and not catching clicks) until the message is hovered, focused or tapped, or its popover is open.
+        "pointer-events-none opacity-0",
         "group-focus-within/msg:pointer-events-auto group-focus-within/msg:opacity-100 group-hover/msg:pointer-events-auto group-hover/msg:opacity-100 data-open:pointer-events-auto data-open:opacity-100",
         className,
       )}
@@ -177,7 +200,7 @@ function MessageMenu({ trigger, items, onClose }: { trigger: RefObject<HTMLButto
       aria-label="Message actions"
       style={style}
       onKeyDown={move}
-      className="fixed z-40 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl shadow-black/50"
+      className="fixed z-40 w-max max-w-[calc(100vw-1rem)] min-w-48 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl shadow-black/50"
     >
       {items.map(({ icon: Icon, label, run }) => (
         <button
@@ -188,7 +211,7 @@ function MessageMenu({ trigger, items, onClose }: { trigger: RefObject<HTMLButto
             onClose()
             run()
           }}
-          className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:bg-zinc-800 focus-visible:outline-none sm:min-h-0 sm:py-1.5"
+          className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 text-left text-sm whitespace-nowrap text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:bg-zinc-800 focus-visible:outline-none sm:min-h-0 sm:py-1.5"
         >
           <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
           {label}

@@ -168,6 +168,21 @@ describe("the message toolbar", () => {
     expect(prompt).toContain("- Project: alpha (prj_alpha1)")
   })
 
+  it("on touch, a tap on the message shows the toolbar and a tap elsewhere hides it; a tap on a link doesn't", () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q === "(hover: none)", media: q, addEventListener() {}, removeEventListener() {} }))
+    inChat(ORCH, () => {}, line(chat("chat_reply0001", "assistant", "See [the docs](https://example.com) for more")), line(chat("chat_reply0002", "assistant", "Other")))
+    const [bar, other] = toolbars()
+    const reply = host.querySelector("[data-testid=chat-reply]")!
+    expect(bar!.hasAttribute("data-open")).toBe(false)
+    act(() => void reply.querySelector("a")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })))
+    expect(bar!.hasAttribute("data-open")).toBe(false)
+    click(reply.querySelector("p")!)
+    expect(bar!.hasAttribute("data-open")).toBe(true)
+    expect(other!.hasAttribute("data-open")).toBe(false)
+    act(() => void other!.parentElement!.dispatchEvent(new Event("pointerdown", { bubbles: true })))
+    expect(bar!.hasAttribute("data-open")).toBe(false)
+  })
+
   it("has no Respond where there's nowhere to send it, but still Copy", () => {
     inChat(null, () => {}, line(chat("chat_reply0001", "assistant", "A reply")))
     expect(host.querySelector("[data-testid=message-respond]")).toBeNull()

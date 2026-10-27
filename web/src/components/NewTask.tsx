@@ -233,8 +233,9 @@ export function NewTaskPopover({
       }}
     >
       {preview && (
-        <blockquote data-testid="selection-quote" title={quote} className="line-clamp-3 rounded-lg border border-zinc-800 border-l-2 border-l-yard-500/60 bg-zinc-900/60 px-3 py-2 text-xs leading-5 wrap-anywhere text-zinc-400">
-          {preview}
+        <blockquote data-testid="selection-quote" title={quote} className="rounded-lg border border-zinc-800 border-l-2 border-l-yard-500/60 bg-zinc-900/60 px-3 py-2 text-xs leading-5 wrap-anywhere text-zinc-400">
+          {/* Clamped inside the padding, or a fourth line peeks out under the third. */}
+          <span className="line-clamp-3">{preview}</span>
         </blockquote>
       )}
       <textarea
