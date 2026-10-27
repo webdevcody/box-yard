@@ -1,5 +1,6 @@
-// A link to a server-hosted file. A plain click on a file the app can show opens the preview modal; Cmd/Ctrl,
-// Shift or middle clicks and "copy link" behave like a normal new-tab link.
+// A link to a server-hosted file (an artifact, an upload). Files are in-app links, so they never wear the ↗ of
+// NewTabLink: a plain click on a file the app can show opens the preview modal, one it can't show (a zip) downloads
+// in place instead of opening a blank tab. Cmd/Ctrl, Shift or middle clicks and "copy link" behave like a normal link.
 import type { ComponentProps, MouseEvent } from "react"
 import { interceptPreviewClick, isFilePath, previewKind, type PreviewItem } from "../lib/filePreview"
 import { openPreview } from "../lib/preview"
@@ -39,7 +40,8 @@ type FileLinkProps = Omit<ComponentProps<"a">, "href"> & {
 
 export function FileLink({ href, name, size, mime, fileTitle, gallery, onClick, children, ...rest }: FileLinkProps) {
   const item: PreviewItem = { url: href, name, size, mime, title: fileTitle }
-  const kind = isFilePath(href) ? previewKind(item) : null
+  const file = isFilePath(href)
+  const kind = file ? previewKind(item) : null
   const click = (e: MouseEvent<HTMLAnchorElement>) => {
     onClick?.(e)
     const anchor = e.currentTarget
@@ -49,10 +51,10 @@ export function FileLink({ href, name, size, mime, fileTitle, gallery, onClick, 
   }
   return (
     <a
-      target="_blank"
-      rel="noopener noreferrer"
+      {...(file && !kind ? { download: name ?? "" } : { target: "_blank", rel: "noopener noreferrer" })}
       {...rest}
       href={href}
+      data-file=""
       onClick={click}
       data-preview={kind ?? undefined}
       data-preview-name={kind ? name : undefined}

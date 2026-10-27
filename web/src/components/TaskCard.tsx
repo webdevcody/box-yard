@@ -141,7 +141,8 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
   return (
     <NewTabLink
       href={preview.url}
-      title={preview.label && preview.label !== preview.url ? `${preview.label}\n${preview.url}` : preview.url}
+      title={preview.label && preview.label !== preview.url ? preview.label : undefined}
+      mark="end"
       className="inline-flex max-w-full items-center gap-1 whitespace-nowrap rounded-md border border-sky-900/60 bg-sky-500/10 px-1.5 py-0.5 text-xs font-medium text-sky-300 transition hover:bg-sky-500/20"
     >
       <Globe className="h-3 w-3 shrink-0" /> Preview :{preview.port}
