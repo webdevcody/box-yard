@@ -1,8 +1,10 @@
 import { config, configProblems } from "./config.js"
 import { createBoxYard } from "./app.js"
 import { bindProblem, isLoopback, listenUrls } from "./bind.js"
+import { passwordProblems, passwordRefusal } from "./password.js"
 
-const refused = bindProblem(config)
+const weak = config.password ? passwordProblems(config.password) : []
+const refused = weak.length ? passwordRefusal(weak) : bindProblem(config)
 if (refused) {
   console.error(`\n[box-yard] Not starting.\n${refused.replace(/^/gm, "  ")}\n`)
   process.exit(1)
