@@ -822,8 +822,8 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
-    const t = store.getTask(req.params.id!)
-    await tasks.requireRunner(body.runsOn, t?.projectId, t ? store.taskEnv(t.id) : {})
+    const row = store.getTaskRow(req.params.id!)
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
     res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))

@@ -108,7 +108,7 @@ export class Setup {
 
   /**
    * Why a task asked to run on `runner` (a per-task runs_on) can't, in plain words, or null when it can. "local" needs
-   * this computer's `claude`, signed in or with a Claude key in Settings; "box" needs Upstash boxes (a key, or
+   * this computer's `claude`, signed in or with a Claude key; "box" needs Upstash boxes (a key, or
    * BOX_PROVIDER=local); "docker" needs Docker running and a Claude key (a container can't use this computer's
    * login). Mock mode needs none. Never a reason to run it somewhere else instead. `claudeKey` says whether the task's
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
