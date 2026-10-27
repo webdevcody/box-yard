@@ -4,8 +4,8 @@ import { memo, useState } from "react"
 import { Link } from "wouter"
 import { Boxes, ChevronRight, Cpu, Settings as SettingsIcon } from "lucide-react"
 import type { CloudStatus } from "../../../shared/types"
-import { useCloud, useRaiseCloudLimit } from "../lib/queries"
-import { BAR_TONE, METER_TONE, boxState, countsLine, dollars, limitPct, meterLabel, perHour, todayLine } from "../lib/cloud"
+import { useAllowMoreBoxes, useCloud, useRaiseCloudLimit } from "../lib/queries"
+import { BAR_TONE, METER_TONE, boxState, countsLine, dollars, limitPct, meterLabel, meterState, newBoxes, perHour, todayLine } from "../lib/cloud"
 import { useOpenSettings } from "./SettingsDialog"
 import { Modal } from "./Modal"
 import { Button, cx } from "./ui"
@@ -36,12 +36,12 @@ export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inli
       <button
         type="button"
         data-testid={variant === "inline" ? "cloud-meter" : "cloud-meter-strip"}
-        data-state={s.spend.state}
+        data-state={meterState(s)}
         onClick={() => setOpen(true)}
         title={label}
         aria-label={label}
         aria-haspopup="dialog"
-        className={cx(CHIP, VARIANT[variant], METER_TONE[s.spend.state])}
+        className={cx(CHIP, VARIANT[variant], METER_TONE[meterState(s)])}
       >
         <Boxes className="h-3.5 w-3.5 shrink-0" aria-hidden />
         {variant === "inline" ? (
@@ -68,6 +68,7 @@ export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inli
 function CloudSheet({ status: s, onClose }: { status: CloudStatus; onClose: () => void }) {
   const openSettings = useOpenSettings()
   const raise = useRaiseCloudLimit()
+  const allow = useAllowMoreBoxes()
   const now = Date.now()
   const { spend } = s
   const pct = limitPct(spend)
@@ -169,6 +170,18 @@ function CloudSheet({ status: s, onClose }: { status: CloudStatus; onClose: () =
           </div>
         )}
 
+        {s.fanout.wanted > 0 && (
+          <div role="status" data-testid="cloud-fanout" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-amber-100">
+            <p>
+              <span className="font-semibold">{newBoxes(s.fanout.wanted)} wait for your OK:</span> the queue wants more than the {s.fanout.freePerHour} an hour Box
+              Yard makes without asking. Up to {perHour(s.fanout.upToHourlyUsd)} if every core is busy.
+            </p>
+            <Button className="mt-2" variant="primary" loading={allow.isPending} onClick={() => allow.mutate()} data-testid="allow-more-boxes">
+              Allow them for an hour
+            </Button>
+          </div>
+        )}
+
         <section aria-label="Now">
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-zinc-300">Now</span>
@@ -176,6 +189,11 @@ function CloudSheet({ status: s, onClose }: { status: CloudStatus; onClose: () =
           </div>
           <p className="mt-0.5 text-xs text-zinc-500">
             {countsLine(s.boxes)} · up to {s.ceiling} boxes at once (a safety stop)
+          </p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            {s.fanout.allowedUntil
+              ? `More than ${s.fanout.freePerHour} new boxes an hour allowed until ${new Date(s.fanout.allowedUntil).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`
+              : `Up to ${s.fanout.freePerHour} new boxes an hour without asking`}
           </p>
           {s.gpu && (
             <p className="mt-1.5 flex items-center gap-1.5 text-xs text-zinc-400 tabular-nums">

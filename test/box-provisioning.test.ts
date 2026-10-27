@@ -8,7 +8,8 @@ import type { WorkerSize } from "../shared/types.js"
 import { FAKE_CLAUDE, testConfig, waitFor } from "./helpers.js"
 
 // Creating boxes for a queue: several at once up to Settings › Boxes created at once, never past Max boxes, only as
-// many as the queued tasks need, and a failed or rate-limited create backs off without holding up the rest.
+// many as the queued tasks need, and a failed or rate-limited create backs off without holding up the rest. At most 5
+// start a minute, and past 15 an hour the rest wait on one OK from Cody.
 
 /** Creates finish only when the test says so. A task's turn is a `sleep`: agents take 3 node processes each. */
 class GatedBoxes extends LocalProvider {
@@ -71,7 +72,8 @@ async function start(overrides: Partial<Config>, tuning: Partial<BoxYard["tasks"
   const boxesDir = path.join(config.dataDir, "local-boxes")
   const provider = new GatedBoxes(boxesDir, FAKE_CLAUDE)
   const yard = createBoxYard(config, { webDir: "/nonexistent", provider })
-  Object.assign(yard.tasks.boxCreateTuning, { retryBaseMs: 200, retryMaxMs: 2000, rateLimitMs: 400, ...tuning })
+  // The pace and the fan-out question have their own tests; the others count on the concurrency alone.
+  Object.assign(yard.tasks.boxCreateTuning, { retryBaseMs: 200, retryMaxMs: 2000, rateLimitMs: 400, paceCreates: 100, freePerHour: 100, ...tuning })
   await yard.start()
   const r = { yard, provider, boxesDir }
   running.push(r)
@@ -231,5 +233,50 @@ describe("parallel box creation", () => {
     await waitFor(() => r.provider.pending === 2, "2 creates")
     await pause(300)
     expect(r.provider.starts).toHaveLength(2)
+  })
+})
+
+describe("pace and the fan-out question", () => {
+  const notices = (r: Running) => (r.yard.store.db.prepare("SELECT content FROM chat_messages WHERE role = 'notice' ORDER BY id").all() as { content: string }[]).map((n) => n.content)
+
+  it("starts at most the pace's creates in its window, then the rest as it allows", async () => {
+    const r = await start({ maxBoxes: 10, boxCreateConcurrency: 10 }, { paceCreates: 2, paceWindowMs: 800 })
+    const p = r.yard.store.createProject({ name: "town" })
+    queue(r, p.id, 4)
+    await waitFor(() => r.provider.starts.length === 2, "2 creates")
+    await pause(300)
+    expect(r.provider.starts).toHaveLength(2)
+    // The window passes: the next two start on their own, without another task or box to wake the scheduler.
+    await waitFor(() => r.provider.starts.length === 4, "2 more creates", 3000)
+    expect(r.provider.starts[2]!.at - r.provider.starts[0]!.at).toBeGreaterThanOrEqual(750)
+  })
+
+  it("makes the hour's free boxes, then asks once for the rest, and makes them when allowed", async () => {
+    const r = await start({ maxBoxes: 20, boxCreateConcurrency: 10 }, { freePerHour: 2 })
+    const p = r.yard.store.createProject({ name: "town" })
+    const tasks = queue(r, p.id, 5)
+    await waitFor(() => r.provider.starts.length === 2, "the 2 free creates")
+    // The three tasks those boxes won't take wait for the OK, with the fix; what they'd cost at most is in the reason.
+    const held = () => r.yard.store.listTasks().filter((t) => t.waitFix === "allow-boxes")
+    await waitFor(() => held().length === 3, "3 tasks held for the OK")
+    const rate = r.yard.settings.get().costRates.boxActiveCpuHourlyUsd.small * 2 // 2 cores
+    expect(held()[0]!.waitReason).toBe(
+      `Waiting for a new box: the queue wants 3 boxes more than the 2 an hour Box Yard makes without asking (up to $${(3 * rate).toFixed(2)}/h if every core is busy); allow them for an hour`,
+    )
+    const status = await r.yard.tasks.cloudStatus()
+    expect(status.fanout).toMatchObject({ freePerHour: 2, wanted: 3, allowedUntil: null })
+    // One question for the Coordinator, not one per pass.
+    await pause(300)
+    expect(notices(r).filter((n) => n.startsWith("🙋 **New boxes** need"))).toHaveLength(1)
+    expect(r.provider.starts).toHaveLength(2)
+
+    r.yard.tasks.allowMoreBoxes("user")
+    await waitFor(() => r.provider.starts.length === 5, "the other 3 creates")
+    expect(held()).toHaveLength(0)
+    expect((await r.yard.tasks.cloudStatus()).fanout).toMatchObject({ wanted: 0, allowedUntil: expect.any(Number) })
+    expect(notices(r).at(-1)).toBe("⚙️ **New boxes** allowed: Cody let Box Yard make more than 2 boxes in the next hour (3 boxes were waiting).")
+    await finish(r, 5)
+    await waitFor(() => working(r) === 5, "5 agents")
+    expect(tasks).toHaveLength(5)
   })
 })
