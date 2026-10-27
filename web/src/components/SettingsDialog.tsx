@@ -695,7 +695,7 @@ function LimitsPanel({
       <Row
         id={fid("ws")}
         label="Worker size"
-        help="Upstash Box size for newly created boxes, unless a project sets its own preferred size. Existing boxes keep their size until resized from the Boxes page."
+        help="Upstash Box size for newly created boxes, unless a project sets its own preferred size or auto-sizing (below) picked one from its runs. Existing boxes keep their size until resized from the Boxes page."
         hint={hint("workerSize")}
       >
         <Select id={fid("ws")} className="w-full" value={s.workerSize} onChange={(e) => set("workerSize", e.target.value as WorkerSize)}>
