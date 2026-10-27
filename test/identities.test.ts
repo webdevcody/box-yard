@@ -227,6 +227,9 @@ describe("signing keys", () => {
     expect(fs.readFileSync(path.join(dir, "box-yard.sqlite")).includes(body)).toBe(false)
     expect(identities.signingFor(p.id)).toEqual({ identity: "Acme", kind: "file", publicKey: key.pub, fingerprint: key.fingerprint, program: null, requireSigned: false, privateKey: key.privateKey })
     expect(identities.secretValues()).toContain(key.privateKey)
+    // Line by line too, so a part printed alone is caught; never its BEGIN/END lines, which every key shares.
+    expect(identities.secretValues()).toContain(body)
+    expect(identities.secretValues()).not.toContain("-----BEGIN OPENSSH PRIVATE KEY-----")
     // requireSigned names the key every push must be signed with.
     expect(identities.requiredSigner(p.id)).toBeNull()
     expect(identities.setRequireSigned(a.id, { requireSigned: true }).signing?.requireSigned).toBe(true)

@@ -574,7 +574,11 @@ export class Identities {
   secretValues(): string[] {
     if (this.secretCache) return this.secretCache
     const rows = this.d.db.prepare("SELECT ciphertext FROM identity_secrets").all() as { ciphertext: string }[]
-    this.secretCache = rows.map((r) => this.d.secrets.open(r.ciphertext) ?? "").filter(Boolean)
+    // A signing key also goes line by line, so part of one printed alone is still caught.
+    this.secretCache = rows
+      .map((r) => this.d.secrets.open(r.ciphertext) ?? "")
+      .filter(Boolean)
+      .flatMap((v) => (v.includes("\n") ? [v, ...v.split("\n").map((l) => l.trim()).filter((l) => l.length >= 16 && !l.startsWith("-----"))] : [v]))
     return this.secretCache
   }
 }

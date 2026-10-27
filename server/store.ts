@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
-import { redactValues } from "./redact.js"
+import { redactPrivateKeys, redactValues } from "./redact.js"
 import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
@@ -676,11 +676,23 @@ export class Store {
 
   /** `content` and `meta` with every transcript secret replaced by "[redacted]". */
   private scrub(role: string, content: string, meta: Record<string, unknown> | null): { content: string; meta: Record<string, unknown> | null } {
-    const secrets = role === "user" ? [] : (this.transcriptSecrets?.() ?? [])
-    if (!secrets.length) return { content, meta }
-    const metaJson = meta ? JSON.stringify(meta) : null
-    const clean = metaJson ? redactValues(metaJson, secrets) : null
-    return { content: redactValues(content, secrets), meta: clean && clean !== metaJson ? (JSON.parse(clean) as Record<string, unknown>) : meta }
+    if (role === "user") return { content, meta }
+    const secrets = this.transcriptSecrets?.() ?? []
+    const clean = (text: string) => redactPrivateKeys(secrets.length ? redactValues(text, secrets) : text)
+    // Meta string by string, not as JSON text: a cut-off key's redaction can't break the JSON.
+    let changed = false
+    const walk = (v: unknown): unknown => {
+      if (typeof v === "string") {
+        const c = clean(v)
+        if (c !== v) changed = true
+        return c
+      }
+      if (Array.isArray(v)) return v.map(walk)
+      if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]))
+      return v
+    }
+    const cleanMeta = meta ? (walk(meta) as Record<string, unknown>) : null
+    return { content: clean(content), meta: changed ? cleanMeta : meta }
   }
 
   // ---------- projects ----------
