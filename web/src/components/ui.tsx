@@ -12,6 +12,7 @@ import { keys } from "../lib/queries"
 import { copyText } from "../lib/clipboard"
 import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
+import { elapsedLabel } from "../lib/runningTasks"
 import type { BoxSize, PrState, Task, TaskStatus } from "../../../shared/types"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
@@ -571,6 +572,16 @@ function subscribeClock(listener: () => void) {
 export const TimeAgo = memo(function TimeAgo({ ts }: { ts: number }) {
   const label = useSyncExternalStore(subscribeClock, () => timeAgo(ts, clockTime()))
   return <time title={new Date(ts).toLocaleString()}>{label}</time>
+})
+
+/** "12m", "1h 5m": how long since `since`, on TimeAgo's shared clock. `title` leads the tooltip ("Running since"). */
+export const Elapsed = memo(function Elapsed({ since, title, className }: { since: number; title: string; className?: string }) {
+  const label = useSyncExternalStore(subscribeClock, () => elapsedLabel(clockTime() - since))
+  return (
+    <time className={className} title={`${title} ${new Date(since).toLocaleString()}`}>
+      {label}
+    </time>
+  )
 })
 
 export function Empty({ icon, title, children }: { icon?: ReactNode; title: string; children?: ReactNode }) {
