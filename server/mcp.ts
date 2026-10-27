@@ -11,6 +11,7 @@ import type { StoredUpload, Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
+import { placementLine } from "../shared/placement.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
@@ -24,6 +25,7 @@ import { isDockerBox } from "../shared/docker.js"
 import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
 import type { BoxActor } from "../shared/boxHistory.js"
 import { errorMessage } from "./util/retry.js"
+import { PR_REPORT_FRESH_MS } from "./prs.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
@@ -283,6 +285,28 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     const st = deps.settings?.get()
     return { allowed: st?.autoResizeEnabled ?? true, max_size: (st?.autoResizeMaxSize ?? "large") as BoxSize, how: tasks.resizeMode() }
   }
+  /**
+   * When GitHub last confirmed a task's PR state, and for a PR that may still be open, a warning when that isn't
+   * recent: list_inbox, get_task and list_tasks ask GitHub first (refreshPrs), so this shows when GitHub couldn't answer.
+   */
+  const prFreshness = (t: Task) => {
+    if (!t.prUrl) return {}
+    const { checkedAt, error } = tasks.prs.prCheck(t.id)
+    const settled = t.prState === "merged" || t.prState === "closed"
+    const fresh = checkedAt !== null && Date.now() - checkedAt < PR_REPORT_FRESH_MS
+    return {
+      prCheckedAt: checkedAt === null ? undefined : new Date(checkedAt).toISOString(),
+      prUnverified:
+        settled || fresh
+          ? undefined
+          : owner(
+              `${checkedAt === null ? "GitHub hasn't confirmed this PR's state since Box Yard started" : `GitHub last confirmed this PR's state ${ago(checkedAt)}`}${error ? ` (${error})` : ""}. ` +
+                "It may be merged or closed already: don't tell Cody it's waiting on him. Have the task's agent check it with gh.",
+            ),
+    }
+  }
+  /** Ask GitHub about these tasks' PRs whose state is older than PR_REPORT_FRESH_MS, before reporting them. */
+  const refreshPrs = (list: Task[]) => tasks.prs.ensureFresh(list.filter((t) => t.prUrl).map((t) => t.id))
   const brief = (t: Task) => ({
     id: t.id,
     title: t.title,
@@ -292,6 +316,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
     prState: t.prUrl ? (t.prState ?? undefined) : undefined,
+    ...prFreshness(t),
     mergeRequested: t.mergeRequest
       ? t.mergeRequest.requestedBy
         ? `The ${t.mergeRequest.requestedBy} asked for a merge of #${t.mergeRequest.prNumber} (${t.mergeRequest.deliveredAt ? "the agent is on it" : "queued behind its current turn"}); don't start another merge of this PR`
@@ -301,6 +326,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
+    placement: placementLine(t),
     runsOn: t.runsOn ?? undefined,
     turns: t.turnCount,
     model: t.model ?? undefined,
@@ -729,7 +755,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
     },
     safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][]; query?: string }) => {
-      let list = store.listTasks({ projectId: projectFilter(a.project), status: a.status })
+      const filter = { projectId: projectFilter(a.project), status: a.status }
+      // Fresh PR states first: a PR merged on GitHub moves its task from pr_ready to done.
+      await refreshPrs(store.listTasks(filter))
+      let list = store.listTasks(filter)
       if (a.query?.trim()) {
         const words = a.query.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
         const score = (t: Task) => {
@@ -931,6 +960,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
     },
     safe(async (a: { task: string; last_messages?: number; full_reply?: boolean; offset?: number }) => {
+      await refreshPrs([task(a.task)])
       const t = task(a.task)
       const { reply, fields } = replyFields(t, a.offset ?? 0)
       if (a.full_reply) return ok({ ...fields, summary: undefined, totalChars: reply?.length ?? 0, offset: a.offset ?? 0 })
@@ -1329,10 +1359,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_inbox",
-    { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures. Quiet schedule runs (no-ops) never show here." },
-    safe(async () =>
-      ok(withoutQuiet(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] })).map(brief)),
-    ),
+    {
+      description:
+        "Tasks waiting on Cody (questions) or ready for review (PRs), and failures. Quiet schedule runs (no-ops) never show here. PR states are checked with GitHub just before (prCheckedAt); one marked prUnverified may already be merged.",
+    },
+    safe(async () => {
+      const inbox = () => withoutQuiet(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] }))
+      // A PR merged outside Box Yard leaves the inbox here (its task moves to done) instead of being reported as waiting.
+      await refreshPrs(inbox())
+      return ok(inbox().map(brief))
+    }),
   )
 
   coordinatorOnly(

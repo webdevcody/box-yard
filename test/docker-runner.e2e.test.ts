@@ -13,6 +13,7 @@ import { LocalProvider } from "../server/providers/local.js"
 import type { DockerRunner } from "../server/tasks.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import { DEFAULT_DOCKER_SETTINGS, dockerBoxId, type DockerStatus } from "../shared/docker.js"
+import { placementView } from "../shared/placement.js"
 import type { Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
@@ -117,13 +118,17 @@ const dockerStatus = (r: Running) => call<DockerStatus>(r, "GET", "/api/docker")
 const containerFolder = (r: Running, projectId: string) => path.join(r.dataDir, "docker-boxes", dockerBoxId(projectId))
 
 describe("Docker runner (mock mode: containers are folders)", () => {
-  it("runs a Docker project's tasks in its own container; Stop keeps the workspaces, Delete archives them for a new one", async () => {
+  // Three turns, each waited for up to a minute (`until`), so a slow one says where it stuck instead of timing out.
+  it("runs a Docker project's tasks in its own container; Stop keeps the workspaces, Delete archives them for a new one", { timeout: 200_000 }, async () => {
     const r = await start()
     const p = await project(r, "contained", "docker")
     const box = dockerBoxId(p.id)
     const t = r.yard.tasks.createTask({ projectId: p.id, title: "first", prompt: "write a haiku" })
     await done(r, t.id)
     expect(getTask(r, t.id).boxId).toBe(box)
+    // Its card and header say it's in its project's Docker container.
+    expect(getTask(r, t.id).placement).toMatchObject({ now: { kind: "docker", boxId: box }, runner: "docker", chosenBy: "project" })
+    expect(placementView(getTask(r, t.id)).label).toMatch(/^Docker · /)
     expect(r.boxes.created).toBe(0)
     expect(r.yard.store.listBoxes()).toEqual([])
     const work = path.join(r.yard.tasks.taskDir(box, t.id), "work", "box-yard-demo.md")

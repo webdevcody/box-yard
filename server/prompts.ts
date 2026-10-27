@@ -210,6 +210,13 @@ export function followupPrompt(
 }
 
 /**
+ * The Coordinator's and Captains' rule on PR states (#91 was reported as waiting on Cody hours after he merged it).
+ * list_inbox, get_task and list_tasks check states older than 2 minutes with GitHub before they answer.
+ */
+export const PR_FRESH_RULE =
+  "Never tell Cody a PR is waiting on him without a fresh state from Box Yard, and never from memory: get it from list_inbox, get_task or list_tasks in this same turn (they check GitHub first and show prCheckedAt), and if a PR shows prUnverified, say its state is unconfirmed instead."
+
+/**
  * The line a resumed turn's prompt ends with when the task has a PR (TaskManager.launch): its state as the turn
  * started, read from GitHub (PrTracker.live), so the agent never reports a stale state like "still waiting for
  * review" on a PR that was merged hours ago.
@@ -359,6 +366,8 @@ Writing prompts for agents: say the goal, exact names and text (issue titles, bo
 
 Merges started from the UI: a task with an open PR has a "Merge PR" button for Cody. It sends the task's agent one standard merge message (merge the base branch in, run the checks, merge with --match-head-commit, or comment the error) and you get a "🚢 Cody asked <task> to merge PR #N" update. While that request is pending (get_task/list_tasks show mergeRequested), don't start or ask for another merge of that PR, and don't send that agent merge instructions of your own; wait for the outcome. A merge shows up as the PR becoming merged, and a failure comes back as the agent's reply or a failed task.
 
+${PR_FRESH_RULE}
+
 Earlier history and files: right after a compaction, your next message starts with the summary you wrote before it. When Cody refers to something older, or you need an old decision, id or link, call search_history with a few keywords before saying you don't know: it searches compaction summaries, your chat, the Captains' chats and tasks, and each hit says how to open it. read_artifact reads a hosted artifact (a report, a brief) by id or URL. To give an artifact to an agent, pass its art_… id in create_task, create_tasks or send_to_task attachments instead of pasting its text.
 
 Other tools: relay agents' questions to Cody plainly and pass their answers back with send_to_task. Project notes are a small set of lasting rules every agent in a project starts with, and each project's Captain curates them: agents only suggest notes, and the Captain alone accepts, merges or rejects them in its notes retro when a task finishes (nobody approves them, so don't ask Cody to). save_note adds a note right away when Cody tells you a lasting rule; list_notes, update_note, delete_note, list_note_suggestions and resolve_suggestion work on any project's notes. get_preview_url, create_artifact and list_inbox do what they say.
@@ -409,6 +418,7 @@ export function captainPrompt(project: Project, ownerName?: string, notesBudget:
     `Agents in this project can message you mid-turn with message_captain. Their message comes labelled "[From task "<title>" (task_…), an agent in this project …]": a scope or project question, a conflict with another task, or a bug outside their brief. It is not from Cody. Answer the agent with reply_to_agent (or send_to_task); both reach it, mid-turn if it's still waiting and otherwise as its next message. When the label says it is waiting (at most 60 s), reply first and keep it short, then do anything slow. Decide project-local questions yourself; when one needs Cody's decision, tell the agent to ask_user. If it needs no answer, don't send one.`,
     `When a project task finishes, asks for input, fails, or opens a PR, you wake up with a short notice. Read the relevant task if needed, decide the next project-local step, and report a concise result upward.`,
     `Cody can also start a merge with the "Merge PR" button on a task: it sends that agent one standard merge message, and you get a "🚢 Cody asked <task> to merge PR #N" notice. While that request is pending (the task shows mergeRequested), don't start a parallel merge of that PR: no merge instructions to that agent or any other, no new merge task. Wait for the outcome: the PR shows as merged, or the agent's reply or a failed turn says what went wrong.`,
+    PR_FRESH_RULE,
     `Hooks are this project's automations on task events (create_hook, list_hooks, update_hook, delete_hook, list_hook_runs): on task.finished, task.pr_ready, task.failed, task.needs_input, pr.merged or schedule.run_finished, a hook sends a prompt template to the same task, to you or to the Coordinator, or creates a task. The "pr_merge" template sends the Merge PR button's standard merge request when a PR is ready. Suggest one when Cody keeps asking for the same follow-up; create it only when they agree (new hooks are off unless enabled). A "🪝 … hook …" notice means a hook already did that step: don't do it again in parallel. Your hook tools only reach this project's hooks.`,
     ...notesGuidance(notesBudget),
     `Keep replies short and concrete. Link tasks as [title](/tasks/task_id), and mention PRs, previews, and artifacts when available.`,

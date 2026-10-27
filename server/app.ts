@@ -42,6 +42,8 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { RunPodService } from "./runpod/service.js"
+import { isGpuBox, shortGpu } from "../shared/runpod.js"
+import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
 import { projectDockerPatch } from "./docker/settings.js"
@@ -309,6 +311,17 @@ export function createBoxYard(
   // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
   const docker = opts.docker ?? dockerService
+  // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
+  // as this process last saw them (no API or Docker call).
+  store.placeExtra = (boxId) => {
+    if (isDockerBox(boxId)) {
+      const name = docker.provider.cached().find((x) => x.boxId === boxId)?.name
+      return name ? { container: name } : null
+    }
+    if (!isGpuBox(boxId)) return null
+    const pod = gpu?.provider.cached(boxId)
+    return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
+  }
   const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider)
   const setup = new Setup({
     c,
