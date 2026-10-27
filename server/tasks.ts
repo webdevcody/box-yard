@@ -995,11 +995,9 @@ export class TaskManager {
     const them = queued === 1 ? "the queued message" : `all ${queued} queued messages`
     this.addEvent(row.id, `${who} sent ${them} now: stopping the current step so the next turn delivers ${queued === 1 ? "it" : "them"}.`, { kind: "send_now", queued })
     if (row.status === "starting") this.stopRequested.add(row.id)
-    else if ((await this.killTurn(row, row.current_turn_id).catch(() => null)) === "gone") {
-      // Its process ended without a turn_end (it died while Box Yard was down): end the turn here, as stopped.
-      this.stopRequested.add(row.id)
-      await this.turnGone(row, "its process had already stopped")
-    }
+    // Its process ended without a turn_end (it died while Box Yard was down): end the turn here, as stopped. Only that
+    // turn: one that ended on its own meanwhile, and the next one, are left alone.
+    else if ((await this.killTurn(row, row.current_turn_id).catch(() => null)) === "gone") await this.turnGone(row, "its process had already stopped", { stopped: true })
     // The runner writes turn_end once it stops; that turn ends "stopped" and the scheduler starts the next one.
     this.emitTask(row.id)
     return result("interrupted")
@@ -4440,17 +4438,17 @@ export class TaskManager {
   /**
    * The turn's process ended without a turn_end Box Yard has seen. What it wrote is read first: its last output, and
    * its turn_end if it got that far (which ends the turn as usual, as when Box Yard was down while it finished). A
-   * turn still open after that is settled: stopped when someone asked it to stop, else interrupted and queued to
-   * carry on in the same session.
+   * turn still open after that is settled: stopped when someone asked it to stop (`stopped`, or Stop), else
+   * interrupted and queued to carry on in the same session. Only if it's still the task's turn: a newer one is left be.
    */
-  private async turnGone(row: TaskRow, reason: string) {
+  private async turnGone(row: TaskRow, reason: string, opts: { stopped?: boolean } = {}) {
     const turnId = row.current_turn_id
     if (!row.box_id || !turnId) return
     await this.drainEvents(row).catch((err) => console.warn(`[box-yard] reading the last events of ${row.id}: ${errorMessage(err)}`))
     if (this.stopped) return
     const fresh = this.store.getTaskRow(row.id)
     if (!fresh || fresh.current_turn_id !== turnId) return
-    if (this.stopRequested.has(row.id)) return this.finishTurn(fresh, { seq: 0, ts: Date.now(), turnId, t: "turn_end", stopped: true, ok: true, exitCode: null })
+    if (opts.stopped || this.stopRequested.has(row.id)) return this.finishTurn(fresh, { seq: 0, ts: Date.now(), turnId, t: "turn_end", stopped: true, ok: true, exitCode: null })
     this.interrupt(fresh, reason)
   }
 
