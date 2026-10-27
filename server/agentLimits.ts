@@ -1,9 +1,9 @@
 /**
  * The projects' own limits on where agents run, the same on an Upstash box, a GPU pod and this computer (the local
- * runner). The box's own limit (Settings › Agents per box, or › Local agents on this computer) caps every agent
+ * runner). The box's own limit (Settings › Tasks running at once per box, or › on this computer) caps every agent
  * there and is checked apart. On top of it:
  *
- * - A project's Agents at once (projects.agents_per_box) caps only its own agents on one box or this computer.
+ * - A project's Tasks running at once (projects.agents_per_box) caps only its own agents on one box or this computer.
  *   Other projects' agents never wait for it.
  * - A project set to Needs the whole machine (projects.whole_machine, off by default) keeps every other project's
  *   agents off the box or computer while one of its agents runs there, and its own wait for the others to finish.
@@ -17,14 +17,14 @@ export interface BoxAgent {
   title: string
   projectId: string
   projectName: string
-  /** The project's Agents at once (the old heavy_tasks counted as 1), or null: only the box's limit. */
+  /** The project's Tasks running at once (the old heavy_tasks counted as 1), or null: only the box's limit. */
   agentsPerBox: number | null
   wholeMachine: boolean
 }
 
 /** Why a task can't start next to the agents running on a box, and which of them hold it back. */
 export type LimitBlock =
-  /** Its project's Agents at once (`cap`) is full: `by` are its project's agents there. */
+  /** Its project's Tasks running at once (`cap`) is full: `by` are its project's agents there. */
   | { kind: "own"; cap: number; by: BoxAgent[] }
   /** `project` needs the whole machine: `by` are its running agents, or the other projects' when it's the task's own. */
   | { kind: "whole"; project: Pick<BoxAgent, "projectId" | "projectName">; by: BoxAgent[] }
@@ -53,12 +53,12 @@ export function agentRefs(agents: Pick<BoxAgent, "title" | "projectName">[], own
 /** The tasks `agentRefs` names. */
 export const named = <T>(agents: T[]): T[] => agents.slice(0, 2)
 
-/** "1 of its agents", "3 of its agents". */
-const ofIts = (n: number) => `${n} of its agents`
+/** "1 of its tasks", "3 of its tasks". */
+const ofIts = (n: number) => `${n} of its tasks`
 
 /**
  * The wait reason for a block on this computer. It names the blocking tasks first, so a task card's two lines show
- * them: "Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer".
+ * them: "Waiting for Merge PR #78: survive-the-night allows 1 of its tasks at a time on this computer".
  */
 export function localBlockReason(agent: BoxAgent, b: LimitBlock): string {
   if (b.kind === "own") return `Waiting for ${agentRefs(b.by, agent.projectName)}: ${agent.projectName} allows ${ofIts(b.cap)} at a time on this computer`
@@ -67,7 +67,7 @@ export function localBlockReason(agent: BoxAgent, b: LimitBlock): string {
 
 /**
  * The reason for a block on a box or pod (`where`: "box box-1", "GPU pod #2"), for "Waiting: …" or "Waiting for a
- * new box: …": "heavy allows 1 of its agents at a time on a box, and Merge PR #78 is running on box box-1".
+ * new box: …": "heavy allows 1 of its tasks at a time on a box, and Merge PR #78 is running on box box-1".
  */
 export function boxBlockReason(agent: BoxAgent, b: LimitBlock, where: string): string {
   const one = where.startsWith("GPU pod") ? "a pod" : "a box"

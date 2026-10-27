@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
 import { ArrowDown } from "lucide-react"
 import { cx } from "./ui"
 import { takeSpot, watchScroll, type LiveSpot } from "../lib/scrollMemory"
@@ -30,30 +30,39 @@ function innerCanScrollUp(target: EventTarget | null, root: HTMLElement) {
   return false
 }
 
+/** What a chat view calls after a send: `scrollToEnd()` re-pins the list and glides to the bottom. */
+export type StickyScrollHandle = { scrollToEnd: () => void }
+
 // A scroll container that follows new content only while the user is at the very bottom.
 // Any scroll up by the user (wheel, trackpad, touch, PageUp/↑/Home, scrollbar drag) unpins at once,
 // and it stays unpinned, with the view held still, until they come back to the very bottom or
 // press "Jump to latest". Our own scrollTop writes never count as the user scrolling.
 // `count` is the number of items; `resetKey` changes when the content is swapped (e.g. another task).
 // With `hidden` > 0 (older items not rendered yet), scrolling near the top calls `onLoadEarlier`,
-// and the view stays on the same content while they are added above it.
+// and the view stays on the same content while they are added above it. `onTrim` is called when items arrive
+// while the view is pinned to the bottom, so the list can stop rendering old items again (useTail's `trim`).
 // With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
 // (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
+// `handle.scrollToEnd()` (after a send) re-pins it and smooth-scrolls to the bottom, even from far up.
 export function StickyScroll({
+  handle,
   count,
   resetKey,
   restoreKey,
   hidden = 0,
   onLoadEarlier,
+  onTrim,
   className,
   contentClassName,
   children,
 }: {
+  handle?: Ref<StickyScrollHandle>
   count: number
   resetKey?: string
   restoreKey?: string
   hidden?: number
   onLoadEarlier?: () => void
+  onTrim?: () => void
   className?: string
   contentClassName?: string
   children: ReactNode
@@ -76,8 +85,10 @@ export function StickyScroll({
   const beforePrepend = useRef<{ height: number; top: number; hidden: number } | null>(null)
   // A spot from Back/Forward being put back: `since` it started, `found` when its row (or content) first showed.
   const restoring = useRef<{ spot: LiveSpot; since: number; found: number } | null>(null)
-  const latest = useRef({ hidden, onLoadEarlier })
-  latest.current = { hidden, onLoadEarlier }
+  // Gliding to the bottom after a send: growth follows with a smooth scroll until the bottom is reached.
+  const gliding = useRef(false)
+  const latest = useRef({ hidden, onLoadEarlier, onTrim })
+  latest.current = { hidden, onLoadEarlier, onTrim }
 
   // Write scrollTop ourselves, remembering where it landed so the scroll event it fires is ignored.
   const setTop = (el: HTMLElement, top: number) => {
@@ -88,8 +99,11 @@ export function StickyScroll({
   const toBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scroller.current
     if (!el) return
-    if (behavior === "auto") setTop(el, el.scrollHeight)
-    else el.scrollTo({ top: el.scrollHeight, behavior })
+    if (behavior === "auto") return setTop(el, el.scrollHeight)
+    // From far up, jump to a screen above the bottom and glide only that last stretch.
+    const near = el.scrollHeight - 2 * el.clientHeight
+    if (el.scrollTop < near) setTop(el, near)
+    el.scrollTo({ top: el.scrollHeight, behavior })
   }
 
   // Remember the first row that reaches into the view and where it sits.
@@ -181,6 +195,7 @@ export function StickyScroll({
   }
 
   const unpin = () => {
+    gliding.current = false
     const el = scroller.current
     // A list that fits has nowhere to scroll.
     if (!el || el.scrollHeight - el.clientHeight < BOTTOM_SLOP_PX) return
@@ -205,6 +220,7 @@ export function StickyScroll({
     // Back at the very bottom re-pins, and so does the browser pulling scrollTop down to a shorter
     // list's bottom. Any other move up is the user leaving it.
     if (atBottom) {
+      gliding.current = false
       if (!stuck.current) pin()
     } else if (moved < 0) unpin()
     else if (!stuck.current) markAnchor()
@@ -312,7 +328,7 @@ export function StickyScroll({
       const box = scroller.current
       if (!box) return
       if (restoring.current) return applyRestore()
-      if (stuck.current) return toBottom()
+      if (stuck.current) return toBottom(gliding.current ? "smooth" : "auto")
       const a = anchor.current
       if (!a || !a.node.isConnected) return markAnchor()
       const shift = a.node.getBoundingClientRect().top - box.getBoundingClientRect().top - a.top
@@ -321,7 +337,17 @@ export function StickyScroll({
     })
     ro.observe(el)
     if (scroller.current) ro.observe(scroller.current)
-    return () => ro.disconnect()
+    // iOS Safari: the on-screen keyboard opening or closing (after a send) changes only the visual
+    // viewport, which the observer doesn't see. Pinned, land on the bottom once it has resized.
+    const vv = window.visualViewport
+    const onViewport = () => {
+      if (stuck.current && !restoring.current) toBottom(gliding.current ? "smooth" : "auto")
+    }
+    vv?.addEventListener("resize", onViewport)
+    return () => {
+      ro.disconnect()
+      vv?.removeEventListener("resize", onViewport)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -329,6 +355,8 @@ export function StickyScroll({
     const added = count - lastCount.current
     lastCount.current = count
     if (added > 0 && !stuck.current) setUnread((n) => n + added)
+    // Pinned to the bottom, rows dropped from the top don't move anything on screen.
+    if (added > 0 && stuck.current && !restoring.current) latest.current.onTrim?.()
   }, [count])
 
   const loadEarlier = useCallback(() => {
@@ -367,6 +395,25 @@ export function StickyScroll({
     pin()
     toBottom("smooth")
   }
+
+  // After a send. Pinning makes the sent message's layout (the resize observer above) carry the list
+  // to it whenever it renders; the frame covers a message that's already laid out. Scrolling up
+  // again unpins as usual, so the streaming reply doesn't pull the view back down.
+  useImperativeHandle(
+    handle,
+    () => ({
+      scrollToEnd: () => {
+        restoring.current = null
+        pin()
+        gliding.current = true
+        requestAnimationFrame(() => {
+          if (stuck.current) toBottom("smooth")
+        })
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  )
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">

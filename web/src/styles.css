@@ -86,6 +86,11 @@ body {
 .prose-chat a {
   @apply text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400;
 }
+/* A link to another site (NewTabLink sets data-external) is sky with a trailing ↗, like the app's other outside links,
+   so it never reads as one of the yellow in-app links. PR links wear their state's colors instead (PrTextLink). */
+.prose-chat a[data-external] {
+  @apply text-sky-400 decoration-sky-400/40 hover:decoration-sky-400;
+}
 .prose-chat code {
   @apply rounded bg-zinc-800 px-1 py-0.5 font-mono text-[0.85em];
 }
@@ -149,4 +154,35 @@ body.resizing {
 }
 body.resizing iframe {
   pointer-events: none;
+}
+
+/* An agent's header icon while it works (AgentIcon in ui.tsx): a slow breathe with a soft amber glow. */
+@keyframes agent-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgb(251 191 36 / 0));
+  }
+  50% {
+    transform: scale(1.15);
+    filter: drop-shadow(0 0 4px rgb(251 191 36 / 0.7));
+  }
+}
+@keyframes agent-fade {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+.agent-working {
+  animation: agent-breathe 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* No movement: just a soft fade. */
+  .agent-working {
+    animation: agent-fade 2.4s ease-in-out infinite;
+  }
 }

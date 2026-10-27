@@ -11,6 +11,7 @@ import type { StoredUpload, Uploads } from "./uploads.js"
 import type { Scheduler } from "./scheduler.js"
 import { CAPTAIN_WAIT_DEFAULT_SECONDS, CAPTAIN_WAIT_MAX_SECONDS, type CaptainManager } from "./captains.js"
 import type { HookEngine } from "./hooks.js"
+import { placementLine } from "../shared/placement.js"
 import { ACTION_INFO, HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS, HOOK_VARIABLES, TRIGGER_INFO, type Hook, type HookRun } from "../shared/hooks.js"
 import { describeCron } from "../shared/cron.js"
 import { isQuietRun, withoutQuiet } from "../shared/quiet.js"
@@ -19,8 +20,11 @@ import { SETTINGS_GROUPS, changeLine, type SettingsGroup, type SettingsTools } f
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
-import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS } from "../shared/runpod.js"
+import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS, isGpuBox } from "../shared/runpod.js"
+import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
+import type { BoxActor } from "../shared/boxHistory.js"
 import { errorMessage } from "./util/retry.js"
+import { PR_REPORT_FRESH_MS } from "./prs.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
@@ -280,6 +284,28 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     const st = deps.settings?.get()
     return { allowed: st?.autoResizeEnabled ?? true, max_size: (st?.autoResizeMaxSize ?? "large") as BoxSize, how: tasks.resizeMode() }
   }
+  /**
+   * When GitHub last confirmed a task's PR state, and for a PR that may still be open, a warning when that isn't
+   * recent: list_inbox, get_task and list_tasks ask GitHub first (refreshPrs), so this shows when GitHub couldn't answer.
+   */
+  const prFreshness = (t: Task) => {
+    if (!t.prUrl) return {}
+    const { checkedAt, error } = tasks.prs.prCheck(t.id)
+    const settled = t.prState === "merged" || t.prState === "closed"
+    const fresh = checkedAt !== null && Date.now() - checkedAt < PR_REPORT_FRESH_MS
+    return {
+      prCheckedAt: checkedAt === null ? undefined : new Date(checkedAt).toISOString(),
+      prUnverified:
+        settled || fresh
+          ? undefined
+          : owner(
+              `${checkedAt === null ? "GitHub hasn't confirmed this PR's state since Box Yard started" : `GitHub last confirmed this PR's state ${ago(checkedAt)}`}${error ? ` (${error})` : ""}. ` +
+                "It may be merged or closed already: don't tell Cody it's waiting on him. Have the task's agent check it with gh.",
+            ),
+    }
+  }
+  /** Ask GitHub about these tasks' PRs whose state is older than PR_REPORT_FRESH_MS, before reporting them. */
+  const refreshPrs = (list: Task[]) => tasks.prs.ensureFresh(list.filter((t) => t.prUrl).map((t) => t.id))
   const brief = (t: Task) => ({
     id: t.id,
     title: t.title,
@@ -289,6 +315,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     question: t.question ?? undefined,
     pr: t.prUrl ?? undefined,
     prState: t.prUrl ? (t.prState ?? undefined) : undefined,
+    ...prFreshness(t),
     mergeRequested: t.mergeRequest
       ? t.mergeRequest.requestedBy
         ? `The ${t.mergeRequest.requestedBy} asked for a merge of #${t.mergeRequest.prNumber} (${t.mergeRequest.deliveredAt ? "the agent is on it" : "queued behind its current turn"}); don't start another merge of this PR`
@@ -298,6 +325,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     error: t.error ?? undefined,
     queuedMessages: t.pendingCount || undefined,
     box: t.boxId ?? undefined,
+    placement: placementLine(t),
     runsOn: t.runsOn ?? undefined,
     turns: t.turnCount,
     model: t.model ?? undefined,
@@ -432,13 +460,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        "Agents at once: how many of this project's own agents may run at the same time on one box, GPU pod or this computer. Other projects' agents never wait for it (only the box's own limit, Settings › Agents per box or Local agents, bounds them). 1: one at a time, for game engines, big builds, test suites and headless browsers that run a box out of memory. null: only the box's own limit.",
+        "Tasks running at once: how many of this project's own tasks may run at the same time on one box, GPU pod or this computer. Other projects' tasks never wait for it (only the box's own limit, Settings › Tasks running at once per box or on this computer, bounds them). 1: one at a time, for game engines, big builds, test suites and headless browsers that run a box out of memory. null: only the box's own limit.",
       ),
     whole_machine: z
       .boolean()
       .optional()
       .describe(
-        "Needs the whole machine: while one of this project's agents runs on a box or this computer, no other project's agent starts there, and its agents wait for the others' to finish. For heavy benchmarks that need the machine to themselves. Off by default.",
+        "Needs the whole machine: while one of this project's tasks runs on a box or this computer, no other project's task starts there, and its tasks wait for the others' to finish. For heavy benchmarks that need the machine to themselves. Off by default.",
       ),
     tasks_per_box: z
       .number()
@@ -447,7 +475,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .max(PROJECT_BOX_LIMITS.tasksPerBox.max)
       .nullable()
       .optional()
-      .describe("Most task folders on a box that holds one of this project's (fewer for a big repo); older archived ones are parked. Where projects share a box the stricter limit wins. null: Settings › Resident tasks per box."),
+      .describe("Most task folders on a box that holds one of this project's (fewer for a big repo); older archived ones are parked. Where projects share a box the stricter limit wins. null: Settings › Task folders kept per box."),
     max_boxes: z
       .number()
       .int()
@@ -456,7 +484,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        "Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes. On RunPod GPU it's the most pods the project has at once (each runs agents_per_box agents).",
+        "Most boxes this project's tasks use at once (made for it or holding its task folders), within the pool's Max boxes. null: only the pool's Max boxes. On RunPod GPU it's the most pods the project has at once (each runs agents_per_box tasks at once).",
       ),
     gpu_max_hourly_usd: z
       .number()
@@ -620,8 +648,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "update_project",
     {
       description: scopeId
-        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running agents are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box, whole_machine, tasks_per_box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
+        ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -724,7 +752,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
     },
     safe(async (a: { project?: string; status?: (typeof TASK_STATUSES)[number][]; query?: string }) => {
-      let list = store.listTasks({ projectId: projectFilter(a.project), status: a.status })
+      const filter = { projectId: projectFilter(a.project), status: a.status }
+      // Fresh PR states first: a PR merged on GitHub moves its task from pr_ready to done.
+      await refreshPrs(store.listTasks(filter))
+      let list = store.listTasks(filter)
       if (a.query?.trim()) {
         const words = a.query.toLowerCase().split(/\W+/).filter((w) => w.length > 2)
         const score = (t: Task) => {
@@ -926,6 +957,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       },
     },
     safe(async (a: { task: string; last_messages?: number; full_reply?: boolean; offset?: number }) => {
+      await refreshPrs([task(a.task)])
       const t = task(a.task)
       const { reply, fields } = replyFields(t, a.offset ?? 0)
       if (a.full_reply) return ok({ ...fields, summary: undefined, totalChars: reply?.length ?? 0, offset: a.offset ?? 0 })
@@ -1324,10 +1356,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   server.registerTool(
     "list_inbox",
-    { description: "Tasks waiting on Cody (questions) or ready for review (PRs), and failures. Quiet schedule runs (no-ops) never show here." },
-    safe(async () =>
-      ok(withoutQuiet(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] })).map(brief)),
-    ),
+    {
+      description:
+        "Tasks waiting on Cody (questions) or ready for review (PRs), and failures. Quiet schedule runs (no-ops) never show here. PR states are checked with GitHub just before (prCheckedAt); one marked prUnverified may already be merged.",
+    },
+    safe(async () => {
+      const inbox = () => withoutQuiet(store.listTasks({ projectId: scopeId ?? undefined, status: ["needs_input", "pr_ready", "failed"] }))
+      // A PR merged outside Box Yard leaves the inbox here (its task moves to done) instead of being reported as waiting.
+      await refreshPrs(inbox())
+      return ok(inbox().map(brief))
+    }),
   )
 
   coordinatorOnly(
@@ -1735,7 +1773,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = busy/total agent slots on that box) and queued tasks. pool.agentsPerBox and pool.tasksPerBox give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own agents on a box; wholeMachine keeps other projects' agents off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1747,7 +1785,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           size: `${b.size} (${sizeSpecLine(b.size)})`,
           projects: b.projects,
           running: `${b.runningTurns}/${b.slots}`,
-          ...(b.projectLimit ? { limit: `${b.projectLimit.slots} while ${b.projectLimit.project} runs here (its Agents per box)` } : {}),
+          ...(b.projectLimit ? { limit: `${b.projectLimit.slots} while ${b.projectLimit.project} runs here (its Tasks running at once)` } : {}),
           tasks: b.residentTasks.length,
           disk: `${diskLine({ freeBytes: b.diskFreeBytes, totalBytes: b.diskTotalBytes, checkedAt: b.diskCheckedAt })}${b.diskLow ? " (low)" : ""}`,
           ...(b.unreachableSince ? { unreachable: `stopped answering ${ago(b.unreachableSince)}; disk and memory are from the last check that worked` } : {}),
@@ -1756,7 +1794,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               ? { free: mb(b.diskFreeBytes), used: mb(Math.max(0, b.diskTotalBytes - b.diskFreeBytes)), total: mb(b.diskTotalBytes), measured: b.diskCheckedAt ? ago(b.diskCheckedAt) : null }
               : null,
           ...(b.memUsedBytes != null && b.memTotalBytes != null
-            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new agents go elsewhere)" : ""}` }
+            ? { memory: `${memLine({ usedBytes: b.memUsedBytes, totalBytes: b.memTotalBytes })}, ${loadLine({ load1: b.loadAvg ?? 0, cpus: b.cpuCount ?? 1 })}${b.memoryPressure ? " (busy: new tasks go elsewhere)" : ""}` }
             : {}),
           ...(rootDiskLine(b) ? { root_disk: `${rootDiskLine(b)}${rootLow({ freeBytes: b.rootFreeBytes ?? null, totalBytes: b.rootTotalBytes ?? null }) ? " (low)" : ""}` } : {}),
           ...(b.cleanup ? { cleanup: b.cleanup.status === "running" ? "running now" : `${cleanupSummary(b.cleanup)} ${ago(b.cleanup.finishedAt ?? b.cleanup.startedAt)}` } : {}),
@@ -1797,10 +1835,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         "get_settings",
         {
           description:
-            "Read Box Yard's global Settings, everything the Settings dialog shows: each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
+            "Read Box Yard's global Settings, everything the Settings dialog shows (slotsPerBox = tasks running at once per box, maxAgents = max tasks running at once, localAgents = tasks running at once on this computer, maxResidentPerBox = task folders kept per box): each key with its current value, its default, the values or range it allows, where it comes from (ui = saved in Settings, env = from envVar, default) and whether you can change it with update_settings. " +
             "An env var only seeds a value: saving one here overrides it, as in the Settings UI. Rows with envLocked (group server) come only from env vars on the server. " +
             "API keys and tokens (group credentials, voice.*ApiKey) show only as set / not set.",
-          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
+          inputSchema: { group: z.enum(SETTINGS_GROUPS).optional().describe("Only this group: settings (Coordinator, box agents, boxes & limits, usage), runpod, voice, runner, credentials or server.") },
         },
         safe(async (a: { group?: SettingsGroup }) => okCompact({ settings: settingsTools.list(a.group) })),
       ),
@@ -1811,13 +1849,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         {
           description:
             "Change global Settings for Cody, through the same checks and save path as the Settings UI (the pool re-reads its limits right away). " +
-            'Pass a partial patch keyed like get_settings: { "slotsPerBox": 3, "maxBoxes": 20, "localAgents": 3, "agentModel": "claude-opus-5-5", "runpod.maxHourlyUsd": 2, "runner": "local" }. ' +
+            'Pass a partial patch keyed like get_settings: { "slotsPerBox": 3, "maxBoxes": 20, "localAgents": 3, "agentModel": "claude-opus-5-5", "runpod.maxHourlyUsd": 2, "runner": "local" } (slotsPerBox is tasks running at once per box, localAgents tasks running at once on this computer, maxAgents max tasks running at once). ' +
             'An object setting takes only the fields that change ({ "budget": { "dailyUsd": 5 } }). ' +
             "The whole patch is checked first: an unknown key, an out-of-range value, a server env-only key or any API key or token fails the call and nothing changes. " +
             "Returns before → after for every value that changed (a new workerSize also moves the size-default box limits), and Cody gets a notice with your reason.",
           inputSchema: {
             patch: z.record(z.string(), z.unknown()).describe("Settings to change, by get_settings key."),
-            reason: z.string().trim().min(3).max(500).describe('Why, in one line for Cody (e.g. "Cody asked for 3 agents per box").'),
+            reason: z.string().trim().min(3).max(500).describe('Why, in one line for Cody (e.g. "Cody asked for 3 tasks running at once per box").'),
           },
         },
         safe(async (a: { patch: Record<string, unknown>; reason: string }) => {
@@ -2230,6 +2268,117 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         size: job.size,
         ...(named.snapshot ? { replaces: named.snapshot.id } : {}),
         next: `You'll get a notice when it's saved (list_projects shows progress). Fan out after that: boxes made before then start without it. New ${named.name} boxes of ${job.size} or bigger will start from it.`,
+      })
+    }),
+  )
+
+  // ---------------------------------------------------------------- deleting boxes
+  // The same safety check as Box Yard's own cleanups (server/boxDelete.ts), strict for MCP callers: no stopping
+  // agents and no override (Cody has those on the Boxes page). A Captain only reaches boxes holding nothing but its
+  // own project's work.
+  const deleter: BoxActor = scopeId ? { kind: "captain", projectId: scopeId } : { kind: "coordinator" }
+  const projectName = (id: string) => store.getProject(id)?.name ?? id
+  /** A box id or GPU pod id this caller may delete. */
+  const deletableBox = (ref: string): string => {
+    const id = ref.trim()
+    if (!isGpuBox(id) && !store.getBox(id) && !tasks.history.boxIds().includes(id)) throw new Error(`No box "${ref}". Use pool_status.`)
+    if (scopeId && !tasks.onlyProjectOn(id, scopeId)) {
+      const on = tasks.projectsOnBox(id).map(projectName)
+      throw outOfScope(`box ${id} ${on.length ? `holds work of ${on.join(", ")}` : "holds no work of your project"}, and a Captain can only delete a box that holds nothing but its own project's`)
+    }
+    return id
+  }
+  const SAFETY =
+    "Safety check first, the same as Box Yard's own cleanups: refused while an agent runs or a task is queued on it, and while any workspace has uncommitted or unpushed work, unless that task's PR is merged and its branch fully pushed. " +
+    "Every workspace is archived first (a merged, fully pushed one needs no archive). RunPod network volumes and project snapshots are never touched. " +
+    owner("You can't stop agents or override the check: tell Cody what holds the box, and Cody can delete it anyway from the Boxes page. ")
+
+  server.registerTool(
+    "delete_box",
+    {
+      description:
+        "Delete one worker box at its provider, or terminate a RunPod GPU pod (runpod-<project>[-n]; terminated, never just stopped, and its network volume stays). " +
+        SAFETY +
+        "The tasks on it keep working: each restores from its archive on its next turn, on another box or a new pod. The box history records it as deleted by you, with your reason. " +
+        "To clear out many boxes, use delete_idle_boxes (dry run first)." +
+        (scopeId ? " As a Captain you can only delete a box that holds nothing but your project's work." : ""),
+      inputSchema: {
+        box: z.string().describe("Box id from pool_status, or a GPU pod's runpod-… id"),
+        reason: z.string().trim().min(3).max(500).describe("Why, in one sentence for the box history (e.g. \"Idle since tiny-town's last PR merged\")."),
+      },
+    },
+    safe(async (a: { box: string; reason: string }) => {
+      const id = deletableBox(a.box)
+      const r = await tasks.destroyBox(id, { actor: deleter, reason: a.reason })
+      if (r.alreadyGone) return ok(`${id} is already gone (deleted earlier, or at the provider): nothing left to delete. box_history has what happened to it.`)
+      return ok({
+        [r.kind === "pod" ? "terminated" : "deleted"]: r.label === id ? id : `${r.label} (${id})`,
+        ...(r.kind === "pod" ? { volume: "kept" } : {}),
+        archived: r.archived.length ? r.archived : undefined,
+        no_archive_needed: r.fromGitHub.length ? r.fromGitHub.map((t) => `${t} (PR merged, nothing unpushed)`) : undefined,
+        next: "Its tasks restore from their archive on their next turn. box_history has the row.",
+      })
+    }),
+  )
+
+  server.registerTool(
+    "delete_idle_boxes",
+    {
+      description:
+        "Find idle boxes (and RunPod GPU pods) and delete them, after the same safety check as delete_box on each. " +
+        "dry_run (the default) changes nothing: it lists each box it would delete with what happens to its tasks, and each box it skips with why. Show Cody that list before deleting when Cody hasn't asked for it outright. " +
+        "With dry_run: false and a reason it deletes those boxes (each is checked again first) and says what it deleted, what failed and what it skipped. " +
+        SAFETY +
+        (scopeId ? "As a Captain you only see boxes that hold nothing but your project's work." : "With project, only boxes holding nothing but that project's work; without it, every running box."),
+      inputSchema: {
+        project: z.string().optional().describe(scopeId ? "Your project (the default)" : "Project id or name: only boxes holding nothing but its work"),
+        dry_run: z.boolean().optional().describe("Default true: only report what it would delete and why each other box is skipped"),
+        reason: z.string().trim().min(3).max(500).optional().describe("Required when dry_run is false: why, in one sentence for each box's history"),
+      },
+    },
+    safe(async (a: { project?: string; dry_run?: boolean; reason?: string }) => {
+      const projectId = projectFilter(a.project)
+      const dry = a.dry_run !== false
+      if (!dry && !a.reason) return fail("Give a reason when dry_run is false; it goes in each box's history.")
+      const ids = await tasks.deleteCandidates(projectId)
+      const scope = projectId ? `${projectName(projectId)}-only` : "running"
+      if (!ids.length) return ok(`No ${scope} boxes to look at.`)
+      const checked = await mapLimit(ids, 4, async (id) => {
+        try {
+          return { id, contents: await tasks.boxContents(id), error: null }
+        } catch (err) {
+          return { id, contents: null, error: errorMessage(err) }
+        }
+      })
+      const go = checked.filter((x) => x.contents && !x.contents.refusals.length)
+      const skipped = checked
+        .filter((x) => !x.contents || x.contents.refusals.length)
+        .map((x) => (x.contents ? `${boxHead(x.contents, projectName)}: ${x.contents.refusals.join("; ")}` : `${x.id}: couldn't check it (${x.error})`))
+      if (dry) {
+        return ok({
+          dry_run: true,
+          summary: `Would delete ${go.length} of ${ids.length} ${scope} ${ids.length === 1 ? "box" : "boxes"}; ${skipped.length} skipped.`,
+          would_delete: go.map((x) => boxSummary(x.contents!, projectName)),
+          skipped,
+          next: go.length ? "To delete them, call delete_idle_boxes again with dry_run: false and a reason. Each box is checked again first." : undefined,
+        })
+      }
+      const done = await mapLimit(go, 3, async (x) => {
+        try {
+          const r = await tasks.destroyBox(x.id, { actor: deleter, reason: a.reason })
+          return { ok: r.alreadyGone ? `${x.id} (already gone at the provider)` : boxSummary(x.contents!, projectName) }
+        } catch (err) {
+          return { failed: `${boxHead(x.contents!, projectName)}: ${errorMessage(err).replace(/\n- /g, "; ").replace(/:\s*;/, ":")}` }
+        }
+      })
+      const deleted = done.flatMap((d) => (d.ok ? [d.ok] : []))
+      const failed = done.flatMap((d) => (d.failed ? [d.failed] : []))
+      return ok({
+        summary: `Deleted ${deleted.length} of ${ids.length} ${scope} ${ids.length === 1 ? "box" : "boxes"}${failed.length ? `; ${failed.length} failed` : ""}; ${skipped.length} skipped.`,
+        deleted,
+        failed: failed.length ? failed : undefined,
+        skipped: skipped.length ? skipped : undefined,
+        next: "Their tasks restore from their archive on their next turn. box_history (type deleted) lists each with your reason.",
       })
     }),
   )

@@ -1,11 +1,13 @@
 // First-run setup (the card Zen shows until the required keys are set) and Settings › Credentials. Keys go to the
 // server and never come back: a field shows only whether its key is set and where it comes from.
 import { useEffect, useId, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
-import { Check, Cloud, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, X } from "lucide-react"
+import { Check, Cloud, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, Undo2, X } from "lucide-react"
 import { useAgentSettings, useCheckLocal, useSaveCredentials, useSaveRunnerChoice, useSaveSettings, useSettings, useSetup, useTestCredential } from "../lib/queries"
 import { Button, LineIcon, NewTabLink, cx, inputClass } from "./ui"
 import { localFlag } from "../lib/localFlag"
 import { Panel, Row, SourceHint } from "./SettingsDialog"
+import { useDraft, useInSettingsDraft } from "../lib/settingsDraft"
+import type { SettingsSection } from "../lib/settingsNav"
 import {
   CREDENTIAL_INFO,
   GITHUB_TOKEN_SCOPES,
@@ -37,24 +39,33 @@ type TestState = { state: "running" } | { state: "ok" | "error"; text: string }
 
 /**
  * A credential's control. Unset: a password input with Save and Test (the typed value, not saved). Saved: masked,
- * with Replace, Remove and Test. From env: masked and read-only (the env var wins), with Test.
+ * with Replace, Remove and Test. From env: masked and read-only (the env var wins), with Test. Inside the Settings
+ * dialog a typed key or a Remove is a draft that the dialog's Save writes, so the field has no Save of its own.
  */
-export function CredentialField({ k, status, id }: { k: CredentialKey; status: CredentialStatus; id: string }) {
+export function CredentialField({ k, status, id, section = "credentials" }: { k: CredentialKey; status: CredentialStatus; id: string; section?: SettingsSection }) {
   const info = CREDENTIAL_INFO[k]
   const save = useSaveCredentials()
   const test = useTestCredential()
+  const drafted = useInSettingsDraft()
+  // In Settings: a typed key (string) or a removal (null) waiting for Save.
+  const [edit, setEdit] = useDraft<string | null | undefined>(`cred-${k}`, section, undefined, async (v) => {
+    if (v !== undefined) await save.mutateAsync({ [k]: v === null ? null : v.trim() })
+  })
   const [editing, setEditing] = useState(false)
-  const [value, setValue] = useState("")
+  const [typed, setTyped] = useState("")
+  const value = drafted ? (edit ?? "") : typed
+  const setValue = (v: string) => (drafted ? setEdit(v.trim() ? v : undefined) : setTyped(v))
+  const removing = drafted && edit === null
   const [result, setResult] = useState<TestState | null>(null)
   const fromEnv = status.source === "env"
   // GitHub only: this computer's `gh auth` login stands in until a token is saved here.
   const fromGh = status.source === "gh"
-  const showInput = !fromEnv && (editing || status.state === "unset")
+  const showInput = !fromEnv && !removing && (editing || typeof edit === "string" || status.state === "unset")
 
   // A save elsewhere (another tab, the other form) settles this one.
   useEffect(() => {
     setEditing(false)
-    setValue("")
+    setTyped("")
   }, [status.source])
 
   const submit = () => {
@@ -80,16 +91,21 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
       },
     )
   }
+  const cancel = () => {
+    setEditing(false)
+    if (drafted) setEdit(undefined)
+    else setTyped("")
+    save.reset()
+  }
   const onKey = (e: ReactKeyboardEvent) => {
-    // Enter saves this key, not a form around it.
-    if (e.key === "Enter") {
+    // Enter saves this key, not a form around it. In Settings it's the dialog's Save, like any other field.
+    if (e.key === "Enter" && !drafted) {
       e.preventDefault()
       submit()
     }
-    if (e.key === "Escape" && editing) {
+    if (e.key === "Escape" && (editing || value)) {
       e.stopPropagation()
-      setEditing(false)
-      setValue("")
+      cancel()
     }
   }
 
@@ -112,6 +128,10 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
           aria-label={info.label}
           aria-describedby={`${id}-result`}
         />
+      ) : removing ? (
+        <p id={id} className="flex min-h-11 items-center rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 text-xs text-amber-200 sm:min-h-9" data-key-removing>
+          Removed when you save.
+        </p>
       ) : (
         <div id={id} className="flex min-h-11 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-sm sm:min-h-9" data-key-masked>
           <KeyRound className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
@@ -128,14 +148,20 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
         </div>
       )}
       <div className="flex flex-wrap gap-2">
-        {showInput ? (
+        {removing ? (
+          <Button type="button" size="sm" variant="ghost" onClick={cancel}>
+            <Undo2 className="h-3.5 w-3.5" /> Keep it
+          </Button>
+        ) : showInput ? (
           <>
-            <Button type="button" variant="primary" size="sm" loading={save.isPending} disabled={!value.trim()} onClick={submit}>
-              Save
-            </Button>
-            {editing && (
-              <Button type="button" variant="ghost" size="sm" onClick={() => (setEditing(false), setValue(""), save.reset())}>
-                Cancel
+            {!drafted && (
+              <Button type="button" variant="primary" size="sm" loading={save.isPending} disabled={!value.trim()} onClick={submit}>
+                Save
+              </Button>
+            )}
+            {(editing || (drafted && value && status.state === "set")) && (
+              <Button type="button" variant="ghost" size="sm" onClick={cancel}>
+                {drafted ? "Keep the saved key" : "Cancel"}
               </Button>
             )}
           </>
@@ -149,13 +175,20 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
               <Button type="button" size="sm" onClick={() => (setEditing(true), setResult(null))}>
                 Replace
               </Button>
-              <Button type="button" size="sm" variant="danger" loading={save.isPending} onClick={() => save.mutate({ [k]: null }, { onSuccess: () => setResult(null) })} title={`Forget the saved ${info.label}`}>
+              <Button
+                type="button"
+                size="sm"
+                variant="danger"
+                loading={save.isPending}
+                onClick={() => (drafted ? (setEdit(null), setResult(null)) : save.mutate({ [k]: null }, { onSuccess: () => setResult(null) }))}
+                title={drafted ? `Forget the saved ${info.label} when you save` : `Forget the saved ${info.label}`}
+              >
                 Remove
               </Button>
             </>
           )
         )}
-        <Button
+        {!removing && <Button
           type="button"
           size="sm"
           variant="ghost"
@@ -165,9 +198,10 @@ export function CredentialField({ k, status, id }: { k: CredentialKey; status: C
           title={showInput ? "Check the key you typed, without saving it" : "Check the key in use"}
         >
           <Play className="h-3.5 w-3.5" /> Test
-        </Button>
+        </Button>}
       </div>
       <div id={`${id}-result`} aria-live="polite">
+        {drafted && edit !== undefined && <SourceHint changed />}
         {fromEnv && <p className="text-xs leading-relaxed text-zinc-500">Set on the server by {info.env}, which always wins. Change it there.</p>}
         {fromGh && !showInput && <p className="text-xs leading-relaxed text-zinc-500">Using this computer's gh login. A token saved here wins over it.</p>}
         {save.error && <ResultLine ok={false} text={save.error.message} />}
@@ -305,10 +339,15 @@ const RUNNER_CHOICES: { runner: Runner; icon: typeof Laptop; title: string; body
   },
 ]
 
-/** Two cards, one per place agents can run. Picking one saves it right away; new projects follow it. */
+/**
+ * Two cards, one per place agents can run; new projects follow the choice. In first-run setup picking one saves it
+ * right away; in Settings it's a draft until the dialog's Save.
+ */
 export function RunnerChoice({ status, compact }: { status: SetupStatus; compact?: boolean }) {
   const save = useSaveRunnerChoice()
-  const current = save.isPending ? save.variables : status.runner.choice
+  const drafted = useInSettingsDraft()
+  const [choice, setChoice, changed] = useDraft<Runner | null>("runner", "credentials", status.runner.choice, (r) => r && save.mutateAsync(r))
+  const current = save.isPending && !drafted ? save.variables : choice
   return (
     <div className="space-y-2">
       <div role="group" aria-label="Where agents run" className={cx("grid gap-2", !compact && "sm:grid-cols-2")}>
@@ -320,7 +359,7 @@ export function RunnerChoice({ status, compact }: { status: SetupStatus; compact
               type="button"
               aria-pressed={on}
               data-runner-choice={c.runner}
-              onClick={() => !on && save.mutate(c.runner)}
+              onClick={() => !on && setChoice(c.runner)}
               className={cx(
                 "flex min-h-11 items-start gap-3 rounded-lg border p-3 text-left transition",
                 on ? "border-yard-500/60 bg-yard-500/10" : "border-zinc-800 bg-zinc-900 hover:border-zinc-700",
@@ -345,6 +384,7 @@ export function RunnerChoice({ status, compact }: { status: SetupStatus; compact
           <span>{LOCAL_UNSANDBOXED}</span>
         </p>
       )}
+      {changed && <SourceHint changed />}
       {save.error && <ResultLine ok={false} text={save.error.message} />}
     </div>
   )

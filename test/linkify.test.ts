@@ -3,7 +3,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { buildEntityIndex, followAppLink, linkTarget, refForHref, remarkEntityLinks, splitText, toolMentions, type EntityIndex } from "../web/src/lib/linkify.js"
+import { buildEntityIndex, followAppLink, githubRef, isExternal, linkTarget, refForHref, remarkEntityLinks, shortGithubLabel, splitText, toolMentions, type EntityIndex } from "../web/src/lib/linkify.js"
 import { createdId } from "../server/orchestrator.js"
 import type { Artifact, BoxInfo, Project, Schedule, Task } from "../shared/types.js"
 
@@ -142,6 +142,46 @@ describe("links", () => {
     expect(refForHref("/boxes#local-1a2b3c4d", index)?.kind).toBe("box")
     expect(refForHref("/artifacts/art_96efb3c6cbea/arch.html", index)?.kind).toBe("artifact")
     expect(refForHref("/inbox", index)).toBeNull()
+  })
+})
+
+describe("internal vs external", () => {
+  const origin = "http://yard.test"
+
+  it("keeps Box Yard's own pages and files in the app", () => {
+    for (const href of ["/tasks/task_1", "/projects/prj_demo01?tab=captain", "/schedules#sch_0123456789ab", "/boxes#local-1", "/artifacts/art_1/a.html", "/api/uploads/u/x.png", `${origin}/tasks/task_1`, origin])
+      expect(isExternal(href, origin), href).toBe(false)
+  })
+
+  it("sends every other site (GitHub, previews, protocol-relative, look-alike origins) to a new tab", () => {
+    for (const href of [
+      "https://github.com/webdevcody/box-yard/pull/154",
+      "https://upstash.com/docs/box",
+      "https://4030-box.upstash.app/",
+      "//evil.test/x",
+      "http://yard.test.evil/tasks/task_1",
+      "http://yard.test:4051/",
+      "mailto:cody@example.com",
+    ])
+      expect(isExternal(href, origin), href).toBe(true)
+  })
+})
+
+describe("GitHub link labels", () => {
+  it("reads PR and issue URLs, with or without a trailing path, query or hash", () => {
+    expect(githubRef("https://github.com/webdevcody/box-yard/pull/154")).toEqual({ owner: "webdevcody", repo: "box-yard", kind: "pull", number: 154 })
+    expect(githubRef("https://github.com/webdevcody/box-yard/pull/154/files#diff-1")?.number).toBe(154)
+    expect(githubRef("https://www.github.com/o/r.js/issues/9?x=1")).toEqual({ owner: "o", repo: "r.js", kind: "issue", number: 9 })
+  })
+
+  it("shortens a PR to 'PR #154' and an issue to 'owner/repo#154'", () => {
+    expect(shortGithubLabel("https://github.com/webdevcody/box-yard/pull/154")).toBe("PR #154")
+    expect(shortGithubLabel("https://github.com/webdevcody/box-yard/issues/154")).toBe("webdevcody/box-yard#154")
+  })
+
+  it("leaves other links alone", () => {
+    for (const href of ["https://github.com/webdevcody/box-yard", "https://github.com/o/r/commit/abc", "https://github.com/o/r/pull/12abc", "https://gitlab.com/o/r/pull/1", "https://evilgithub.com/o/r/pull/1", "/tasks/task_1"])
+      expect(shortGithubLabel(href), href).toBeNull()
   })
 })
 

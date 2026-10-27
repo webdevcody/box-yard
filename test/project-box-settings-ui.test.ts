@@ -144,15 +144,15 @@ describe("Project › Settings › Boxes", () => {
 
   it("on this computer, says Agents at once still applies there", () => {
     render(project({ runner: "local" }))
-    expect($("project-boxes")!.textContent).toContain("Agents at once also limits its agents here, within Settings › Local agents")
+    expect($("project-boxes")!.textContent).toContain("Tasks running at once also limits its tasks here, within Settings › Tasks running at once on this computer")
   })
 
   // Cody: it wasn't obvious that the setting held back every project. It now says it limits only this project's.
   it("says Agents at once limits only this project's agents, with what the value does as it stands", () => {
     render(project({ agentsPerBox: 1 }))
     const field = $("project-agents-per-box")!.closest("div.space-y-1\\.5")!
-    expect(field.querySelector("label")!.textContent).toBe("Agents at once (this project)")
-    expect(field.textContent).toContain("How many of this project's agents can run at the same time on one box or this computer. Other projects' agents never wait for it.")
+    expect(field.querySelector("label")!.textContent).toBe("Tasks running at once (this project)")
+    expect(field.textContent).toContain("How many of this project's tasks can run at the same time on one box or this computer. Other projects' tasks never wait for it.")
     expect($("project-agents-per-box-effect")!.textContent).toBe("survive-the-night: 1 at a time; other projects unaffected.")
     type($<HTMLInputElement>("project-agents-per-box")!, "3")
     expect($("project-agents-per-box-effect")!.textContent).toBe("survive-the-night: 3 at a time; other projects unaffected.")
@@ -164,10 +164,10 @@ describe("Project › Settings › Boxes", () => {
     render(project({ agentsPerBox: 1 }))
     const box = $<HTMLInputElement>("project-whole-machine")!
     expect(box.checked).toBe(false)
-    expect(box.closest("label")!.textContent).toContain("No other project's agents run on the same box or this computer while one of its agents runs")
+    expect(box.closest("label")!.textContent).toContain("No other project's tasks run on the same box or this computer while one of its tasks runs")
     click(box)
     expect(box.checked).toBe(true)
-    expect($("project-agents-per-box-effect")!.textContent).toBe("survive-the-night: 1 at a time; no other project's agents run beside it.")
+    expect($("project-agents-per-box-effect")!.textContent).toBe("survive-the-night: 1 at a time; no other project's tasks run beside it.")
     const form = $("project-boxes")!.closest("form")!
     act(() => void form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
     await settle()

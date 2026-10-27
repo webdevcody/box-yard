@@ -200,7 +200,7 @@ function ProjectHeader({
         <h1 className="truncate text-2xl font-semibold tracking-tight text-zinc-50">{project.name}</h1>
         <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-500">
           {project.repo ? (
-            <NewTabLink href={repoUrl(project.repo)} className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
+            <NewTabLink href={repoUrl(project.repo)} mark="end" className="inline-flex min-w-0 items-center gap-1.5 hover:text-zinc-300">
               <FolderGit2 className="h-4 w-4 shrink-0" /> <span className="truncate">{project.repo}</span>
             </NewTabLink>
           ) : (
@@ -380,13 +380,13 @@ function Files({ files: all, tasks }: { files: Artifact[]; tasks: Task[] }) {
 const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z][k]}`).join(" · ")
 
 /**
- * Project › Settings › Boxes: the project's own box size, agents per box, tasks per box and max boxes. Each one left
+ * Project › Settings › Boxes: the project's own box size, tasks running at once, task folders kept per box and max boxes. Each one left
  * blank uses the global setting (Settings › Boxes & limits), which the field names ("Using global: …"); one that's
  * set has a Use global button that clears it.
  */
 function ProjectBoxSettings(p: {
   info: SettingsInfo | undefined
-  /** The project's name, for the line that says what Agents at once does. */
+  /** The project's name, for the line that says what Tasks running at once does. */
   name: string
   local: boolean
   gpu: boolean
@@ -429,10 +429,10 @@ function ProjectBoxSettings(p: {
         </button>
       </div>
       <p className="text-xs text-zinc-500">
-        Leave one blank to use the global setting. Where projects share a box, the strictest Tasks per box wins.
-        {p.local && " This project runs on this computer: Agents at once also limits its agents here, within Settings › Local agents, and the rest apply when it runs on boxes."}
+        Leave one blank to use the global setting. Where projects share a box, the strictest Task folders kept per box wins.
+        {p.local && " This project runs on this computer: Tasks running at once also limits its tasks here, within Settings › Tasks running at once on this computer, and the rest apply when it runs on boxes."}
         {p.gpu &&
-          " This project runs on RunPod GPU pods: Agents at once sets its agents per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Tasks per box and Box size apply when it runs on boxes."}
+          " This project runs on RunPod GPU pods: Tasks running at once sets its tasks per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Task folders kept per box and Box size apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -454,18 +454,18 @@ function ProjectBoxSettings(p: {
       <div className="grid gap-3 @4xl:grid-cols-3">
         <OverrideField
           id="project-agents-per-box"
-          label="Agents at once (this project)"
+          label="Tasks running at once (this project)"
           global={agents.long}
           set={p.agentsPerBox.trim() !== ""}
           onClear={() => p.setAgentsPerBox("")}
-          hint="How many of this project's agents can run at the same time on one box or this computer. Other projects' agents never wait for it. 1: one at a time (game engines, big builds, headless browsers)."
+          hint="How many of this project's tasks can run at the same time on one box or this computer. Other projects' tasks never wait for it. 1: one at a time (game engines, big builds, headless browsers)."
           effect={agentsAtOnceLine(p.name, p.agentsPerBox, p.wholeMachine)}
         >
           <LimitInput id="project-agents-per-box" range={PROJECT_BOX_LIMITS.agentsPerBox} value={p.agentsPerBox} onChange={p.setAgentsPerBox} placeholder={`Global: ${agents.short}`} />
         </OverrideField>
         <OverrideField
           id="project-tasks-per-box"
-          label="Tasks per box"
+          label="Task folders kept per box"
           global={folders.long}
           set={p.tasksPerBox.trim() !== ""}
           onClear={() => p.setTasksPerBox("")}
@@ -489,7 +489,7 @@ function ProjectBoxSettings(p: {
         <span className="min-w-0">
           Needs the whole machine
           <span className="block text-xs text-zinc-500">
-            No other project's agents run on the same box or this computer while one of its agents runs, and its agents wait for theirs to finish. For heavy benchmarks that need the machine to themselves. Off by default.
+            No other project's tasks run on the same box or this computer while one of its tasks runs, and its tasks wait for theirs to finish. For heavy benchmarks that need the machine to themselves. Off by default.
           </span>
         </span>
       </label>
@@ -617,11 +617,11 @@ function OverrideField({
   )
 }
 
-/** What Agents at once and Needs the whole machine do together, for the project's name: "survive-the-night: 1 at a time; other projects unaffected." */
+/** What Tasks running at once and Needs the whole machine do together, for the project's name: "survive-the-night: 1 at a time; other projects unaffected." */
 export function agentsAtOnceLine(name: string, agentsAtOnce: string, wholeMachine: boolean): string {
   const n = Number.parseInt(agentsAtOnce, 10)
   const own = Number.isFinite(n) && n > 0 ? `${n} at a time` : "up to the box's limit"
-  return `${name || "This project"}: ${own}; ${wholeMachine ? "no other project's agents run beside it." : "other projects unaffected."}`
+  return `${name || "This project"}: ${own}; ${wholeMachine ? "no other project's tasks run beside it." : "other projects unaffected."}`
 }
 
 function LimitInput({
@@ -689,12 +689,22 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
+  // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, notesMax, notesTokens])
+  const [opened] = useState(snapshot)
+  const dirty = snapshot !== opened
+  const cancel = async () => {
+    if (dirty && !(await confirmDialog({ title: "Discard unsaved changes?", body: `Your edits to ${project.name}'s settings haven't been saved.`, confirmLabel: "Discard", cancelLabel: "Keep editing", danger: true })))
+      return
+    onDone()
+  }
 
   return (
     <form
       className="space-y-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4"
       onSubmit={async (e) => {
         e.preventDefault()
+        if (!dirty) return
         if (runner === "local" && project.runner !== "local") {
           const ok = await confirmDialog({
             title: "Run agents on this computer?",
@@ -750,7 +760,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Local agents). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Tasks running at once on this computer). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
@@ -899,10 +909,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <Trash2 className="h-4 w-4" /> Delete project
         </Button>
         <div className="flex gap-2 max-sm:flex-col-reverse sm:ml-auto">
-          <Button type="button" variant="ghost" onClick={onDone}>
+          {dirty && (
+            <span className="self-center text-xs text-amber-300" role="status">
+              Unsaved changes
+            </span>
+          )}
+          <Button type="button" variant="ghost" onClick={() => void cancel()}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary">
+          <Button type="submit" variant="primary" disabled={!dirty} data-testid="project-settings-save">
             Save
           </Button>
         </div>

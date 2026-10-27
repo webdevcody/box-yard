@@ -1,13 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
-import { Bot, Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
+import { Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
 import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
-import { Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { AgentIcon, Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
 import { useEntityIndex } from "../lib/entities"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
@@ -51,6 +51,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const box = useRef<HTMLTextAreaElement>(null)
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
+  const list = useRef<StickyScrollHandle>(null)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
@@ -62,15 +63,26 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
   const addGithub = useCallback(() => openSettings("credentials"), [openSettings])
 
-  const submit = useCallback(
+  // A suggested next step sends without touching the composer (no keyboard pops up on a phone).
+  const followUp = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
-      send.mutate({ id: newClientId("chat"), content, attachments })
+      const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      list.current?.scrollToEnd()
       markTryFirstDone()
-      box.current?.focus()
+      return sending
     },
-    [send.mutate],
+    [send.mutateAsync],
+  )
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const sending = followUp(text, attachments)
+      box.current?.focus()
+      return sending
+    },
+    [followUp],
   )
 
   const messages = chat.data ?? NO_MESSAGES
@@ -112,7 +124,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header
         className={cx(
-          "flex items-center gap-2",
+          // A container, so the voice chip shrinks to an icon in a narrow header (see VoiceControl).
+          "@container flex items-center gap-2",
           // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
           zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
             : onClose ? "min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4"
@@ -120,13 +133,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             : "border-b border-zinc-900 px-4 py-3",
         )}
       >
-        <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+        <AgentIcon busy={Boolean(busy.data)} />
         <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
           {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
           {zen && <span className="max-sm:hidden">Box Yard </span>}
           Coordinator
         </div>
-        {busy.data && <span className="shrink-0 text-xs text-sky-400">thinking…</span>}
         <div className="ml-auto flex shrink-0 items-center gap-1">
           {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
           <VoiceControl />
@@ -177,7 +189,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
       <div className={showSetup ? "hidden" : "contents"}>
         <SelectionToTask source={selectionSource} onPrompt={submit}>
-          <StickyScroll count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+          <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
             {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
               <TryFirst
                 ready={!setup.needed}
@@ -203,9 +215,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 </div>
               </div>
             )}
-            <ChatLines messages={settled} onFollowUp={submit} />
+            <ChatLines messages={settled} onFollowUp={followUp} />
             <StreamingReply busy={Boolean(busy.data)} />
-            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={submit} />}
+            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
           </StickyScroll>
         </SelectionToTask>
 
@@ -215,6 +227,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           textareaRef={box}
           handleRef={composer}
           panelRef={panel}
+          historyKey="coordinator"
           className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
         />
       </div>

@@ -1,6 +1,6 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, Cpu, DollarSign, ExternalLink, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, Cpu, DollarSign, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -13,10 +13,13 @@ import {
   stepSection,
   type SettingsSection,
 } from "../lib/settingsNav"
+import { SettingsDraftContext, updateParts, useDraft, type DraftPart, type DraftRegistry } from "../lib/settingsDraft"
 import { LEGACY_POOL_DEFAULTS, sizeCapacities } from "../lib/capacity"
 import { browserNotificationsOn, browserNotificationsSupported, setBrowserNotifications } from "../lib/notifications"
 import { withParam } from "./TaskFilters"
 import { VoicePanel } from "./VoiceSettings"
+import { SendSoundRow } from "./SendSoundSettings"
+import { setSendSound, useSendSound } from "../lib/sendSound"
 import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { RunPodPanel } from "./RunPodSettings"
@@ -48,6 +51,9 @@ import {
 
 
 const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, runpod: Cpu, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+
+/** Sections whose controls keep their own drafts (useDraft). They stay mounted once opened, so the drafts survive. */
+const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "runpod", "hooks", "notifications", "voice"]
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -195,6 +201,15 @@ export function SettingsDialog({
   const [draft, setDraft] = useState<Settings | null>(null)
   // Box limits typed in while the size defaults apply: saved even when the number matches the default.
   const [pinned, setPinned] = useState<(keyof Settings)[]>([])
+  // Saved values to forget on Save ("Use size default").
+  const [resets, setResets] = useState<(keyof Settings)[]>([])
+  // Drafts of the parts that aren't plain Settings fields (voice, keys, RunPod, hooks...), registered by useDraft.
+  const [parts, setParts] = useState<Record<string, DraftPart>>({})
+  const registry = useMemo<DraftRegistry>(() => ({ update: (id, part) => setParts((p) => updateParts(p, id, part)) }), [])
+  // Sections opened so far stay mounted (hidden), so their drafts survive switching sections.
+  const [visited, setVisited] = useState<SettingsSection[]>([section])
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const [savedAt, setSavedAt] = useState(0)
   const ids = useId()
   const navRef = useRef<HTMLDivElement>(null)
@@ -202,31 +217,53 @@ export function SettingsDialog({
 
   const current = info.data
   const s = draft ?? current?.settings
-  const changed = draft ? [...new Set([...changedKeys(draft, current?.settings), ...pinned])] : []
-  const dirty = changed.length > 0
-  const dirtySections = changedSections(changed)
+  const changed = [...new Set([...(draft ? [...changedKeys(draft, current?.settings), ...pinned] : []), ...resets])]
+  const partList = Object.values(parts)
+  const changeCount = changed.length + partList.reduce((n, p) => n + p.count, 0)
+  const dirty = changeCount > 0
+  const dirtySections = new Set([...changedSections(changed), ...partList.map((p) => p.section)])
 
-  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => s && setDraft({ ...s, [k]: v })
+  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
+    if (!s) return
+    setDraft({ ...s, [k]: v })
+    setResets((r) => (r.includes(k) ? r.filter((x) => x !== k) : r))
+  }
   const pin = (k: keyof Settings, on: boolean) => setPinned((p) => (on ? (p.includes(k) ? p : [...p, k]) : p.filter((x) => x !== k)))
-  // Forget just these saved values; the rest of the draft stays as edited.
-  const resetKeys = (keys: (keyof Settings)[]) =>
-    resetFields.mutate(keys, {
-      onSuccess: (next) => {
-        setDraft((d) => d && { ...d, ...Object.fromEntries(keys.map((k) => [k, next.settings[k]])) })
-        setPinned((p) => p.filter((k) => !keys.includes(k)))
-      },
-    })
+  // Forget just these saved values on Save; until then the field shows the size defaults, marked unsaved.
+  const resetKeys = (keys: (keyof Settings)[]) => {
+    setResets((r) => [...new Set([...r, ...keys])])
+    setPinned((p) => p.filter((k) => !keys.includes(k)))
+    setDraft((d) => d && { ...d, ...Object.fromEntries(keys.map((k) => [k, current?.settings[k]])) })
+  }
   const hint = (k: keyof Settings) => <SourceHint source={current?.sources[k]} env={SETTING_ENV[k]} changed={changed.includes(k)} />
   const fid = (k: string) => `${ids}-${k}`
+
+  const discard = () => {
+    setDraft(null)
+    setPinned([])
+    setResets([])
+    setSaveError(null)
+    for (const p of partList) p.discard()
+  }
 
   const close = async () => {
     if (
       dirty &&
-      !(await confirmDialog({ title: "Discard unsaved changes?", body: "Your edits to settings haven't been saved.", confirmLabel: "Discard", danger: true }))
+      !(await confirmDialog({
+        title: "Discard unsaved changes?",
+        body: `${changeCount === 1 ? "1 change" : `${changeCount} changes`} to settings haven't been saved.`,
+        confirmLabel: "Discard",
+        cancelLabel: "Keep editing",
+        danger: true,
+      }))
     )
       return
     onClose()
   }
+
+  useEffect(() => {
+    setVisited((v) => (v.includes(section) ? v : [...v, section]))
+  }, [section])
 
   // Start keyboard focus on the selected category, so ↑/↓ work right away.
   useEffect(() => {
@@ -254,16 +291,29 @@ export function SettingsDialog({
     navRef.current?.querySelector<HTMLElement>(`[data-section=${next}]`)?.focus()
   }
 
-  const submit = (e: React.FormEvent) => {
+  const saveCore = async () => {
+    if (draft && (changedKeys(draft, current?.settings).length || pinned.length)) {
+      const patch = savePatch(draft, current?.settings, pinned)
+      for (const k of resets) delete patch[k]
+      await save.mutateAsync(patch)
+    }
+    if (resets.length) await resetFields.mutateAsync(resets)
+    setDraft(null)
+    setPinned([])
+    setResets([])
+  }
+
+  // One Save writes every draft. Each part starts inside the click, so a browser permission prompt still works.
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!s || !dirty) return
-    save.mutate(savePatch(s, current?.settings, pinned), {
-      onSuccess: () => {
-        setDraft(null)
-        setPinned([])
-        setSavedAt(Date.now())
-      },
-    })
+    if (!dirty || saving) return
+    setSaving(true)
+    setSaveError(null)
+    const jobs = [...(changed.length ? [saveCore()] : []), ...partList.map((p) => p.save())]
+    const failed = (await Promise.allSettled(jobs)).filter((r): r is PromiseRejectedResult => r.status === "rejected")
+    setSaving(false)
+    if (failed.length) setSaveError((failed[0]!.reason as Error)?.message || "Couldn't save")
+    else setSavedAt(Date.now())
   }
 
   return (
@@ -293,6 +343,7 @@ export function SettingsDialog({
                     onSuccess: () => {
                       setDraft(null)
                       setPinned([])
+                      setResets([])
                     },
                   }))
             }}
@@ -301,9 +352,13 @@ export function SettingsDialog({
             Reset to defaults
           </Button>
           <div className="flex flex-col-reverse gap-2 sm:ml-auto sm:flex-row sm:items-center sm:gap-3">
-            {dirty ? (
-              <span className="text-xs text-amber-300" role="status">
-                {changed.length === 1 ? "1 unsaved change" : `${changed.length} unsaved changes`}
+            {saveError ? (
+              <span className="text-xs text-red-300 wrap-anywhere" role="alert">
+                Couldn't save: {saveError}
+              </span>
+            ) : dirty ? (
+              <span className="text-xs text-amber-300" role="status" data-testid="unsaved-count">
+                {changeCount === 1 ? "1 unsaved change" : `${changeCount} unsaved changes`}
               </span>
             ) : savedAt ? (
               <span className="inline-flex items-center gap-1 text-xs text-emerald-400" role="status">
@@ -311,7 +366,7 @@ export function SettingsDialog({
               </span>
             ) : null}
             {dirty && (
-              <Button type="button" variant="ghost" onClick={() => setDraft(null)}>
+              <Button type="button" variant="ghost" onClick={discard}>
                 Discard
               </Button>
             )}
@@ -320,7 +375,7 @@ export function SettingsDialog({
                 Close
               </Button>
             )}
-            <Button type="submit" variant="primary" loading={save.isPending} disabled={!s || !dirty}>
+            <Button type="submit" variant="primary" loading={saving} disabled={!dirty}>
               Save
             </Button>
           </div>
@@ -369,20 +424,27 @@ export function SettingsDialog({
         aria-labelledby={fid(`tab-${section}`)}
         className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6"
       >
-        {section === "about" ? (
+        <SettingsDraftContext.Provider value={registry}>
+          {DRAFT_SECTIONS.filter((k) => visited.includes(k)).map((k) => (
+            <div key={k} hidden={k !== section} data-settings-section={k}>
+              {k === "notifications" ? (
+                <NotificationsPanel fid={fid} />
+              ) : k === "voice" ? (
+                <VoicePanel fid={fid} />
+              ) : k === "credentials" ? (
+                <CredentialsPanel fid={fid} />
+              ) : k === "runpod" ? (
+                <RunPodPanel fid={fid} active={section === "runpod"} />
+              ) : (
+                <Panel section="hooks">
+                  <HooksPanel projectId={null} intro={false} />
+                </Panel>
+              )}
+            </div>
+          ))}
+        </SettingsDraftContext.Provider>
+        {DRAFT_SECTIONS.includes(section) ? null : section === "about" ? (
           <AboutPanel />
-        ) : section === "notifications" ? (
-          <NotificationsPanel fid={fid} />
-        ) : section === "voice" ? (
-          <VoicePanel fid={fid} />
-        ) : section === "credentials" ? (
-          <CredentialsPanel fid={fid} />
-        ) : section === "runpod" ? (
-          <RunPodPanel fid={fid} />
-        ) : section === "hooks" ? (
-          <Panel section="hooks">
-            <HooksPanel projectId={null} intro={false} />
-          </Panel>
         ) : !s ? (
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : section === "orchestrator" ? (
@@ -562,7 +624,7 @@ export function SettingsDialog({
             current={current?.settings}
             pin={pin}
             resetKeys={resetKeys}
-            resetting={resetFields.isPending ? (resetFields.variables ?? null) : null}
+            resets={resets}
           />
         ) : (
           <CostsPanel s={s} set={set} hint={hint} fid={fid} />
@@ -590,7 +652,7 @@ function LimitsPanel({
   current,
   pin,
   resetKeys,
-  resetting,
+  resets,
 }: {
   s: Settings
   set: <K extends keyof Settings>(k: K, v: Settings[K]) => void
@@ -601,7 +663,7 @@ function LimitsPanel({
   current?: Settings
   pin: (k: keyof Settings, on: boolean) => void
   resetKeys: (keys: (keyof Settings)[]) => void
-  resetting: (keyof Settings)[] | null
+  resets: (keyof Settings)[]
 }) {
   const health = useHealth()
   const server = useSettings()
@@ -619,8 +681,11 @@ function LimitsPanel({
     onValue: (v: number) => set(k, v),
     pin: (on: boolean) => pin(k, on),
     onReset: () => resetKeys([k]),
-    resetting: resetting?.includes(k) ?? false,
+    pendingReset: resets.includes(k),
   })
+  // A pending "Use size default" shows the size defaults already.
+  const shownSources = sources && { ...sources, ...Object.fromEntries(resets.map((k) => [k, "default"])) }
+  const overrides = changed.filter((k) => !resets.includes(k))
   const upstash = health.data?.provider === "upstash"
   return (
     <Panel section="limits">
@@ -641,7 +706,7 @@ function LimitsPanel({
       <Row
         id={fid("are")}
         label="Allow the Coordinator to resize boxes automatically"
-        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running agents for it, and every resize they make sends you a notice with their reason."
+        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running tasks for it, and every resize they make sends you a notice with their reason."
         hint={hint("autoResizeEnabled")}
       >
         <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
@@ -682,7 +747,7 @@ function LimitsPanel({
           {s.placementResizeEnabled ? "On: an idle box may be resized" : "Off: the task waits"}
         </label>
       </Row>
-      <SizeCapacityTable s={s} sources={sources} changed={changed} />
+      <SizeCapacityTable s={s} sources={shownSources} changed={overrides} />
       <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
         <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
       </Row>
@@ -705,19 +770,19 @@ function LimitsPanel({
       </Row>
       <Row
         id={fid("spb")}
-        label="Agents per box"
-        help={`Claude turns that may run at the same time inside one box, every project's together. A project's own Agents at once (project settings) limits only its own agents within this. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
+        label="Tasks running at once per box"
+        help={`Tasks that may run at the same time inside one box, every project's together (each task runs its own Claude Code agent). A project's own Tasks running at once (project settings) limits only its own tasks within this. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].slotsPerBox}`).join(", ")}.`}
         hint={hint("slotsPerBox")}
       >
         <BoxLimitInput id={fid("spb")} max={20} {...limitField("slotsPerBox")} />
       </Row>
-      <Row id={fid("ma")} label="Max agents" help="A cap on agents running at once across all boxes. 0 = boxes × agents per box." hint={hint("maxAgents")}>
+      <Row id={fid("ma")} label="Max tasks running at once" help="A cap on tasks running at once across all boxes. 0 = boxes × tasks running at once per box." hint={hint("maxAgents")}>
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
       </Row>
       <Row
         id={fid("la")}
-        label="Local agents"
-        help={`Agents of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Agents at once limits only its own agents within this. They have their own queue: they never take a box slot or count toward Max agents. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
+        label="Tasks running at once on this computer"
+        help={`Tasks of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Tasks running at once limits only its own tasks within this. They have their own queue: they never take a box slot or count toward Max tasks running at once. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
         hint={hint("localAgents")}
       >
         <input
@@ -733,8 +798,8 @@ function LimitsPanel({
       </Row>
       <Row
         id={fid("mr")}
-        label="Resident tasks per box"
-        help={`Task folders kept on one box before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
+        label="Task folders kept per box"
+        help={`Task folders kept on one box (running or not) before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
         hint={hint("maxResidentPerBox")}
       >
         <BoxLimitInput id={fid("mr")} max={200} {...limitField("maxResidentPerBox")} />
@@ -870,10 +935,10 @@ function LimitsPanel({
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
-          With these limits, up to <span className="font-medium text-zinc-100 tabular-nums">{capacity}</span> {capacity === 1 ? "agent runs" : "agents run"} at once on up to{" "}
+          With these limits, up to <span className="font-medium text-zinc-100 tabular-nums">{capacity}</span> {capacity === 1 ? "task runs" : "tasks run"} at once on up to{" "}
           <span className="font-medium text-zinc-100 tabular-nums">{s.maxBoxes}</span> {s.maxBoxes === 1 ? "box" : "boxes"}.
         </p>
-        <p>Changes apply right away. Lowering a limit never stops running boxes or agents: no new work is placed until usage drops.</p>
+        <p>Saved changes apply right away. Lowering a limit never stops running boxes or tasks: no new work is placed until usage drops.</p>
         {upstash && (
           <p className={cx(s.maxBoxes > UPSTASH_FREE_CONCURRENT_BOXES && "text-amber-300")}>
             Free plan: up to {UPSTASH_FREE_CONCURRENT_BOXES} concurrent boxes (
@@ -888,11 +953,11 @@ function LimitsPanel({
   )
 }
 
-/** Agents and resident folders per box for each worker size, so a small box's lower capacity is visible. */
+/** Tasks running at once and task folders kept per box for each worker size, so a small box's lower capacity is visible. */
 type BoxLimitKey = "slotsPerBox" | "maxResidentPerBox"
 
 /**
- * Agents or task folders per box. While each box follows its own size, the field shows every size's default
+ * Tasks running at once or task folders kept per box. While each box follows its own size, the field shows every size's default
  * instead of one number; typing a number overrides it for every box. A value saved here gets a "Use size default"
  * button, and one set by env says how to remove it.
  */
@@ -907,7 +972,7 @@ export function BoxLimitInput({
   onValue,
   pin,
   onReset,
-  resetting,
+  pendingReset = false,
 }: {
   id: string
   k: BoxLimitKey
@@ -919,11 +984,12 @@ export function BoxLimitInput({
   onValue: (v: number) => void
   pin: (on: boolean) => void
   onReset: () => void
-  resetting: boolean
+  /** "Use size default" was pressed; Save forgets the saved value. */
+  pendingReset?: boolean
 }) {
   // What's typed while focused, so the field can be empty mid-edit without the number snapping back.
   const [text, setText] = useState<string | null>(null)
-  const atDefault = source === "default" && !changed
+  const atDefault = pendingReset || (source === "default" && !changed)
   const sizes = boxLimitDefaults(k)
   const env = SETTING_ENV[k]
   const shown = text ?? (atDefault ? "" : String(value))
@@ -957,7 +1023,7 @@ export function BoxLimitInput({
         }}
       />
       {source === "ui" && !changed && (
-        <Button type="button" variant="subtle" size="sm" className="w-full sm:w-auto" loading={resetting} onClick={onReset} data-testid={`use-size-default-${k}`}>
+        <Button type="button" variant="subtle" size="sm" className="w-full sm:w-auto" onClick={onReset} data-testid={`use-size-default-${k}`}>
           Use size default
         </Button>
       )}
@@ -985,8 +1051,8 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
         <thead className="bg-zinc-900/60 text-zinc-500">
           <tr>
             <th className="px-3 py-2 font-medium">Worker size</th>
-            <th className="px-3 py-2 font-medium">Agents per box</th>
-            <th className="px-3 py-2 font-medium">Resident tasks per box</th>
+            <th className="px-3 py-2 font-medium">Tasks running at once per box</th>
+            <th className="px-3 py-2 font-medium">Task folders kept per box</th>
           </tr>
         </thead>
         <tbody>
@@ -1013,8 +1079,8 @@ function SizeCapacityTable({ s, sources, changed }: { s: Settings; sources?: Rec
       <p className="border-t border-zinc-900 px-3 py-2 leading-relaxed text-zinc-500">
         {overridden
           ? "Your saved or env values below replace the size defaults for every size."
-          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} agent at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
-        Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} agents and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
+          : `Each box uses its own size's values: a small box runs ${SIZE_DEFAULTS.small.slotsPerBox} task at a time and keeps ${SIZE_DEFAULTS.small.maxResidentPerBox} task folders, a medium one ${SIZE_DEFAULTS.medium.slotsPerBox} and ${SIZE_DEFAULTS.medium.maxResidentPerBox}. Set the fields below to override them for every box.`}{" "}
+        Before size-based defaults, every box ran {LEGACY_POOL_DEFAULTS.slotsPerBox} tasks at once and kept {LEGACY_POOL_DEFAULTS.maxResidentPerBox} folders.
       </p>
     </div>
   )
@@ -1103,9 +1169,17 @@ function CostsPanel({
 }
 
 function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
-  const [on, setOn] = useState(browserNotificationsOn)
+  const [saved, setSaved] = useState(browserNotificationsOn)
   const [denied, setDenied] = useState(false)
   const supported = browserNotificationsSupported()
+  // Turning them on asks the browser for permission when Save is pressed (still inside the click).
+  const [on, setOn] = useDraft("browser-notifications", "notifications", saved, async (want: boolean) => {
+    const now = await setBrowserNotifications(want)
+    setSaved(now)
+    setDenied(want && !now)
+  })
+  // Sound on send is saved in this browser; the row previews the draft.
+  const [sound, setSound] = useDraft("send-sound", "notifications", useSendSound(), setSendSound)
   return (
     <Panel section="notifications">
       <Row
@@ -1126,16 +1200,15 @@ function NotificationsPanel({ fid }: { fid: (k: string) => string }) {
             type="checkbox"
             disabled={!supported}
             checked={on}
-            onChange={async (e) => {
-              const want = e.target.checked
-              const now = await setBrowserNotifications(want)
-              setOn(now)
-              setDenied(want && !now)
+            onChange={(e) => {
+              setOn(e.target.checked)
+              setDenied(false)
             }}
           />
           {on ? "On" : "Off"}
         </label>
       </Row>
+      <SendSoundRow fid={fid} value={sound} onChange={setSound} />
     </Panel>
   )
 }
@@ -1176,14 +1249,14 @@ function AboutPanel() {
         <AboutRow label="Max upload">{server.data ? `${server.data.maxUploadMb} MB` : "…"}</AboutRow>
         <AboutRow label="Links">
           <div className="flex flex-wrap gap-x-4 gap-y-1">
-            <NewTabLink className={link} href="https://github.com/webdevcody/box-yard">
-              GitHub <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://github.com/webdevcody/box-yard">
+              GitHub
             </NewTabLink>
-            <NewTabLink className={link} href="https://upstash.com/docs/box">
-              Upstash Box docs <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://upstash.com/docs/box">
+              Upstash Box docs
             </NewTabLink>
-            <NewTabLink className={link} href="https://console.upstash.com">
-              Upstash console <ExternalLink className="h-3 w-3" />
+            <NewTabLink className={link} mark="end" href="https://console.upstash.com">
+              Upstash console
             </NewTabLink>
           </div>
         </AboutRow>

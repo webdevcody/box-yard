@@ -42,6 +42,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { RunPodService } from "./runpod/service.js"
+import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
@@ -287,6 +288,12 @@ export function createBoxYard(
   })
   // Every box provider gets the local runner and the GPU pods beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
+  // A task's GPU pod as its placement shows it: the GPU type and pod id this process last saw (no API call).
+  store.placeExtra = (boxId) => {
+    if (!isGpuBox(boxId)) return null
+    const pod = gpu?.provider.cached(boxId)
+    return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
+  }
   const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider)
   const setup = new Setup({ c, store, credentials: settings.credentials, settings, provider: () => provider.name, githubFetch: opts.github?.fetch, ...opts.setup })
   const ttsSettings = new TtsSettingsStore(store, c)
@@ -800,11 +807,6 @@ export function createBoxYard(
       throw new BadRequestError((err as Error).message)
     }
   })
-  api.post("/runpod/pods/:boxId/stop", async (req, res) => {
-    const boxId = String(req.params.boxId)
-    await tasks.stopGpuPod(boxId, { actor: { kind: "owner" }, reason: "Stopped from Settings › RunPod GPU." })
-    res.json(await runpodStatus())
-  })
   api.post("/runpod/pods/:boxId/keep-warm", async (req, res) => {
     const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
     await runpod.keepWarm(String(req.params.boxId), minutes)
@@ -826,6 +828,7 @@ export function createBoxYard(
     if (!(err instanceof TtsError)) throw err
     res.removeHeader("Content-Type")
     res.removeHeader("X-TTS-Cache")
+    res.removeHeader("X-TTS-Voice")
     res.status(err.status).json({ error: err.message, provider: err.provider, upstreamStatus: err.upstreamStatus })
   }
   api.get("/tts/voices", async (req, res) => {
@@ -852,6 +855,7 @@ export function createBoxYard(
     res.setHeader("Content-Type", audio.contentType)
     res.setHeader("Cache-Control", "no-store")
     res.setHeader("X-TTS-Cache", audio.cache)
+    res.setHeader("X-TTS-Voice", audio.voice)
     try {
       for await (const chunk of audio.chunks) {
         if (res.destroyed) break
@@ -1070,10 +1074,14 @@ export function createBoxYard(
     const body = parse(z.object({ stopAgents: z.boolean().optional() }), req.body ?? {})
     res.json(await tasks.clearBox(req.params.id!, { stopAgents: body.stopAgents }))
   })
-  /** Archive every workspace, then destroy the box. 409 while agents run, unless ?stopAgents=1. */
+  /**
+   * Archive every workspace, then destroy the box, or terminate a RunPod GPU pod (`runpod-*`; its volume stays).
+   * 409 while agents run, unless ?stopAgents=1, and when the safety check flags a task (queued, unpushed or
+   * uncommitted work), unless ?override=1 (Delete anyway). GET /boxes/:id/contents has the check.
+   */
   api.delete("/boxes/:id", async (req, res) => {
-    await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1" })
-    res.json({ ok: true })
+    const result = await tasks.destroyBox(req.params.id!, { stopAgents: req.query.stopAgents === "1", override: req.query.override === "1" })
+    res.json({ ok: true, ...result })
   })
 
   /** What resizing to ?size= would do: in place or by migration, the running agents, and a scale-down's disk fit. */

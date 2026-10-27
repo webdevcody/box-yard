@@ -124,6 +124,13 @@ export interface DictationState {
 /** A press shorter than this is a tap: it toggles listening on (and the next tap turns it off). */
 export const TAP_MS = 350
 
+/**
+ * After stop(), the last words and `end` normally arrive within a second. iOS sometimes never sends `end`
+ * (a home-screen app thawed mid-session, say), and while stopping, Send and the mic do nothing. So stopping
+ * gives up after this long: the session is aborted and what was heard is kept.
+ */
+export const STOP_TIMEOUT_MS = 3000
+
 export const IDLE: DictationState = { phase: "idle", mode: null, interim: "", error: null }
 
 export function errorKind(code: string): DictationError | null {
@@ -148,6 +155,7 @@ export class DictationMachine {
   private sendAfterEnd = false
   private wantListening = false
   private restarts = 0
+  private stopTimer: ReturnType<typeof setTimeout> | null = null
   private listeners = new Set<() => void>()
 
   constructor(
@@ -288,6 +296,15 @@ export class DictationMachine {
     this.sendAfterEnd = send
     if (!rec) return this.end()
     this.set({ phase: "stopping" })
+    if (this.stopTimer) clearTimeout(this.stopTimer)
+    this.stopTimer = setTimeout(() => {
+      this.stopTimer = null
+      if (this.rec !== rec || this.state.phase !== "stopping") return
+      this.end()
+      try {
+        rec.abort()
+      } catch {}
+    }, STOP_TIMEOUT_MS)
     try {
       rec.stop() // the last words arrive as final results, then onend
     } catch {
@@ -296,6 +313,8 @@ export class DictationMachine {
   }
 
   private end() {
+    if (this.stopTimer) clearTimeout(this.stopTimer)
+    this.stopTimer = null
     const rec = this.rec
     this.rec = null
     if (rec) rec.onresult = rec.onerror = rec.onend = null
@@ -309,6 +328,8 @@ export class DictationMachine {
 
   /** Drop everything now, without waiting for the last results (unmount). */
   abort() {
+    if (this.stopTimer) clearTimeout(this.stopTimer)
+    this.stopTimer = null
     const rec = this.rec
     this.rec = null
     this.wantListening = false

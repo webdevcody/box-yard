@@ -4,6 +4,7 @@ import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
+import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
@@ -133,6 +134,8 @@ export interface TaskRow {
   routing_reason: string | null
   /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
   runs_on?: string | null
+  /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
+  last_place_json?: string | null
   /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
   source: string | null
   pr_head_sha: string | null
@@ -650,6 +653,12 @@ const queuedInputRow = (r: InputRow): QueuedInputRow => ({
 export class Store {
   constructor(readonly db: DB) {}
 
+  /**
+   * What only a provider knows about a box (a RunPod pod's GPU type and id, a Docker container's name), merged
+   * into Task.placement. Set by the app; tests leave it unset.
+   */
+  placeExtra: ((boxId: string) => Partial<Place> | null) | null = null
+
   /** Called with every notification right after it is recorded (the app broadcasts it). */
   onNotification: ((n: AppNotification) => void) | null = null
 
@@ -1076,10 +1085,38 @@ export class Store {
       routingRule: row.routing_rule ?? null,
       routingReason: row.routing_reason ?? null,
       runsOn: taskRunsOn(row),
+      placement: this.taskPlacement(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    }
+  }
+
+  /** A box as Task.placement shows it: its kind, and for worker boxes who made it and its size. */
+  placeOf(boxId: string): Place {
+    const kind = placeKindOf(boxId)
+    const place: Place = { kind, boxId }
+    if (kind === "box") {
+      const box = this.db.prepare("SELECT provider, size FROM boxes WHERE id = ?").get(boxId) as { provider: string; size: string } | undefined
+      if (box) {
+        place.provider = box.provider
+        place.size = normalizeBoxSize(box.size)
+      }
+    }
+    return { ...place, ...this.placeExtra?.(boxId) }
+  }
+
+  /** Where a task runs now, where it last ran, and where its next turn goes (shared/placement.ts). */
+  taskPlacement(row: TaskRow): TaskPlacement {
+    const projectRunner = this.projectRunner(row.project_id)
+    const own = taskRunsOn(row)
+    return {
+      now: row.box_id ? this.placeOf(row.box_id) : null,
+      last: row.box_id ? null : json<(Place & { leftAt: number }) | null>(row.last_place_json ?? null, null),
+      runner: own ?? projectRunner,
+      chosenBy: own ? "task" : "project",
+      projectRunner,
     }
   }
 
@@ -1260,6 +1297,14 @@ export class Store {
         : undefined
     const sets: string[] = []
     const args: unknown[] = []
+    // A box letting the task go: remember where it ran, so a resting, archived task still says where (Task.placement.last).
+    if (patch.boxId === null) {
+      const was = (this.db.prepare("SELECT box_id FROM tasks WHERE id = ?").get(id) as { box_id: string | null } | undefined)?.box_id
+      if (was) {
+        sets.push("last_place_json = ?")
+        args.push(JSON.stringify({ ...this.placeOf(was), leftAt: Date.now() }))
+      }
+    }
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
       if (value === undefined) continue
       sets.push(`${TASK_COLUMNS[key]} = ?`)

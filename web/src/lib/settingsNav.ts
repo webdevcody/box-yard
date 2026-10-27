@@ -28,28 +28,28 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "credentials",
     label: "Credentials",
     description:
-      "Where agents run, and the keys Box Yard works with: Upstash boxes, Claude and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Changes here save right away and apply from the next turn, no restart needed.",
+      "Where agents run, and the keys Box Yard works with: Upstash boxes, Claude and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Saved changes apply from the next turn, no restart needed.",
     fields: [],
   },
   {
     key: "runpod",
     label: "RunPod GPU",
     description:
-      "GPU machines for projects that need one (a WebGL game, ML work): a project whose Runs on is RunPod GPU gets a pod of its own that starts when a task needs it and stops when idle. Changes here save right away.",
+      "GPU machines for projects that need one (a WebGL game, ML work): a project whose Runs on is RunPod GPU gets a pod of its own that starts when a task needs it and stops when idle.",
     fields: [],
   },
   {
     key: "hooks",
     label: "Hooks",
     description:
-      "Global hooks: automations the Coordinator runs on every project's task events, like asking an agent to merge its PR once it's ready. Project hooks live on each project's Hooks tab. Changes here save right away.",
+      "Global hooks: automations the Coordinator runs on every project's task events, like asking an agent to merge its PR once it's ready. Project hooks live on each project's Hooks tab. Switching a hook on or off waits for Save; New hook and Edit open their own form.",
     fields: [],
   },
   {
     key: "limits",
     label: "Boxes & limits",
     description:
-      "Worker box size and resizing, capacity, local agents on this computer, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
+      "Worker box size and resizing, capacity, tasks running at once on this computer, disk and memory headroom, cleanup retention, the dependency cache, repo mirrors and pushing work to git.",
     fields: [
       "workerSize",
       "autoResizeEnabled",
@@ -86,7 +86,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "notifications",
     label: "Notifications",
-    description: "How this browser tells you a task finished or needs you. Saved in this browser only.",
+    description: "How this browser tells you a task finished or needs you, and the sound a send makes. Saved in this browser only.",
     fields: [],
   },
   {

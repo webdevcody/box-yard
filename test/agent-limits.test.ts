@@ -30,8 +30,8 @@ describe("limitBlock", () => {
     const second = heavy("Perf lane 1")
     const block = limitBlock(second, [merge, agent("box-yard")])
     expect(block).toEqual({ kind: "own", cap: 1, by: [merge] })
-    expect(localBlockReason(second, block!)).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer")
-    expect(boxBlockReason(second, block!, "box box-1")).toBe("survive-the-night allows 1 of its agents at a time on a box, and Merge PR #78 is running on box box-1")
+    expect(localBlockReason(second, block!)).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its tasks at a time on this computer")
+    expect(boxBlockReason(second, block!, "box box-1")).toBe("survive-the-night allows 1 of its tasks at a time on a box, and Merge PR #78 is running on box box-1")
     // Below its limit it runs.
     expect(limitBlock(agent("survive-the-night", { agentsPerBox: 2 }), [merge])).toBeNull()
   })

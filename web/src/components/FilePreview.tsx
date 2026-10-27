@@ -23,7 +23,7 @@ import { PREVIEW_PARAM, closePreview, stepPreview, usePreviewState } from "../li
 import { Modal, type ModalSize } from "./Modal"
 import { formatSize } from "./Attachments"
 import { isTyping } from "./TaskFilters"
-import { Markdown, cx } from "./ui"
+import { Markdown, NewTabLink, cx } from "./ui"
 import type { Artifact } from "../../../shared/types"
 
 /** Mounted once in the app: shows the file named by `?preview=`. */
@@ -178,9 +178,9 @@ function FileActions({ url, name }: { url: string; name: string }) {
   }
   return (
     <>
-      <a href={url} target="_blank" rel="noopener noreferrer" className={actionClass} title="Open in new tab" aria-label="Open in new tab">
+      <NewTabLink href={url} mark={false} className={actionClass} title="Open in new tab" aria-label="Open in new tab">
         <ExternalLink className="h-4 w-4" />
-      </a>
+      </NewTabLink>
       <a href={url} download={name} className={actionClass} title="Download" aria-label="Download">
         <Download className="h-4 w-4" />
       </a>
@@ -225,9 +225,9 @@ function Problem({ message, url }: { message: string; url?: string }) {
       <FileWarning className="h-8 w-8 text-zinc-600" />
       <p>{message}</p>
       {url && (
-        <a href={url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700">
+        <NewTabLink href={url} mark={false} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700">
           <ExternalLink className="h-3.5 w-3.5" /> Open in new tab
-        </a>
+        </NewTabLink>
       )}
     </div>
   )

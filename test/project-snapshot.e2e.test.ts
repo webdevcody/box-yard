@@ -167,9 +167,9 @@ const finished = (r: Running, projectId: string) =>
     const j = r.yard.tasks.snapshotJob(projectId)
     return j && j.status !== "running" ? j : null
   }, `the snapshot for ${projectId} to finish`)
-/** Delete a project's box so its next task needs a new one. */
+/** Delete a project's box so its next task needs a new one (Delete anyway: its workspaces hold uncommitted files). */
 const dropBox = async (r: Running, boxId: string) => {
-  await call(r, "DELETE", `/api/boxes/${boxId}`)
+  await call(r, "DELETE", `/api/boxes/${boxId}?override=1`)
   await waitFor(() => !r.yard.store.getBox(boxId), `box ${boxId} to go`)
 }
 
@@ -311,7 +311,7 @@ describe("taking a project snapshot", () => {
 
     const busy = await takeSnapshot(r, p.id, boxId)
     expect(busy.status).toBe(409)
-    expect(busy.data.error).toBe(`1 agent is running on ${boxId}: stop it first.`)
+    expect(busy.data.error).toBe(`1 task is running on ${boxId}: stop it first.`)
     expect(r.yard.tasks.snapshotJob(p.id)).toBeNull()
     expect(r.provider.snapshots).toEqual([])
     expect((await getTask(r, hang.id)).status).toBe("working")

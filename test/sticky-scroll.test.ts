@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { act, createElement } from "react"
+import { act, createElement, createRef } from "react"
 import { createRoot, type Root } from "react-dom/client"
-import { StickyScroll } from "../web/src/components/StickyScroll.js"
+import { StickyScroll, type StickyScrollHandle } from "../web/src/components/StickyScroll.js"
+import { useTail } from "../web/src/lib/tail.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -89,10 +90,12 @@ const userScroll = (dy: number) => {
   scroller.scrollTop = top + dy
 }
 
+const handle = createRef<StickyScrollHandle>()
+
 function Thread({ heights }: { heights: number[] }) {
   return createElement(
     StickyScroll,
-    { count: heights.length, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
+    { handle, count: heights.length, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
   )
 }
 
@@ -106,7 +109,16 @@ function streamDelta(px = 30) {
   frame()
 }
 
+// requestAnimationFrame callbacks wait here until the test runs the next frame.
+let frames: FrameRequestCallback[] = []
+const nextFrame = () => act(() => frames.splice(0).forEach((cb) => cb(0)))
+let viewport: EventTarget
+
 beforeEach(() => {
+  frames = []
+  vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb))
+  viewport = new EventTarget()
+  vi.stubGlobal("visualViewport", viewport)
   vi.stubGlobal("ResizeObserver", FakeResizeObserver)
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
@@ -294,5 +306,154 @@ describe("StickyScroll", () => {
     act(() => void inner.dispatchEvent(new WheelEvent("wheel", { deltaY: -20, bubbles: true })))
     streamDelta()
     expect(atBottom()).toBe(true)
+  })
+
+  describe("after a send (scrollToEnd)", () => {
+    // Reading history far up, unpinned.
+    const readHistory = () => {
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-1200)
+      frame()
+      expect(jumpButton()).toBeDefined()
+    }
+    // The composer sends: the sent message renders a moment later (React Query notifies on a timer).
+    const send = () => act(() => handle.current!.scrollToEnd())
+    const messageRenders = (h = 80) => {
+      heights.push(h)
+      render()
+      frame()
+    }
+
+    it("a send scrolls to the bottom, even from far up", () => {
+      readHistory()
+      send()
+      nextFrame()
+      flush()
+      expect(atBottom()).toBe(true)
+      expect(jumpButton()).toBeUndefined()
+    })
+
+    it("lands on the sent message when it renders after the frame", () => {
+      readHistory()
+      send()
+      nextFrame()
+      frame()
+      messageRenders()
+      expect(atBottom()).toBe(true)
+      expect(rowTop(rows().at(-1)!) + height(rows().at(-1)!)).toBe(VIEW)
+    })
+
+    it("lands on the sent message when it renders before the frame", () => {
+      readHistory()
+      send()
+      messageRenders()
+      nextFrame()
+      flush()
+      expect(atBottom()).toBe(true)
+    })
+
+    it("stays pinned while the reply streams in", () => {
+      readHistory()
+      send()
+      nextFrame()
+      messageRenders()
+      messageRenders(40)
+      for (let i = 0; i < 5; i++) streamDelta()
+      expect(atBottom()).toBe(true)
+    })
+
+    it("a streaming reply doesn't pull the view back down after scrolling up again", () => {
+      readHistory()
+      send()
+      nextFrame()
+      messageRenders()
+      messageRenders(40)
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-300)
+      frame()
+      const reading = top
+      for (let i = 0; i < 10; i++) streamDelta()
+      expect(top).toBe(reading)
+      expect(jumpButton()).toBeDefined()
+    })
+
+    it("scrolling up before the frame cancels the glide", () => {
+      readHistory()
+      send()
+      act(() => void scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -100, bubbles: true })))
+      userScroll(-100)
+      frame()
+      const reading = top
+      nextFrame()
+      messageRenders()
+      expect(top).toBe(reading)
+    })
+
+    it("follows the visual viewport (an iOS keyboard closing) back to the bottom", () => {
+      send()
+      nextFrame()
+      flush()
+      // The keyboard took the bottom: the browser left scrollTop short of it.
+      top -= 200
+      dispatched = top
+      act(() => void viewport.dispatchEvent(new Event("resize")))
+      expect(atBottom()).toBe(true)
+    })
+  })
+
+  // A phone's home-screen app stays open for days: a thread that kept every message that arrived ended up
+  // rendering hundreds of them, and every layout (keyboard, rotation, a dialog) froze the app for seconds.
+  describe("with useTail, as the chats use it", () => {
+    let items: { id: string }[]
+
+    function TailThread({ items }: { items: { id: string }[] }) {
+      const tail = useTail(items, "chat")
+      return createElement(StickyScroll, {
+        handle,
+        count: items.length,
+        hidden: tail.hidden,
+        onLoadEarlier: tail.loadEarlier,
+        onTrim: tail.trim,
+        children: tail.visible.map((m) => createElement("div", { key: m.id, "data-h": 100 }, m.id)),
+      })
+    }
+    const renderTail = () => act(() => root.render(createElement(TailThread, { items: [...items] })))
+    // The rendered messages (the list also holds the "load earlier" sentinel).
+    const messages = () => rows().filter((r) => r.dataset.h)
+    const arrive = () => {
+      items.push({ id: `m${items.length}` })
+      renderTail()
+      frame()
+    }
+
+    beforeEach(() => {
+      act(() => root.render(null))
+      items = Array.from({ length: 200 }, (_, i) => ({ id: `m${i}` }))
+      renderTail()
+      installLayout()
+      scroller.scrollTop = max()
+      frame()
+    })
+
+    it("starts with the newest 60", () => {
+      expect(messages()).toHaveLength(60)
+      expect(messages().at(-1)!.textContent).toBe("m199")
+    })
+
+    it("stays at most twice that while new messages arrive at the bottom", () => {
+      for (let i = 0; i < 300; i++) arrive()
+      expect(messages().length).toBeLessThanOrEqual(120)
+      expect(messages().at(-1)!.textContent).toBe("m499")
+      expect(atBottom()).toBe(true)
+    })
+
+    it("keeps every row while scrolled up reading, so nothing moves", () => {
+      userScroll(-1000)
+      flush()
+      const reading = messages().find((r) => rowTop(r) >= 0)!.textContent
+      for (let i = 0; i < 100; i++) arrive()
+      expect(messages()).toHaveLength(160)
+      expect(messages().find((r) => rowTop(r) >= 0)!.textContent).toBe(reading)
+    })
   })
 })

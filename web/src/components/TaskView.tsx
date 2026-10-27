@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, type Ref } from "react"
 import { Link } from "wouter"
 import { Bot, MessageCircleQuestion, Users, Webhook } from "lucide-react"
 import {
@@ -14,7 +14,7 @@ import {
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
 import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown, WaitIcon } from "./ui"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
@@ -25,6 +25,7 @@ import { AttachmentList } from "./Attachments"
 import { TaskQueue } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
+import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
@@ -41,11 +42,21 @@ export function TaskView({ id }: { id: string }) {
   const sendChat = useSendChat()
   const [showTools, setShowTools] = useStoredFlag("boxyard:show-tool-calls")
   const panel = useRef<HTMLDivElement>(null)
+  const thread = useRef<StickyScrollHandle>(null)
   const task = tasks.data
   const project = projects.data?.find((p) => p.id === task?.projectId)
   const schedule = task?.scheduleId ? schedules.data?.find((s) => s.id === task.scheduleId) : null
-  const submit = useCallback((content: string, attachments: Attachment[]) => send.mutate({ content, attachments }), [send.mutate])
-  const sendFollowUp = useCallback((content: string) => send.mutate({ content, attachments: [] }), [send.mutate])
+  // A message to a busy task shows as a queued row at the end of the transcript: either way, scroll to it.
+  const submit = useCallback(
+    (content: string, attachments: Attachment[]) => {
+      const sending = send.mutateAsync({ content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      thread.current?.scrollToEnd()
+      return sending
+    },
+    [send.mutateAsync],
+  )
+  const sendFollowUp = useCallback((content: string) => submit(content, []), [submit])
   const startFromSelection = useCallback(
     (content: string) => sendChat.mutate({ id: newClientId("chat"), content, attachments: [] }),
     [sendChat.mutate],
@@ -86,6 +97,7 @@ export function TaskView({ id }: { id: string }) {
       )}
 
       <TaskThread
+        handle={thread}
         id={id}
         showTools={showTools}
         working={running ? (task.status === "starting" ? "Preparing the box…" : "Agent is working…") : null}
@@ -98,6 +110,7 @@ export function TaskView({ id }: { id: string }) {
         className={cx(COMPOSER_FOOTER, "mt-3")}
         onSubmit={submit}
         panelRef={panel}
+        historyKey={`task:${id}`}
         placeholder={
           task.status === "needs_input"
             ? "Answer the agent…"
@@ -112,6 +125,7 @@ export function TaskView({ id }: { id: string }) {
 
 /** The transcript. Its own component so header updates (status, context meter) don't re-render it. */
 const TaskThread = memo(function TaskThread({
+  handle,
   id,
   showTools,
   working,
@@ -119,6 +133,7 @@ const TaskThread = memo(function TaskThread({
   onStartFromSelection,
   onFollowUp,
 }: {
+  handle: Ref<StickyScrollHandle>
   id: string
   showTools: boolean
   working: string | null
@@ -141,11 +156,13 @@ const TaskThread = memo(function TaskThread({
   return (
     <SelectionToTask source={selectionSource} onPrompt={onStartFromSelection}>
       <StickyScroll
+        handle={handle}
         count={shown.length}
         resetKey={id}
         restoreKey="task"
         hidden={tail.hidden}
         onLoadEarlier={tail.loadEarlier}
+        onTrim={tail.trim}
         className="rounded-xl border border-zinc-900 bg-zinc-950 p-4"
         contentClassName="space-y-2.5"
       >
@@ -182,7 +199,7 @@ const PublishedRun = memo(
   (a, b) => a.messages.length === b.messages.length && a.messages.every((m, i) => m === b.messages[i]),
 )
 
-const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
+export const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
   const ownerName = useOwnerName()
   const time = (
     <span className="ml-2 text-[10px] text-zinc-600">
@@ -194,7 +211,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       // A hook's message (server/hooks.ts) is an automation's, not Cody's: its own colour and icon.
       const hook = m.meta?.source === "hook"
       return (
-        <div className={cx("rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
+        <div className={cx(MESSAGE_BLOCK, "rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
           <div className={cx("mb-0.5 flex items-center gap-1 text-[11px] font-semibold", hook ? "text-teal-300" : "text-yard-400")}>
             {hook && <Webhook className="h-3 w-3" />}
             {userMessageLabel(m.meta, ownerName)}
@@ -203,6 +220,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}
           <AttachmentList files={m.meta?.attachments} />
           {m.meta?.undelivered === true && <div className="mt-1 text-[11px] text-zinc-500">Not delivered: the task was stopped or marked done first.</div>}
+          {!m.meta?.pending && <MessageActions text={m.content} />}
         </div>
       )
     }
@@ -211,12 +229,13 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
         // The reply's first block drops its top margin (pt-1.5 keeps the gap) and the row sets one leading,
         // so the icon's one-line box sits on the first line. A reply opening with a code block: the box
         // skips the block's p-3 and is one 16px code line tall.
-        <div className="group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed">
+        <div className={cx(MESSAGE_BLOCK, "group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed")}>
           <LineIcon icon={Bot} className="h-4 w-4 text-zinc-500" box="group-has-[>div>.prose-chat>.code-block:first-child]:mt-3 group-has-[>div>.prose-chat>.code-block:first-child]:h-4" />
           <div className="min-w-0 text-zinc-200 [&>.prose-chat>:first-child]:mt-0!">
             <Markdown>{m.content}</Markdown>
             <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
           </div>
+          <MessageActions text={m.content} />
         </div>
       )
     case "tool":
@@ -228,7 +247,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       )
     case "agent":
       return (
-        <div className="flex items-start gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200">
+        <div className={cx(MESSAGE_BLOCK, "flex items-start gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200")}>
           <LineIcon icon={Users} className="h-4 w-4 text-violet-400" />
           <div className="min-w-0">
             {typeof m.meta?.from === "string" && (
@@ -238,6 +257,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
             )}
             <div className="whitespace-pre-wrap wrap-anywhere">{m.content}</div>
           </div>
+          <MessageActions text={m.content} />
         </div>
       )
     default: {

@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -61,9 +62,9 @@ export interface Project {
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
   /**
-   * Agents at once: how many of its own agents may run at the same time on one box, GPU pod or this computer. Other
-   * projects' agents never wait for it; the box's own limit (Settings › Agents per box, or › Local agents) bounds
-   * them. null: only the box's limit (server/agentLimits.ts).
+   * Tasks running at once: how many of its own tasks may run at the same time on one box, GPU pod or this computer.
+   * Other projects' tasks never wait for it; the box's own limit (Settings › Tasks running at once per box, or › on this
+   * computer) bounds them. null: only the box's limit (server/agentLimits.ts).
    */
   agentsPerBox: number | null
   /**
@@ -71,7 +72,7 @@ export interface Project {
    * project's agent starts there, and its agents wait for the others' to finish (server/agentLimits.ts).
    */
   wholeMachine: boolean
-  /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Resident tasks per box. */
+  /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Task folders kept per box. */
   tasksPerBox: number | null
   /** Most boxes its tasks use at once (boxes made for it or holding its task folders); null: only Settings › Max boxes. */
   maxBoxes: number | null
@@ -204,6 +205,11 @@ export interface Task {
    * later message. It wins over the project's setting for every turn; null follows the project.
    */
   runsOn: Runner | null
+  /**
+   * Where it actually runs (shared/placement.ts): the box its workspace is on now, where it last ran once that box
+   * let it go, and where its next turn goes and which setting chose that. Always set by the server.
+   */
+  placement?: TaskPlacement | null
   /** Cody pressed "Merge PR" and the agent hasn't finished that turn yet (null otherwise). */
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
@@ -403,7 +409,7 @@ export interface BoxInfo {
   slots: number
   runningTurns: number
   /**
-   * Fewer than `slots` while a project with an agent running here sets Agents per box: the strictest of those
+   * Fewer than `slots` while a project with an agent running here sets Tasks running at once: the strictest of those
    * limits (no agent joins until running drops below it), with the project. Absent otherwise.
    */
   projectLimit?: { slots: number; project: string } | null
@@ -453,9 +459,22 @@ export interface BoxInfo {
 
 export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot"
 
-/** What Clear box and Delete box would touch, for their confirmations. */
+/**
+ * A task's part in the delete safety check (server/boxDelete.ts): "ok" lets the box go, the rest hold it. The
+ * Coordinator and Captains (delete_box) are refused by any of them; Cody can stop agents, or delete anyway.
+ */
+export type BoxDeleteVerdict = "ok" | "running" | "queued" | "unpushed" | "dirty" | "unchecked"
+
+/** Tasks Cody can delete past with "Delete anyway": all but "ok", and running agents (those are stopped instead). */
+export const deleteAtRisk = <T extends { verdict: BoxDeleteVerdict }>(tasks: T[]): T[] => tasks.filter((t) => t.verdict !== "ok" && t.verdict !== "running")
+
+/** What Clear box and Delete box would touch, for their confirmations, and the safety check delete_box runs. */
 export interface BoxContents {
   boxId: string
+  /** A worker box (deleted at its provider) or a RunPod GPU pod (terminated; its network volume stays). */
+  kind: "box" | "pod"
+  /** The box id, or "GPU pod #1 · project" for a pod. */
+  label: string
   tasks: {
     id: string
     title: string
@@ -467,12 +486,20 @@ export interface BoxContents {
     uncommitted: number | null
     /** The workspace already has an archive newer than its last activity. */
     archived: boolean
+    prState: PrState | null
+    verdict: BoxDeleteVerdict
+    /** Why it holds the delete, or what happens to it ("archived first", "needs no archive: PR merged…"). */
+    detail: string
   }[]
   /** Agents running on the box: Clear and Delete refuse unless asked to stop them. */
   running: number
   /** Disk in use on the box (df), and how much of it is Box Yard's folders (du). */
   diskUsedBytes: number | null
   diskBytes: number | null
+  /** Why nobody can delete it right now (another operation on it, still being created, a pod that isn't up), or null. */
+  busy: string | null
+  /** Every reason delete_box refuses it (busy, then each task that isn't "ok"); empty when it may go. */
+  refusals: string[]
 }
 
 export interface Health {
@@ -650,11 +677,11 @@ export interface Settings {
   boxCreateConcurrency: number
   /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
   slotsPerBox: number
-  /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
+  /** Max tasks running at once across all boxes. 0 = no extra cap beyond boxes x tasks running at once per box. */
   maxAgents: number
   /**
-   * Local runner: most agents of "This computer" projects running at once on the machine running Box Yard. They
-   * queue on their own, apart from box slots and Max agents.
+   * Local runner: most tasks of "This computer" projects running at once on the machine running Box Yard. They
+   * queue on their own, apart from box slots and Max tasks running at once.
    */
   localAgents: number
   /** Rates used to estimate Upstash Box infrastructure costs. */

@@ -28,15 +28,17 @@ import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
-import { AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
-import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
+import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { ChatLine, CollapsibleMarkdown, FullReplyLink } from "./ChatLine"
+import { stripTruncation } from "../lib/truncated"
 import { QueuedChatMessage } from "./QueuedMessages"
 import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
 import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { SelectionToTask } from "./SelectionToTask"
+import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
@@ -52,17 +54,29 @@ export function CaptainTab({ project }: { project: Project }) {
   const send = useSendCaptainMessage(project.id)
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
+  const thread = useRef<StickyScrollHandle>(null)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
-  const submit = useCallback(
+  // A suggested next step sends without touching the composer (no keyboard pops up on a phone).
+  const followUp = useCallback(
     (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
       if (!content && !attachments.length) return
-      send.mutate({ id: newClientId("chat"), content, attachments })
-      box.current?.focus()
+      const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
+      sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      thread.current?.scrollToEnd()
+      return sending
     },
-    [send.mutate],
+    [send.mutateAsync],
+  )
+  const submit = useCallback(
+    (text: string, attachments: Attachment[] = []) => {
+      const sending = followUp(text, attachments)
+      box.current?.focus()
+      return sending
+    },
+    [followUp],
   )
   const toggleGroup = useCallback(
     (id: string) =>
@@ -109,26 +123,26 @@ export function CaptainTab({ project }: { project: Project }) {
 
       <SelectionToTask source={selectionSource} onPrompt={submit}>
         <StickyScroll
+          handle={thread}
           count={list.length}
           resetKey={project.id}
           restoreKey="captain"
           hidden={tail.hidden}
           onLoadEarlier={tail.loadEarlier}
+          onTrim={tail.trim}
           className="px-3 py-4 sm:px-4"
           contentClassName="mx-auto max-w-3xl space-y-3"
         >
           {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
           {tail.visible.map((row) => (
-            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={submit} />
+            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
           ))}
           {busy && (
-            <div className="flex items-center gap-2 px-1 py-1 text-xs text-sky-400" aria-live="polite">
-              <span className="flex gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
-                ))}
-              </span>
-              Captain is working…
+            // Just the dots, like the Coordinator's: the header's robot says it's working.
+            <div data-testid="captain-working" className="flex gap-1 px-1 py-2">
+              {[0, 1, 2].map((i) => (
+                <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
+              ))}
             </div>
           )}
           {queued.map((m) => (
@@ -137,7 +151,7 @@ export function CaptainTab({ project }: { project: Project }) {
         </StickyScroll>
       </SelectionToTask>
 
-      <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} />
+      <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} historyKey={`captain:${project.id}`} />
     </section>
   )
 }
@@ -226,7 +240,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
   // An agent's message is always message_captain, and "From task" says so: the room goes to the task title.
   const tool = source !== "agent" && typeof m.meta?.tool === "string" ? m.meta.tool : null
   const bubble = (
-    <div className={cx("max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
+    <div className={cx(MESSAGE_BLOCK, "max-w-[85%] min-w-0 rounded-2xl px-3 py-2 text-sm text-zinc-100", s.box, m.meta?.pending ? "opacity-70" : "")}>
       <div className={cx("mb-1 flex items-center gap-1.5 text-[11px] font-semibold tracking-wide uppercase", s.head)}>
         <Icon className="h-3 w-3 shrink-0" />{" "}
         {source === "agent" ? <AgentSource meta={m.meta} /> : source === "hook" && typeof m.meta?.hookName === "string" ? `Hook: ${m.meta.hookName}` : s.label}
@@ -237,6 +251,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
       </div>
       {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
       <AttachmentList files={m.meta?.attachments} />
+      {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} />}
     </div>
   )
   // Queued (sent mid-turn): the bubble, then the Queued label with Edit and Delete under it.
@@ -284,10 +299,11 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       role="button"
       tabIndex={0}
       aria-expanded={full}
-      title={full ? undefined : plainText(m.content)}
+      title={full ? undefined : plainText(stripTruncation(m.content).text)}
       onClick={toggle}
       onKeyDown={toggle}
       className={cx(
+        MESSAGE_BLOCK,
         "flex min-w-0 cursor-pointer items-start gap-2 rounded-lg px-2 py-1.5 text-xs text-zinc-500 hover:bg-zinc-900/60 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
       )}
       {...PREVIEW_GROUP}
@@ -317,12 +333,14 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
                 <span key={i}>{s.text}</span>
               ),
             )}
+            {n.truncated && taskId && <FullReplyLink taskId={taskId} />}
           </div>
           <span className="text-right text-[11px] text-zinc-600">
             <TimeAgo ts={m.createdAt} />
           </span>
         </div>
       </div>
+      <MessageActions text={m.content} />
     </div>
   )
 })
@@ -414,7 +432,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
   return (
     // Like the task header: name, status and a small context reading; model, last active and the full meter are in ⋯.
     <header className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
-      <Bot className="h-4 w-4 shrink-0 text-yard-400" />
+      <AgentIcon busy={Boolean(state?.busy)} />
       <span className="text-sm font-semibold text-zinc-100">Captain</span>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">

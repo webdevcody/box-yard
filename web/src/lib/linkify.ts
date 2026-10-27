@@ -136,6 +136,30 @@ export function linkTarget(href: string, origin?: string): { kind: "app" | "file
   return { kind: "app", href: path }
 }
 
+/** Whether a link leaves Box Yard: it opens in a new tab and shows the ↗ mark (ExternalMark in ui.tsx). */
+export const isExternal = (href: string, origin?: string) => linkTarget(href, origin).kind === "external"
+
+export interface GithubRef {
+  owner: string
+  repo: string
+  kind: "pull" | "issue"
+  number: number
+}
+
+/** A GitHub pull request or issue URL ("https://github.com/o/r/pull/154/files#x" too), else null. */
+export function githubRef(href: string): GithubRef | null {
+  const m = /^https?:\/\/(?:www\.)?github\.com\/([\w.-]+)\/([\w.-]+)\/(pull|issues)\/(\d+)(?:[/?#]|$)/i.exec(href)
+  if (!m) return null
+  return { owner: m[1]!, repo: m[2]!, kind: m[3]!.toLowerCase() === "pull" ? "pull" : "issue", number: Number(m[4]) }
+}
+
+/** How a raw GitHub PR or issue URL reads: "PR #154", "owner/repo#154". Null for every other link. */
+export function shortGithubLabel(href: string): string | null {
+  const ref = githubRef(href)
+  if (!ref) return null
+  return ref.kind === "pull" ? `PR #${ref.number}` : `${ref.owner}/${ref.repo}#${ref.number}`
+}
+
 /** `href` is on `origin` itself: "http://yard.test", "http://yard.test/x", "?q" or "#h" after it, not "http://yard.test.evil". */
 function sameOrigin(href: string, origin: string): boolean {
   if (!href.toLowerCase().startsWith(origin.toLowerCase())) return false

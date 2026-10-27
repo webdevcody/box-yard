@@ -7,6 +7,7 @@ import { useLocation } from "wouter"
 import { AlertTriangle, FileText, Laptop, Loader2, Paperclip, Plus, ShieldAlert, SlidersHorizontal, X } from "lucide-react"
 import { newClientId, useAgentSettings, useCreateTask, useProjects, useSettings } from "../lib/queries"
 import { draftScope, loadDraft, saveDraft } from "../lib/newTask"
+import { primeSendSound } from "../lib/sendSound"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
@@ -209,6 +210,7 @@ export function NewTaskPopover({
 
   const submit = () => {
     const prompt = text.trim()
+    primeSendSound()
     if (onStart) {
       saveDraft(scope, "")
       onClose(false)
@@ -231,8 +233,9 @@ export function NewTaskPopover({
       }}
     >
       {preview && (
-        <blockquote data-testid="selection-quote" title={quote} className="line-clamp-3 rounded-lg border border-zinc-800 border-l-2 border-l-yard-500/60 bg-zinc-900/60 px-3 py-2 text-xs leading-5 wrap-anywhere text-zinc-400">
-          {preview}
+        <blockquote data-testid="selection-quote" title={quote} className="rounded-lg border border-zinc-800 border-l-2 border-l-yard-500/60 bg-zinc-900/60 px-3 py-2 text-xs leading-5 wrap-anywhere text-zinc-400">
+          {/* Clamped inside the padding, or a fourth line peeks out under the third. */}
+          <span className="line-clamp-3">{preview}</span>
         </blockquote>
       )}
       <textarea
@@ -464,6 +467,7 @@ export function NewTaskDialog({
       onSubmit={(e) => {
         e.preventDefault()
         if (!canStart) return
+        primeSendSound()
         const id = newClientId("task")
         create.mutate({
           id,

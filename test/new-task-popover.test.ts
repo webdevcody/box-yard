@@ -216,7 +216,7 @@ describe("New task popover", () => {
       const was = toggle.checked
       if (flip) click(toggle)
       // Turned on, it shows the unsandboxed warning.
-      expect(Boolean(popover()!.textContent?.includes("Local agents are not sandboxed"))).toBe(toggle.checked)
+      expect(Boolean(popover()!.textContent?.includes("Tasks on this computer are not sandboxed"))).toBe(toggle.checked)
       click(button("Start agent"))
       return was
     }

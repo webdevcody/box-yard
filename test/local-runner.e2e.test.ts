@@ -94,7 +94,7 @@ async function call<T>(r: Running, method: string, urlPath: string, body?: unkno
 
 const HANG = "keep going [hang]"
 /** Settings › Local agents is full: the reason names the running tasks (`by`: "a (mac)"). */
-const localSlotWait = (slots: number, by: string) => `Waiting for ${by}: this computer runs ${slots === 1 ? "1 agent" : `${slots} agents`} at a time (Settings › Local agents)`
+const localSlotWait = (slots: number, by: string) => `Waiting for ${by}: this computer runs ${slots === 1 ? "1 task" : `${slots} tasks`} at a time (Settings › Tasks running at once on this computer)`
 const getTask = (r: Running, id: string) => r.yard.store.getTask(id)!
 const newTask = (r: Running, projectId: string, title: string, prompt = "write a haiku") => r.yard.tasks.createTask({ projectId, title, prompt })
 const project = (r: Running, name: string, runner: "box" | "local") => call<Project>(r, "POST", "/api/projects", { name, runner })
@@ -240,7 +240,7 @@ describe("local runner", () => {
     const d = newTask(r, cloud.id, "d", HANG)
     await new Promise((res) => setTimeout(res, 800))
     expect(getTask(r, d.id).status).toBe("queued")
-    expect(getTask(r, d.id).waitReason ?? "").not.toMatch(/Local agents/)
+    expect(getTask(r, d.id).waitReason ?? "").not.toMatch(/on this computer\)/)
 
     // Raising Local agents starts the waiting local task.
     await call(r, "PUT", "/api/agent-settings", { localAgents: 2 })
@@ -260,7 +260,7 @@ describe("local runner", () => {
     // A second agent of the same project waits, and its reason names (and links) the one running.
     const b = newTask(r, heavy.id, "Perf lane 1", HANG)
     const held = await status(r, b.id, (t) => t.status === "queued" && t.waitReason !== null, "the project's second task to wait")
-    expect(held.waitReason).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its agents at a time on this computer")
+    expect(held.waitReason).toBe("Waiting for Merge PR #78: survive-the-night allows 1 of its tasks at a time on this computer")
     expect(held.waitFor).toEqual([{ taskId: a.id, title: "Merge PR #78" }])
     expect(r.yard.store.listTaskMessages(b.id, 50).some((m) => m.role === "event" && m.content === `${held.waitReason}.`)).toBe(true)
     // Another project's task runs beside it, within Settings › Local agents.

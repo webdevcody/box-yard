@@ -84,16 +84,21 @@ export const pushedVerdict = (out: string) => out.split("\n").find((l) => l.star
 /**
  * Prints whether a work folder holds anything GitHub doesn't: one repo (no nested ones), nothing uncommitted or
  * stashed, and no commit on HEAD or any local branch that isn't on a remote branch. Always exits 0.
+ * `committedOnly` asks only about commits (is every branch pushed?), past uncommitted and stashed changes.
  */
-export function pushedCheck(work: string): string {
+export function pushedCheck(work: string, opts: { committedOnly?: boolean } = {}): string {
   const no = (why: string) => `{ echo "${PUSHED_MARK}no ${why}"; exit 0; }`
   return [
     `cd ${q(work)} 2>/dev/null || ${no("no work folder")}`,
     `[ -e .git ] && [ "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)" ] || ${no("not a git repo")}`,
-    `[ -z "$(find . -mindepth 2 -maxdepth 6 -name .git -print -quit 2>/dev/null)" ] || ${no("it holds more than one repo")}`,
-    `s=$(git --no-optional-locks status --porcelain 2>/dev/null) || ${no("git status failed")}`,
-    `[ -z "$s" ] || ${no("uncommitted changes")}`,
-    `[ -z "$(git stash list 2>/dev/null)" ] || ${no("stashed changes")}`,
+    ...(opts.committedOnly
+      ? []
+      : [
+          `[ -z "$(find . -mindepth 2 -maxdepth 6 -name .git -print -quit 2>/dev/null)" ] || ${no("it holds more than one repo")}`,
+          `s=$(git --no-optional-locks status --porcelain 2>/dev/null) || ${no("git status failed")}`,
+          `[ -z "$s" ] || ${no("uncommitted changes")}`,
+          `[ -z "$(git stash list 2>/dev/null)" ] || ${no("stashed changes")}`,
+        ]),
     `n=$(git rev-list --count HEAD --branches --not --remotes 2>/dev/null) || ${no("couldn't compare with origin")}`,
     `[ "$n" = 0 ] || ${no(`$n unpushed commits`)}`,
     `echo "${PUSHED_MARK}yes"`,

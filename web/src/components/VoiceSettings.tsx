@@ -1,13 +1,15 @@
-import type { ReactNode } from "react"
+import { useState, type ReactNode } from "react"
 import { Mic, Volume2 } from "lucide-react"
-import { setVoiceSettings, speakNow, useVoiceSettings, useVoices, voiceSupported } from "../lib/speech"
+import { setVoiceSettings, speakBrowserPreview, stopSpeech, unlockVoice, useVoiceSettings, useVoices, voiceSupported } from "../lib/speech"
 import { VOICE_EVENTS, VOICE_EVENT_LABEL, pickVoice, type VoiceSettings } from "../lib/voice"
 import { DICTATION_KEYS, LANGUAGES, keyLabel, type DictationKey } from "../lib/dictation"
 import { dictationSupported, isMac, setDictationSettings, useDictationSettings } from "../lib/useDictation"
+import type { DictationSettings } from "../lib/dictation"
 import { Panel, Row } from "./SettingsDialog"
-import { TtsSection } from "./TtsSettings"
+import { TtsSection, draftRequest, useTtsDraft } from "./TtsSettings"
 import { useTtsSettings } from "../lib/queries"
-import { activeProvider, useLastFallback } from "../lib/tts"
+import { playPreview, useLastFailure, useVoiceLog, type VoiceLogEntry } from "../lib/tts"
+import { useDraft } from "../lib/settingsDraft"
 import { TTS_PROVIDER_LABEL } from "../../../shared/tts"
 import { Button, Select, cx, inputClass } from "./ui"
 
@@ -55,17 +57,27 @@ export function Slider({ id, label, value, min, max, step, disabled, onChange, f
 }
 
 /**
- * Settings → Voice. Applied at once. What to speak, the browser voice and volume are saved per
- * browser (localStorage); the provider, its voice and keys are server settings (TtsSection).
+ * Settings → Voice. What to speak, the browser voice and volume are saved per browser (localStorage);
+ * the provider, its voice and keys are server settings (TtsSection). All of it is a draft until the
+ * dialog's Save; Test voice and the voice previews use the draft.
  */
 export function VoicePanel({ fid }: { fid: (k: string) => string }) {
-  const s = useVoiceSettings()
+  const [s, setDraft] = useDraft("voice", "voice", useVoiceSettings(), (d: VoiceSettings) => setVoiceSettings(d))
+  const tts = useTtsDraft()
   const voices = useVoices()
-  const tts = useTtsSettings().data ?? null
-  const cloud = activeProvider(tts)
-  const fallback = useLastFallback()
+  const cloud = tts.settings.provider
+  const failure = useLastFailure()
+  const [testError, setTestError] = useState<string | null>(null)
   const supported = voiceSupported()
-  const set = (patch: Partial<VoiceSettings>) => setVoiceSettings(patch)
+  const set = (patch: Partial<VoiceSettings>) => setDraft((d) => ({ ...d, ...patch }))
+  const test = () => {
+    setTestError(null)
+    const request = draftRequest(tts.settings, TEST_LINE)
+    if (!request) return speakBrowserPreview(TEST_LINE, s)
+    stopSpeech()
+    unlockVoice()
+    playPreview("test-voice", { request }, s.volume).catch((err: Error) => setTestError(`${TTS_PROVIDER_LABEL[request.provider!]} failed: ${err.message}`))
+  }
   const off = !supported || !s.enabled
   const auto = pickVoice(voices, "", typeof navigator !== "undefined" ? navigator.language : "en-US")
   const sorted = [...voices].sort((a, b) => Number(/^en\b/i.test(b.lang)) - Number(/^en\b/i.test(a.lang)) || a.name.localeCompare(b.name))
@@ -83,10 +95,7 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           id={fid("ve")}
           disabled={!supported}
           checked={s.enabled}
-          onChange={(enabled) => {
-            set({ enabled })
-            if (enabled) speakNow("Voice on.")
-          }}
+          onChange={(enabled) => set({ enabled })}
         >
           {s.enabled ? "On" : "Off"}
         </Check>
@@ -111,30 +120,25 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           </div>
         </div>
       </Row>
-      <TtsSection fid={fid} />
-      <Row
-        id={fid("vv")}
-        label={cloud === "browser" ? "Browser voice" : "Fallback voice"}
-        help={
-          cloud === "browser"
-            ? "The browser's voices. Local voices work offline and sound the same every time."
-            : `The browser voice that speaks if ${TTS_PROVIDER_LABEL[cloud]} fails (bad key, quota, no network).`
-        }
-      >
-        <Select id={fid("vv")} className="w-full" disabled={off} value={s.voiceURI} onChange={(e) => set({ voiceURI: e.target.value })}>
-          <option value="">Default{auto ? ` (${auto.name})` : ""}</option>
-          {sorted.map((v) => (
-            <option key={v.voiceURI} value={v.voiceURI}>
-              {v.name} · {v.lang}
-              {v.localService ? "" : " · online"}
-            </option>
-          ))}
-        </Select>
-      </Row>
+      <TtsSection fid={fid} draft={tts} volume={s.volume} />
+      {/* A cloud voice never hands a line to the browser's voice, so its picker only matters for Browser / OS. */}
+      {cloud === "browser" && (
+        <Row id={fid("vv")} label="Browser voice" help="The browser's voices. Local voices work offline and sound the same every time.">
+          <Select id={fid("vv")} className="w-full" disabled={off} value={s.voiceURI} onChange={(e) => set({ voiceURI: e.target.value })}>
+            <option value="">Default{auto ? ` (${auto.name})` : ""}</option>
+            {sorted.map((v) => (
+              <option key={v.voiceURI} value={v.voiceURI}>
+                {v.name} · {v.lang}
+                {v.localService ? "" : " · online"}
+              </option>
+            ))}
+          </Select>
+        </Row>
+      )}
       <Row
         id={fid("vr")}
         label="Rate, pitch and volume"
-        help={cloud === "browser" ? "How fast, how high and how loud." : `Rate and pitch shape the browser voice; ${TTS_PROVIDER_LABEL[cloud]} uses its own Speed above. Volume applies to every voice.`}
+        help={cloud === "browser" ? "How fast, how high and how loud." : `${TTS_PROVIDER_LABEL[cloud]} uses its own Speed above, so only Volume applies to it.`}
       >
         <div className="space-y-2">
           <Slider id={fid("vr")} label="Rate" value={s.rate} min={0.5} max={2} step={0.1} disabled={off} onChange={(rate) => set({ rate })} format={x} />
@@ -183,15 +187,21 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
           </div>
         </div>
       </Row>
-      <Row label="Test" help="Say a sample line with these settings. This also unlocks audio, which browsers block until you click.">
-        <Button type="button" variant="subtle" disabled={!supported} onClick={() => speakNow(TEST_LINE)}>
+      <Row label="Test" help="Say a sample line with these settings, saved or not. This also unlocks audio, which browsers block until you tap or click.">
+        <Button type="button" variant="subtle" disabled={!supported} onClick={test} data-testid="test-voice">
           <Volume2 className="h-4 w-4" /> Test voice
         </Button>
-        {fallback && cloud === fallback.provider && (
-          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-fallback>
-            {TTS_PROVIDER_LABEL[fallback.provider]} failed, so the browser voice spoke instead: {fallback.message}
+        {testError && (
+          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="alert">
+            {testError}
           </p>
         )}
+        {!testError && failure && cloud === failure.provider && (
+          <p className="text-xs leading-relaxed text-red-300 wrap-anywhere" role="status" data-voice-failure>
+            {TTS_PROVIDER_LABEL[failure.provider]} couldn't say a line: {failure.message}
+          </p>
+        )}
+        <RecentLines />
       </Row>
       <p className="mt-2 text-xs text-zinc-500">
         The provider, its voice and keys are saved on the server for every browser; everything else is saved in this browser only. Toggle voice from the speaker in the Coordinator header, or press <kbd className="rounded bg-zinc-800 px-1">Alt</kbd>+
@@ -202,11 +212,40 @@ export function VoicePanel({ fid }: { fid: (k: string) => string }) {
   )
 }
 
+const OUTCOME_LABEL: Record<VoiceLogEntry["outcome"], string> = { played: "played", blocked: "waiting for a tap", failed: "failed", retrying: "retrying" }
+
+/** The last lines and which voice said them (also in the console as `[voice] …`), for "why did it sound different?". */
+function RecentLines() {
+  const log = useVoiceLog()
+  const saved = useTtsSettings().data?.settings.elevenlabs
+  // The saved voice by name, so "the default voice" (another id) stands out.
+  const voice = (id: string) => (saved && id === saved.voiceId ? `${saved.voiceName || "saved voice"}, ${id}` : id)
+  if (!log.length) return null
+  return (
+    <details className="mt-2 text-xs text-zinc-400" data-voice-log>
+      <summary className="cursor-pointer select-none text-zinc-500">Recent lines ({log.length})</summary>
+      <ul className="mt-1 space-y-1">
+        {log
+          .slice(-8)
+          .reverse()
+          .map((e, i) => (
+            <li key={`${e.at}-${i}`} className="wrap-anywhere">
+              <span className="text-zinc-500">{new Date(e.at).toLocaleTimeString()}</span> {TTS_PROVIDER_LABEL[e.path]}
+              {e.voice ? ` (${e.path === "elevenlabs" ? voice(e.voice) : e.voice})` : ""}, <span className={e.outcome === "failed" ? "text-red-300" : undefined}>{OUTCOME_LABEL[e.outcome]}</span>: “{e.text}”
+              {e.detail && e.outcome !== "blocked" ? ` · ${e.detail}` : ""}
+            </li>
+          ))}
+      </ul>
+    </details>
+  )
+}
+
 const OS_DICTATION_TIP = "You can also use your OS dictation in any text box (macOS: press Fn twice; Windows: Win+H)."
 
 /** Settings → Voice → Dictation: the composers' push-to-talk mic. */
 function DictationSection({ fid }: { fid: (k: string) => string }) {
-  const d = useDictationSettings()
+  const [d, setDraft] = useDraft("dictation", "voice", useDictationSettings(), (v: DictationSettings) => setDictationSettings(v))
+  const setDictation = (patch: Partial<DictationSettings>) => setDraft((x) => ({ ...x, ...patch }))
   const supported = dictationSupported()
   const mac = isMac()
   const browserLang = typeof navigator !== "undefined" ? navigator.language : "en-US"
@@ -226,12 +265,12 @@ function DictationSection({ fid }: { fid: (k: string) => string }) {
       ) : (
         <>
           <Row id={fid("de")} label="Dictation" help="Show the mic in message boxes. Press and hold it to talk, or click it to start and stop.">
-            <Check id={fid("de")} checked={d.enabled} onChange={(enabled) => setDictationSettings({ enabled })}>
+            <Check id={fid("de")} checked={d.enabled} onChange={(enabled) => setDictation({ enabled })}>
               {d.enabled ? "On" : "Off"}
             </Check>
           </Row>
           <Row id={fid("dl")} label="Language" help="What you'll speak. Defaults to the browser's language.">
-            <Select id={fid("dl")} className="w-full" disabled={off} value={d.lang} onChange={(e) => setDictationSettings({ lang: e.target.value })}>
+            <Select id={fid("dl")} className="w-full" disabled={off} value={d.lang} onChange={(e) => setDictation({ lang: e.target.value })}>
               <option value="">Browser default ({browserLang})</option>
               {languages.map(([tag, name]) => (
                 <option key={tag} value={tag}>
@@ -241,7 +280,7 @@ function DictationSection({ fid }: { fid: (k: string) => string }) {
             </Select>
           </Row>
           <Row id={fid("dk")} label="Push-to-talk key" help="Hold it anywhere in Box Yard to talk into the focused (or last used) message box; let go to stop. A quick tap toggles.">
-            <Select id={fid("dk")} className="w-full" disabled={off} value={d.key} onChange={(e) => setDictationSettings({ key: e.target.value as DictationKey })}>
+            <Select id={fid("dk")} className="w-full" disabled={off} value={d.key} onChange={(e) => setDictation({ key: e.target.value as DictationKey })}>
               {DICTATION_KEYS.map((k) => (
                 <option key={k} value={k}>
                   {k === "off" ? "None" : `Hold ${keyLabel(k, mac)}`}
@@ -250,7 +289,7 @@ function DictationSection({ fid }: { fid: (k: string) => string }) {
             </Select>
           </Row>
           <Row id={fid("ds")} label="Send when I release" help="Send the message as soon as you let go of a held mic or key. Off: review it, then press Enter.">
-            <Check id={fid("ds")} disabled={off} checked={d.sendOnRelease} onChange={(sendOnRelease) => setDictationSettings({ sendOnRelease })}>
+            <Check id={fid("ds")} disabled={off} checked={d.sendOnRelease} onChange={(sendOnRelease) => setDictation({ sendOnRelease })}>
               Send when I release
             </Check>
           </Row>

@@ -703,6 +703,11 @@ export const MIGRATIONS: string[] = [
   -- The tasks a queued task's wait reason names as holding it back, [{"taskId","title"}] (Task.waitFor).
   ALTER TABLE tasks ADD COLUMN wait_for_json TEXT;
   `,
+  `
+  -- Where a task last ran once its box let it go (Task.placement.last): the place as JSON plus leftAt, so a resting,
+  -- archived task still says "Upstash · pure-lobster · small · archived" after that box is gone.
+  ALTER TABLE tasks ADD COLUMN last_place_json TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
