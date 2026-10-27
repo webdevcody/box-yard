@@ -5,7 +5,8 @@ import { DOCKER_NOT_INSTALLED, DOCKER_NOT_RUNNING, DockerEngine } from "../serve
 import { DockerImages, baseImageTag, projectImageTag } from "../server/docker/images.js"
 import { DOCKER_SECRETS_DIR, DockerProvider } from "../server/providers/docker.js"
 import { DEFAULT_DOCKER_SETTINGS, NO_PROJECT_DOCKER, dockerBoxId, type DockerSettings, type ProjectDocker } from "../shared/docker.js"
-import { tmpDir } from "./helpers.js"
+import { createBoxYard } from "../server/app.js"
+import { testConfig, tmpDir } from "./helpers.js"
 
 // The Docker runner against a fake docker CLI (test/fake-docker.mjs), which keeps containers and volumes in a JSON
 // file and logs every call: what Box Yard asks Docker for, that nothing of this computer is mounted, that no secret
@@ -313,6 +314,19 @@ describe("DockerImages", () => {
     fs.appendFileSync(path.join(dir, "Dockerfile"), `ENV ANTHROPIC_API_KEY=${SECRET}\n`)
     await expect(images(dir).ensure("prj_abc")).rejects.toThrow(/Refusing to build: something shaped like a key is in Dockerfile/)
     expect(builds()).toEqual([])
+  })
+
+  it("refuses a project's Dockerfile holding an identity's secret too, in the app", async () => {
+    const yard = createBoxYard(testConfig({ dockerBin: FAKE }), { webDir: "/nonexistent", realDocker: { claudeBin: "claude" } })
+    try {
+      const acme = yard.identities.create({ name: "Acme" })
+      yard.identities.saveClaude(acme.id, { kind: "api_key", value: "acme-claude-0001-not-key-shaped" })
+      const p = yard.store.createProject({ name: "own-image", docker: { image: null, dockerfile: "FROM node\nRUN echo acme-claude-0001-not-key-shaped\n" } })
+      await expect(yard.docker.images.ensure(p.id)).rejects.toThrow(/Refusing to build: line 2/)
+      expect(builds()).toEqual([])
+    } finally {
+      yard.stop()
+    }
   })
 
   it("Box Yard's own docker/ builds: only public tools, and the git config that clears other credential helpers", () => {
