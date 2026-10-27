@@ -17,6 +17,8 @@ import { ChatLine } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { groupPublished } from "../lib/publishedNotices"
 import { SelectionToTask } from "./SelectionToTask"
+import { SideThreadPane, ThreadChatProvider } from "./SideThread"
+import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
 import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
@@ -113,7 +115,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       if (!reveal(id)) return
       // Two frames: let the list settle (and stop following the bottom) before scrolling to the message.
       requestAnimationFrame(() =>
-        requestAnimationFrame(() => document.getElementById(`chat-${id}`)?.scrollIntoView({ block: "center", behavior: "smooth" })),
+        requestAnimationFrame(() =>
+          (document.getElementById(`chat-${id}`) ?? panel.current?.querySelector(`[data-chat-id="${CSS.escape(id)}"]`))?.scrollIntoView({ block: "center", behavior: "smooth" }),
+        ),
       )
     }
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
@@ -121,117 +125,125 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   }, [reveal])
 
   return (
-    <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
-      <header
-        className={cx(
-          // A container, so the voice chip shrinks to an icon in a narrow header (see VoiceControl).
-          "@container flex items-center gap-2",
-          // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
-          zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
-            : onClose ? "min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4"
-            // Docked beside the page: a compact header
-            : "border-b border-zinc-900 px-4 py-3",
-        )}
-      >
-        <AgentIcon busy={Boolean(busy.data)} />
-        <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
-          {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-          {zen && <span className="max-sm:hidden">Box Yard </span>}
-          Coordinator
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
-          <VoiceControl />
+    <ThreadChatProvider value={COORDINATOR_CHAT}>
+      {/* A `coord` container: an open side thread sits beside the chat when the panel is wide (App widens the dock
+          for it), over it when not. */}
+      <section ref={panel} data-testid="chat-panel" className="@container/coord relative flex h-full min-w-0 bg-zinc-950">
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <header
+            className={cx(
+              // A container, so the voice chip shrinks to an icon in a narrow header (see VoiceControl).
+              "@container flex items-center gap-2",
+              // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
+              zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
+                : onClose ? "min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4"
+                // Docked beside the page: a compact header
+                : "border-b border-zinc-900 px-4 py-3",
+            )}
+          >
+            <AgentIcon busy={Boolean(busy.data)} />
+            <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
+              {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+              {zen && <span className="max-sm:hidden">Box Yard </span>}
+              Coordinator
+            </div>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
+              <VoiceControl />
+              {!zen && (
+                <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
+                  <Expand className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
+                <SettingsIcon className="h-3.5 w-3.5" />
+              </Button>
+              {busy.data && (
+                <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
+                  <Square className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {zen && (
+                <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
+                  <Shrink className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {onClose && !zen && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  title="Close"
+                  aria-label="Close the Coordinator"
+                  className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          </header>
           {!zen && (
-            <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
-              <Expand className="h-3.5 w-3.5" />
-            </Button>
+            <ContextMeter
+              className="border-b border-zinc-900 px-4 py-2"
+              tokens={orch.data?.usage.tokens ?? null}
+              window={orch.data?.usage.window ?? null}
+              compacting={orch.data?.compacting ?? false}
+              queued={Boolean(orch.data?.compactQueued) || compact.isPending}
+              onCompact={() => compact.mutate()}
+            />
           )}
-          <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
-            <SettingsIcon className="h-3.5 w-3.5" />
-          </Button>
-          {busy.data && (
-            <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
-              <Square className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          {zen && (
-            <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
-              <Shrink className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          {onClose && !zen && (
-            <button
-              type="button"
-              onClick={onClose}
-              title="Close"
-              aria-label="Close the Coordinator"
-              className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
+
+          {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
+          {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
+
+          <div className={showSetup ? "hidden" : "contents"}>
+            <SelectionToTask source={selectionSource} onPrompt={submit}>
+              <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+                {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
+                  <TryFirst
+                    ready={!setup.needed}
+                    github={setup.status?.github.state === "set" && !setup.status.mock}
+                    needsGithub={setup.status?.github.state === "unset" && !setup.status.mock}
+                    onPick={fill}
+                    onGithub={addGithub}
+                  />
+                )}
+                {messages.length === 0 && !chat.isLoading && !zen && (
+                  <div className="space-y-3 pt-6 text-center">
+                    <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
+                    <div className="space-y-2">
+                      {SUGGESTIONS.map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => submit(s)}
+                          className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <ChatLines messages={settled} onFollowUp={followUp} />
+                <StreamingReply busy={Boolean(busy.data)} />
+                {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+              </StickyScroll>
+            </SelectionToTask>
+
+            <Composer
+              onSubmit={submit}
+              placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
+              textareaRef={box}
+              handleRef={composer}
+              panelRef={panel}
+              historyKey="coordinator"
+              className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
+            />
+          </div>
         </div>
-      </header>
-      {!zen && (
-        <ContextMeter
-          className="border-b border-zinc-900 px-4 py-2"
-          tokens={orch.data?.usage.tokens ?? null}
-          window={orch.data?.usage.window ?? null}
-          compacting={orch.data?.compacting ?? false}
-          queued={Boolean(orch.data?.compactQueued) || compact.isPending}
-          onCompact={() => compact.mutate()}
-        />
-      )}
-
-      {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
-      {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
-
-      <div className={showSetup ? "hidden" : "contents"}>
-        <SelectionToTask source={selectionSource} onPrompt={submit}>
-          <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
-            {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
-              <TryFirst
-                ready={!setup.needed}
-                github={setup.status?.github.state === "set" && !setup.status.mock}
-                needsGithub={setup.status?.github.state === "unset" && !setup.status.mock}
-                onPick={fill}
-                onGithub={addGithub}
-              />
-            )}
-            {messages.length === 0 && !chat.isLoading && !zen && (
-              <div className="space-y-3 pt-6 text-center">
-                <p className="text-sm text-zinc-400">One chat runs the whole yard. Ask for work in plain words.</p>
-                <div className="space-y-2">
-                  {SUGGESTIONS.map((s) => (
-                    <button
-                      key={s}
-                      onClick={() => submit(s)}
-                      className="block w-full rounded-lg border border-zinc-800 px-3 py-2 text-left text-xs text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900"
-                    >
-                      {s}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-            <ChatLines messages={settled} onFollowUp={followUp} />
-            <StreamingReply busy={Boolean(busy.data)} />
-            {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
-          </StickyScroll>
-        </SelectionToTask>
-
-        <Composer
-          onSubmit={submit}
-          placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
-          textareaRef={box}
-          handleRef={composer}
-          panelRef={panel}
-          historyKey="coordinator"
-          className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
-        />
-      </div>
-    </section>
+        {/* Its header as tall as the chat's: 3.5rem in Zen and the drawer, the docked header's 47px (py-3, a 22px row, the border). */}
+        <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+      </section>
+    </ThreadChatProvider>
   )
 })
 
