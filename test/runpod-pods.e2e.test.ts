@@ -190,7 +190,7 @@ describe("RunPod GPU: pods per project", () => {
     await working(r, a)
     await working(r, b)
     const c = await hang(r, p.id, "c")
-    const t = await waits(r, c, /free agent slot on its project's 2 GPU pods \(its Max boxes is 2/)
+    const t = await waits(r, c, /free slot on its project's 2 GPU pods \(its Max boxes is 2/)
     expect(t.boxId).toBeNull()
     expect(r.pods.started.length).toBe(2)
     // A slot frees up: it takes it, on a pod that's already up.

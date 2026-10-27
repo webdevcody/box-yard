@@ -81,7 +81,7 @@ export interface RunPodSettings {
   dataCenter: string | null
   /** Stop a pod after this many minutes with no agent turn running. */
   idleMinutes: number
-  /** Agents that may run on one pod at once, unless the project sets its own Agents per box. */
+  /** Tasks that may run on one pod at once, unless the project sets its own Tasks running at once. */
   agentsPerPod: number
   containerDiskGb: number
   /** Size of a project's network volume (caches, data), which only its pod #1 mounts. 0: no volume. */

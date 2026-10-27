@@ -33,7 +33,7 @@ export function memoryMeter(box: MemoryBox): MemoryMeter | null {
   const load = box.loadAvg === null || box.loadAvg === undefined ? null : loadLine({ load1: box.loadAvg, cpus: box.cpuCount ?? 1 })
   const busy = box.memoryPressure ?? null
   const tone = usedRatio >= CRITICAL_MEMORY_RATIO ? "error" : busy ? "warn" : "ok"
-  const title = [`Memory: ${label}`, load, busy ? `New agents go to other boxes while agents run here: ${busy}` : null].filter(Boolean).join("\n")
+  const title = [`Memory: ${label}`, load, busy ? `New tasks go to other boxes while tasks run here: ${busy}` : null].filter(Boolean).join("\n")
   return { used, total, usedRatio, label, load, busy, tone, title }
 }
 

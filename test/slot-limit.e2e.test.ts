@@ -330,7 +330,7 @@ describe("slot limit", () => {
     const box = r.yard.tasks.boxes().find((x) => x.id === boxId)! as BoxInfo
     expect(box).toMatchObject({ slots: 1, runningTurns: 2, limitLoweredFrom: 2 })
     const over = boxAttention(box).find((x) => x.key === "over")!
-    expect(over.detail).toBe("The limit was lowered from 2 to 1 while 2 agents were running. 2 agents are running on 1 slots. Running work continues; nothing new is placed here until it drops.")
+    expect(over.detail).toBe("The limit was lowered from 2 to 1 while 2 tasks were running. 2 tasks are running on 1 slots. Running work continues; nothing new is placed here until it drops.")
     const t = newTask(r, project.id, "after the change", HANG)
     await status(r, t.id, (x) => Boolean(x.waitReason), "the new task to wait")
     expect(getTask(r, t.id).status).toBe("queued")
