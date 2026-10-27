@@ -135,6 +135,7 @@ describe("auto-sizing", () => {
     // Another project isn't measured, so Settings › Worker size applies to it.
     const other = await call<Project>(r, "POST", "/api/projects", { name: "other" })
     expect(r.yard.tasks.newBoxSize(other.id)).toBe("small")
+    expect(r.yard.tasks.projectBoxSettings(other).boxSize).toBe("global: small (Settings › Worker size)")
 
     // The project's own box size wins; with auto-sizing off, Worker size applies.
     await call(r, "PATCH", `/api/projects/${p.id}`, { boxSize: "small" })

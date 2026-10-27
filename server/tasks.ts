@@ -1355,8 +1355,9 @@ export class TaskManager {
   private autoSizeLine(projectId: string): string {
     const worker = `${this.settings.get().workerSize} (Settings › Worker size)`
     const auto = this.autoBoxSize(projectId)
-    if (!auto.enabled) return `global: ${worker}`
-    return auto.size ? `auto: ${auto.label}` : `global: ${worker}; auto-sizing has it ${auto.label}`
+    if (auto.enabled && auto.size) return `auto: ${auto.label}`
+    // A project never measured (none of its runs were on Upstash boxes yet) reads as plain Worker size.
+    return auto.enabled && auto.runs > 0 ? `global: ${worker}; auto-sizing has it ${auto.label}` : `global: ${worker}`
   }
 
   /**
