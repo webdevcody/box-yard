@@ -42,6 +42,8 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS } from "../shared/runner.js"
 import { RunPodService } from "./runpod/service.js"
+import { Identities } from "./identity/identities.js"
+import { SecretBox } from "./identity/secretBox.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
@@ -284,6 +286,14 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
+  // Project identities (docs/identities.md): their secrets are encrypted with a key that is never in the database.
+  const identities = new Identities({
+    db,
+    secrets: new SecretBox({ dataDir: c.dataDir, envKey: c.secretKey }),
+    credentials: settings.credentials,
+    github: opts.github?.fetch,
+    mock: c.mock,
+  })
   // RunPod GPU pods, for projects that run on "RunPod GPU" (docs/runpod.md). Idle until a RunPod key is set.
   const install = () => {
     let id = store.getKv("install_id")
@@ -342,7 +352,7 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
   tasks.runnerProblem = (runner) => setup.runnerProblem(runner)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)

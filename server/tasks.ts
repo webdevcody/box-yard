@@ -58,7 +58,9 @@ import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpo
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js"
+import { GLOBAL_CREDENTIALS, credentialSet, ownGithubToken, turnEnv } from "./turnCredentials.js"
+import type { Identities } from "./identity/identities.js"
+import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
@@ -205,6 +207,7 @@ export interface TaskManagerDeps {
   gpu?: GpuRunner | null
   /** Docker containers on this computer (Runs on: Docker container), when this install has the runner. */
   docker?: DockerRunner | null
+  identities: Identities
 }
 
 /** What TaskManager uses of the Docker containers' provider: DockerProvider, or FolderDockerProvider (mock mode, tests). */
@@ -520,6 +523,8 @@ export class TaskManager {
   private gpuWaitNoticed = new Map<string, string>()
   /** Docker containers on this computer, or null when this install has no Docker runner. */
   private readonly docker: DockerRunner | null
+  /** Project identities: every GitHub token, Claude login and git author a turn, clone, push or PR check uses. */
+  readonly identities: Identities
   private lastDockerSweepAt = 0
   /** Tasks whose Captain heard why they wait for Docker (missing or stopped), by the reason: a notice once. */
   private dockerWaitNoticed = new Map<string, string>()
@@ -529,6 +534,7 @@ export class TaskManager {
   constructor(deps: TaskManagerDeps) {
     this.gpu = deps.gpu ?? null
     this.docker = deps.docker ?? null
+    this.identities = deps.identities
     this.c = deps.config
     this.store = deps.store
     this.provider = deps.provider
@@ -541,7 +547,7 @@ export class TaskManager {
     this.sleep = new SleepWatch()
     this.prs = new PrTracker({
       store: deps.store,
-      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : (this.store.projectEnv(projectId).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")) || null)),
+      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
       log: (msg) => console.warn(msg),
@@ -1148,7 +1154,7 @@ export class TaskManager {
       return
     }
     const slug = githubSlug(project.repo)
-    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
+    const token = this.githubToken(project.id)
     if (this.c.mock || !slug || !token) return
     await fetch(`https://api.github.com/repos/${slug}/git/refs/${wipRef(row.id).replace(/^refs\//, "")}`, {
       method: "DELETE",
@@ -2810,8 +2816,14 @@ export class TaskManager {
    */
   private async leaveOtherCredsBox(row: TaskRow, boxId: string): Promise<string | null | "stay"> {
     if (this.archiving.has(row.id)) return null
-    const own = this.projectCreds(row.project_id) !== GLOBAL_CREDENTIALS
-    const why = own ? "its project has its own Claude login or GitHub token, so it gets boxes no other project uses" : "its project uses the global credentials now, and the box is another project's"
+    const creds = this.projectCreds(row.project_id)
+    const identity = this.credsIdentity(creds)
+    const why =
+      creds === GLOBAL_CREDENTIALS
+        ? "its project uses the global credentials now, and the box is another project's"
+        : identity
+          ? `its project uses the ${identity} identity, so it gets boxes only that identity's projects use`
+          : "its project has its own Claude login or GitHub token, so it gets boxes no other project uses"
     const block = row.session_started ? this.moveBlock(row) : null
     if (block) {
       this.noteOnce(row.id, `${row.id}:${boxId}:creds`, `Running on ${boxId} though ${why}: it can't move safely (${block}).`)
@@ -2825,9 +2837,23 @@ export class TaskManager {
     return this.assign(row.id, other)
   }
 
+  /**
+   * The GitHub token a project's clones, fetches, pushes, PR checks and turns use: its own GITHUB_TOKEN (or GH_TOKEN),
+   * else its identity's for the repo's owner (identities.base). Read on every use, so a new token applies at once.
+   */
+  githubToken(projectId: string): string {
+    const project = this.store.getProject(projectId)
+    return ownGithubToken(this.store.projectEnv(projectId)) || (project ? this.identities.base(projectId, project.repo).githubToken : "")
+  }
+
   /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
   private projectCreds(projectId: string): string {
-    return credentialSet(projectId, this.store.projectEnv(projectId))
+    return credentialSet(projectId, this.store.projectEnv(projectId), this.identities.idOf(projectId))
+  }
+
+  /** The identity's name when `creds` is an identity's set (`identity:<id>`), else null. */
+  private credsIdentity(creds: string): string | null {
+    return creds.startsWith("identity:") ? (this.identities.get(creds.slice("identity:".length))?.name ?? "another") : null
   }
 
   /** The credential set a pool box's workspaces were made with: its project's when it was made, else the global one. */
@@ -2841,9 +2867,12 @@ export class TaskManager {
 
   /** Why a task waits when the only boxes with room are of another credential set and no box can be made. */
   private walledReason(creds: string): string {
+    const identity = this.credsIdentity(creds)
     return creds === GLOBAL_CREDENTIALS
-      ? "Waiting for a box: the boxes with room belong to projects with their own Claude login or GitHub token, and the pool is at its limit"
-      : "Waiting for a box of its own: its project has its own Claude login or GitHub token, so it never shares a box with another project's tasks, and the pool is at its limit"
+      ? "Waiting for a box: the boxes with room belong to other identities or to projects with their own Claude login or GitHub token, and the pool is at its limit"
+      : identity
+        ? `Waiting for a box of its identity: tasks of the ${identity} identity never share a box with another identity's, and the pool is at its limit`
+        : "Waiting for a box of its own: its project has its own Claude login or GitHub token, so it never shares a box with another project's tasks, and the pool is at its limit"
   }
 
   /**
@@ -4481,12 +4510,8 @@ export class TaskManager {
   }
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
-    // Read on every turn, so a credential saved in Settings › Credentials reaches the next turn without a restart.
-    const creds = this.settings.credentials
-    const { env, unsetEnv, claudeFrom } = turnEnv(
-      { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) },
-      { claude: creds.claudeEnv(), githubToken: creds.get("githubToken") },
-    )
+    // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
+    const { env, unsetEnv, claudeFrom } = turnEnv({ ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }, this.identities.base(project.id, project.repo))
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
@@ -4709,7 +4734,7 @@ export class TaskManager {
    */
   private mirrorSpec(boxId: string, project: NonNullable<ReturnType<Store["getProject"]>>) {
     const helper = GITHUB_HELPER
-    const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
+    const token = this.githubToken(project.id)
     const only = this.onlyBoxYardHelper(boxId, project.id)
     const spec: MirrorSpec = {
       root: this.provider.root(boxId),
@@ -4724,7 +4749,7 @@ export class TaskManager {
 
   /** See mirrorSpec's `only`. */
   private onlyBoxYardHelper(boxId: string, projectId: string): boolean {
-    return !isLocalRunnerBox(boxId) || Boolean(this.store.projectEnv(projectId).GITHUB_TOKEN)
+    return !isLocalRunnerBox(boxId) || Boolean(ownGithubToken(this.store.projectEnv(projectId))) || this.identities.idOf(projectId) !== DEFAULT_IDENTITY_ID
   }
 
   /**
