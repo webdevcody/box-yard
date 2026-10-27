@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { execFileSync } from "node:child_process"
 import fs from "node:fs"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
@@ -198,6 +199,79 @@ describe("Identities", () => {
     identities.assign(p.id, a.id)
     expect(credentialSet(p.id, {}, identities.idOf(p.id))).toBe(`identity:${a.id}`)
     expect(credentialSet(p.id, { GITHUB_TOKEN: "x" }, identities.idOf(p.id))).toBe(`project:${p.id}`)
+  })
+})
+
+describe("signing keys", () => {
+  /** A throwaway key pair made for the test (`passphrase` for one that has it). */
+  const keyPair = (passphrase = "") => {
+    const dir = tmpDir("signing-key-")
+    const file = path.join(dir, "key")
+    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", passphrase, "-C", "test@box-yard", "-f", file])
+    const pub = fs.readFileSync(`${file}.pub`, "utf8").split(" ").slice(0, 2).join(" ")
+    const fingerprint = /SHA256:\S+/.exec(execFileSync("ssh-keygen", ["-l", "-E", "sha256", "-f", `${file}.pub`], { encoding: "utf8" }))![0]
+    return { privateKey: fs.readFileSync(file, "utf8"), pub, fingerprint }
+  }
+
+  it("a key file: only its public key and fingerprint are shown, and the private key is kept encrypted for turns", async () => {
+    const { store, identities, db, dir } = setup()
+    const key = keyPair()
+    const a = identities.create({ name: "Acme" })
+    const p = store.createProject({ name: "site" })
+    identities.assign(p.id, a.id)
+    const saved = await identities.saveSigning(a.id, { kind: "file", privateKey: key.privateKey })
+    expect(saved.signing).toEqual({ format: "ssh", kind: "file", publicKey: key.pub, fingerprint: key.fingerprint, program: null, requireSigned: false, readable: true })
+    expect(JSON.stringify(identities.list())).not.toContain("PRIVATE KEY")
+    const body = key.privateKey.split("\n")[1]!
+    db.pragma("wal_checkpoint(TRUNCATE)")
+    expect(fs.readFileSync(path.join(dir, "box-yard.sqlite")).includes(body)).toBe(false)
+    expect(identities.signingFor(p.id)).toEqual({ identity: "Acme", kind: "file", publicKey: key.pub, fingerprint: key.fingerprint, program: null, requireSigned: false, privateKey: key.privateKey })
+    expect(identities.secretValues()).toContain(key.privateKey)
+    // requireSigned names the key every push must be signed with.
+    expect(identities.requiredSigner(p.id)).toBeNull()
+    expect(identities.setRequireSigned(a.id, { requireSigned: true }).signing?.requireSigned).toBe(true)
+    expect(identities.requiredSigner(p.id)).toEqual({ identity: "Acme", publicKey: key.pub, fingerprint: key.fingerprint })
+    // Another secret key can't open it: the identity says so, and turns don't sign.
+    fs.writeFileSync(path.join(dir, "secret.key"), randomBytes(32).toString("base64"))
+    const after = new Identities({ db, secrets: new SecretBox({ dataDir: dir }), credentials: { get: () => "", claudeEnv: () => ({}) } })
+    expect(after.require(a.id).signing).toMatchObject({ readable: false })
+    expect(after.signingFor(p.id)?.privateKey).toBeNull()
+    identities.removeSigning(a.id)
+    expect(identities.require(a.id).signing).toBeNull()
+    expect(identities.signingFor(p.id)).toBeNull()
+    expect(db.prepare("SELECT COUNT(*) AS n FROM identity_secrets WHERE kind = 'signing_key'").get()).toEqual({ n: 0 })
+    expect(() => identities.setRequireSigned(a.id, { requireSigned: true })).toThrow(/no signing key yet/)
+  })
+
+  it("refuses a key with a passphrase, what isn't a key, and a signing program that isn't there", async () => {
+    const { identities } = setup()
+    const a = identities.create({ name: "Acme", runners: ["local"] })
+    await expect(identities.saveSigning(a.id, { kind: "file", privateKey: keyPair("hunter2-hunter2").privateKey })).rejects.toThrow(/has a passphrase/)
+    await expect(identities.saveSigning(a.id, { kind: "file", privateKey: "x".repeat(80) })).rejects.toThrow(/isn't an SSH private key/)
+    await expect(identities.saveSigning(a.id, { kind: "agent", publicKey: "my laptop's key, the usual one" })).rejects.toThrow(/isn't an SSH public key/)
+    await expect(identities.saveSigning(a.id, { kind: "agent", publicKey: "ssh-ed25519 AAAAnotarealkey" })).rejects.toThrow(/couldn't read that public key/)
+    const { pub } = keyPair()
+    await expect(identities.saveSigning(a.id, { kind: "agent", publicKey: pub, program: "op-ssh-sign" })).rejects.toThrow(/full path/)
+    await expect(identities.saveSigning(a.id, { kind: "agent", publicKey: pub, program: "/nonexistent/op-ssh-sign" })).rejects.toThrow(/no program at/)
+    expect(identities.require(a.id).signing).toBeNull()
+  })
+
+  it("a key in this computer's SSH agent signs only for projects on this computer", async () => {
+    const { store, identities } = setup()
+    const { pub, fingerprint } = keyPair()
+    const a = identities.create({ name: "Laptop" })
+    const p = store.createProject({ name: "site", runner: "box" })
+    identities.assign(p.id, a.id)
+    await expect(identities.saveSigning(a.id, { kind: "agent", publicKey: `${pub} me@laptop` })).rejects.toThrow(/site uses the Laptop identity and runs on an Upstash box/)
+    store.updateProject(p.id, { runner: "local" })
+    const saved = await identities.saveSigning(a.id, { kind: "agent", publicKey: `${pub} me@laptop`, program: "/bin/sh", requireSigned: true })
+    expect(saved.signing).toEqual({ format: "ssh", kind: "agent", publicKey: pub, fingerprint, program: "/bin/sh", requireSigned: true, readable: true })
+    expect(identities.signingFor(p.id)).toMatchObject({ kind: "agent", privateKey: null, program: "/bin/sh" })
+    expect(identities.runnerProblem(a.id, "box")).toMatch(/signs with a key in this computer's SSH agent/)
+    expect(identities.runnerProblem(a.id, "local")).toBeNull()
+    expect(() => identities.update(a.id, { runners: ["docker"] })).toThrow()
+    const narrowed = identities.create({ name: "Boxes", runners: ["box"] })
+    await expect(identities.saveSigning(narrowed.id, { kind: "agent", publicKey: pub })).rejects.toThrow(/runs only on an Upstash box/)
   })
 })
 

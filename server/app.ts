@@ -649,6 +649,15 @@ export function createBoxYard(
   api.delete("/identities/:id/claude", (req, res) => {
     res.json(identities.removeClaude(req.params.id!))
   })
+  api.put("/identities/:id/signing", async (req, res) => {
+    res.json(await identities.saveSigning(req.params.id!, req.body))
+  })
+  api.patch("/identities/:id/signing", (req, res) => {
+    res.json(identities.setRequireSigned(req.params.id!, req.body))
+  })
+  api.delete("/identities/:id/signing", (req, res) => {
+    res.json(identities.removeSigning(req.params.id!))
+  })
   api.delete("/projects/:id", async (req, res) => {
     const id = req.params.id!
     for (const s of store.listSchedules({ projectId: id })) await scheduler.remove(s.id)
