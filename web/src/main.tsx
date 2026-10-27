@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { App } from "./App"
 import { ApiError } from "./lib/api"
+import { installPageGuards } from "./lib/resume"
 import "./styles.css"
 
 const queryClient = new QueryClient({
@@ -16,6 +17,9 @@ const queryClient = new QueryClient({
     mutations: { retry: 0 },
   },
 })
+
+// Phones: the document scroll goes back after the keyboard closes and when the page comes back.
+installPageGuards()
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
