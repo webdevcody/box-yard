@@ -1,6 +1,7 @@
 import { z } from "zod"
 import type { Config } from "./config.js"
 import { BadRequestError, type Store } from "./store.js"
+import { redactValues } from "./redact.js"
 import { CREDENTIAL_INFO, CREDENTIAL_KEYS, type CredentialKey, type CredentialSource, type CredentialStatus } from "../shared/setup.js"
 
 /** Saved values live in their own kv entry, like the TTS keys, so nothing that returns settings can include them. */
@@ -133,9 +134,7 @@ const SECRET_PATTERNS = [
 
 /** `text` with every known secret, and anything shaped like a key or token, replaced by "[redacted]". */
 export function redact(text: string, secrets: readonly string[] = []): string {
-  let out = text
-  // Longest first, so a secret that contains another is replaced whole.
-  for (const s of [...new Set(secrets.filter((s) => s && s.length >= 6))].sort((a, b) => b.length - a.length)) out = out.split(s).join("[redacted]")
+  let out = redactValues(text, secrets)
   for (const p of SECRET_PATTERNS) out = out.replace(p, (m, word?: string) => (typeof word === "string" && /^(bearer|token)$/i.test(word) ? `${word} [redacted]` : "[redacted]"))
   return out
 }

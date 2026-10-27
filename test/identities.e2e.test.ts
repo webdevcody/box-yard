@@ -72,11 +72,11 @@ async function start() {
       .map((t) => t.trim().split("\n").filter(Boolean))
       .filter((lines) => lines[0]!.includes(`${path.sep}captains${path.sep}`) === captains)
       .map((lines) => lines.slice(1).sort())
-  const runTask = async (project: Project) => {
+  const runTask = async (project: Project, prompt = "Say hi") => {
     const before = turns().length
-    const task = await call<Task>("POST", "/api/tasks", { projectId: project.id, title: "Hello", prompt: "Say hi" })
+    const task = await call<Task>("POST", "/api/tasks", { projectId: project.id, title: "Hello", prompt })
     await waitFor(() => (yard.store.getTask(task.id)?.status === "done" ? true : null), "the task's turn to end", 30_000)
-    return turns()[before]
+    return { env: turns()[before]!, task }
   }
   return { yard, raw, call, runTask, turns }
 }
@@ -119,7 +119,7 @@ describe("identities over the API", () => {
 
     const onAcme = await r.call<Project>("POST", "/api/projects", { name: "acme-app", identityId: acme.id })
     expect(onAcme.identityId).toBe(acme.id)
-    expect(await r.runTask(onAcme)).toEqual([
+    expect((await r.runTask(onAcme)).env).toEqual([
       "CLAUDE_CODE_OAUTH_TOKEN=acme-oauth-0001",
       "GH_TOKEN=tok-acme-0002",
       "GITHUB_TOKEN=tok-acme-0002",
@@ -131,16 +131,40 @@ describe("identities over the API", () => {
 
     // An identity without a token gets none (never the global one); without a Claude login it uses the global one.
     const onSolo = await r.call<Project>("POST", "/api/projects", { name: "solo-app", identityId: solo.id })
-    expect(await r.runTask(onSolo)).toEqual(["ANTHROPIC_API_KEY=global-key"])
+    expect((await r.runTask(onSolo)).env).toEqual(["ANTHROPIC_API_KEY=global-key"])
 
     // Every other project is on Default: Settings › Credentials, as before.
     const plain = await r.call<Project>("POST", "/api/projects", { name: "plain" })
     expect(plain.identityId).toBe(DEFAULT_IDENTITY_ID)
-    expect(await r.runTask(plain)).toEqual(["ANTHROPIC_API_KEY=global-key", "GH_TOKEN=global-gh", "GITHUB_TOKEN=global-gh"])
+    expect((await r.runTask(plain)).env).toEqual(["ANTHROPIC_API_KEY=global-key", "GH_TOKEN=global-gh", "GITHUB_TOKEN=global-gh"])
 
     // A project's own env vars still win over its identity's.
     await r.call("PATCH", `/api/projects/${onAcme.id}`, { env: { GITHUB_TOKEN: "project-gh" } })
-    expect(await r.runTask(onAcme)).toEqual(expect.arrayContaining(["CLAUDE_CODE_OAUTH_TOKEN=acme-oauth-0001", "GITHUB_TOKEN=project-gh", "GH_TOKEN=project-gh"]))
+    expect((await r.runTask(onAcme)).env).toEqual(expect.arrayContaining(["CLAUDE_CODE_OAUTH_TOKEN=acme-oauth-0001", "GITHUB_TOKEN=project-gh", "GH_TOKEN=project-gh"]))
+  })
+
+  it("keep an agent's printed credentials out of every transcript", async () => {
+    const r = await start()
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+    await r.call("PUT", `/api/identities/${acme.id}/tokens`, { owner: "", token: "tok-acme-0002" })
+    await r.call("PUT", `/api/identities/${acme.id}/claude`, { kind: "oauth_token", value: "acme-oauth-0001" })
+    const project = await r.call<Project>("POST", "/api/projects", { name: "acme-app", identityId: acme.id })
+    const plain = await r.call<Project>("POST", "/api/projects", { name: "plain" })
+
+    const { task } = await r.runTask(project, "Show your env [print-env]")
+    const said = r.yard.store.listTaskMessages(task.id).map((m) => `${m.content} ${JSON.stringify(m.meta)}`)
+    expect(said.some((t) => t.includes("GITHUB_TOKEN=[redacted] CLAUDE_CODE_OAUTH_TOKEN=[redacted]"))).toBe(true)
+    // Settings › Credentials' values too, on a Default project.
+    const { task: other } = await r.runTask(plain, "Show your env [print-env]")
+    const saidToo = r.yard.store.listTaskMessages(other.id).map((m) => `${m.content} ${JSON.stringify(m.meta)}`)
+    expect(saidToo.some((t) => t.includes("GITHUB_TOKEN=[redacted] ANTHROPIC_API_KEY=[redacted]"))).toBe(true)
+
+    const everything = JSON.stringify([
+      ...[task.id, other.id].flatMap((id) => r.yard.store.listTaskMessages(id)),
+      ...r.yard.store.listCaptainMessages(project.id),
+      ...r.yard.store.listChat(500),
+    ])
+    for (const secret of ["tok-acme-0002", "acme-oauth-0001", "global-gh", "global-key"]) expect(everything).not.toContain(secret)
   })
 
   it("run a project's Captain on its identity's Claude login, and never hand it the secret key", async () => {

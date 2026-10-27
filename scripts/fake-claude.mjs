@@ -323,6 +323,8 @@ async function worker(mcp, prompt) {
   const file = path.join(cwd, "box-yard-demo.md")
   fs.writeFileSync(file, `# Mock result\n\nPrompt:\n\n${prompt.slice(0, 2000)}\n`)
   if (/\[artifact\]/i.test(prompt)) await useTool(mcp, "publish_artifact", { path: "box-yard-demo.md", title: "Mock report" })
+  // An agent that prints its credentials (the transcript keeps "[redacted]" instead, test/identities.e2e.test.ts).
+  if (/\[print-env\]/i.test(prompt)) await say(`My env: GITHUB_TOKEN=${process.env.GITHUB_TOKEN ?? ""} ${Object.entries(process.env).filter(([k]) => /^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY)$/.test(k)).map(([k, v]) => `${k}=${v}`).join(" ")}`)
   if (noop) await markNoop()
   else if (!/\[(ask|preview|pr)\]/i.test(prompt) && !/^Message from agent/m.test(prompt)) {
     await useTool(mcp, "mark_done", { summary: "The mock agent wrote box-yard-demo.md." })

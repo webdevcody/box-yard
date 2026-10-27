@@ -299,6 +299,9 @@ export function createBoxYard(
     github: opts.github?.fetch,
     mock: c.mock,
   })
+  /** Every credential value in effect: no transcript keeps one, and no error shows one. */
+  const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues()]
+  store.transcriptSecrets = secretValues
   /** A project's identity has to allow where it runs (Identity.runners). */
   const requireIdentityRunner = (identityId: string, runner: Runner) => {
     const problem = identities.runnerProblem(identities.require(identityId).id, runner)
@@ -1259,7 +1262,7 @@ export function createBoxYard(
   // Errors become JSON with a helpful message; 5xx are logged. Neither ever shows a credential.
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     const status = (err as { status?: number }).status ?? 500
-    const secrets = settings.credentials.secrets()
+    const secrets = secretValues()
     const message = redact(err instanceof Error ? err.message : String(err), secrets)
     if (status >= 500) console.error("[box-yard]", redact(err instanceof Error ? (err.stack ?? message) : message, secrets))
     if (res.headersSent) return
