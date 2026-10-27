@@ -4,6 +4,7 @@ import { FolderGit2, FolderOpen } from "lucide-react"
 import type { Project } from "../../../shared/types"
 import { useReorderProjects } from "../lib/queries"
 import { applyOrder, dropIndex, movedAnnouncement, moveItem, shiftFor } from "../lib/projectOrder"
+import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
 import { IS_MAC } from "./CommandPalette"
 
@@ -249,7 +250,11 @@ export const ProjectList = memo(function ProjectList({
     window.addEventListener("pointercancel", onCancel)
     window.addEventListener("touchmove", onTouchMove, { passive: false })
     window.addEventListener("keydown", onKey)
+    // A press can't outlive the page going to the background: iOS may never send its pointerup, and a press
+    // left active would keep cancelling every touchmove, so nothing in the app would scroll.
+    const offSuspend = onSuspend(() => press.current && (press.current.active ? finish(false) : endPress()))
     return () => {
+      offSuspend()
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
       window.removeEventListener("pointercancel", onCancel)
@@ -261,6 +266,12 @@ export const ProjectList = memo(function ProjectList({
 
   const onPointerDown = (e: ReactPointerEvent<HTMLAnchorElement>, id: string) => {
     swallowClick.current = false
+    // Another finger while a press is held: that press lost its pointerup (a system gesture took it). Drop it.
+    const stale = press.current
+    if (stale && stale.pointerId !== e.pointerId) {
+      if (stale.active) finish(false)
+      else endPress()
+    }
     if (press.current || dragRef.current) return
     // Modified clicks open a new tab or window: leave them to the link.
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return

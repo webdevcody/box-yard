@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import type { PointerEvent } from "react"
 import { cx } from "../components/ui"
+import { onSuspend } from "./resume"
 
 type Options = {
   /** localStorage key the width is saved under */
@@ -45,7 +46,12 @@ export function useResizable(opts: Options) {
   useEffect(() => {
     if (!dragging) return
     document.body.classList.add("resizing")
-    return () => document.body.classList.remove("resizing")
+    // A drag whose pointerup never came (the page went to the background) ends there.
+    const offSuspend = onSuspend(() => setDragging(false))
+    return () => {
+      offSuspend()
+      document.body.classList.remove("resizing")
+    }
   }, [dragging])
 
   const onPointerDown = useCallback((e: PointerEvent) => {
