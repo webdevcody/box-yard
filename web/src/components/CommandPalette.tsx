@@ -425,6 +425,7 @@ function Option({
           href={item.externalUrl}
           aria-label="Open on GitHub"
           title="Open on GitHub"
+          mark={false}
           onMouseDown={(e) => e.preventDefault()}
           className="grid h-11 w-11 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-700/60 hover:text-zinc-200 sm:h-7 sm:w-7"
         >

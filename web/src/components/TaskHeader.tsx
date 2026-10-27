@@ -9,7 +9,6 @@ import {
   CheckCircle2,
   CircleStop,
   Copy,
-  ExternalLink,
   Globe,
   Loader2,
   Minimize2,
@@ -221,9 +220,10 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
     <NewTabLink
       href={preview.url}
       title={preview.label}
+      mark="end"
       className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100")}
     >
-      <Globe className="h-3 w-3 text-sky-400" /> Preview :{preview.port} <ExternalLink className="h-3 w-3 opacity-60" />
+      <Globe className="h-3 w-3 text-sky-400" /> Preview :{preview.port}
     </NewTabLink>
   )
 }

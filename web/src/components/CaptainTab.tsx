@@ -29,7 +29,8 @@ import { useEntityIndex } from "../lib/entities"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
 import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
-import { ChatLine, CollapsibleMarkdown } from "./ChatLine"
+import { ChatLine, CollapsibleMarkdown, FullReplyLink } from "./ChatLine"
+import { stripTruncation } from "../lib/truncated"
 import { QueuedChatMessage } from "./QueuedMessages"
 import { AttachmentList } from "./Attachments"
 import { captainSourceOf } from "../../../shared/captain"
@@ -297,7 +298,7 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
       role="button"
       tabIndex={0}
       aria-expanded={full}
-      title={full ? undefined : plainText(m.content)}
+      title={full ? undefined : plainText(stripTruncation(m.content).text)}
       onClick={toggle}
       onKeyDown={toggle}
       className={cx(
@@ -331,6 +332,7 @@ const NoticeRow = memo(function NoticeRow({ m }: { m: CaptainMessage }) {
                 <span key={i}>{s.text}</span>
               ),
             )}
+            {n.truncated && taskId && <FullReplyLink taskId={taskId} />}
           </div>
           <span className="text-right text-[11px] text-zinc-600">
             <TimeAgo ts={m.createdAt} />

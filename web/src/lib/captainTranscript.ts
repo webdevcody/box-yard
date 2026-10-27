@@ -1,7 +1,8 @@
 // The project Captain's transcript as chat rows: task notices become slim one-line rows,
 // and runs of consecutive notices collapse into one expandable "N task updates" group.
 import type { CaptainMessage, CaptainToolResult } from "../../../shared/types"
-import type { EntityIndex, EntityRef } from "./linkify"
+import { shortGithubLabel, type EntityIndex, type EntityRef } from "./linkify"
+import { stripTruncation } from "./truncated"
 import { groupPublished, type PublishedGroup } from "./publishedNotices"
 
 export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "settings" | "info"
@@ -14,6 +15,8 @@ export interface ParsedNotice {
   /** The task's title as the notice wrote it (the bold part), if any. */
   title: string | null
   summary: NoticeSegment[]
+  /** The server shortened the notice (its "[truncated: …]" marker is dropped); the task has the full text. */
+  truncated: boolean
 }
 
 // The leading emoji server/tasks.ts puts on each notice.
@@ -46,10 +49,10 @@ export function plainText(md: string): string {
     .trim()
 }
 
-/** "PR #16" for a GitHub pull request URL, the file name for a file, else the URL without its scheme. */
+/** "PR #16" or "owner/repo#16" for a GitHub PR or issue URL, the file name for a file, else the URL without its scheme. */
 export function linkLabel(href: string): string {
-  const pr = href.match(/\/pull\/(\d+)/)
-  if (pr) return `PR #${pr[1]}`
+  const gh = shortGithubLabel(href)
+  if (gh) return gh
   const path = href.replace(/^https?:\/\/[^/]+/, "")
   if (path.startsWith("/artifacts/") || path.startsWith("/api/uploads/")) return decodeURIComponent(path.split("/").pop() || path)
   return href.replace(/^https?:\/\//, "")
@@ -78,7 +81,8 @@ export function segments(text: string): NoticeSegment[] {
  * ("is done:", "failed:") are dropped; a notice that is only a link (a PR, a file) keeps its verb.
  */
 export function parseNotice(content: string, meta: Record<string, unknown> | null = null): ParsedNotice {
-  let rest = content
+  const { text: stripped, truncated } = stripTruncation(content)
+  let rest = stripped
   let kind: NoticeKind = "info"
   const emoji = rest.match(LEADING_EMOJI)
   if (emoji) {
@@ -97,7 +101,7 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
     const m = rest.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
     if (m) {
       const url = m[3]!.match(URL_RE)?.[0]
-      return { kind, title: plainText(m[2]!), summary: segments(url ? `${plainText(m[1]!)} it to merge ${url}` : plainText(`${m[1]}it${m[3]}`)) }
+      return { kind, title: plainText(m[2]!), summary: segments(url ? `${plainText(m[1]!)} it to merge ${url}` : plainText(`${m[1]}it${m[3]}`)), truncated }
     }
   }
   let title: string | null = null
@@ -123,7 +127,7 @@ export function parseNotice(content: string, meta: Record<string, unknown> | nul
       else text = detail || verb
     }
   }
-  return { kind, title, summary: segments(text) }
+  return { kind, title, summary: segments(text), truncated }
 }
 
 export interface NoticeParts {
@@ -132,6 +136,8 @@ export interface NoticeParts {
   title: string | null
   /** The rest of the notice as markdown, minus the emoji and the title: "opened a pull request: https://…". */
   event: string
+  /** The server shortened the notice (its "[truncated: …]" marker is dropped); the task has the full text. */
+  truncated: boolean
 }
 
 /**
@@ -140,7 +146,8 @@ export interface NoticeParts {
  * merge PR #12"), so the title moves up and the sentence says "it". A notice without a bold title keeps all its text.
  */
 export function splitNotice(content: string, meta: Record<string, unknown> | null = null): NoticeParts {
-  let rest = content
+  const { text: stripped, truncated } = stripTruncation(content)
+  let rest = stripped
   let kind: NoticeKind = "info"
   const emoji = rest.match(LEADING_EMOJI)
   if (emoji) {
@@ -153,12 +160,12 @@ export function splitNotice(content: string, meta: Record<string, unknown> | nul
   }
   if (kind === "merge") {
     const m = rest.match(/^(.*?)\*\*(.+?)\*\*(.*)$/s)
-    if (m) return { kind, title: plainText(m[2]!), event: shortPrLink(`${m[1]}it${m[3]}`.trim()) }
+    if (m) return { kind, title: plainText(m[2]!), event: shortPrLink(`${m[1]}it${m[3]}`.trim()), truncated }
   }
   const bold = rest.match(/^\*\*(.+?)\*\*\s*/)
-  if (!bold) return { kind, title: null, event: rest.trim() }
+  if (!bold) return { kind, title: null, event: rest.trim(), truncated }
   const event = rest.slice(bold[0].length).trim()
-  return { kind, title: plainText(bold[1]!), event: kind === "pr" ? shortPrLink(event) : event }
+  return { kind, title: plainText(bold[1]!), event: kind === "pr" ? shortPrLink(event) : event, truncated }
 }
 
 /**
