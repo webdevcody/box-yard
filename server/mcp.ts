@@ -1418,7 +1418,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       description: "Get a public URL for a port in a task's box (a dev server the agent started).",
       inputSchema: { task: z.string(), port: z.number().int().min(1).max(65535) },
     },
-    safe(async (a: { task: string; port: number }) => ok(await tasks.previewUrl(task(a.task).id, a.port))),
+    safe(async (a: { task: string; port: number }) => {
+      const t = task(a.task)
+      unsealed(t.projectId, "its previews show its work")
+      return ok(await tasks.previewUrl(t.id, a.port))
+    }),
   )
 
   server.registerTool(

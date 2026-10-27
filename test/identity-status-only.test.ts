@@ -133,6 +133,10 @@ describe("the Coordinator's view of a status-only project", () => {
     expect(got.lines).toBeUndefined()
     const waited = (await tool("wait_for_tasks", { tasks: [r.hidden.id], timeout_seconds: 5 })).text
     expect(waited).toContain(r.hidden.id)
+    const inbox = (await tool("list_inbox")).json() as { id: string }[]
+    for (const text of [JSON.stringify(got), waited, JSON.stringify(inbox.find((t) => t.id === r.hidden.id))]) {
+      for (const w of CONTENT) expect(text, w).not.toContain(w)
+    }
 
     // A query can't probe its prompt or summary: only the title and PR match.
     expect(((await tool("list_tasks", { query: "PROMPT-WORDS SUMMARY-WORDS" })).json() as { id: string }[]).map((t) => t.id)).toEqual([r.visible.id])
@@ -155,6 +159,7 @@ describe("the Coordinator's view of a status-only project", () => {
       ["list_compactions", { project: "secret" }],
       ["search_history", { project: "secret", query: "launch" }],
       ["list_queued_messages", { task: r.hidden.id }],
+      ["get_preview_url", { task: r.hidden.id, port: 4230 }],
     ] as const) {
       const res = await tool(name, args)
       expect(res.ok, `${name} ${res.text}`).toBe(false)
