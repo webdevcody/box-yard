@@ -18,7 +18,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react"
-import { useCloseTask, useCompactTask, useDeleteTask, useRetryTask, useStopTask } from "../lib/queries"
+import { useCloseTask, useCompactTask, useDeleteTask, useIdentities, useRetryTask, useStopTask } from "../lib/queries"
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
@@ -36,6 +36,8 @@ import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
 import { PlacementHeaderChip } from "./PlacementChip"
+import { IdentityBadge } from "./IdentityBadge"
+import { useOpenSettings } from "./SettingsDialog"
 
 /** A boolean saved in localStorage, so a toggle keeps its state across tasks and reloads. */
 export function useStoredFlag(key: string): [boolean, (v: boolean) => void] {
@@ -345,6 +347,7 @@ function TaskMenu({
                   </span>
                 </Detail>
               )}
+              {project && <IdentityDetail identityId={project.identityId} onOpen={() => setOpen(false)} />}
               {task.pushState && <PushDetail push={task.pushState} />}
               {(task.model || task.effort) && (
                 <Detail label="Model">
@@ -451,6 +454,29 @@ function PushDetail({ push }: { push: NonNullable<Task["pushState"]> }) {
       <span className="min-w-0 py-0.5 leading-snug wrap-anywhere" data-testid="push-state">
         <span className={line.tone === "ok" ? "text-zinc-300" : line.tone === "warn" ? "text-amber-300" : undefined}>{line.text}</span> · <TimeAgo ts={push.at} />
       </span>
+    </Detail>
+  )
+}
+
+/** Who the task's turns act as on GitHub: its project's identity (Settings › Identities). */
+function IdentityDetail({ identityId, onOpen }: { identityId: string; onOpen: () => void }) {
+  const identity = useIdentities().data?.find((i) => i.id === identityId)
+  const openSettings = useOpenSettings()
+  if (!identity) return null
+  return (
+    <Detail label="Identity">
+      <button
+        type="button"
+        className="flex min-w-0 items-center gap-1.5 rounded text-left hover:text-zinc-100"
+        onClick={() => {
+          onOpen()
+          openSettings("identities")
+        }}
+        data-testid="task-identity"
+      >
+        <IdentityBadge identity={identity} className="max-w-full" />
+        {identity.githubLogin && <span className="truncate font-mono text-[11px] text-zinc-400">{identity.githubLogin}</span>}
+      </button>
     </Detail>
   )
 }
