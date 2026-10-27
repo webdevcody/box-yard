@@ -29,7 +29,7 @@ Use these instead of hand-rolling:
 | Any dialog, drawer or sheet | `<Modal>` (`size`, `placement="center\|top\|sheet"`, `dirty`, `onSubmit`, `footer`) | `web/src/components/Modal.tsx` |
 | Yes/no prompt | `await confirmDialog({ title, body, confirmLabel, danger })`, not `window.confirm` | `web/src/lib/confirm.ts` |
 | A dropdown | `<Select>` (width via `className`, `size="sm"` inline), not a raw `<select>` | `web/src/components/ui.tsx` |
-| Link to another site | `<NewTabLink>`; never hand-write `target="_blank"` | `ui.tsx` |
+| Link to another site | `<NewTabLink>`; never hand-write `target="_blank"`. It adds the ↗ (`ExternalMark`) and the URL tooltip: `mark="end"` in a flex chip, `mark={false}` only for icon buttons that already say where they go | `ui.tsx` |
 | Link that may be in-app, a file or external (e.g. markdown) | `<AppLink>`, which routes by `linkTarget()` in `lib/linkify.ts` | `ui.tsx` |
 | Link to an artifact or upload | `<FileLink>` / `<ArtifactLink>` (opens the preview modal; wrap lists in `{...PREVIEW_GROUP}` for the ←/→ gallery) | `web/src/components/FileLink.tsx` |
 | Leading icon on a text row | `<LineIcon icon={X} className="h-4 w-4" />` in an `items-start` row, not a hand-tuned `mt-*` | `ui.tsx` |
@@ -37,6 +37,7 @@ Use these instead of hand-rolling:
 | A list of task cards | `useStableTasks(tasks, { compare, include, resetKey })` + `<TaskGrid stable />` | `web/src/components/TaskGrid.tsx` |
 
 - `AppLink`, `FileLink` and `NewTabLink` stop click propagation. Never wrap rendered Markdown in a `<Link>`/`<a>`: auto-linked URLs become nested anchors. Use a `role="link"` div card (see `NoticeCard` in `ChatLine.tsx`).
+- Link colours: yellow = in-app, sky + ↗ = another site, PR glyph in its state colour + ↗ = a GitHub PR. A pasted GitHub PR/issue URL renders as "PR #154" / "owner/repo#154" (`shortGithubLabel` in `lib/linkify.ts`). Artifacts and uploads are in-app (preview modal, or download in place), so no ↗.
 - PR links and task status: `<PrChip>` and `<StatusBadge status={badgeStatus(task)} />` from `ui.tsx` (`badgeStatus` is in `lib/prState.ts`). They show the purple Merged state, so don't hand-roll PR links.
 - Settings: open it with `useOpenSettings()(section)`. It's mounted once as `SettingsHost`, so don't render `<SettingsDialog>` yourself. New categories go in `SETTINGS_SECTIONS` (`lib/settingsNav.ts`).
 - `useStableTasks`: pass all candidate tasks and filter with `include` (pre-filtering makes cards vanish instead of dimming). `resetKey` is the sort/filter/search, never `now`.
