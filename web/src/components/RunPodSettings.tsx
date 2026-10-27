@@ -36,8 +36,8 @@ const NUMBERS: { key: Numeric; label: string; help: string; step?: number; unit:
     help: "RunPod only places a new pod on a host with at least this much RAM. Cheap Community hosts can come with little; a game's browser needs about 12 GB. A project can set its own.",
   },
   { key: "minVcpus", label: "Min vCPUs", unit: "vCPUs", help: "…and at least this many vCPUs. Fewer hosts qualify the higher these are, so a pod may wait longer for one." },
-  { key: "idleMinutes", label: "Stop when idle", unit: "min", help: "A pod with no agent running or waiting is stopped after this long. Its network volume stays; the next task starts a new pod." },
-  { key: "agentsPerPod", label: "Agents per pod", unit: "agents", help: "Agents of one project that may run on its pod at once, unless the project sets its own Agents at once." },
+  { key: "idleMinutes", label: "Stop when idle", unit: "min", help: "A pod with no task running or waiting is stopped after this long. Its network volume stays; the next task starts a new pod." },
+  { key: "agentsPerPod", label: "Tasks running at once per pod", unit: "tasks", help: "Tasks of one project that may run on its pod at once, unless the project sets its own Tasks running at once." },
   {
     key: "maxHourlyUsd",
     label: "Max per project",

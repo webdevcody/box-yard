@@ -117,18 +117,18 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
   }
 
   const Icon = action === "clear" ? Eraser : target.kind === "pod" ? Power : Trash2
-  const agents = (n: number) => `${n} ${n === 1 ? "agent" : "agents"}`
+  const tasks = (n: number) => `${n} running ${n === 1 ? "task" : "tasks"}`
   const Verb = copy.verb[0]!.toUpperCase() + copy.verb.slice(1)
   const label = mutation.isPending
     ? `Archiving and ${copy.verb === "terminate" ? "terminating" : `${copy.verb}ing`}…`
     : step === "confirm"
       ? running > 0
-        ? `Stop agents and ${copy.verb}…`
+        ? `Stop tasks and ${copy.verb}…`
         : risky.length
           ? `${Verb} anyway…`
           : copy.confirm
       : step === "stop"
-        ? `Stop ${agents(running)} and ${copy.verb}${next ? "…" : ""}`
+        ? `Stop ${tasks(running)} and ${copy.verb}${next ? "…" : ""}`
         : `${Verb} anyway`
   return (
     <Modal
@@ -166,7 +166,7 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
         <div className="space-y-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-sm text-red-100" data-testid="stop-confirm">
           <div className="flex items-center gap-2 font-medium">
             <AlertTriangle className="h-4 w-4 shrink-0 text-red-300" />
-            Stop {running} running {running === 1 ? "agent" : "agents"} first?
+            Stop {running} running {running === 1 ? "task" : "tasks"} first?
           </div>
           <p className="text-xs text-red-200/80">
             {running === 1 ? "Its turn ends" : "Their turns end"} mid-way. What {running === 1 ? "it has" : "they have"} done so far is archived with the rest, and {running === 1 ? "it picks" : "they pick"} up
@@ -211,7 +211,7 @@ export function BoxActionDialog({ box, pod, action, onClose, onDone }: { box?: B
             <div role="status" className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" data-testid="agents-running">
               <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-300" />
               <span>
-                {running} {running === 1 ? "agent is" : "agents are"} running: stop {running === 1 ? "it" : "them"} first, or choose “Stop agents and {copy.verb}” to stop{" "}
+                {running} {running === 1 ? "task is" : "tasks are"} running: stop {running === 1 ? "it" : "them"} first, or choose “Stop tasks and {copy.verb}” to stop{" "}
                 {running === 1 ? "it" : "them"} as part of this.
               </span>
             </div>

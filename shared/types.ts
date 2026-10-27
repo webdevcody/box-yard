@@ -61,9 +61,9 @@ export interface Project {
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
   /**
-   * Agents at once: how many of its own agents may run at the same time on one box, GPU pod or this computer. Other
-   * projects' agents never wait for it; the box's own limit (Settings › Agents per box, or › Local agents) bounds
-   * them. null: only the box's limit (server/agentLimits.ts).
+   * Tasks running at once: how many of its own tasks may run at the same time on one box, GPU pod or this computer.
+   * Other projects' tasks never wait for it; the box's own limit (Settings › Tasks running at once per box, or › on this
+   * computer) bounds them. null: only the box's limit (server/agentLimits.ts).
    */
   agentsPerBox: number | null
   /**
@@ -71,7 +71,7 @@ export interface Project {
    * project's agent starts there, and its agents wait for the others' to finish (server/agentLimits.ts).
    */
   wholeMachine: boolean
-  /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Resident tasks per box. */
+  /** Most task folders on a box that holds one of its folders, the same way; null uses Settings › Task folders kept per box. */
   tasksPerBox: number | null
   /** Most boxes its tasks use at once (boxes made for it or holding its task folders); null: only Settings › Max boxes. */
   maxBoxes: number | null
@@ -403,7 +403,7 @@ export interface BoxInfo {
   slots: number
   runningTurns: number
   /**
-   * Fewer than `slots` while a project with an agent running here sets Agents per box: the strictest of those
+   * Fewer than `slots` while a project with an agent running here sets Tasks running at once: the strictest of those
    * limits (no agent joins until running drops below it), with the project. Absent otherwise.
    */
   projectLimit?: { slots: number; project: string } | null
@@ -671,11 +671,11 @@ export interface Settings {
   boxCreateConcurrency: number
   /** Claude turns that may run at once inside one box. Unset, each box uses its own size's default. */
   slotsPerBox: number
-  /** Cap on agents running at once across all boxes. 0 = no extra cap beyond boxes x agents per box. */
+  /** Max tasks running at once across all boxes. 0 = no extra cap beyond boxes x tasks running at once per box. */
   maxAgents: number
   /**
-   * Local runner: most agents of "This computer" projects running at once on the machine running Box Yard. They
-   * queue on their own, apart from box slots and Max agents.
+   * Local runner: most tasks of "This computer" projects running at once on the machine running Box Yard. They
+   * queue on their own, apart from box slots and Max tasks running at once.
    */
   localAgents: number
   /** Rates used to estimate Upstash Box infrastructure costs. */
