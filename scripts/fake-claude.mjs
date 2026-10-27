@@ -349,6 +349,9 @@ process.stdin.on("end", async () => {
     out({ type: "result", subtype: "success", is_error: true, result: loginError, session_id: session.id })
     process.exit(1)
   }
+  // Like the real CLI, a session exists from its first turn's start: a turn killed halfway can be resumed. Its turns
+  // list gets this one at the end.
+  if (sessionFile && !resumeId) fs.writeFileSync(sessionFile, JSON.stringify(session))
   let result = ""
   let mcp = null
   if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")
