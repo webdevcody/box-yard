@@ -38,6 +38,11 @@ export interface BoxProvider {
   readonly claudeBin: string
   /** Folder inside a box that holds `.boxyard/` and `tasks/`. */
   root(boxId: string): string
+  /**
+   * A folder in the box's memory only (a tmpfs), where `writeFile` keeps each task's task.json and signing.key and
+   * the runner keeps the turn's signing key (task.json `secretsDir`). Unset: the box has none, and they're on its disk.
+   */
+  readonly secretsDir?: string
   /** Folder holding the task folders, `<root>/tasks` unless the provider says otherwise (the local runner). */
   tasksRoot?(boxId: string): string
   /**

@@ -113,7 +113,7 @@ describe("DockerProvider", () => {
     expect(events.map((e) => e.kind)).toEqual(["created", "started"])
   })
 
-  it("sends commands and files on stdin, keeps task.json on the tmpfs, and never puts a secret on a command line", async () => {
+  it("sends commands and files on stdin, keeps task.json and signing.key on the tmpfs, and never puts a secret on a command line", async () => {
     const { p } = provider()
     await p.wake(BOX)
     await p.exec(BOX, `export GITHUB_TOKEN=${GH_SECRET} && git push`)
@@ -126,11 +126,23 @@ describe("DockerProvider", () => {
     expect(write.args!.at(-1)).toContain(`cat > '${DOCKER_SECRETS_DIR}/task_1.json.tmp'`)
     expect(write.args!.at(-1)).toContain(`ln -sfn '${DOCKER_SECRETS_DIR}/task_1.json' '/workspace/tasks/task_1/task.json'`)
     expect(write.stdin).toContain(SECRET)
+    expect(p.secretsDir).toBe(DOCKER_SECRETS_DIR)
+
+    const KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+    await p.writeFile(BOX, "/workspace/tasks/task_1/signing.key", KEY)
+    const key = calls().at(-1)!
+    expect(key.args!.at(-1)).toMatch(/^umask 077 && /)
+    expect(key.args!.at(-1)).toContain(`cat > '${DOCKER_SECRETS_DIR}/task_1.signing.key.tmp'`)
+    expect(key.args!.at(-1)).toContain(`ln -sfn '${DOCKER_SECRETS_DIR}/task_1.signing.key' '/workspace/tasks/task_1/signing.key'`)
+    expect(key.stdin).toBe(KEY)
+    // Only a task folder's: a file of that name elsewhere is an ordinary file.
+    await p.writeFile(BOX, "/workspace/tasks/task_1/work/signing.key", "not a key")
+    expect(calls().at(-1)!.args!.at(-1)).toContain("/workspace/tasks/task_1/work/signing.key.boxyard-tmp")
 
     await p.writeFile(BOX, "/workspace/tasks/task_1/prompt.md", "hello")
     expect(calls().at(-1)!.args!.at(-1)).toContain("/workspace/tasks/task_1/prompt.md.boxyard-tmp")
 
-    for (const c of calls()) expect(JSON.stringify(c.args ?? [])).not.toMatch(new RegExp(`${SECRET}|${GH_SECRET}`))
+    for (const c of calls()) expect(JSON.stringify(c.args ?? [])).not.toMatch(new RegExp(`${SECRET}|${GH_SECRET}|PRIVATE KEY`))
   })
 
   it("starts a stopped container again when a command needs it", async () => {
