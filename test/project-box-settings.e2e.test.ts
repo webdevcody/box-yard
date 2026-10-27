@@ -185,7 +185,7 @@ describe("project box settings: API", () => {
     // whole_machine is a box setting it sets too, and list_projects says so.
     expect((await captain.tool("update_project", { whole_machine: true })).isError).not.toBe(true)
     expect(r.yard.store.getProject(a.id)!.wholeMachine).toBe(true)
-    expect((JSON.parse((await captain.tool("list_projects")).content[0]!.text) as { boxSettings: Record<string, string> }[])[0]!.boxSettings.wholeMachine).toMatch(/^yes: no other project's agent starts/)
+    expect((JSON.parse((await captain.tool("list_projects")).content[0]!.text) as { boxSettings: Record<string, string> }[])[0]!.boxSettings.wholeMachine).toMatch(/^yes: no other project's task starts/)
     await captain.tool("update_project", { whole_machine: false })
     expect((await captain.tool("update_project", { agents_per_box: 3, max_boxes: null })).isError).not.toBe(true)
     expect(r.yard.store.getProject(a.id)).toMatchObject({ name: "alpha", agentsPerBox: 3, tasksPerBox: 5, maxBoxes: null })
