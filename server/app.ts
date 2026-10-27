@@ -246,6 +246,8 @@ export interface BoxYard {
   hooks: HookEngine
   notes: ProjectNotes
   retro: NotesRetro
+  /** Settings › Docker and the containers behind "Runs on: Docker container" (docs/docker.md). */
+  docker: DockerService
   start(): Promise<void>
   stop(): void
 }
@@ -261,6 +263,8 @@ export function createBoxYard(
     gpu?: GpuRunner
     /** Stands in for the Docker runner's placement (tests): `docker-*` boxes route to its provider, and placement asks it. */
     docker?: DockerRunner
+    /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
+    realDocker?: { claudeBin: string }
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -299,7 +303,8 @@ export function createBoxYard(
     install,
     git: { name: c.gitUserName, email: c.gitUserEmail },
     bin: c.dockerBin || null,
-    mock: c.mock ? { dir: path.join(c.dataDir, "docker-boxes"), claudeBin: c.claudeBin } : null,
+    mock: c.mock && !opts.realDocker ? { dir: path.join(c.dataDir, "docker-boxes"), claudeBin: c.claudeBin } : null,
+    claudeBin: opts.realDocker?.claudeBin,
   })
   // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
@@ -1201,6 +1206,7 @@ export function createBoxYard(
     hooks,
     notes,
     retro,
+    docker: dockerService,
     async start() {
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
       if (setup.onThisComputer()) await setup.refreshLocal()

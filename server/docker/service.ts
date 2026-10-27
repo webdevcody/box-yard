@@ -34,6 +34,8 @@ export class DockerService implements DockerRunner {
       bin?: string | null
       /** Mock mode: containers are folders here, and agents run this claude. */
       mock?: { dir: string; claudeBin: string } | null
+      /** Tests: the claude command inside real containers (else the image's `claude`). */
+      claudeBin?: string
     },
   ) {
     this.engine = new DockerEngine({ bin: d.bin || null })
@@ -58,6 +60,7 @@ export class DockerService implements DockerRunner {
         git: d.git,
         onEvent: (e) => this.onEvent?.(e),
         onProgress: (boxId, message) => this.onProgress?.(boxId, message),
+        claudeBin: d.claudeBin,
       })
     }
   }
