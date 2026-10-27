@@ -120,7 +120,8 @@ describe.skipIf(!enabled)("Docker runner on real Docker (BOXYARD_DOCKER_E2E=1)",
 
       // The turn's credentials: in task.json on the tmpfs only, never in the container's config, env or the image.
       expect(await sh(`readlink ${y.tasks.taskDir(box, t.id)}/task.json`)).toBe(`${DOCKER_SECRETS_DIR}/${t.id}.json`)
-      expect(await sh(`grep -c ${GH_SECRET} ${DOCKER_SECRETS_DIR}/${t.id}.json`)).toBe("1")
+      // In GITHUB_TOKEN and GH_TOKEN (gh reads GH_TOKEN first), from the one resolver (turnCredentials).
+      expect(await sh(`grep -c ${GH_SECRET} ${DOCKER_SECRETS_DIR}/${t.id}.json`)).toBe("2")
       expect(await sh(`awk '$2 == "${DOCKER_SECRETS_DIR}" { print $3 }' /proc/mounts`)).toBe("tmpfs")
       expect(inspect).not.toContain(GH_SECRET)
       const history = (await docker(bin, ["image", "history", "--no-trunc", c!.Config.Image])).stdout.toString("utf8")
