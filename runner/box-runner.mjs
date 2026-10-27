@@ -17,14 +17,15 @@
 //   work/         the agent's working directory (repo clone or scratch space)
 //   claude/       CLAUDE_CONFIG_DIR, so the session transcript lives with the task
 //   events.jsonl  append-only event log
-//   turn.pid      pid of the running turn
+//   turn.pid      pid of the running turn (it leads a process group of its own)
+//   run.json      the running turn's record: pid, process identity, turn id, events offset
 
-import { spawn, execFile } from "node:child_process"
+import { spawn, execFile, execFileSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 
-const RUNNER_VERSION = "1"
+const RUNNER_VERSION = "2"
 const [, , mode, taskDirArg] = process.argv
 
 if (!mode || !taskDirArg) {
@@ -159,9 +160,85 @@ process.on("SIGTERM", () => {
   }, 5000).unref()
 })
 
+// The same lines as by_boot/by_start in server/turnProcess.ts: the machine's boot, and when a process started (clock
+// ticks since boot on Linux, ps's start time elsewhere). Box Yard compares them with what run.json says, so a pid the
+// system hands out again after a reboot or a box resume isn't taken for this turn.
+const IDENT_SH = String.raw`by_boot() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null || true; }
+by_start() { if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; else LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//;s/ *$//'; fi; }
+printf '%s|%s' "$(by_boot)" "$(by_start "$1")"`
+
+function processIdent(pid) {
+  try {
+    const ident = execFileSync("sh", ["-c", IDENT_SH, "sh", String(pid)], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] })
+    return /^[^|"\\\n]*\|[^"\\\n]+$/.test(ident) ? ident : null
+  } catch {
+    return null
+  }
+}
+
+/** The process group `pid` is in, or null when this system can't say. */
+function groupOf(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8")
+    return Number(stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[2]) || null
+  } catch {}
+  try {
+    return Number(execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] }).trim()) || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A turn leads a process group of its own, Claude and its tools in it, so Box Yard can stop all of it with one
+ * `kill -- -<pid>`, and a server stopping (Ctrl-C in its terminal, an upgrade) never reaches it. Box Yard starts it
+ * under setsid where there is one; where there isn't (macOS) it starts again here as a new session.
+ */
+function leadOwnGroup() {
+  if (process.env.BOXYARD_RUNNER_DETACHED === "1") {
+    delete process.env.BOXYARD_RUNNER_DETACHED
+    return true
+  }
+  const group = groupOf(process.pid)
+  if (group === null || group === process.pid) return true
+  const child = spawn(process.execPath, process.argv.slice(1), {
+    detached: true,
+    stdio: ["ignore", "inherit", "inherit"],
+    env: { ...process.env, BOXYARD_RUNNER_DETACHED: "1" },
+  })
+  child.unref()
+  return false
+}
+
+/**
+ * The turn's run record, so a Box Yard that restarts while it runs can find it again: which process this is (pid,
+ * with the boot and its start time), its turn, and where its events start in events.jsonl. run.json goes first and
+ * turn.pid after it, so a turn.pid always has its record. Both stay behind after the turn (see the end of runTurn).
+ */
+function writeRunRecord(turn) {
+  let eventsOffset = 0
+  try {
+    eventsOffset = fs.statSync(eventsFile).size
+  } catch {}
+  const record = {
+    pid: process.pid,
+    ident: processIdent(process.pid),
+    turnId: turn.turnId ?? null,
+    startedAt: Date.now(),
+    events: "events.jsonl",
+    eventsOffset,
+    log: "runner.log",
+    runner: RUNNER_VERSION,
+  }
+  const tmp = path.join(taskDir, `run.json.${process.pid}`)
+  fs.writeFileSync(tmp, JSON.stringify(record))
+  fs.renameSync(tmp, path.join(taskDir, "run.json"))
+  fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
+}
+
 async function runTurn() {
   const turn = readJson(path.join(taskDir, "turn.json"))
-  fs.writeFileSync(path.join(taskDir, "turn.pid"), String(process.pid))
+  writeRunRecord(turn)
   // While the machine sleeps the wall clock runs on and the monotonic one doesn't: the gap is time asleep (sleptMs).
   const clocks = { wall: Date.now(), mono: performance.now() }
   // Answers to message_captain waits that ran out last turn; their replies come as this turn's messages.
@@ -228,8 +305,8 @@ async function runTurn() {
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
     sleptMs: Math.max(0, Math.round(Date.now() - clocks.wall - (performance.now() - clocks.mono))),
   })
-  // turn.pid stays behind on purpose: the orchestrator checks it with kill -0,
-  // and a fast turn must not finish before the orchestrator sees it started.
+  // turn.pid and run.json stay behind on purpose: the orchestrator checks the
+  // process with them, and a fast turn must not finish before it sees it started.
 }
 
 function claudeEnv() {
@@ -1092,7 +1169,12 @@ function depsStep(fn, deps, work) {
 
 // ---------------------------------------------------------------------------
 
-if (mode === "turn") {
+if (mode === "turn" && !leadOwnGroup()) {
+  // The turn runs on in the copy that leads its own group; that one writes turn.pid.
+  process.exit(0)
+} else if (mode === "turn") {
+  // No terminal to hang up, but a stray SIGHUP mustn't end a turn either (nohup's ignore doesn't outlive a re-exec).
+  process.on("SIGHUP", () => {})
   runTurn().then(
     () => process.exit(0),
     async (err) => {
