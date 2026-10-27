@@ -11,10 +11,11 @@ import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
 import { QueuedLink } from "./QueuedMessages"
 import { WaitReason } from "./WaitReason"
+import { PlacementCardChip } from "./PlacementChip"
 
 /**
  * One task in a card grid. Fixed structure so cards in a row line up: project, title (2 lines max), summary (2 lines,
- * space reserved), an optional chips row, then a one-line footer pinned to the bottom (the card grows to fill its flex-column grid cell).
+ * space reserved), an optional chips row, then a one-line footer pinned to the bottom (where it runs as an icon first, then PR, cost…) (the card grows to fill its flex-column grid cell).
  *
  * `onMarkDone` adds a "Mark done" check button (inbox cards). `stale` dims a card that no longer belongs in its
  * list (e.g. it finished under the Active filter) but stays put until the list is re-sorted (useStableOrder).
@@ -87,6 +88,7 @@ export const TaskCard = memo(function TaskCard({
       )}
 
       <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 pt-3 text-xs text-zinc-500 sm:flex-nowrap sm:whitespace-nowrap">
+        <PlacementCardChip task={task} />
         <PrChip task={task} variant="link" />
         {mergeButtonState(task) !== "hidden" && <MergePrCardButton task={task} />}
         {task.scheduleId && (
