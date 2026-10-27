@@ -1,6 +1,7 @@
 import type { Project, Task } from "../../../shared/types"
 
-const MAX_SELECTED_CHARS = 12_000
+/** A safety cap well above any chat message, so a whole message (its toolbar's Respond) is quoted in full. */
+const MAX_SELECTED_CHARS = 50_000
 
 export interface SelectionProjectContext {
   id: string

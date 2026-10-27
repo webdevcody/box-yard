@@ -25,6 +25,7 @@ import { AttachmentList } from "./Attachments"
 import { TaskQueue } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { SelectionToTask } from "./SelectionToTask"
+import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { projectContext, taskContext, type SelectionTaskSource } from "../lib/selectionTask"
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
@@ -197,7 +198,7 @@ const PublishedRun = memo(
   (a, b) => a.messages.length === b.messages.length && a.messages.every((m, i) => m === b.messages[i]),
 )
 
-const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
+export const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp: (message: string) => void }) {
   const ownerName = useOwnerName()
   const time = (
     <span className="ml-2 text-[10px] text-zinc-600">
@@ -209,7 +210,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       // A hook's message (server/hooks.ts) is an automation's, not Cody's: its own colour and icon.
       const hook = m.meta?.source === "hook"
       return (
-        <div className={cx("rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
+        <div className={cx(MESSAGE_BLOCK, "rounded-lg border-l-2 px-3 py-2", hook ? "border-teal-500 bg-teal-500/5" : "border-yard-500 bg-yard-500/5", m.meta?.pending ? "opacity-60" : "")} data-testid={hook ? "hook-message" : undefined}>
           <div className={cx("mb-0.5 flex items-center gap-1 text-[11px] font-semibold", hook ? "text-teal-300" : "text-yard-400")}>
             {hook && <Webhook className="h-3 w-3" />}
             {userMessageLabel(m.meta, ownerName)}
@@ -218,6 +219,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
           {m.content && <div className="text-sm whitespace-pre-wrap wrap-anywhere text-zinc-200">{m.content}</div>}
           <AttachmentList files={m.meta?.attachments} />
           {m.meta?.undelivered === true && <div className="mt-1 text-[11px] text-zinc-500">Not delivered: the task was stopped or marked done first.</div>}
+          {!m.meta?.pending && <MessageActions text={m.content} />}
         </div>
       )
     }
@@ -226,12 +228,13 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
         // The reply's first block drops its top margin (pt-1.5 keeps the gap) and the row sets one leading,
         // so the icon's one-line box sits on the first line. A reply opening with a code block: the box
         // skips the block's p-3 and is one 16px code line tall.
-        <div className="group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed">
+        <div className={cx(MESSAGE_BLOCK, "group flex min-w-0 items-start gap-2 pt-1.5 text-sm leading-relaxed")}>
           <LineIcon icon={Bot} className="h-4 w-4 text-zinc-500" box="group-has-[>div>.prose-chat>.code-block:first-child]:mt-3 group-has-[>div>.prose-chat>.code-block:first-child]:h-4" />
           <div className="min-w-0 text-zinc-200 [&>.prose-chat>:first-child]:mt-0!">
             <Markdown>{m.content}</Markdown>
             <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
           </div>
+          <MessageActions text={m.content} />
         </div>
       )
     case "tool":
@@ -243,7 +246,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
       )
     case "agent":
       return (
-        <div className="flex items-start gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200">
+        <div className={cx(MESSAGE_BLOCK, "flex items-start gap-2 rounded-lg bg-violet-500/5 px-3 py-2 text-sm text-violet-200")}>
           <LineIcon icon={Users} className="h-4 w-4 text-violet-400" />
           <div className="min-w-0">
             {typeof m.meta?.from === "string" && (
@@ -253,6 +256,7 @@ const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFollowUp:
             )}
             <div className="whitespace-pre-wrap wrap-anywhere">{m.content}</div>
           </div>
+          <MessageActions text={m.content} />
         </div>
       )
     default: {
