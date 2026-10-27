@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest"
+import { execFileSync } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import type { Server } from "node:http"
@@ -7,8 +8,9 @@ import { docker } from "../server/docker/cli.js"
 import { DOCKER_SECRETS_DIR } from "../server/providers/docker.js"
 import { GITHUB_HELPER, setHelperScript } from "../server/gitShare.js"
 import { dockerBoxId } from "../shared/docker.js"
+import type { Identity } from "../shared/identities.js"
 import type { Project, Task } from "../shared/types.js"
-import { freePort, testConfig, waitFor } from "./helpers.js"
+import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // The Docker runner on this computer's real Docker, end to end. Opt-in: it builds Box Yard's image the first time
 // (a few minutes, about 2 GB), then runs a whole task in a real container and deletes the container and its volume.
@@ -146,6 +148,77 @@ describe.skipIf(!enabled)("Docker runner on real Docker (BOXYARD_DOCKER_E2E=1)",
       expect((await docker(bin, ["volume", "inspect", volume])).code).not.toBe(0)
       expect(y.tasks.history.list({ boxId: box }).map((e) => e.type).reverse()).toEqual(["created", "stopped", "started", "deleted"])
       box = null
+    },
+    40 * 60_000,
+  )
+
+  it(
+    "signs a turn's commits in the container with its identity's key, kept on the tmpfs only, and removes it with the turn",
+    async () => {
+      const port = await freePort()
+      const LOG = "/workspace/.boxyard/sign.log"
+      // The agent: commits in its work folder, writes where its signing key is, then runs the fake claude.
+      const WRAP = "/workspace/.boxyard/claude-sign.sh"
+      const wrapper = `#!/bin/sh
+prompt=$(cat)
+id=$(basename "$(dirname "$PWD")")
+git rev-parse --git-dir >/dev/null 2>&1 || git init -q
+echo x >> signed.txt && git add signed.txt && git commit -qm "signed in docker" >> ${LOG} 2>&1 || echo COMMIT_FAILED >> ${LOG}
+k=$(git config user.signingKey)
+echo "SIGNING_KEY=$k" >> ${LOG}
+echo "KEY_MODE=$(stat -c %a "$k")" >> ${LOG}
+echo "KEY_FS=$(stat -f -c %T "$k")" >> ${LOG}
+echo "DELIVERED=$(test -e ../signing.key && echo there || echo gone)" >> ${LOG}
+echo "ON_DISK=$(test -e "\${TMPDIR:-/tmp}/boxyard-sign-$id/key" && echo there || echo none)" >> ${LOG}
+git log -1 --format='SIG %s %G?' >> ${LOG}
+printf '%s' "$prompt" | exec node ${FAKE_IN_CONTAINER} "$@"
+`
+      const config = testConfig({ port })
+      const y = createBoxYard(config, { webDir: "/nonexistent", realDocker: { claudeBin: `sh ${WRAP}` } })
+      y.docker.onEvent = (e) => y.tasks.dockerEvent(e)
+      const listening = await new Promise<Server>((resolve) => {
+        const s = y.app.listen(port, "127.0.0.1", () => resolve(s))
+      })
+      await y.start()
+      let signBox: string | null = null
+      try {
+        const keyFile = path.join(tmpDir("docker-signing-"), "key")
+        execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "docker-e2e", "-f", keyFile])
+        const acme = y.identities.create({ name: "Acme", author: { name: "Acme Bot", email: "bot@acme.example" } })
+        await y.identities.saveSigning(acme.id, { kind: "file", privateKey: fs.readFileSync(keyFile, "utf8") })
+        const p = y.store.createProject({ name: "docker-signing-e2e", runner: "docker", identityId: acme.id })
+        signBox = dockerBoxId(p.id)
+        const sh = async (command: string) => {
+          const r = await y.docker.provider.exec(signBox!, command)
+          if (r.exitCode !== 0) throw new Error(`exit ${r.exitCode}: ${(r.stderr || r.stdout).slice(-600)}`)
+          return r.stdout.trim()
+        }
+        await y.docker.provider.wake(signBox)
+        await y.docker.provider.writeFile(signBox, FAKE_IN_CONTAINER, fs.readFileSync(path.resolve("scripts/fake-claude.mjs")))
+        await y.docker.provider.writeFile(signBox, WRAP, wrapper)
+
+        const t = y.tasks.createTask({ projectId: p.id, title: "sign a commit", prompt: "commit something" })
+        await waitFor(() => {
+          const x = y.store.getTask(t.id)!
+          return x.status === "failed" || (x.turnCount >= 1 && !x.currentTurnId && !["starting", "queued", "working"].includes(x.status)) ? x : null
+        }, "the task's turn to end", 180_000)
+        const lines = (await sh(`cat ${LOG}`)).split("\n")
+        expect(lines).not.toContain("COMMIT_FAILED")
+        expect(lines).toContain("SIG signed in docker G")
+        expect(lines).toContain(`SIGNING_KEY=${DOCKER_SECRETS_DIR}/sign-${t.id}.key`)
+        expect(lines).toContain("KEY_MODE=600")
+        expect(lines).toContain("KEY_FS=tmpfs")
+        expect(lines).toContain("DELIVERED=gone")
+        expect(lines).toContain("ON_DISK=none")
+        // After the turn: neither copy is on the tmpfs, and nothing on the volume holds the key.
+        expect(await sh(`ls -A ${DOCKER_SECRETS_DIR}`)).toBe(`${t.id}.json`)
+        const pem = fs.readFileSync(keyFile, "utf8").split("\n")[1]!
+        expect(await sh(`grep -rlF -- ${JSON.stringify(pem)} /workspace /tmp 2>/dev/null || echo none`)).toBe("none")
+      } finally {
+        if (signBox) await y.docker.provider.destroy(signBox).catch((err) => console.warn(`couldn't delete ${signBox}: ${(err as Error).message}`))
+        y.stop()
+        await new Promise((res) => listening.close(() => res(null)))
+      }
     },
     40 * 60_000,
   )
