@@ -27,6 +27,8 @@ export class DockerService implements DockerRunner {
     private readonly d: {
       store: Store
       credentials: CredentialStore
+      /** Every credential value in effect (Settings' and identities'): a build refuses a Dockerfile holding one, and its log never shows one. */
+      secrets?: () => string[]
       /** The install id (TaskManager.installLabel without "by-"). */
       install: () => string
       git: { name: string; email: string }
@@ -45,7 +47,7 @@ export class DockerService implements DockerRunner {
       install: d.install,
       settings: () => this.store.get(),
       project: (projectId) => d.store.projectDocker(projectId),
-      secrets: () => d.credentials.secrets(),
+      secrets: d.secrets ?? (() => d.credentials.secrets()),
     })
     if (d.mock) {
       const folders = new FolderDockerProvider(d.mock.dir, d.mock.claudeBin)
