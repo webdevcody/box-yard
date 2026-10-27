@@ -106,6 +106,121 @@ export interface IdentityInput {
   coordinatorSees?: CoordinatorSees
 }
 
+// ---- Detection (docs/identities.md › Set up from this computer): what this computer's gh, git and ssh already use,
+// as evidence and proposals. Never a value: tokens and keys are named by reference ("gh:github.com:octocat",
+// "file:~/.ssh/acme_signing"), and only the server resolves a reference, when an identity is created or imported.
+
+/** A GitHub account `gh` is signed in to on this computer. */
+export interface DetectedAccount {
+  host: string
+  login: string
+  /** gh's active account for the host. */
+  active: boolean
+  /** gh's git protocol for the host ("https", "ssh"); Box Yard's turns always push over HTTPS with the token. */
+  protocol: string | null
+  /** A classic token's scopes; null when gh didn't say (a fine-grained token, or an old gh). */
+  scopes: string[] | null
+  /** Where gh keeps the token: "keyring", or a hosts.yml path. */
+  storage: string | null
+  /** The reference create_identity and import_detected_identity resolve on the server. */
+  tokenRef: string
+  // From GitHub, when detection may ask it (online); null otherwise.
+  githubId: number | null
+  name: string | null
+  orgs: string[] | null
+  verifiedEmails: string[] | null
+  /** Fingerprints of the SSH keys it signs commits with on GitHub. */
+  signingKeys: string[] | null
+  /** Fingerprints of the SSH keys it logs in (pushes) with on GitHub. */
+  sshKeys: string[] | null
+  problem: string | null
+}
+
+/** A commit signing setup found in a git config. */
+export interface DetectedSigning {
+  format: "ssh" | "openpgp" | "x509"
+  /** "file": a key file without a passphrase, which Box Yard can keep; "agent": one only an agent (or 1Password) can use. */
+  kind: "file" | "agent" | null
+  /** What to import: "file:<path>" or "agent:<fingerprint>"; null when nothing can be. */
+  ref: string | null
+  publicKey: string | null
+  fingerprint: string | null
+  /** gpg.ssh.program, when it isn't ssh-keygen (1Password's op-ssh-sign). */
+  program: string | null
+  /** commit.gpgsign: git signs every commit there without being asked. */
+  signsByDefault: boolean
+  /** Why it can't be imported as it is. */
+  problem: string | null
+  /** Why importing it may be unwise (it's also a key this computer logs in to servers with). */
+  warning: string | null
+}
+
+/** A git author: the global one, or an includeIf block's (with the global values it doesn't override). */
+export interface DetectedAuthor {
+  /** "global", or the includeIf condition ("gitdir:~/work/acme/", "hasconfig:remote.*.url:https://github.com/acme/**"). */
+  scope: string
+  file: string
+  name: string | null
+  email: string | null
+  signing: DetectedSigning | null
+  /** The key core.sshCommand pushes with (-i), as evidence of the account. */
+  sshKey: string | null
+  sshKeyFingerprint: string | null
+  /** GitHub owners of the repos it applies to: remotes of the repos under its folder, or its hasconfig URL. */
+  repoOwners: string[]
+}
+
+/** A ~/.ssh/config Host that reaches GitHub, as evidence (alias → key). */
+export interface DetectedSshHost {
+  alias: string
+  keyFile: string | null
+  keyFingerprint: string | null
+  /** IdentityAgent: 1Password's agent socket, say. */
+  agent: string | null
+}
+
+export interface ProposedProject {
+  id: string
+  name: string
+  repo: string
+  why: string
+  /** The identity it uses now. */
+  currentIdentity: string
+}
+
+/** One identity detection suggests, for one gh account. */
+export interface IdentityProposal {
+  name: string
+  login: string
+  host: string
+  tokenRef: string
+  owners: string[]
+  author: { name: string; email: string; from: string } | null
+  signing: DetectedSigning | null
+  /** The projects that should use it. */
+  projects: ProposedProject[]
+  /** The Default identity's token is this account already: projects that stay on Default need nothing. */
+  isDefaultToday: boolean
+  /** An identity Box Yard already has for this login: importing updates it instead of making another. */
+  existing: { id: string; name: string } | null
+  evidence: string[]
+}
+
+export interface IdentityDetection {
+  at: number
+  /** Whether GitHub was asked (orgs, emails, keys, push access); offline, only this computer was read. */
+  online: boolean
+  accounts: DetectedAccount[]
+  authors: DetectedAuthor[]
+  sshHosts: DetectedSshHost[]
+  /** git's credential helpers here, by name ("osxkeychain"); turns don't use them. */
+  credentialHelpers: string[]
+  proposals: IdentityProposal[]
+  /** Projects no account here clearly owns: they stay where they are. */
+  unmatched: ProposedProject[]
+  notes: string[]
+}
+
 /** A GitHub owner or login: letters, digits and single hyphens, up to 39 characters. */
 export const GITHUB_OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/
 
