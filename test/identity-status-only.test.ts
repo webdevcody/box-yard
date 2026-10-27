@@ -257,7 +257,7 @@ describe("what else reaches the Coordinator", () => {
     expect(r.yard.orchestrator.statusOnly(r.open.id)).toBe(false)
   })
 
-  it("a hook's message to the Coordinator withholds {summary}, and its notices carry no prompt", async () => {
+  it("a hook withholds {summary} from its message to the Coordinator and from a new task's title, and its notices carry no prompt", async () => {
     const r = await start()
     r.yard.hooks.stop()
     const sent: { content: string; meta: HookMeta }[] = []
