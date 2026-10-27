@@ -622,7 +622,9 @@ async function callTool(name, args = {}) {
       const filename = path.basename(p).replace(/[^\w.\- ]+/g, "_").trim().slice(0, 120) || "file"
       const id = `art_${randomUUID().replace(/-/g, "").slice(0, 12)}`
       const url = `${task.publicUrl ? task.publicUrl.replace(/\/$/, "") : ""}/artifacts/${id}/${encodeURIComponent(filename)}`
-      await emit({ t: "artifact", id, path: p, title: args.title ? String(args.title) : path.basename(p), size: stat.size })
+      // sha256: create_pull_request only copies the file to GitHub while it's still what was published.
+      const sha256 = createHash("sha256").update(fs.readFileSync(p)).digest("hex")
+      await emit({ t: "artifact", id, path: p, title: args.title ? String(args.title) : path.basename(p), size: stat.size, sha256 })
       return text(`Published ${filename}. Box Yard will host it at ${url} (live within a few seconds). Share that link.`)
     }
     case "mark_done": {
@@ -735,7 +737,7 @@ const IMAGE_FILE = /\.(png|jpe?g|gif|webp|avif|svg)$/i
 /** A relative /artifacts/ link, or one on any host (BOXYARD_PUBLIC_URL, or github.com where a relative link landed). Sentence punctuation after it isn't part of it. */
 const ARTIFACT_LINK = /(?<![\w.\-/:])(?:https?:\/\/[^\s/)"'<>\]]+)?\/artifacts\/(art_[a-z0-9]+)\/([^\s)"'<>\]]*[^\s)"'<>\].,;:!?])/gi
 
-/** Artifacts this task published: id to the file's path, from the event log. */
+/** Artifacts this task published: id to { path, size, sha256 } from the event log. */
 function publishedArtifacts() {
   const out = new Map()
   let raw = ""
@@ -748,7 +750,7 @@ function publishedArtifacts() {
     if (!line.includes('"artifact"')) continue
     try {
       const e = JSON.parse(line)
-      if (e.t === "artifact" && e.id && e.path) out.set(e.id, e.path)
+      if (e.t === "artifact" && e.id && e.path) out.set(e.id, e)
     } catch {}
   }
   return out
@@ -802,6 +804,16 @@ async function pushAssets(gh, slug, files) {
   throw lastErr
 }
 
+/** The file still holds what was published (older events have no sha256, so their size stands in). */
+function unchanged(e) {
+  try {
+    const data = fs.readFileSync(e.path)
+    return e.sha256 ? createHash("sha256").update(data).digest("hex") === e.sha256 : data.length === e.size
+  } catch {
+    return false
+  }
+}
+
 /** The PR body with every link to an artifact this task published pointed at its copy on the assets branch, and notes on any it couldn't move. */
 async function hostArtifacts(gh, slug, body) {
   const links = [...body.matchAll(ARTIFACT_LINK)]
@@ -811,9 +823,9 @@ async function hostArtifacts(gh, slug, body) {
   const missing = new Set()
   for (const [, id, name] of links) {
     if (files.has(id) || missing.has(id)) continue
-    const file = known.get(id)
-    if (!file || !fs.existsSync(file)) missing.add(id)
-    else files.set(id, { file, repoPath: `${task.taskId}/${id}/${assetName(name)}` })
+    const e = known.get(id)
+    if (!e || !unchanged(e)) missing.add(id)
+    else files.set(id, { file: e.path, repoPath: `${task.taskId}/${id}/${assetName(name)}` })
   }
   const notes = []
   if (files.size) {
@@ -825,7 +837,7 @@ async function hostArtifacts(gh, slug, body) {
     }
   }
   if (missing.size) {
-    notes.push(`GitHub can't show ${[...missing].join(", ")}: this task didn't publish it, or the file is gone. Publish the file again with publish_artifact, use the new link, and call create_pull_request again.`)
+    notes.push(`GitHub can't show ${[...missing].join(", ")}: this task didn't publish it, or the file is gone or has changed since. Publish the file again with publish_artifact, use the new link, and call create_pull_request again.`)
   }
   const out = body.replace(ARTIFACT_LINK, (link, id) => {
     const f = files.get(id)

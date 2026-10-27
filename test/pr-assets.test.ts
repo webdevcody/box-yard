@@ -136,7 +136,8 @@ async function taskFolder() {
 function publish(dir: string, id: string, name: string, content: string) {
   const file = path.join(dir, name)
   fs.writeFileSync(file, content)
-  fs.appendFileSync(path.join(dir, "events.jsonl"), JSON.stringify({ seq: 1, ts: 1, t: "artifact", id, path: file, title: name, size: content.length }) + "\n")
+  const sha256 = createHash("sha256").update(content).digest("hex")
+  fs.appendFileSync(path.join(dir, "events.jsonl"), JSON.stringify({ seq: 1, ts: 1, t: "artifact", id, path: file, title: name, size: content.length, sha256 }) + "\n")
   return file
 }
 
@@ -216,10 +217,14 @@ describe("create_pull_request with screenshots", () => {
     const { dir } = await taskFolder()
     const gone = publish(dir, "art_ddd444", "gone.png", "x")
     fs.rmSync(gone)
-    const body = "![gone](/artifacts/art_ddd444/gone.png) ![other task's](/artifacts/art_eee555/x.png) plain text"
+    // Published twice from one path: the first artifact's file now holds the second's picture.
+    const shot = publish(dir, "art_ggg777", "shot.png", "first")
+    publish(dir, "art_hhh888", "shot.png", "second")
+    expect(fs.readFileSync(shot, "utf8")).toBe("second")
+    const body = "![gone](/artifacts/art_ddd444/gone.png) ![other task's](/artifacts/art_eee555/x.png) ![old](/artifacts/art_ggg777/shot.png) plain text"
     const r = await createPr(dir, body)
     expect(r.isError).toBeFalsy()
-    expect(r.text).toMatch(/GitHub can't show art_ddd444, art_eee555: .*Publish the file again/)
+    expect(r.text).toMatch(/GitHub can't show art_ddd444, art_eee555, art_ggg777: .*changed since\. Publish the file again/)
     expect(gh!.pulls[0]!.body).toContain(body)
     expect(gh!.refs.has("boxyard-assets")).toBe(false)
   })
