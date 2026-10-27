@@ -4,6 +4,7 @@ import { BOX_SIZES, shouldNotify } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
+import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -292,6 +293,7 @@ interface ProjectRow {
   gpu_min_vcpus?: number | null
   docker_image?: string | null
   docker_dockerfile?: string | null
+  identity_id?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -690,6 +692,7 @@ export class Store {
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       gpuMachine: gpuMachineOf(row),
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
+      identityId: row.identity_id || DEFAULT_IDENTITY_ID,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -782,6 +785,7 @@ export class Store {
     gpuMaxHourlyUsd?: number | null
     gpuMachine?: Partial<ProjectGpuMachine>
     docker?: Partial<ProjectDocker>
+    identityId?: string
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -809,7 +813,14 @@ export class Store {
     this.setRunner(id, input.runner)
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
+    if (input.identityId) this.setProjectIdentity(id, input.identityId)
     return this.getProject(id)!
+  }
+
+  /** Give a project an identity (shared/identities.ts). The caller checks that its runner fits. */
+  setProjectIdentity(id: string, identityId: string) {
+    if (!this.db.prepare("SELECT 1 FROM identities WHERE id = ?").get(identityId)) throw new BadRequestError(`Identity ${identityId} not found`)
+    this.db.prepare("UPDATE projects SET identity_id = ? WHERE id = ?").run(identityId, id)
   }
 
   updateProject(
@@ -849,6 +860,8 @@ export class Store {
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
       notesMaxTokens?: number | null
+      /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
+      identityId?: string
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -876,6 +889,7 @@ export class Store {
     this.setRunner(id, patch.runner)
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
+    if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
     return this.getProject(id)!
   }
 

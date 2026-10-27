@@ -714,6 +714,48 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN docker_image TEXT;
   ALTER TABLE projects ADD COLUMN docker_dockerfile TEXT;
   `,
+  `
+  -- Project identities (shared/identities.ts, docs/identities.md): who acts for a project. The Default identity is
+  -- Settings › Credentials, and every existing project starts on it, so nothing changes until Cody picks another.
+  CREATE TABLE identities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL DEFAULT 'slate',
+    is_default INTEGER NOT NULL DEFAULT 0,
+    github_login TEXT,
+    github_id INTEGER,
+    owners_json TEXT NOT NULL DEFAULT '[]',
+    author_name TEXT,
+    author_email TEXT,
+    email_check TEXT,
+    signing_json TEXT,
+    claude_kind TEXT,
+    runners_json TEXT,
+    coordinator_sees TEXT NOT NULL DEFAULT 'everything',
+    checked_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX identities_name ON identities(name COLLATE NOCASE);
+  -- Its secrets, write-only: AES-256-GCM with a key that is never in this database (server/identity/secretBox.ts).
+  -- kind: github_token (one per owner, '' for every owner), claude, signing_key.
+  CREATE TABLE identity_secrets (
+    identity_id TEXT NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    ciphertext TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    login TEXT,
+    scopes_json TEXT,
+    expires_at INTEGER,
+    source TEXT NOT NULL DEFAULT 'pasted',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (identity_id, kind, owner)
+  );
+  INSERT INTO identities (id, name, color, is_default, created_at, updated_at)
+    VALUES ('idn_default', 'Default', 'slate', 1, CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+  ALTER TABLE projects ADD COLUMN identity_id TEXT NOT NULL DEFAULT 'idn_default';
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

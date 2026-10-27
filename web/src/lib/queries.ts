@@ -8,6 +8,7 @@ import { announceResize, withResize } from "./boxResize"
 import type { ProjectSnapshotState } from "./projectSnapshot"
 import type { SnapshotJob } from "../../../shared/snapshots"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
+import { DEFAULT_IDENTITY_ID } from "../../../shared/identities"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
@@ -535,6 +536,7 @@ export function useCreateProject() {
           gpuMaxHourlyUsd: null,
           gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
           docker: { image: null, dockerfile: null },
+          identityId: DEFAULT_IDENTITY_ID,
           snapshot: null,
           createdAt: now,
           updatedAt: now,

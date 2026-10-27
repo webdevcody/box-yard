@@ -86,6 +86,8 @@ export interface Project {
   gpuMachine: ProjectGpuMachine
   /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
   docker: ProjectDocker
+  /** Who acts for it (shared/identities.ts): its GitHub account, git author, signing key and Claude login. */
+  identityId: string
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number
