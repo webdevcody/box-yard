@@ -180,7 +180,7 @@ describe("TaskHeader", () => {
 
   it("warns that a local task is unsandboxed, in full on a tap", () => {
     render(task({ boxId: "this-computer" }))
-    expect(chip().textContent).toContain("This computer")
+    expect(chip().textContent).toContain("This computer· unsandboxed")
     expect(chip().title).toContain(LOCAL_UNSANDBOXED)
     expect(chip().getAttribute("aria-expanded")).toBe("false")
     expect(document.getElementById("local-warning-note")).toBeNull()
@@ -194,7 +194,7 @@ describe("TaskHeader", () => {
     expect(chip().textContent).toBe("→ Upstash")
     expect(chip().dataset.state).toBe("next")
     header(task({ boxId: null, status: "queued" }), "local")
-    expect(chip().textContent).toBe("→ This computer")
+    expect(chip().textContent).toBe("→ This computer· unsandboxed")
   })
 
   it("shows the last place of a resting, archived task", () => {
@@ -206,13 +206,13 @@ describe("TaskHeader", () => {
   it("follows the task's own runs_on over its project's, both ways, marks it pinned and names it in the details", async () => {
     // Pinned here in a box project: it shows where it goes before it has a place, and that it's pinned.
     render(task({ boxId: null, status: "queued", runsOn: "local" }))
-    expect(chip().textContent).toBe("→ This computer · pinned")
+    expect(chip().textContent).toBe("→ This computer· unsandboxed · pinned")
     // Pinned to a box in a local project.
     header(task({ boxId: null, status: "queued", runsOn: "box" }), "local")
     expect(chip().textContent).toBe("→ Upstash · pinned")
     // Its own runs_on, the same as the project's: not pinned.
     header(task({ boxId: "this-computer", runsOn: "local" }), "local")
-    expect(chip().textContent).toBe("This computer")
+    expect(chip().textContent).toBe("This computer· unsandboxed")
     // The ⋯ details say it's this task's own choice.
     header(task({ boxId: "this-computer", runsOn: "local", prUrl: "https://github.com/o/r/pull/7" }), "box")
     await act(async () => void document.querySelector<HTMLButtonElement>('button[aria-label="Task details and more actions"]')!.click())

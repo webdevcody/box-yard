@@ -24,7 +24,7 @@ export const PlacementCardChip = memo(function PlacementCardChip({ task }: { tas
   const v = placementView(task)
   const Icon = PLACE_ICON[v.kind]
   return (
-    <span data-testid="card-placement" data-state={v.state} className={cx("inline-flex min-w-0 items-center gap-1", tone(v))} title={placementTitle(v)}>
+    <span data-testid="card-placement" data-state={v.state} className={cx("inline-flex max-w-48 min-w-0 shrink-0 items-center gap-1", tone(v))} title={placementTitle(v)}>
       <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
       <span className="min-w-0 truncate">{v.short}</span>
       {v.pinned && <Pin className="h-3 w-3 shrink-0 text-zinc-500" aria-label="pinned" />}
@@ -60,6 +60,7 @@ export function PlacementHeaderChip({ task, project }: { task: Task; project: Pr
       >
         <Icon className="h-3 w-3 shrink-0" aria-hidden />
         <span className="min-w-0 truncate">{v.label}</span>
+        {v.kind === "local" && <span className="shrink-0">· unsandboxed</span>}
         {v.pinned && (
           <span className="inline-flex shrink-0 items-center gap-0.5 text-zinc-500">
             {" · "}
@@ -79,7 +80,7 @@ export function PlacementHeaderChip({ task, project }: { task: Task; project: Pr
             <span>{v.state === "next" ? `Goes to ${v.label.slice(2)}` : v.label}</span>
           </p>
           <dl className="mt-2 grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-2 gap-y-1">
-            {v.place && (
+            {v.place && v.place.kind !== "local" && (
               <>
                 <dt className="text-zinc-500">{v.place.kind === "gpu" ? "Pod" : v.place.kind === "docker" ? "Container" : "Box"}</dt>
                 <dd className="min-w-0 font-mono text-[11px] wrap-anywhere text-zinc-300">

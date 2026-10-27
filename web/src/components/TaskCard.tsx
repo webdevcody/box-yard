@@ -87,7 +87,7 @@ export const TaskCard = memo(function TaskCard({
         </div>
       )}
 
-      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 pt-3 text-xs text-zinc-500 sm:flex-nowrap sm:whitespace-nowrap">
+      <div className="mt-auto flex min-w-0 flex-wrap items-center gap-2 pt-3 text-xs text-zinc-500 whitespace-nowrap">
         <PlacementCardChip task={task} />
         <PrChip task={task} variant="link" />
         {mergeButtonState(task) !== "hidden" && <MergePrCardButton task={task} />}
