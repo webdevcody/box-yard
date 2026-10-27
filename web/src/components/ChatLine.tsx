@@ -12,6 +12,7 @@ import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
+import { ThreadMarkers } from "./SideThread"
 import type { ChatMessage } from "../../../shared/types"
 
 /** Markdown that folds behind "Show more" when it's long. */
@@ -315,12 +316,25 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
   return (
     <div className={MESSAGE_BLOCK}>
       {taskId ? <NoticeCard taskId={taskId}>{body}</NoticeCard> : <div className={NOTICE_CLASS}>{body}</div>}
-      <MessageActions text={m.content} />
+      <MessageActions text={m.content} anchorId={m.id} />
     </div>
   )
 })
 
+/**
+ * A chat message. Its root names the message (`data-chat-id`): a selection in it can start a side thread on it, and
+ * the threads it has show as markers under it (SideThread.tsx; nothing outside a chat with threads).
+ */
 export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
+  return (
+    <div data-chat-id={m.id}>
+      <ChatLineBody m={m} onFollowUp={onFollowUp} />
+      {m.role !== "tool" && <ThreadMarkers m={m} />}
+    </div>
+  )
+})
+
+function ChatLineBody({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
@@ -330,7 +344,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
             <AlarmClock className="h-3 w-3" /> Scheduled
           </div>
           {m.content}
-          <MessageActions text={m.content} />
+          <MessageActions text={m.content} anchorId={m.id} />
         </div>
       </div>
     )
@@ -343,7 +357,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
           <Webhook className="h-3 w-3" /> Hook: {String(m.meta.hookName ?? "")}
         </div>
         {m.content}
-        {m.meta.queued !== true && <MessageActions text={m.content} />}
+        {m.meta.queued !== true && <MessageActions text={m.content} anchorId={m.id} />}
       </div>
     )
     return (
@@ -363,7 +377,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
       <div className={cx(MESSAGE_BLOCK, "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
         {m.content}
         <AttachmentList files={m.meta?.attachments} />
-        {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} />}
+        {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} anchorId={m.id} />}
       </div>
     )
     return (
@@ -385,7 +399,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
       <div className={cx(MESSAGE_BLOCK, "flex items-start gap-2 rounded-lg border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-300")}>
         <LineIcon icon={AlertTriangle} className="h-3.5 w-3.5" />
         <div className="min-w-0 whitespace-pre-wrap wrap-anywhere">{m.content}</div>
-        <MessageActions text={m.content} />
+        <MessageActions text={m.content} anchorId={m.id} />
       </div>
     )
   }
@@ -393,7 +407,7 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessa
     <div data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
       <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
-      <MessageActions text={m.content} />
+      <MessageActions text={m.content} anchorId={m.id} />
     </div>
   )
-})
+}
