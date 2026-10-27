@@ -1085,6 +1085,7 @@ export class Store {
       waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
       waitFor: row.status === "queued" && row.wait_reason ? json<WaitFor[]>(row.wait_for_json ?? null, []) : [],
       turnCount: row.turn_count,
+      turnStartedAt: row.current_turn_id ? this.turnStartedAt(row.current_turn_id) : null,
       pendingCount: pending.n,
       queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",
       lastArchivedAt: row.last_archived_at,
@@ -1282,6 +1283,12 @@ export class Store {
   lastTurnFinishedAt(taskId: string): number | null {
     const row = this.db.prepare("SELECT MAX(finished_at) AS at FROM task_turns WHERE task_id = ?").get(taskId) as { at: number | null }
     return row.at ?? null
+  }
+
+  /** When this turn started; null before its ledger row is written. */
+  turnStartedAt(turnId: string): number | null {
+    const row = this.db.prepare("SELECT started_at FROM task_turns WHERE id = ?").get(turnId) as { started_at: number } | undefined
+    return row?.started_at ?? null
   }
 
   /** When the task's last turn started (null before its first). */
