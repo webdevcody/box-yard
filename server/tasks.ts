@@ -59,6 +59,8 @@ import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpo
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
+import { GLOBAL_CREDENTIALS, credentialSet, turnEnv } from "./turnCredentials.js"
+import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
@@ -362,6 +364,8 @@ const captainMeta = (store: Store, projectId: string) => ({ source: "captain", c
 const projectBoxKey = (projectId: string) => `project_box:${projectId}`
 /** kv key for the project a box was created for. */
 const boxOwnerKey = (boxId: string) => `box_owner:${boxId}`
+/** The credential set (turnCredentials.ts) a pool box's workspaces were made with; none means the global one. */
+const boxCredsKey = (boxId: string) => `box_creds:${boxId}`
 /** kv key for the status a resting task had before a message queued it (where cancelling every message returns it). */
 const queuedFromKey = (taskId: string) => `queued_from:${taskId}`
 /** The claim on a queued input handed to the agent mid-turn (Store.lockInput). */
@@ -1970,6 +1974,7 @@ export class TaskManager {
         this.emitTask(row.id)
       }
       if (owner) this.store.setKv(boxOwnerKey(to), owner)
+      this.setBoxCreds(to, this.boxCreds(r.boxId))
       for (const p of this.store.listProjects()) if (this.store.getKv(projectBoxKey(p.id)) === r.boxId) this.store.setKv(projectBoxKey(p.id), to)
       const n = r.movedTasks.length
       return n ? `${n} ${n === 1 ? "task" : "tasks"} moved to ${to}` : `nothing to move; ${to} takes over`
@@ -2006,6 +2011,7 @@ export class TaskManager {
     this.boxOps.delete(boxId)
     this.resizes.delete(boxId)
     this.store.setKv(boxOwnerKey(boxId), null)
+    this.store.setKv(boxCredsKey(boxId), null)
     if (!box) return `The new box ${boxId} is already gone.`
     this.store.setBoxStatus(boxId, "deleting")
     this.emitBoxes()
@@ -2866,6 +2872,10 @@ export class TaskManager {
           const moved = await this.leaveSmallBox(row, box.id, min!)
           if (moved !== "stay") return moved
         }
+        if (this.boxCreds(box.id) !== this.projectCreds(row.project_id)) {
+          const moved = await this.leaveOtherCredsBox(row, box.id)
+          if (moved !== "stay") return moved
+        }
         // Busy: no free slot, or a free one that a project's Agents per box or the box's memory rules out.
         const full = this.runningOn(box.id) >= this.slotsFor(box.id)
         const busy = full ? null : (this.limitBlock(row, box.id) ?? asWait(await this.memoryBlock(box.id, row.id)))
@@ -2957,6 +2967,50 @@ export class TaskManager {
     void this.removeTaskDir(boxId, row.id).catch(() => {})
     this.addEvent(row.id, `Moved from ${boxId} (${normalizeBoxSize(this.store.getBox(boxId)?.size)}) to ${other}: its project needs ${min} boxes.`)
     return this.assign(row.id, other)
+  }
+
+  /**
+   * A resting task whose folder is on a box of another credential set (the box wall, `projectCreds`): its project
+   * got a Claude login or GitHub token of its own after the box was made, or lost it, or the box is from before the
+   * wall. It moves through `pickBox` like `leaveSmallBox` when nothing would be lost; one that can't stays ("stay")
+   * and its log says why.
+   */
+  private async leaveOtherCredsBox(row: TaskRow, boxId: string): Promise<string | null | "stay"> {
+    if (this.archiving.has(row.id)) return null
+    const own = this.projectCreds(row.project_id) !== GLOBAL_CREDENTIALS
+    const why = own ? "its project has its own Claude login or GitHub token, so it gets boxes no other project uses" : "its project uses the global credentials now, and the box is another project's"
+    const block = row.session_started ? this.moveBlock(row) : null
+    if (block) {
+      this.noteOnce(row.id, `${row.id}:${boxId}:creds`, `Running on ${boxId} though ${why}: it can't move safely (${block}).`)
+      return "stay"
+    }
+    const other = await this.pickBox(row.id, boxId)
+    if (!other) return null
+    this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+    void this.removeTaskDir(boxId, row.id).catch(() => {})
+    this.addEvent(row.id, `Moved from ${boxId} to ${other}: ${why}.`)
+    return this.assign(row.id, other)
+  }
+
+  /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
+  private projectCreds(projectId: string): string {
+    return credentialSet(projectId, this.store.projectEnv(projectId))
+  }
+
+  /** The credential set a pool box's workspaces were made with: its project's when it was made, else the global one. */
+  private boxCreds(boxId: string): string {
+    return this.store.getKv(boxCredsKey(boxId)) ?? GLOBAL_CREDENTIALS
+  }
+
+  private setBoxCreds(boxId: string, creds: string) {
+    this.store.setKv(boxCredsKey(boxId), creds === GLOBAL_CREDENTIALS ? null : creds)
+  }
+
+  /** Why a task waits when the only boxes with room are of another credential set and no box can be made. */
+  private walledReason(creds: string): string {
+    return creds === GLOBAL_CREDENTIALS
+      ? "Waiting for a box: the boxes with room belong to projects with their own Claude login or GitHub token, and the pool is at its limit"
+      : "Waiting for a box of its own: its project has its own Claude login or GitHub token, so it never shares a box with another project's tasks, and the pool is at its limit"
   }
 
   /**
@@ -3592,9 +3646,14 @@ export class TaskManager {
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
     const min = this.minBoxSize(projectId)
     const cap = projectId ? this.projectBoxCap(projectId, taskId) : null
-    const candidates = this.store
+    const creds = projectId ? this.projectCreds(projectId) : GLOBAL_CREDENTIALS
+    const fitting = this.store
       .listBoxes()
       .filter((b) => b.status === "ready" && b.id !== exclude && !this.boxOps.has(b.id) && sizeFits(b.size, min) && (!cap?.full || cap.used.has(b.id)))
+    // The box wall: only boxes of its project's credential set.
+    const walled = fitting.some((b) => this.boxCreds(b.id) !== creds)
+    const candidates = fitting
+      .filter((b) => this.boxCreds(b.id) === creds)
       .map((b) => {
         const residents = this.store.listTaskRows({ boxId: b.id }).filter((r) => r.id !== taskId)
         // A box made for a project belongs to it, even before its first task lands.
@@ -3654,7 +3713,7 @@ export class TaskManager {
       }
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
-    const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : this.noNewBoxReason()) : null
+    const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : walled && !candidates.length ? this.walledReason(creds) : this.noNewBoxReason()) : null
     this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, !canGrow && !cap?.full ? this.noNewBox() : null)
     return null
   }
@@ -3685,7 +3744,8 @@ export class TaskManager {
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
     // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
     if (!this.settings.get().placementResizeEnabled) return this.setWaitReason(row.id, `${waitFor}: ${full} and none has room`, min)
-    const idle = this.idleBoxesBelow(min).filter((b) => !own || own.used.has(b.id))
+    const creds = this.projectCreds(row.project_id)
+    const idle = this.idleBoxesBelow(min).filter((b) => (!own || own.used.has(b.id)) && this.boxCreds(b.id) === creds)
     for (const box of idle) {
       const project = this.store.getProject(row.project_id)
       try {
@@ -4223,6 +4283,7 @@ export class TaskManager {
       if (projectId && this.store.getProject(projectId)) {
         this.store.setKv(projectBoxKey(projectId), id)
         this.store.setKv(boxOwnerKey(id), projectId)
+        this.setBoxCreds(id, this.projectCreds(projectId))
       }
       this.recordBoxEvent({
         boxId: id,
@@ -4329,6 +4390,7 @@ export class TaskManager {
 
       const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
       await this.provider.writeFile(boxId, runnerPath, this.runnerSource())
+      await this.dropBoxGitCredential(boxId)
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId), null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
@@ -4587,14 +4649,28 @@ export class TaskManager {
     return this.runnerCache
   }
 
+  /** Upstash boxes whose git config has Box Yard's credential helper and no stored token, this server run. */
+  private readonly boxGitChecked = new Set<string>()
+
+  /**
+   * An Upstash box made before credentials left Box.create still has the global GitHub token stored in its git config,
+   * where it answers before a project's own: replace it with Box Yard's helper, once per box per server run.
+   * Best effort: a box it fails on is tried again on its next turn.
+   */
+  private async dropBoxGitCredential(boxId: string) {
+    if (this.boxGitChecked.has(boxId) || providerOf(this.provider, boxId).name !== "upstash") return
+    const res = await this.provider.exec(boxId, BOX_GIT_CREDENTIAL_SCRIPT).catch(() => null)
+    if (res?.exitCode === 0) this.boxGitChecked.add(boxId)
+    else console.warn(`[box-yard] couldn't reset the git credential on ${boxId}: ${errorTail(res?.stderr ?? "") || "no result"}`)
+  }
+
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string) {
-    const env: Record<string, string> = { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }
     // Read on every turn, so a credential saved in Settings › Credentials reaches the next turn without a restart.
     const creds = this.settings.credentials
-    const claude = creds.claudeEnv()
-    Object.assign(env, claude)
-    const githubToken = creds.get("githubToken")
-    if (githubToken) env.GITHUB_TOKEN = env.GITHUB_TOKEN ?? githubToken
+    const { env, unsetEnv, claudeFrom } = turnEnv(
+      { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) },
+      { claude: creds.claudeEnv(), githubToken: creds.get("githubToken") },
+    )
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
@@ -4603,11 +4679,12 @@ export class TaskManager {
       projectId: project.id,
       boxId,
       env,
+      unsetEnv,
       claudeBin,
       claudeArgs,
       // A local `claude` login lives in the default config dir, so only
       // isolate when we have a token to log in with.
-      isolateConfig: !local || Object.keys(claude).length > 0,
+      isolateConfig: !local || claudeFrom !== null,
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),
@@ -6557,6 +6634,7 @@ export class TaskManager {
     this.recordBoxEvent({ boxId, ...event })
     this.store.setBoxStatus(boxId, "lost")
     this.store.setKv(boxOwnerKey(boxId), null)
+    this.store.setKv(boxCredsKey(boxId), null)
     this.janitor.forget(boxId)
     this.diskCache.delete(boxId)
     this.unreachable.delete(boxId)

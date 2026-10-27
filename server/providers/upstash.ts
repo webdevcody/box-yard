@@ -6,6 +6,7 @@ import { errorMessage, retry } from "../util/retry.js"
 import type { CredentialStore } from "../credentials.js"
 import { UPSTASH_MAX_UPLOAD_BYTES } from "../upload.js"
 import { q, type BoxHealth, type BoxProvider, type BoxSnapshotInfo, type BoxUsageProbe, type ExecResult } from "./types.js"
+import { GITHUB_HELPER } from "../gitShare.js"
 
 const ROOT = "/workspace/home"
 const READ_CHUNK = 8 * 1024 * 1024 // server limit for one ranged read
@@ -15,7 +16,23 @@ const SNAPSHOT_WAIT_MS = 30 * 60_000
 const LIST_TTL_MS = 50_000
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** Install Claude Code (unless a snapshot already has it) and set up git. */
+/**
+ * The box's own git credential: the turn's $GITHUB_TOKEN, read when git asks, after an empty helper that drops any
+ * other (a box made before this fix had `credential.helper=store` and a ~/.git-credentials holding the global token,
+ * written by Box.create's `git` option, which answered before a project's own token). Holds no secret itself, so
+ * every git command on the box, even outside a task's repo, uses the token of the turn that runs it. Run at create
+ * and before every turn, so older boxes lose their stored token too.
+ */
+export const BOX_GIT_CREDENTIAL_SCRIPT = [
+  `git config --global --replace-all credential.helper ''`,
+  `git config --global --add credential.helper ${q(GITHUB_HELPER)}`,
+  `rm -f "$HOME/.git-credentials"`,
+].join(" && ")
+
+/**
+ * Install Claude Code (unless a snapshot already has it) and set up git. No credential is baked into the box: tokens
+ * and the git author come with each turn (task.json), so one box never acts as another project's account.
+ */
 export function workerSetupScript(c: Pick<Config, "gitUserName" | "gitUserEmail">) {
   return [
     "set -e",
@@ -25,6 +42,7 @@ export function workerSetupScript(c: Pick<Config, "gitUserName" | "gitUserEmail"
     `git config --global user.name ${q(c.gitUserName)}`,
     `git config --global user.email ${q(c.gitUserEmail)}`,
     "git config --global init.defaultBranch main",
+    BOX_GIT_CREDENTIAL_SCRIPT,
     "claude --version",
   ].join(" && ")
 }
@@ -38,22 +56,19 @@ export class UpstashProvider implements BoxProvider {
   private cache = new Map<string, Box>()
   private cacheFor = ""
 
-  /** `creds` reads the key and tokens on each use (Settings › Credentials, env wins); without it, the env values at startup. */
+  /** `creds` reads the Box API key on each use (Settings › Credentials, env wins); without it, the env value at startup. */
   constructor(
     private readonly c: Config,
-    private readonly creds?: Pick<CredentialStore, "get" | "claudeEnv">,
+    private readonly creds?: Pick<CredentialStore, "get">,
   ) {}
 
   private get apiKey() {
     return this.creds ? this.creds.get("upstashBoxApiKey") : this.c.upstashBoxApiKey
   }
-  private get gitToken() {
-    return this.creds ? this.creds.get("githubToken") : this.c.githubToken
-  }
 
-  /** Cached Box handles carry the key and git token they were made with, so a new key or token drops them. */
+  /** Cached Box handles carry the key they were made with, so a new key drops them. */
   private boxes(): Map<string, Box> {
-    const key = `${this.apiKey}\n${this.gitToken}`
+    const key = this.apiKey
     if (key !== this.cacheFor) {
       this.cache.clear()
       this.cacheFor = key
@@ -69,32 +84,25 @@ export class UpstashProvider implements BoxProvider {
     const cache = this.boxes()
     const hit = cache.get(boxId)
     if (hit) return hit
-    const box = await retry(() => Box.get(boxId, { apiKey: this.apiKey, gitToken: this.gitToken }))
+    const box = await retry(() => Box.get(boxId, { apiKey: this.apiKey }))
     cache.set(boxId, box)
     return box
   }
 
   async create({ labels, size, snapshotId }: { labels: string[]; size?: WorkerSize; snapshotId?: string }): Promise<string> {
+    // No credentials at create (F1, F2 of the identities report): the SDK's `git` option wrote the global token into
+    // the box's git config, where it answered before a project's own, and box env held the global Claude login for
+    // every agent on the box. Each turn brings its own (task.json).
     const env: Record<string, string> = { DISABLE_AUTOUPDATER: "1", IS_SANDBOX: "1" }
-    if (this.creds) Object.assign(env, this.creds.claudeEnv())
-    else {
-      if (this.c.claudeOauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.c.claudeOauthToken
-      if (this.c.anthropicApiKey) env.ANTHROPIC_API_KEY = this.c.anthropicApiKey
-    }
-    const gitToken = this.gitToken
-    if (gitToken) env.GITHUB_TOKEN = gitToken
     const opts = {
       apiKey: this.apiKey,
       runtime: this.c.workerRuntime as "node",
       size: size ?? this.c.workerSize,
       labels: labels.map((l) => l.replace(/[^\w.:-]/g, "-").slice(0, 20)).slice(0, 5),
       env,
-      git: gitToken
-        ? { token: gitToken, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail }
-        : undefined,
     }
     // Create is not idempotent, so only one attempt; callers handle failure. A project's snapshot comes first, then
-    // the install-wide WORKER_SNAPSHOT_ID. A box from a snapshot gets the size, env and git token passed here.
+    // the install-wide WORKER_SNAPSHOT_ID. A box from a snapshot gets the size and env passed here.
     const from = snapshotId || this.c.workerSnapshotId
     const box = from ? await Box.fromSnapshot(from, opts) : await Box.create(opts)
     this.boxes().set(box.id, box)
