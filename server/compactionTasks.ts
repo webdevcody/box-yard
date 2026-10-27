@@ -8,6 +8,14 @@ const BUSY = new Set(["queued", "starting", "working", "needs_input", "waiting"]
 /** At most this many live task lines go into a summary prompt or a recap. */
 const LIVE_MAX = 60
 
+/**
+ * Projects whose identity lets the Coordinator see their status only (docs/identities.md). Its records and prompts
+ * keep their tasks' id, title, status and PR, never their replies, questions or errors. A Captain passes none.
+ */
+export type StatusOnly = (projectId: string) => boolean
+/** A status-only task's snapshot summary. */
+export const STATUS_ONLY_SNAPSHOT = "Status only: its project shows the Coordinator status, not content. Its Captain has the rest."
+
 /** Task ids named anywhere in these values (strings, arrays and objects, e.g. message content and meta). */
 export function mentionedTaskIds(values: unknown[]): Set<string> {
   const ids = new Set<string>()
@@ -51,7 +59,7 @@ function taskSnapshotSummary(store: Store, task: Task, since: number): string {
  * hasn't changed since is in an earlier compaction already, so it isn't copied into every one. `since` is
  * inclusive: a task that moved in the same millisecond as the previous compaction is in both, never in neither.
  */
-export function compactionTaskSnapshots(store: Store, tasks: Task[], since: number, mentioned: Set<string>): CompactionTaskSnapshot[] {
+export function compactionTaskSnapshots(store: Store, tasks: Task[], since: number, mentioned: Set<string>, statusOnly?: StatusOnly): CompactionTaskSnapshot[] {
   return tasks
     .filter((t) => t.updatedAt >= since || mentioned.has(t.id))
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -64,7 +72,7 @@ export function compactionTaskSnapshots(store: Store, tasks: Task[], since: numb
       branch: t.branch,
       prUrl: t.prUrl,
       sessionId: t.sessionId,
-      summary: taskSnapshotSummary(store, t, since),
+      summary: statusOnly?.(t.projectId) ? STATUS_ONLY_SNAPSHOT : taskSnapshotSummary(store, t, since),
       lastActiveAt: t.updatedAt,
     }))
 }
@@ -74,11 +82,11 @@ const clip = (text: string, max: number) => {
   return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t
 }
 
-/** One task as it is now: id, title, project, status, PR and any open question. */
-export function liveTaskLine(store: Store, t: Task, withProject = true): string {
+/** One task as it is now: id, title, project, status, PR and any open question (not a status-only project's). */
+export function liveTaskLine(store: Store, t: Task, withProject = true, statusOnly?: StatusOnly): string {
   const project = withProject ? ` [${store.getProject(t.projectId)?.name ?? t.projectId}]` : ""
   const pr = t.prUrl ? ` · PR ${t.prUrl}${t.prState ? ` (${t.prState})` : ""}` : ""
-  const asks = t.status === "needs_input" && t.question ? ` · asks: ${clip(t.question, 160)}` : ""
+  const asks = t.status === "needs_input" && t.question && !statusOnly?.(t.projectId) ? ` · asks: ${clip(t.question, 160)}` : ""
   return `- ${t.id} "${clip(t.title, 80)}"${project} ${t.status}${pr}${asks}`
 }
 
@@ -86,7 +94,7 @@ export function liveTaskLine(store: Store, t: Task, withProject = true): string 
  * Live lines for the named tasks (in that order) and, with `busy`, every task that is running or waiting
  * on someone. Ids that aren't tasks (or are another project's, with `projectId`) are left out.
  */
-export function liveTaskLines(store: Store, ids: Iterable<string>, opts: { projectId?: string; busy?: boolean } = {}): string[] {
+export function liveTaskLines(store: Store, ids: Iterable<string>, opts: { projectId?: string; busy?: boolean; statusOnly?: StatusOnly } = {}): string[] {
   const seen = new Set<string>()
   const tasks: Task[] = []
   const add = (t: Task | null) => {
@@ -96,6 +104,6 @@ export function liveTaskLines(store: Store, ids: Iterable<string>, opts: { proje
   }
   if (opts.busy) for (const t of store.listTasks(opts.projectId ? { projectId: opts.projectId } : {})) if (BUSY.has(t.status)) add(t)
   for (const id of ids) add(store.getTask(id))
-  const lines = tasks.slice(0, LIVE_MAX).map((t) => liveTaskLine(store, t, !opts.projectId))
+  const lines = tasks.slice(0, LIVE_MAX).map((t) => liveTaskLine(store, t, !opts.projectId, opts.statusOnly))
   return tasks.length > LIVE_MAX ? [...lines, `- …and ${tasks.length - LIVE_MAX} more (list_tasks)`] : lines
 }

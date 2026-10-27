@@ -402,6 +402,8 @@ export function createBoxYard(
   tasks.onCaptainMessage = (projectId, input) => captains.fromAgent(projectId, input)
   captains.onAgentMessagesHandled = (_projectId, messages, reply) => tasks.captainHandledAgentMessages(messages, reply)
   captains.claudeLogin = (projectId) => identities.ownClaude(projectId)
+  // Coordinator sees: status only (docs/identities.md): its summaries, recaps and hook messages leave those projects' content out.
+  orchestrator.statusOnly = (projectId) => identities.statusOnly(projectId)
   const hooks = new HookEngine({
     store,
     hooks: new HookStore(db),
@@ -410,6 +412,7 @@ export function createBoxYard(
     messageCaptain: (projectId, content, meta) => void captains.get(projectId).send(content, { source: "hook", meta }),
     messageCoordinator: (content, meta) => void orchestrator.hookMessage(content, meta),
     ownerName: () => settings.get().ownerName,
+    statusOnly: (projectId) => identities.statusOnly(projectId),
   })
   hooks.start()
   const notes = new ProjectNotes({

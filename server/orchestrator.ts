@@ -28,7 +28,7 @@ import {
   writeCompaction,
 } from "./compactions.js"
 import { routingInstructions } from "./routing.js"
-import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
+import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds, type StatusOnly } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 
@@ -148,6 +148,12 @@ export class Orchestrator {
   }
 
   private readonly mcpConfig: string
+
+  /**
+   * Projects whose identity lets the Coordinator see their status only (app.ts wires Identities in). Its summaries,
+   * recaps and compaction snapshots then keep their tasks' status and leave out their questions and replies.
+   */
+  statusOnly: StatusOnly = () => false
 
   /**
    * Written before every turn rather than once at startup: the token is per
@@ -333,7 +339,7 @@ export class Orchestrator {
   private compactionTaskSnapshots(): CompactionTaskSnapshot[] {
     const previous = this.previousCompactionAt()
     const mentioned = mentionedTaskIds(this.store.listChatSince(previous).flatMap((m) => [m.content, m.meta]))
-    return compactionTaskSnapshots(this.store, this.store.listTasks(), previous, mentioned)
+    return compactionTaskSnapshots(this.store, this.store.listTasks(), previous, mentioned, this.statusOnly)
   }
 
   private previousCompactionAt(): number {
@@ -362,7 +368,7 @@ export class Orchestrator {
       ...this.store.listTasks().filter((t) => t.updatedAt >= since).map((t) => t.id),
       ...mentionedTaskIds(this.store.listChatSince(since).flatMap((m) => [m.content, m.meta])),
     ])
-    return summaryPrompt(withOwner(SUMMARY_PROMPT, this.owner()), { previous, liveTasks: liveTaskLines(this.store, ids, { busy: true }) })
+    return summaryPrompt(withOwner(SUMMARY_PROMPT, this.owner()), { previous, liveTasks: liveTaskLines(this.store, ids, { busy: true, statusOnly: this.statusOnly }) })
   }
 
   /** A saved summary as a prompt block, with the current state of every task it names. */
@@ -373,7 +379,7 @@ export class Orchestrator {
     } catch {
       return null
     }
-    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)])), lead)
+    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { statusOnly: this.statusOnly }), lead)
   }
 
   /**

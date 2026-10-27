@@ -193,6 +193,20 @@ export class Identities {
     return this.get(this.idOf(projectId)) ?? this.require(DEFAULT_IDENTITY_ID)
   }
 
+  /** Projects whose identity lets the Coordinator see their status only (one that names a deleted identity follows Default's). */
+  statusOnlyProjects(): Set<string> {
+    const rows = this.d.db
+      .prepare(
+        "SELECT p.id FROM projects p LEFT JOIN identities i ON i.id = p.identity_id WHERE COALESCE(i.coordinator_sees, (SELECT coordinator_sees FROM identities WHERE id = ?)) = 'status'",
+      )
+      .all(DEFAULT_IDENTITY_ID) as { id: string }[]
+    return new Set(rows.map((r) => r.id))
+  }
+
+  statusOnly(projectId: string): boolean {
+    return this.statusOnlyProjects().has(projectId)
+  }
+
   private row(id: string): IdentityRow | undefined {
     return this.d.db.prepare("SELECT * FROM identities WHERE id = ?").get(id) as IdentityRow | undefined
   }

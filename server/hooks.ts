@@ -70,8 +70,16 @@ export interface HookEngineDeps {
   messageCoordinator: (content: string, meta: HookMeta) => void
   /** What Box Yard calls its human (Settings.ownerName). */
   ownerName?: () => string | undefined
+  /**
+   * Projects whose identity lets the Coordinator see their status only: a message_coordinator prompt gets no
+   * {summary}, and the notices the Coordinator reads carry no prompt.
+   */
+  statusOnly?: (projectId: string) => boolean
   now?: () => number
 }
+
+/** {summary} in a message_coordinator prompt, for a status-only project. */
+export const SUMMARY_WITHHELD = "(status only: ask the project's Captain)"
 
 /** What a hook's message carries, so every transcript can label it "Hook: <name>". */
 export interface HookMeta {
@@ -270,7 +278,7 @@ export class HookEngine {
       // Fire once: anything but a guard's skip settles this event for this hook.
       const prior = hooks.runFor(hook.id, row.id, event.type, key)
       if (prior.some((r) => r.status !== "skipped" || !r.guard)) continue
-      const prompt = renderHookTemplate(hook.prompt, vars)
+      const prompt = renderHookTemplate(hook.prompt, hook.action === "message_coordinator" && this.statusOnly(task) ? { ...vars, summary: SUMMARY_WITHHELD } : vars)
       const blocked = this.blocked(hook, row.id, origin, counts)
       if (blocked) {
         // The same guard again for the same event isn't logged twice.
@@ -359,24 +367,24 @@ export class HookEngine {
         tasks.sendInput(task.id, prompt, `hook:${hook.id}`, [], null, { prefix, meta })
         target = task.id
         result = `Sent to the task's agent${pr}.`
-        this.notice(hook, task, `sent to the agent${pr}: ${preview(prompt, 240, "see the task transcript")}`, meta)
+        this.notice(hook, task, `sent to the agent${pr}${this.peek(task, prompt, 240, "see the task transcript")}`, meta)
       } else if (hook.action === "message_captain") {
         this.deps.messageCaptain(task.projectId, prompt, meta)
         result = `Sent to the ${project?.name ?? "project"} Captain.`
         this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) messaged the ${project?.name ?? "project"} Captain: ${preview(prompt, 400, "see the Captain tab")}`, hook, run)
-        this.notice(hook, task, `messaged the Captain${pr}: ${preview(prompt, 240, "see the Captain tab")}`, meta)
+        this.notice(hook, task, `messaged the Captain${pr}${this.peek(task, prompt, 240, "see the Captain tab")}`, meta)
       } else if (hook.action === "message_coordinator") {
         this.deps.messageCoordinator(prompt, meta)
         result = "Sent to the Coordinator."
         this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) messaged the Coordinator: ${preview(prompt, 400, "see the Coordinator chat")}`, hook, run)
-        this.notice(hook, task, `messaged the Coordinator${pr}: ${preview(prompt, 240, "see the Coordinator chat")}`, meta)
+        this.notice(hook, task, `messaged the Coordinator${pr}${this.peek(task, prompt, 240, "see the Coordinator chat")}`, meta)
       } else {
         const title = renderHookTemplate(hook.taskTitle ?? hook.name, vars).slice(0, 120).trim() || hook.name
         const created = tasks.createTask({ projectId: task.projectId, title, prompt, source: `hook:${hook.id}` })
         target = created.id
         result = `Started task "${created.title}" (${created.id}).`
         this.transcript(task.id, `Hook "${hook.name}" (${TRIGGER_INFO[hook.trigger].label}) started [${created.title}](/tasks/${created.id}).`, hook, run)
-        this.notice(hook, task, `started a new task [${created.title}](/tasks/${created.id}): ${preview(prompt, 200, "see the new task")}`, meta)
+        this.notice(hook, task, `started a new task [${created.title}](/tasks/${created.id})${this.peek(task, prompt, 200, "see the new task")}`, meta)
       }
       run = hooks.updateRun(run.id, { result, targetTaskId: target })
     } catch (err) {
@@ -392,6 +400,15 @@ export class HookEngine {
     if (!this.deps.store.getTaskRow(taskId)) return
     const msg = this.deps.store.addTaskMessage(taskId, "event", content, { kind: "hook", hookId: hook.id, hookName: hook.name, hookRunId: run.id, status: run.status })
     this.deps.hub.broadcast({ type: "task.message", message: msg })
+  }
+
+  private statusOnly(task: Task): boolean {
+    return this.deps.statusOnly?.(task.projectId) ?? false
+  }
+
+  /** ": <the prompt's start>" for a notice, or nothing for a status-only project: the Coordinator reads these too. */
+  private peek(task: Task, prompt: string, max: number, more: string): string {
+    return this.statusOnly(task) ? "" : `: ${preview(prompt, max, more)}`
   }
 
   /** "[Box Yard updates]" for both the Captain and the Coordinator. It doesn't wake either: they read it on their next turn. */
