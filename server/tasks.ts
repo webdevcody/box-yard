@@ -181,6 +181,8 @@ const RECONCILE_MS = 5 * 60_000
 export const RECONCILE_LOOK_MS = 60_000
 /** Tries at restoring an archive before the task restarts from a recap instead (prepareWorkspace). */
 const RESTORE_ATTEMPTS = 2
+/** How often the idle-box sweep retries a workspace archive that failed, before the box may be deleted. */
+const IDLE_ARCHIVE_RETRY_MS = 10 * 60_000
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
 const ARCHIVE_EXCLUDED_DIRS = [
   "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
@@ -462,6 +464,10 @@ export class TaskManager {
   /** Boxes the last probe couldn't reach, since when (the next probe that reaches one clears it). */
   private unreachable = new Map<string, number>()
   private checkingReach = new Set<string>()
+  /** Idle boxes kept past Settings › Idle box deletion because a workspace on them isn't archived yet: why. */
+  private idleHeld = new Map<string, string>()
+  /** When the idle sweep may retry each task's failed archive (retryIdleArchives). */
+  private idleArchiveRetryAt = new Map<string, number>()
   private budgetNoticeAt = 0
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
@@ -1371,6 +1377,7 @@ export class TaskManager {
         usageSource: b.usage_source ?? "estimated",
         createdAt: b.created_at,
         lastUsedAt: b.last_used_at,
+        idleHeld: this.idleHeld.get(b.id) ?? null,
       }
     })
   }
@@ -2548,6 +2555,12 @@ export class TaskManager {
           this.store.updateTask(row.id, { status: "queued" })
           this.emitTask(row.id)
         }
+        continue
+      }
+      // Placement awaited: the box it picked may have gone meanwhile (the idle sweep, a delete, a lost box). The task
+      // stays queued and the next pass places it again.
+      if (!ownRunnerOf(boxId) && !isLocalRunnerBox(boxId) && (this.store.getBox(boxId)?.status !== "ready" || this.boxOps.has(boxId))) {
+        this.schedule()
         continue
       }
       const turnId = randomUUID()
@@ -6009,20 +6022,39 @@ export class TaskManager {
     const idleDelete = this.limits().boxIdleDeleteMinutes
     if (idleDelete > 0) {
       for (const box of this.store.listBoxes()) {
-        if (box.status !== "ready" || this.boxOps.has(box.id)) continue
-        if (now - box.last_used_at < idleDelete * 60_000) continue
+        if (box.status !== "ready" || this.boxOps.has(box.id)) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
+        if (now - box.last_used_at < idleDelete * 60_000) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
         const residents = this.store.listTaskRows({ boxId: box.id })
-        if (residents.some((r) => r.current_turn_id || this.store.hasInputs(r.id))) continue
-        if (residents.some((r) => !this.hasFreshArchive(r))) continue
+        // A task about to start here, or waiting for a turn, keeps the box (placement may be picking it right now).
+        if (residents.some((r) => r.current_turn_id || r.status === "starting" || this.wantsTurn(r) || this.store.hasInputs(r.id))) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
+        // Only a workspace its archive holds may go (one no agent ever ran in has nothing to keep). One whose archive
+        // failed is retried every IDLE_ARCHIVE_RETRY_MS, and the box stays, saying why, until it lands: a box never
+        // goes with work only it has.
+        const unsaved = residents.filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
+        if (unsaved.length) {
+          this.retryIdleArchives(box.id, unsaved, now)
+          continue
+        }
+        this.idleHeld.delete(box.id)
         console.log(`[box-yard] deleting idle box ${box.id}`)
         await this.loseBox(box.id, "Box retired after being idle; workspaces are archived.", true, {
           type: "deleted",
           actor: { kind: "janitor" },
           reason: `Idle for ${Math.round((now - box.last_used_at) / 60_000)} min (Settings retires boxes after ${idleDelete} min); every workspace was archived.`,
         })
-        await this.provider.destroy(box.id).catch(() => {})
+        // A delete that doesn't go through leaves a box with no row: the orphan sweep deletes it (cleanupOrphanBoxes).
+        await this.provider.destroy(box.id).catch((err) => console.warn(`[box-yard] destroy idle box ${box.id}: ${errorMessage(err)}; the orphan sweep retries it`))
       }
-    }
+    } else this.idleHeld.clear()
     if (now - this.lastRetentionAt > 5 * 60_000) {
       this.lastRetentionAt = now
       await this.maintainRestingStorage(now)
@@ -6046,6 +6078,27 @@ export class TaskManager {
     await this.sweepGpuPods(now)
     await this.sweepDocker(now)
     this.schedule()
+  }
+
+  /**
+   * An idle box due for deletion holds workspaces its archives don't: archive them again (each at most every
+   * IDLE_ARCHIVE_RETRY_MS, so a failing one doesn't hammer the box), and keep the box until they land. The reason is
+   * on the box (BoxInfo.idleHeld) so the cost of keeping it isn't silent.
+   */
+  private retryIdleArchives(boxId: string, unsaved: TaskRow[], now: number) {
+    for (const r of unsaved) {
+      if (this.archiving.has(r.id) || now < (this.idleArchiveRetryAt.get(r.id) ?? 0)) continue
+      this.idleArchiveRetryAt.set(r.id, now + IDLE_ARCHIVE_RETRY_MS)
+      void this.archive(r.id).catch((err) => console.warn(`[box-yard] idle archive ${r.id}: ${errorMessage(err)}`))
+    }
+    const failing = unsaved.find((r) => this.archiveErrors.has(r.id))
+    const why = failing
+      ? `Kept though idle: archiving ${failing.title} keeps failing (${this.archiveErrors.get(failing.id)}); Box Yard retries every ${Math.round(IDLE_ARCHIVE_RETRY_MS / 60_000)} min`
+      : `Kept though idle: archiving ${unsaved.length === 1 ? unsaved[0]!.title : `${unsaved.length} tasks`} first`
+    if (this.idleHeld.get(boxId) !== why) {
+      this.idleHeld.set(boxId, why)
+      this.emitBoxes()
+    }
   }
 
   /**
@@ -6227,6 +6280,7 @@ export class TaskManager {
     this.unreachable.delete(boxId)
     this.reserved.delete(boxId)
     this.lowBoxes.delete(boxId)
+    this.idleHeld.delete(boxId)
     for (const [taskId, held] of this.diskHold) if (held === boxId) this.diskHold.delete(taskId)
     for (const row of this.store.listTaskRows({ boxId })) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })

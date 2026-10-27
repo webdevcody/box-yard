@@ -458,6 +458,8 @@ export interface BoxInfo {
   usageSource: "actual" | "estimated"
   createdAt: number
   lastUsedAt: number
+  /** Why an idle box outlives Settings › Idle box deletion: a workspace on it isn't archived yet (retried), or null. */
+  idleHeld?: string | null
 }
 
 export type BoxOperation = "cleanup" | "clear" | "delete" | "resize" | "snapshot"
