@@ -95,7 +95,7 @@ export function SelectionToTask({
     }
     const clearIfOutside = (e: PointerEvent) => {
       const target = e.target as Node | null
-      if (!target || root.current?.contains(target) || document.querySelector("[data-selection-task-action]")?.contains(target)) return
+      if (!target || root.current?.contains(target) || [...document.querySelectorAll("[data-selection-task-action]")].some((el) => el.contains(target))) return
       setSelection(null)
     }
     document.addEventListener("selectionchange", update)
@@ -211,7 +211,7 @@ export function SelectionToTask({
               </button>
             )}
             {source && (
-              <button type="button" aria-haspopup="dialog" onMouseDown={(e) => e.preventDefault()} onClick={open} className={PILL}>
+              <button type="button" data-selection-task-action aria-haspopup="dialog" onMouseDown={(e) => e.preventDefault()} onClick={open} className={PILL}>
                 <MessageSquarePlus className="h-3.5 w-3.5" /> Start new task
               </button>
             )}
