@@ -17,7 +17,7 @@ import type { Project, SettingsInfo, Task } from "../shared/types"
 const now = Date.now()
 const identity = (id: string, name: string, extra: Partial<Identity> = {}) =>
   ({ id, name, color: "sky", isDefault: id === DEFAULT_IDENTITY_ID, githubLogin: null, owners: [], tokens: [], author: null, signing: null, claude: null, runners: null, projectIds: [], lastCheck: null, ...extra }) as unknown as Identity
-const IDENTITIES = [identity(DEFAULT_IDENTITY_ID, "Default", { color: "slate", githubLogin: "octocat" }), identity("idn_acme", "Acme", { githubLogin: "octo-acme" }), identity("idn_here", "Signed here", { githubLogin: "octo-here", runners: ["local"] })]
+const IDENTITIES = [identity(DEFAULT_IDENTITY_ID, "Default", { color: "slate", githubLogin: "octocat" }), identity("idn_acme", "Acme", { githubLogin: "octo-acme", coordinatorSees: "status" }), identity("idn_here", "Signed here", { githubLogin: "octo-here", runners: ["local"] })]
 
 const project = (over: Partial<Project> = {}) =>
   ({
@@ -129,6 +129,14 @@ describe("Project › Settings › Identity", () => {
     expect(save().disabled).toBe(true)
     pick(DEFAULT_IDENTITY_ID)
     expect($("identity-misfit")).toBeNull()
+  })
+
+  it("an identity that shows the Coordinator status only says so", () => {
+    render(project())
+    expect($("identity-status-only")).toBeNull()
+    pick("idn_acme")
+    expect($("identity-status-only")!.textContent).toBe("The Acme identity shows the Coordinator this project's status only (titles, states, PRs). Its Captain sees everything.")
+    expect(save().disabled).toBe(false)
   })
 
   it("a running turn keeps the identity until it rests", () => {

@@ -907,6 +907,11 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           </button>{" "}
           adds accounts, or imports the ones on this computer.
         </p>
+        {identity?.coordinatorSees === "status" && (
+          <p className="text-xs text-zinc-500" data-testid="identity-status-only">
+            The {identity.name} identity shows the Coordinator this project's status only (titles, states, PRs). Its Captain sees everything.
+          </p>
+        )}
         {identityMisfit && (
           <p role="note" className="text-xs text-amber-300" data-testid="identity-misfit">
             The {identityMisfit.name} identity runs only on {identityMisfit.runners!.map((r) => RUNNER_PHRASE[r]).join(" or ")}: pick another runner or identity.

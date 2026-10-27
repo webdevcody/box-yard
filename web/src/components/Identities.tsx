@@ -6,7 +6,7 @@ import { Check, Fingerprint, KeyRound, Laptop, Pencil, Play, Plus, ScanSearch, T
 import { ApiError } from "../lib/api"
 import { identityApi, useDetectIdentities, useIdentities, useProjects, useTestIdentity } from "../lib/queries"
 import { useDraft } from "../lib/settingsDraft"
-import { IDENTITY_COLORS, type Identity, type IdentityClaudeKind, type IdentityColor, type IdentityDetection, type IdentityInput, type IdentityProposal } from "../../../shared/identities"
+import { IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityClaudeKind, type IdentityColor, type IdentityDetection, type IdentityInput, type IdentityProposal } from "../../../shared/identities"
 import { RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 import type { Project } from "../../../shared/types"
 import { IDENTITY_DOT, IdentityDot } from "./IdentityBadge"
@@ -26,6 +26,7 @@ export interface IdentityEdit {
   owners?: string
   author?: { name: string; email: string } | null
   runners?: Runner[] | null
+  coordinatorSees?: CoordinatorSees
   requireSigned?: boolean
   /** A pasted GitHub token, for one owner or ("") every owner. */
   token?: { owner: string; value: string }
@@ -66,6 +67,7 @@ function put<K extends keyof IdentityEdit>(edit: IdentityEdit, k: K, v: Identity
     if (k === "owners" && sameOwners(v as string, i.owners)) return rest
     if (k === "author" && JSON.stringify(authorOf(v as IdentityEdit["author"])) === JSON.stringify(i.author ? { name: i.author.name, email: i.author.email } : null)) return rest
     if (k === "runners" && JSON.stringify(normalRunners(v as Runner[] | null)) === JSON.stringify(i.runners)) return rest
+    if (k === "coordinatorSees" && v === i.coordinatorSees) return rest
     if (k === "requireSigned" && v === (i.signing?.requireSigned ?? false)) return rest
   }
   return { ...rest, [k]: v }
@@ -79,6 +81,7 @@ function fieldsOf(e: IdentityEdit): IdentityInput {
   if (e.owners !== undefined) f.owners = parseOwners(e.owners)
   if (e.author !== undefined) f.author = authorOf(e.author)
   if (e.runners !== undefined) f.runners = normalRunners(e.runners)
+  if (e.coordinatorSees !== undefined) f.coordinatorSees = e.coordinatorSees
   return f
 }
 
@@ -90,7 +93,7 @@ async function writeEdit(id: string, e: IdentityEdit, done: (k: keyof IdentityEd
   const fields = fieldsOf(e)
   if (Object.keys(fields).length) {
     await identityApi.update(id, fields)
-    for (const k of ["name", "color", "owners", "author", "runners"] as const) done(k)
+    for (const k of ["name", "color", "owners", "author", "runners", "coordinatorSees"] as const) done(k)
   }
   for (const owner of e.removeTokens ?? []) await identityApi.removeToken(id, owner)
   if (e.removeTokens) done("removeTokens")
@@ -132,7 +135,7 @@ export function IdentitiesPanel({ fid }: { fid: (k: string) => string }) {
         throw named(name, err)
       }
       try {
-        const { name: _n, color: _c, owners: _o, author: _a, runners: _r, ...secrets } = n.edit
+        const { name: _n, color: _c, owners: _o, author: _a, runners: _r, coordinatorSees: _s, ...secrets } = n.edit
         await writeEdit(made.id, secrets, () => {})
       } catch (err) {
         // Nothing half-made: the identity goes again, and the draft stays for another try.
@@ -276,6 +279,7 @@ function IdentityCard({ identity: i, projects, fid }: { identity: Identity; proj
           </Fact>
           {!i.isDefault && <Fact label="Claude">{i.claude ? `its own ${i.claude.kind === "api_key" ? "API key" : "OAuth token"} · ${i.claude.fingerprint}` : <Muted>Settings' Claude login</Muted>}</Fact>}
           <Fact label="Runs on">{i.runners ? i.runners.map((r) => RUNNER_LABEL[r]).join(", ") : <Muted>any runner</Muted>}</Fact>
+          <Fact label="Coordinator sees">{i.coordinatorSees === "status" ? <span data-coordinator-sees="status">status only: its Captains see the rest</span> : <Muted>everything</Muted>}</Fact>
           <Fact label="Projects">{used.length ? used.join(", ") : <Muted>none</Muted>}</Fact>
         </dl>
       )}
@@ -378,6 +382,16 @@ function IdentityForm({ fid, identity: i, edit, onEdit }: { fid: (k: string) => 
             </label>
           ))}
         </div>
+      </FormField>
+      <FormField
+        id={fid("coordinatorSees")}
+        label="Coordinator sees"
+        hint="Status only: the Coordinator gets its projects' task titles, states and PRs, not their replies, questions, notes, artifacts or history. Their Captains still see everything. The Coordinator can set this to status only, but only you set it back."
+      >
+        <Select id={fid("coordinatorSees")} className="w-full sm:w-60" value={edit.coordinatorSees ?? i?.coordinatorSees ?? "everything"} onChange={(e) => set("coordinatorSees", e.target.value as CoordinatorSees)} data-testid="identity-coordinator-sees">
+          <option value="everything">Everything</option>
+          <option value="status">Status only</option>
+        </Select>
       </FormField>
 
       {isDefault ? (

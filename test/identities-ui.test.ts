@@ -149,6 +149,14 @@ const type = async (el: HTMLInputElement, value: string) => {
   await settle()
 }
 
+const choose = async (el: HTMLSelectElement, value: string) => {
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value)
+    el.dispatchEvent(new Event("change", { bubbles: true }))
+  })
+  await settle()
+}
+
 describe("Settings › Identities", () => {
   it("shows each identity's account, owners, author and token fingerprint, never a token", async () => {
     render()
@@ -234,6 +242,28 @@ describe("Settings › Identities", () => {
       ]),
     )
     expect(document.querySelector('[data-identity-card="new"]')).toBeNull()
+  })
+
+  it("Coordinator sees is a draft: Status only goes in the PATCH on Save, and a sealed card says so", async () => {
+    qc.setQueryData(keys.identities, [identity(DEFAULT_IDENTITY_ID, "Default", { color: "slate" }), acme(), identity("idn_private", "Private", { coordinatorSees: "status" })])
+    render()
+    await settle()
+    expect(card("Private").textContent).toContain("Coordinator seesstatus only: its Captains see the rest")
+    expect(card("Acme").textContent).toContain("Coordinator seeseverything")
+    await click(card("Acme").querySelector("[data-testid=identity-edit]"))
+    const sees = card("Acme").querySelector<HTMLSelectElement>("[data-testid=identity-coordinator-sees]")!
+    expect(sees.value).toBe("everything")
+    expect([...sees.options].map((o) => o.textContent)).toEqual(["Everything", "Status only"])
+    await choose(sees, "status")
+    expect(unsaved()).toBe("1 unsaved change")
+    await choose(sees, "everything")
+    expect(unsaved()).toBeNull()
+    await choose(sees, "status")
+    expect(writes()).toEqual([])
+
+    await click(saveButton())
+    expect(writes()).toEqual([{ method: "PATCH", url: "/api/identities/idn_acme", body: { coordinatorSees: "status" } }])
+    expect(unsaved()).toBeNull()
   })
 
   it("counts a draft's changes and reads owners as GitHub does", () => {
