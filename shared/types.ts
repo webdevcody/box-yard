@@ -861,6 +861,8 @@ export interface CloudSpend {
   dailyLimitUsd: number
   /** What "Raise today's limit" added today. */
   raisedUsd: number
+  /** Today's limit after one more raise (a day's worth on top of the limit, or of today's spend if past it); null without a daily limit. */
+  raiseToUsd: number | null
   /** Box spend over the last 30 days, and the limit on it (0: none). */
   monthUsd: number
   monthlyLimitUsd: number

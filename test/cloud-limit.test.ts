@@ -38,7 +38,7 @@ describe("cloud spend", () => {
     spend(store, 2.5, noon)
     expect(cloudSpend(store, budget, rates, noon)).toMatchObject({ state: "reached", blockedReason: "today's cloud spend is $10.50 of its $10 limit" })
     // No daily limit: never blocks.
-    expect(cloudSpend(store, { dailyUsd: 0, monthlyUsd: 0 }, rates, noon)).toMatchObject({ dailyLimitUsd: 0, state: "ok" })
+    expect(cloudSpend(store, { dailyUsd: 0, monthlyUsd: 0 }, rates, noon)).toMatchObject({ dailyLimitUsd: 0, raiseToUsd: null, state: "ok" })
   })
 
   it("blocks on the monthly limit over the last 30 days", () => {
@@ -56,8 +56,9 @@ describe("cloud spend", () => {
     const noon = startOfLocalDay(Date.now()) + 12 * H
     const budget = { dailyUsd: 10, monthlyUsd: 0 }
     spend(store, 12, noon) // boxes that ran on took it past the limit
+    expect(cloudSpend(store, budget, rates, noon)).toMatchObject({ state: "reached", raiseToUsd: 22 })
     expect(raiseToday(store, budget, 12, noon)).toBe(12)
-    expect(cloudSpend(store, budget, rates, noon)).toMatchObject({ dailyLimitUsd: 22, raisedUsd: 12, state: "ok" })
+    expect(cloudSpend(store, budget, rates, noon)).toMatchObject({ dailyLimitUsd: 22, raisedUsd: 12, state: "ok", raiseToUsd: 32 })
     expect(raiseToday(store, budget, 12, noon)).toBe(22) // again: one more day's worth on top
     expect(todaysRaise(store, noon + 13 * H)).toBe(0) // tomorrow
     expect(JSON.parse(store.getKv(CLOUD_RAISE_KEY)!)).toEqual({ day: localDay(noon), usd: 22 })

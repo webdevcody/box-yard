@@ -13,6 +13,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPc
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
+import { CloudMeter } from "./CloudMeter"
 import { ChatLine } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { groupPublished } from "../lib/publishedNotices"
@@ -124,7 +125,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     <section ref={panel} data-testid="chat-panel" className="relative flex h-full min-w-0 flex-col bg-zinc-950">
       <header
         className={cx(
-          // A container, so the voice chip shrinks to an icon in a narrow header (see VoiceControl).
+          // A container, so the cloud meter and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
           "@container flex items-center gap-2",
           // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
           zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
@@ -140,6 +141,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           Coordinator
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1">
+          <CloudMeter />
           {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
           <VoiceControl />
           {!zen && (

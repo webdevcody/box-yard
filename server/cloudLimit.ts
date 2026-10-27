@@ -34,6 +34,9 @@ export function todaysRaise(store: Pick<Store, "getKv">, now = Date.now()): numb
   }
 }
 
+/** What raises add up to after one more: today's limit, or today's spend if that's past it already. */
+const nextRaise = (limit: number, todayUsd: number) => Math.round(Math.max(limit, todayUsd) * 100) / 100
+
 /**
  * "Raise today's limit": one more day's worth (Settings' daily limit) on top of today's limit, or of today's spend if
  * that's past it already (boxes that ran on go over a little), so a raise always leaves room for new boxes. It lapses
@@ -43,7 +46,7 @@ export function raiseToday(store: Pick<Store, "getKv" | "setKv">, budget: Budget
   if (budget.dailyUsd <= 0) return 0
   const limit = budget.dailyUsd + todaysRaise(store, now)
   // The new limit is max(limit, todayUsd) + dailyUsd, so the raise on top of Settings' limit is:
-  const raised = Math.round(Math.max(limit, todayUsd) * 100) / 100
+  const raised = nextRaise(limit, todayUsd)
   store.setKv(CLOUD_RAISE_KEY, JSON.stringify({ day: localDay(now), usd: raised }))
   return raised
 }
@@ -68,6 +71,7 @@ export function cloudSpend(store: Pick<Store, "getKv" | "boxSpendSince">, budget
     todayUsd: today.costUsd,
     dailyLimitUsd,
     raisedUsd,
+    raiseToUsd: dailyLimitUsd > 0 ? nextRaise(dailyLimitUsd, today.costUsd) + budget.dailyUsd : null,
     monthUsd,
     monthlyLimitUsd,
     state: blockedReason ? "reached" : warning ? "warning" : "ok",
