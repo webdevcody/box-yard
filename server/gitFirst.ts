@@ -22,6 +22,7 @@
 // new object dir in a stage folder (/tmp, or the work disk when that has more room) and the repo's objects as
 // an alternate. Its commits have fixed dates, so the same work gives the same commit and a no-op push.
 
+import { setHelperScript } from "./gitShare.js"
 import { q } from "./providers/types.js"
 
 export const wipRef = (taskId: string) => `refs/boxyard/wip/${taskId}`
@@ -264,8 +265,8 @@ export interface GitRestoreOptions {
   baseBranch: string
   gitUserName: string
   gitUserEmail: string
-  /** Clones work/ when the archive has no .git (a git-first archive). Null: no mirror (no repo). */
-  clone: { script: string; helper: string } | null
+  /** Clones work/ when the archive has no .git (a git-first archive). Null: no mirror (no repo). `only`: see setHelperScript. */
+  clone: { script: string; helper: string; only?: boolean } | null
   /** `git` with the credential helper, and the env exports that reach GitHub. */
   git: string
   env: string
@@ -310,7 +311,7 @@ export function gitRestoreScript(o: GitRestoreOptions): string {
           `  rm -rf .boxyard-clone`,
           `  { ${o.clone.script}\n  } >"$byt/err" 2>&1 || byno "git clone failed: $(byerr)"`,
           `  mv .boxyard-clone/.git work/.git && rm -rf .boxyard-clone || byno "couldn't move the clone into work/"`,
-          `  git -C work config credential.helper ${q(o.clone.helper)}`,
+          `  ${setHelperScript(o.clone.helper, o.clone.only ?? false, "git -C work")}`,
         ].join("\n")
       : `  byno "the archive has no repo and the project has none to clone"`,
     `fi`,

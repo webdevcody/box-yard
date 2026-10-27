@@ -50,7 +50,7 @@ import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/mem
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
 import { atRisk, deleteCheckScript, deleteVerdict, parseDeleteCheck, refusalLine, refusalsOf, type BoxDeleteResult, type WorkspaceGit } from "./boxDelete.js"
-import { GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
+import { GITHUB_HELPER, GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, gitWithHelper, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, setHelperScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
@@ -3837,11 +3837,13 @@ export class TaskManager {
         trigger,
       })
 
+      // A workspace cloned before Box Yard's credential helper cleared the box's own (mirrorSpec's `only`) gets it now.
+      const helper = project.repo && this.onlyBoxYardHelper(boxId, project.id) ? `([ ! -d work/.git ] || (cd work && ${setHelperScript(GITHUB_HELPER, true)}) >/dev/null 2>&1; true) && ` : ""
       // setsid (where it exists; macOS has none) + nohup: the turn survives a
       // dropped exec connection. The runner writes turn.pid itself.
       const start = await this.provider.exec(
         boxId,
-        `cd ${q(dir)} && ([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
+        `cd ${q(dir)} && ${helper}([ -f turn.pid ] && kill -TERM -- -$(cat turn.pid) 2>/dev/null; rm -f turn.pid; true) && ($(command -v setsid || true) nohup ${q(providerOf(this.provider, boxId).nodeBin)} ${q(runnerPath)} turn ${q(dir)} >> runner.log 2>&1 < /dev/null &) && for i in $(seq 1 50); do [ -f turn.pid ] && break; sleep 0.2; done; [ -f turn.pid ] && cat turn.pid || (tail -n 20 runner.log; exit 1)`,
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       if (superseded()) {
@@ -4224,7 +4226,7 @@ export class TaskManager {
   private async cloneWorkspace(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null): Promise<PreparedWorkspace> {
     const steps = [`mkdir -p ${q(dir)}`, `rm -rf ${q(dir + "/work")}`]
     if (mirror) {
-      const { spec, env, helper } = mirror
+      const { spec, env, helper, only } = mirror
       // One mirror per repo per box (see server/gitShare.ts): the task's clone borrows its objects, so a task
       // folder holds its working tree and only the objects it made or fetched itself.
       const refs = [`refs/heads/${project.baseBranch}`, ...(row.branch ? [`refs/heads/${row.branch}`] : [])]
@@ -4232,7 +4234,7 @@ export class TaskManager {
         env,
         withMirrorLock(spec.mirror, [syncMirrorScript(spec), hydrateMirrorScript(spec, refs), `cd ${q(dir)}`, cloneTaskScript(spec)].join("\n")),
         `cd work`,
-        `git config credential.helper ${q(helper)}`,
+        setHelperScript(helper, only),
         `git config user.name ${q(this.c.gitUserName)}`,
         `git config user.email ${q(this.c.gitUserEmail)}`,
         // The clone has no checkout yet (so it never fetches the default branch's files for nothing).
@@ -4266,19 +4268,30 @@ export class TaskManager {
     return project.partialClone ?? this.settings.get().gitPartialClone
   }
 
-  /** The repo mirror on a box for a project, with the git command, env and credential helper that reach GitHub. */
+  /**
+   * The repo mirror on a box for a project, with the git command, env and credential helper that reach GitHub.
+   * `only`: Box Yard's helper is the only one git asks, so a credential the box's own git config stores can't answer
+   * before the token Box Yard gives it. That's every box but this computer, where the owner's own git login still
+   * answers first unless the project has a GITHUB_TOKEN of its own.
+   */
   private mirrorSpec(boxId: string, project: NonNullable<ReturnType<Store["getProject"]>>) {
-    const helper = `!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=$GITHUB_TOKEN"; }; f`
+    const helper = GITHUB_HELPER
     const token = this.store.projectEnv(project.id).GITHUB_TOKEN ?? this.settings.credentials.get("githubToken")
+    const only = this.onlyBoxYardHelper(boxId, project.id)
     const spec: MirrorSpec = {
       root: this.provider.root(boxId),
       tasks: tasksRootOf(this.provider, boxId),
       mirror: `${this.provider.root(boxId)}/.boxyard/repos/${this.repoMirrorName(project.repo)!}`,
       url: cloneUrl(project.repo!),
       partial: this.partialClone(project),
-      git: `git -c credential.helper=${q(helper)}`,
+      git: gitWithHelper(helper, only),
     }
-    return { spec, helper, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0` }
+    return { spec, helper, only, env: `export GITHUB_TOKEN=${q(token ?? "")} GIT_TERMINAL_PROMPT=0` }
+  }
+
+  /** See mirrorSpec's `only`. */
+  private onlyBoxYardHelper(boxId: string, projectId: string): boolean {
+    return !isLocalRunnerBox(boxId) || Boolean(this.store.projectEnv(projectId).GITHUB_TOKEN)
   }
 
   /**
@@ -4286,10 +4299,10 @@ export class TaskManager {
    * history GitHub has: clone that again from the mirror or GitHub and put the rest back. Fails loudly when a ref's
    * commit can't be found (the archive stays as it was for another try), never with commits silently gone.
    */
-  private async restoreThinGit(boxId: string, dir: string, { spec, env, helper }: { spec: MirrorSpec; env: string; helper: string }) {
+  private async restoreThinGit(boxId: string, dir: string, { spec, env, helper, only }: { spec: MirrorSpec; env: string; helper: string; only: boolean }) {
     const check = await this.provider.exec(boxId, `[ -d ${q(`${dir}/${THIN_DIR}`)} ] && echo thin`)
     if (!check.stdout.includes("thin")) return
-    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
+    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, only, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
     const mark = res.stdout.split("\n").find((l) => l.startsWith(THIN_MARK))?.slice(THIN_MARK.length)
     if (mark !== "ok") {
       const why = mark?.replace(/^fail /, "") || errorTail(res.stderr || res.stdout) || `exit ${res.exitCode}`
@@ -4321,7 +4334,7 @@ export class TaskManager {
   private async restoreGit(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string, mirror: ReturnType<TaskManager["mirrorSpec"]> | null) {
     const refs = [`refs/heads/${project.baseBranch}`, ...(row.branch ? [`refs/heads/${row.branch}`] : [])]
     const clone = mirror
-      ? { script: withMirrorLock(mirror.spec.mirror, [syncMirrorScript(mirror.spec), hydrateMirrorScript(mirror.spec, refs), cloneTaskScript(mirror.spec, ".boxyard-clone")].join("\n")), helper: mirror.helper }
+      ? { script: withMirrorLock(mirror.spec.mirror, [syncMirrorScript(mirror.spec), hydrateMirrorScript(mirror.spec, refs), cloneTaskScript(mirror.spec, ".boxyard-clone")].join("\n")), helper: mirror.helper, only: mirror.only }
       : null
     const script = gitRestoreScript({
       dir,

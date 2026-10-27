@@ -1,5 +1,5 @@
 import { q } from "./providers/types.js"
-import { KEEP_PACK, cloneTaskScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
+import { KEEP_PACK, cloneTaskScript, setHelperScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import { GIT_MANIFEST, GIT_PACK, stageBaseScript } from "./gitFirst.js"
 
 /**
@@ -210,7 +210,7 @@ function thinSnapshot(taskId: string, mirror?: string): string {
  * over the working tree (uncommitted again). Echoes THIN_MARK ok, or `fail <why>` and exits non-zero, leaving no
  * work/ behind: a ref whose commit can't be found fails the restore instead of losing it.
  */
-export function thinRestoreScript(taskDir: string, s: MirrorSpec, git: { helper: string; userName: string; userEmail: string }): string {
+export function thinRestoreScript(taskDir: string, s: MirrorSpec, git: { helper: string; only?: boolean; userName: string; userEmail: string }): string {
   const t = q(`${taskDir}/${THIN_DIR}`)
   const fail = (why: string) => `{ echo "${THIN_MARK}fail ${why}"; cd ${q(taskDir)}; rm -rf work; exit 1; }`
   return [
@@ -218,7 +218,7 @@ export function thinRestoreScript(taskDir: string, s: MirrorSpec, git: { helper:
     `ue=$(mktemp 2>/dev/null || echo /dev/null)`,
     withMirrorLock(s.mirror, [syncMirrorScript(s), `cd ${q(taskDir)}`, cloneTaskScript(s)].join("\n")) + ` || ${fail(`couldn't clone ${s.url}`)}`,
     `cd work || ${fail(`couldn't clone ${s.url}`)}`,
-    `git config credential.helper ${q(git.helper)} && git config user.name ${q(git.userName)} && git config user.email ${q(git.userEmail)}`,
+    `${setHelperScript(git.helper, git.only ?? false)} && git config user.name ${q(git.userName)} && git config user.email ${q(git.userEmail)}`,
     `[ ! -f ../${KEEP_PACK} ] || { git index-pack -q --stdin < ../${KEEP_PACK} >/dev/null && rm -f ../${KEEP_PACK}; } || ${fail("the keep pack didn't apply")}`,
     `[ ! -f ${t}/unpushed.bundle ] || git bundle unbundle ${t}/unpushed.bundle >/dev/null 2>"$ue" || ${fail(`the unpushed commits need history the mirror and GitHub don't have: $(tail -n 2 "$ue" | tr '\\n' ' ')`)}`,
     `while read -r sha ref; do [ -n "$ref" ] || continue; git cat-file -e "$sha" 2>/dev/null || ${fail("commit $sha of $ref is missing")}; git update-ref "$ref" "$sha" || ${fail("couldn't set $ref")}; done < ${t}/refs`,
