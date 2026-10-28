@@ -27,12 +27,19 @@ export function countsLine(boxes: CloudStatus["boxes"]): string {
   return parts.join(" · ")
 }
 
+/** "7 new boxes" */
+export const newBoxes = (n: number) => `${n} new ${n === 1 ? "box" : "boxes"}`
+
 /** The chip's full reading, for its accessible name and tooltip. */
 export function meterLabel(s: CloudStatus): string {
   const limit = s.spend.dailyLimitUsd > 0 ? `${todayLine(s.spend)} today's cloud limit` : `${dollars(s.spend.todayUsd)} today, no daily limit`
   const state = s.spend.state === "reached" ? ". New boxes wait" : s.spend.state === "warning" ? ". Near today's limit" : ""
-  return `Cloud boxes: ${countsLine(s.boxes)} · ${perHour(s.hourlyUsd)} now · ${limit}${state}`
+  const fanout = s.fanout.wanted > 0 ? `. ${newBoxes(s.fanout.wanted)} wait for your OK` : ""
+  return `Cloud boxes: ${countsLine(s.boxes)} · ${perHour(s.hourlyUsd)} now · ${limit}${state}${fanout}`
 }
+
+/** The chip's tone: the spend's, or amber while new boxes wait for an OK. */
+export const meterState = (s: CloudStatus): CloudSpend["state"] => (s.spend.state === "ok" && s.fanout.wanted > 0 ? "warning" : s.spend.state)
 
 /** Chip colours: calm, amber from 80% of a limit, rose at it. */
 export const METER_TONE: Record<CloudSpend["state"], string> = {

@@ -20,7 +20,7 @@ import { DEFAULT_SETTINGS, type SettingsStore } from "./settings.js"
 import { SETTINGS_GROUPS, changeLine, type SettingsGroup, type SettingsTools } from "./settingsTools.js"
 import { ProjectNotes, SUGGESTION_ACTIONS, MAX_NOTE_CHARS, type SuggestionAction } from "./notes.js"
 import { MAX_REASON_CHARS, NOTE_BUDGET_LIMITS } from "../shared/notes.js"
-import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxSize, type CloudSpend, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
+import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, TASK_STATUSES, type BoxFanout, type BoxSize, type CloudSpend, type Effort, type NoteSuggestion, type Project, type ProjectNote, type QueuedMessage, type Schedule, type ScheduleRun, type Task } from "../shared/types.js"
 import { RUNPOD_GPU_GUIDE, RUNPOD_MACHINE_LIMITS, isGpuBox } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { boxHead, boxSummary, mapLimit } from "./boxDelete.js"
@@ -204,6 +204,14 @@ function cloudLine(spend: CloudSpend): string {
   const month = spend.monthlyLimitUsd > 0 ? `; last 30 days ${usd(spend.monthUsd)} of the ${usd(spend.monthlyLimitUsd)} monthly limit` : ""
   const state = spend.blockedReason ? `. Limit reached: new boxes wait (running work goes on and free slots are still used); raise_cloud_limit raises today's` : spend.state === "warning" ? ". Over 80%" : ""
   return `${today}${raised}${month}${state}`
+}
+
+/** pool_status's line on new boxes past the hour's free ones: how many wait on Cody's OK, or until when it lasts. */
+function fanoutLine(f: BoxFanout): string {
+  const free = `Box Yard makes up to ${f.freePerHour} new boxes an hour without asking`
+  if (f.allowedUntil) return `${free}; Cody allowed more until ${new Date(f.allowedUntil).toISOString()}`
+  if (f.wanted > 0) return `${free}; ${f.wanted} more wait for Cody's OK (up to ${usd(f.upToHourlyUsd)}/h if every core is busy): allow_more_boxes allows them for an hour`
+  return free
 }
 
 export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coordinator" }): McpServer {
@@ -1916,6 +1924,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         resize_box: resizeGuard(),
         // What boxes cost today against Settings › Daily cloud limit: at the limit new boxes wait (running work goes on).
         cloud: cloudLine(tasks.cloudSpend()),
+        new_boxes: owner(fanoutLine(tasks.boxFanout())),
         // RunPod GPU projects: their pods (each a box of its own, runpod-<project>[-<n>]), spend and $/hr caps.
         ...(await gpuPools()),
         // Docker projects: their one container each (docker-<project>), image and limits.
@@ -1943,6 +1952,18 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         const spend = tasks.raiseCloudLimit("coordinator")
         return ok({ raised: true, cloud: cloudLine(spend) })
       }),
+    ),
+  )
+
+  coordinatorOnly(
+    server.registerTool(
+      "allow_more_boxes",
+      {
+        description:
+          "Let Box Yard make more new boxes than the ones it makes in an hour without asking, for the next hour, so tasks waiting on that OK get boxes now (still under the daily cloud limit and the box ceiling). " +
+          "Use it when Cody says yes to the New boxes question; pool_status's new_boxes line says how many wait and what they'd cost.",
+      },
+      safe(async () => ok({ allowed: true, new_boxes: owner(fanoutLine(tasks.allowMoreBoxes("coordinator"))) })),
     ),
   )
 
