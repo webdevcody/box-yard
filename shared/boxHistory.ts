@@ -22,6 +22,8 @@ export const BOX_EVENT_TYPES = [
   // workspaces, so it isn't deleted and made again.
   { key: "started", label: "Started" },
   { key: "stopped", label: "Stopped" },
+  // An idle box placement gave to another project (same credential set) instead of making a new box.
+  { key: "reused", label: "Reused" },
 ] as const
 export type BoxEventType = (typeof BOX_EVENT_TYPES)[number]["key"]
 

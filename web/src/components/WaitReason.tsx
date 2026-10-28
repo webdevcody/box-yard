@@ -1,7 +1,7 @@
 import { Link } from "wouter"
 import { navigate } from "wouter/use-browser-location"
 import type { Task, WaitFor } from "../../../shared/types"
-import { useRaiseCloudLimit } from "../lib/queries"
+import { useAllowMoreBoxes, useRaiseCloudLimit } from "../lib/queries"
 import { useOpenSettings } from "./SettingsDialog"
 import { Button, cx } from "./ui"
 
@@ -62,11 +62,25 @@ export function WaitReason({ task, inLink, className }: { task: Pick<Task, "wait
 
 /**
  * The one-click way out of a wait (Task.waitFix): "Raise today's limit" when today's cloud limit holds back a new box,
- * or the Usage settings when the monthly one does. Nothing for other waits.
+ * the Usage settings when the monthly one does, "Allow more boxes" when the queue wants more than Box Yard makes in
+ * an hour without asking, and Settings › Boxes & limits at the box ceiling. Nothing for other waits.
  */
 export function WaitFixButton({ task, className }: { task: Pick<Task, "waitFix">; className?: string }) {
   const raise = useRaiseCloudLimit()
+  const allow = useAllowMoreBoxes()
   const openSettings = useOpenSettings()
+  if (task.waitFix === "allow-boxes")
+    return (
+      <Button size="sm" variant="subtle" className={className} loading={allow.isPending} onClick={() => allow.mutate()} data-testid="wait-fix" title="For the next hour, still under the daily cloud limit">
+        Allow more boxes
+      </Button>
+    )
+  if (task.waitFix === "box-settings")
+    return (
+      <Button size="sm" variant="subtle" className={className} onClick={() => openSettings("limits")} data-testid="wait-fix">
+        Box ceiling
+      </Button>
+    )
   if (task.waitFix === "raise-cloud-limit")
     return (
       <Button size="sm" variant="subtle" className={className} loading={raise.isPending} onClick={() => raise.mutate()} data-testid="wait-fix" title="One more day's worth until midnight">
