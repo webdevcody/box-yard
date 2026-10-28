@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { execFileSync, spawnSync } from "node:child_process"
 import { LocalProvider } from "../server/providers/local.js"
-import { UPSTASH_MAX_UPLOAD_BYTES, isUploadTooBig, putFile, statedUploadLimit, uploadPartBytes } from "../server/upload.js"
+import { UPSTASH_MAX_UPLOAD_BYTES, isUploadTooBig, putFile, statedUploadLimit, uploadPartBytes, uploadSize } from "../server/upload.js"
 import { ArchiveDecoder, archiveOutcome, archiveScript } from "../server/archive.js"
 import { tmpDir } from "./helpers.js"
 
@@ -92,8 +92,29 @@ describe("putFile", () => {
     const { p, id, src, dest } = await box(100 * KB)
     p.failUpload = 2
     fs.writeFileSync(src, random(250 * KB))
-    await expect(putFile(p, id, src, dest)).rejects.toThrow("socket hang up")
+    // The error names the part (parts of 92,160 bytes: 90% of the 102,400-byte limit).
+    await expect(putFile(p, id, src, dest)).rejects.toThrow(/^part 2 of 3 \(92\.2 KB\) failed: socket hang up$/)
     expect(fs.readdirSync(path.dirname(dest))).toEqual([])
+  })
+
+  it("a part refused for its size still reads as a refusal for size, naming the part", async () => {
+    const { p, id, src, dest } = await box(100 * KB)
+    p.refuseOver = 50 * KB
+    fs.writeFileSync(src, random(250 * KB))
+    const err = await putFile(p, id, src, dest).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe("part 1 of 3 (92.2 KB) failed: file exceeds maximum size of 51.2 KB")
+    expect(isUploadTooBig(err)).toBe(true)
+    expect(err).toMatchObject({ statusCode: 400 })
+    expect(fs.readdirSync(path.dirname(dest))).toEqual([])
+  })
+
+  it("states sizes in the decimal units upload limits use", () => {
+    expect(uploadSize(230_412_345)).toBe("230.4 MB")
+    expect(uploadSize(90_000_000)).toBe("90 MB")
+    expect(uploadSize(92_160)).toBe("92.2 KB")
+    expect(uploadSize(1_500_000_000)).toBe("1.5 GB")
+    expect(uploadSize(12)).toBe("12 bytes")
   })
 
   it("without a known limit it sends the file whole", async () => {

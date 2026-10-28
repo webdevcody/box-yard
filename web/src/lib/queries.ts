@@ -17,6 +17,7 @@ import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
 import { playSendSound } from "./sendSound"
+import { runningCount } from "./runningTasks"
 import type {
   BoxCleanup,
   BoxContents,
@@ -142,6 +143,8 @@ export const QUIET: Quiet = { notifyOnChangeProps: ["status"] }
 
 export const useProjects = (o?: Quiet) => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects"), notifyOnChangeProps: o?.notifyOnChangeProps })
 export const useTasks = (o?: Quiet) => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), notifyOnChangeProps: o?.notifyOnChangeProps })
+/** How many tasks are running (lib/runningTasks). Re-renders only when the count changes, not on every task update. */
+export const useRunningCount = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: runningCount })
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
