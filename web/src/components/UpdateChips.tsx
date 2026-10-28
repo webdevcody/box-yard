@@ -2,14 +2,14 @@
 // "✓ Fix login done · …". A click opens the whole notice in place, under the chip; back-to-back updates fold into one
 // "N updates" chip that opens to their list. Open state is per session (lib/chipState.ts) and per chip, so a toggle
 // re-renders only that chip.
-import { memo, useMemo, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { memo, useMemo, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Bot, ChevronRight, type LucideIcon } from "lucide-react"
 import { AppLink, Markdown, cx } from "./ui"
-import { FullReplyLink, NoticeProject } from "./ChatLine"
+import { ChatLine, FullReplyLink, NoticeProject } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { NOTICE_ICON } from "./noticeIcons"
-import { chipView, groupPreview, itemMessages, type UpdateItem } from "../lib/chatUpdates"
+import { chipView, coordinatorRows, groupPreview, itemMessages, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
 import { splitNotice } from "../lib/captainTranscript"
 import { stripTruncation } from "../lib/truncated"
 import { publishedLabel } from "../lib/publishedNotices"
@@ -173,5 +173,24 @@ export const UpdateGroup = memo(function UpdateGroup({ id, items }: { id: string
         </div>
       )}
     </div>
+  )
+})
+
+/** coordinatorRows, with every row that didn't change kept as the same object, so its memo'd component skips. */
+export function useCoordinatorRows(messages: ChatMessage[]): CoordinatorRow[] {
+  const prev = useRef<CoordinatorRow[]>([])
+  return useMemo(() => (prev.current = stableRows(prev.current, coordinatorRows(messages))), [messages])
+}
+
+/** The thread: updates as chips (one "N updates" chip for a run of them), questions and failures as cards. */
+export const ChatRows = memo(function ChatRows({ rows, onFollowUp }: { rows: CoordinatorRow[]; onFollowUp: (message: string) => void }) {
+  return rows.map((r) =>
+    r.type === "updates" ? (
+      <UpdateGroup key={r.id} id={r.id} items={r.items} />
+    ) : r.type === "update" ? (
+      <UpdateChip key={r.id} item={r.item} />
+    ) : (
+      <ChatLine key={r.id} m={r.message} sources={r.sources} onFollowUp={onFollowUp} />
+    ),
   )
 })

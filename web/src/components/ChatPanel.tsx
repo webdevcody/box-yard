@@ -15,8 +15,8 @@ import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
-import { UpdateChip, UpdateGroup } from "./UpdateChips"
-import { coordinatorRows, rowsFrom, stableRows, type CoordinatorRow } from "../lib/chatUpdates"
+import { ChatRows, useCoordinatorRows } from "./UpdateChips"
+import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -312,25 +312,6 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
     </div>
   )
 }
-
-/** coordinatorRows, with every row that didn't change kept as the same object, so its memo'd component skips. */
-function useCoordinatorRows(messages: ChatMessage[]): CoordinatorRow[] {
-  const prev = useRef<CoordinatorRow[]>([])
-  return useMemo(() => (prev.current = stableRows(prev.current, coordinatorRows(messages))), [messages])
-}
-
-/** The thread: updates as chips (one "N updates" chip for a run of them), questions and failures as cards. */
-const ChatRows = memo(function ChatRows({ rows, onFollowUp }: { rows: CoordinatorRow[]; onFollowUp: (message: string) => void }) {
-  return rows.map((r) =>
-    r.type === "updates" ? (
-      <UpdateGroup key={r.id} id={r.id} items={r.items} />
-    ) : r.type === "update" ? (
-      <UpdateChip key={r.id} item={r.item} />
-    ) : (
-      <ChatLine key={r.id} m={r.message} sources={r.sources} onFollowUp={onFollowUp} />
-    ),
-  )
-})
 
 /** Messages Cody queued mid-turn. */
 const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {

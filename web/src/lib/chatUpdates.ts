@@ -131,8 +131,8 @@ function sourceOf(item: UpdateItem, rowId: string): UpdateSource {
  *
  * Which updates a reply covers: a turn reads every update that came in before it started, so a reply covers the
  * Coordinator-read updates (readByCoordinator) that arrived before its turn's first tool call or, with none, before
- * the reply. One that arrived after that tool call came in mid-turn and waits for the next reply. Updates the reply
- * didn't read (a task notice its Captain handled) aren't listed.
+ * the reply. One that arrived after that tool call came in mid-turn and waits for the next reply. A turn that ended in
+ * an error covers nothing. Updates the Coordinator didn't read (a task notice its Captain handled) aren't listed.
  */
 export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRow[] {
   const rows: CoordinatorRow[] = []
@@ -173,7 +173,7 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
       }
     }
     flush()
-    if (m.role === "tool") start()
+    if (m.role === "tool" || m.role === "error") start()
     const row: MessageRow = { type: "message", id: m.id, message: m, sources: null }
     rows.push(row)
     if (m.role === "assistant") {
