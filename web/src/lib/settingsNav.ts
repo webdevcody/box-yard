@@ -87,7 +87,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "costs",
     label: "Usage",
-    description: "Upstash Box rates and optional spending budgets.",
+    description: "What boxes may cost per day and per month, and the Upstash Box rates their cost is worked out with.",
     fields: ["costRates", "budget"],
   },
   {

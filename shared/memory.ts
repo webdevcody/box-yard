@@ -11,13 +11,20 @@ export interface BoxMemory {
   load1: number
   /** CPUs the load average is spread over (nproc). */
   cpus: number
+  /**
+   * CPU time the cgroup has used so far (cpu.stat usage_usec), in µs; absent without it. It's the box's own only on a
+   * provider whose boxes are each their own cgroup (BoxProvider.ownCgroup: Upstash), which is when Box Yard meters it.
+   */
+  cpuUsageUsec?: number | null
+  /** CPUs the cgroup may use (cpu.max quota / period); absent when unlimited or unknown. */
+  cpuLimit?: number | null
 }
 
 /** Separates the memory/load part from the df lines in dfCommand's output. */
 export const MEM_MARK = "@@boxyard-mem"
 
 /**
- * Prints the cgroup v2 memory files, /proc/meminfo's totals, nproc and /proc/loadavg as `key value` lines.
+ * Prints the cgroup v2 memory files and CPU use and limit, /proc/meminfo's totals, nproc and /proc/loadavg as `key value` lines.
  * Always exits 0: a box without some of them still reports the rest.
  */
 export const memCommand = () =>
@@ -25,6 +32,8 @@ export const memCommand = () =>
     `echo ${MEM_MARK}`,
     `for f in memory.current memory.max; do [ -r /sys/fs/cgroup/$f ] && echo "$f $(cat /sys/fs/cgroup/$f)"; done`,
     `grep -s '^inactive_file ' /sys/fs/cgroup/memory.stat`,
+    `grep -s '^usage_usec ' /sys/fs/cgroup/cpu.stat`,
+    `[ -r /sys/fs/cgroup/cpu.max ] && echo "cpu.max $(cat /sys/fs/cgroup/cpu.max)"`,
     `grep -s -E '^(MemTotal|MemAvailable):' /proc/meminfo`,
     `echo "loadavg $(cat /proc/loadavg 2>/dev/null)"`,
     `echo "nproc $(nproc 2>/dev/null)"`,
@@ -67,7 +76,17 @@ export function parseMemory(stdout: string): BoxMemory | null {
   } else return null
   const load1 = num("loadavg")
   const cpus = num("nproc")
-  return { usedBytes: Math.min(usedBytes, totalBytes), totalBytes, load1: load1 ?? 0, cpus: cpus && cpus > 0 ? cpus : 1 }
+  const usage = num("usage_usec")
+  const [quota, period] = (kv.get("cpu.max") ?? "").split(/\s+/).map(Number)
+  const cpuLimit = quota && period && quota > 0 && period > 0 ? quota / period : null
+  return {
+    usedBytes: Math.min(usedBytes, totalBytes),
+    totalBytes,
+    load1: load1 ?? 0,
+    cpus: cpus && cpus > 0 ? cpus : 1,
+    ...(usage !== null && usage >= 0 ? { cpuUsageUsec: usage } : {}),
+    ...(cpuLimit ? { cpuLimit } : {}),
+  }
 }
 
 export interface MemoryPolicy {
