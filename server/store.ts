@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
+import { redactValues } from "./redact.js"
 import { BOX_SIZES, WAIT_FIXES, shouldNotify, weakerSource } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
+import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -327,6 +329,7 @@ interface ProjectRow {
   gpu_min_vcpus?: number | null
   docker_image?: string | null
   docker_dockerfile?: string | null
+  identity_id?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -733,6 +736,21 @@ export class Store {
 
   /** Called with every notification right after it is recorded (the app broadcasts it). */
   onNotification: ((n: AppNotification) => void) | null = null
+  /**
+   * The secret values transcripts never keep (app.ts: Settings › Credentials' and the identities'). An agent that
+   * prints its env or task.json shows "[redacted]" in its transcript, the Captain's and the Coordinator's. What Cody
+   * writes ("user" messages) is kept as written.
+   */
+  transcriptSecrets: (() => readonly string[]) | null = null
+
+  /** `content` and `meta` with every transcript secret replaced by "[redacted]". */
+  private scrub(role: string, content: string, meta: Record<string, unknown> | null): { content: string; meta: Record<string, unknown> | null } {
+    const secrets = role === "user" ? [] : (this.transcriptSecrets?.() ?? [])
+    if (!secrets.length) return { content, meta }
+    const metaJson = meta ? JSON.stringify(meta) : null
+    const clean = metaJson ? redactValues(metaJson, secrets) : null
+    return { content: redactValues(content, secrets), meta: clean && clean !== metaJson ? (JSON.parse(clean) as Record<string, unknown>) : meta }
+  }
 
   // ---------- projects ----------
 
@@ -759,6 +777,7 @@ export class Store {
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       gpuMachine: gpuMachineOf(row),
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
+      identityId: row.identity_id || DEFAULT_IDENTITY_ID,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -851,6 +870,7 @@ export class Store {
     gpuMaxHourlyUsd?: number | null
     gpuMachine?: Partial<ProjectGpuMachine>
     docker?: Partial<ProjectDocker>
+    identityId?: string
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -878,7 +898,14 @@ export class Store {
     this.setRunner(id, input.runner)
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
+    if (input.identityId) this.setProjectIdentity(id, input.identityId)
     return this.getProject(id)!
+  }
+
+  /** Give a project an identity (shared/identities.ts). The caller checks that its runner fits. */
+  setProjectIdentity(id: string, identityId: string) {
+    if (!this.db.prepare("SELECT 1 FROM identities WHERE id = ?").get(identityId)) throw new BadRequestError(`Identity ${identityId} not found`)
+    this.db.prepare("UPDATE projects SET identity_id = ? WHERE id = ?").run(identityId, id)
   }
 
   updateProject(
@@ -918,6 +945,8 @@ export class Store {
       notesMaxCount?: number | null
       /** null clears it (Settings › Notes token budget applies). */
       notesMaxTokens?: number | null
+      /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
+      identityId?: string
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -945,6 +974,7 @@ export class Store {
     this.setRunner(id, patch.runner)
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
+    if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
     return this.getProject(id)!
   }
 
@@ -1976,6 +2006,7 @@ export class Store {
     content: string,
     meta: Record<string, unknown> | null = null,
   ): TaskMessage {
+    ;({ content, meta } = this.scrub(role, content, meta))
     const msg: TaskMessage = { id: newId("tm"), taskId, role, content, meta, createdAt: Date.now() }
     this.db
       .prepare("INSERT INTO task_messages (id, task_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
@@ -2010,6 +2041,7 @@ export class Store {
   // ---------- orchestrator chat ----------
 
   addChat(role: ChatRole, content: string, meta: Record<string, unknown> | null = null, id?: string): ChatMessage {
+    ;({ content, meta } = this.scrub(role, content, meta))
     const msg: ChatMessage = { id: id ?? newId("chat"), role, content, meta, createdAt: Date.now() }
     // User messages and the orchestrator's own words are already "seen" by it.
     const seen = role === "notice" ? 0 : 1
@@ -2023,6 +2055,7 @@ export class Store {
 
   /** Replace a chat message's meta (e.g. a tool line learning the id it created). */
   setChatMeta(id: string, meta: Record<string, unknown>): ChatMessage | null {
+    meta = this.scrub("meta", "", meta).meta!
     this.db.prepare("UPDATE chat_messages SET meta_json = ? WHERE id = ?").run(JSON.stringify(meta), id)
     const r = this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(id) as
       | { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
@@ -2156,6 +2189,7 @@ export class Store {
   }
 
   addSideThreadMessage(threadId: string, role: SideThreadRole, content: string, meta: Record<string, unknown> | null = null, id?: string): SideThreadMessage {
+    ;({ content, meta } = this.scrub(role, content, meta))
     const msg: SideThreadMessage = { id: id ?? newId("thm"), threadId, role, content, meta, createdAt: Date.now() }
     this.db.transaction(() => {
       this.db
@@ -2177,6 +2211,7 @@ export class Store {
 
   addCaptainMessage(projectId: string, role: ChatRole, content: string, meta: Record<string, unknown> | null = null, id?: string): CaptainMessage {
     if (!this.getProject(projectId)) throw new NotFoundError(`Project ${projectId} not found`)
+    ;({ content, meta } = this.scrub(role, content, meta))
     const msg: CaptainMessage = { id: id ?? newId("cap"), projectId, role, content, meta, createdAt: Date.now() }
     const seen = role === "notice" ? 0 : 1
     this.db

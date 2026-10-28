@@ -30,6 +30,7 @@ import {
 import { routingInstructions } from "./routing.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
+import { serverClaudeEnv } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -458,6 +459,7 @@ export class Orchestrator {
       effort: () => this.settings.get().orchestratorEffort,
       compactionsDir: this.compactionsDir,
       caller: { kind: "coordinator" },
+      claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
     }
   }
@@ -679,12 +681,8 @@ export class Orchestrator {
       this.writeMcpConfig()
       const args = this.claudeArgs(kind, sessionId, resume)
       const [bin, ...pre] = this.c.claudeBin.split(" ")
-      const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
-      // When Box Yard itself was started from inside a Claude Code session, don't
-      // let the orchestrator think it is that session's child.
-      for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
       // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
-      Object.assign(env, this.settings.credentials.claudeEnv())
+      const env = serverClaudeEnv(null, this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {

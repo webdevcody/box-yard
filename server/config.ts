@@ -149,6 +149,11 @@ export const config = {
   runpodApiKey: env.RUNPOD_API_KEY ?? "",
   /** The docker CLI for Docker projects (docs/docker.md); empty: found on PATH or where Docker Desktop puts it. */
   dockerBin: env.DOCKER_BIN?.trim() ?? "",
+  /**
+   * The key identity secrets are encrypted with (server/identity/secretBox.ts): 32 bytes as hex or base64, or any
+   * passphrase. Empty: a random key in <data dir>/secret.key, made on first use.
+   */
+  secretKey: env.BOXYARD_SECRET_KEY ?? "",
   gitUserName: env.GIT_USER_NAME ?? "Box Yard Agent",
   gitUserEmail: env.GIT_USER_EMAIL ?? "box-yard@users.noreply.github.com",
 

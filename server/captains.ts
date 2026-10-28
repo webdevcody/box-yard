@@ -39,6 +39,7 @@ import {
   writeCompaction,
 } from "./compactions.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
+import { serverClaudeEnv } from "./turnCredentials.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -162,6 +163,8 @@ export class CaptainManager {
   onAgentMessagesHandled: ((projectId: string, messages: CaptainMessage[], reply: string) => void) | null = null
   /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
   onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
+  /** The Claude login a project's Captain runs on when its identity has one of its own (app.ts: Identities.ownClaude). */
+  claudeLogin: ((projectId: string) => Record<string, string> | null) | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -190,6 +193,7 @@ export class CaptainManager {
         this.tuning,
         (notices, ok) => this.onNoticesHandled?.(project.id, notices, ok),
         (messages, reply) => this.onAgentMessagesHandled?.(project.id, messages, reply),
+        () => this.claudeLogin?.(project.id) ?? null,
       )
       this.captains.set(project.id, captain)
     }
@@ -394,6 +398,8 @@ class Captain {
     private readonly tuning: CaptainTuning,
     private readonly noticesHandled: (notices: CaptainNoticeEntry[], ok: boolean) => void = () => {},
     private readonly agentMessagesHandled: (messages: CaptainMessage[], reply: string) => void = () => {},
+    /** Its project identity's own Claude login (Identities.ownClaude), or null for the global one. */
+    private readonly claudeLogin: () => Record<string, string> | null = () => null,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.workdir = path.join(c.dataDir, "captains", project.id)
@@ -616,6 +622,7 @@ class Captain {
       effort: () => this.settings.get().captainEffort,
       compactionsDir: this.compactionsDir,
       caller: { kind: "captain", projectId: id },
+      claudeLogin: () => this.claudeLogin(),
       usage: { source: "captain", projectId: id },
     }
   }
@@ -991,10 +998,9 @@ class Captain {
       this.writeMcpConfig()
       const args = this.claudeArgs(kind, sessionId, resume)
       const [bin, ...pre] = this.c.claudeBin.split(" ")
-      const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
-      for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
-      // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
-      Object.assign(env, this.settings.credentials.claudeEnv())
+      // Its project identity's own Claude login, else env vars or Settings › Credentials, read on every run so a
+      // saved token works without a restart.
+      const env = serverClaudeEnv(this.claudeLogin(), this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {

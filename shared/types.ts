@@ -9,6 +9,7 @@ import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
+import type { Identity } from "./identities.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -86,6 +87,8 @@ export interface Project {
   gpuMachine: ProjectGpuMachine
   /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
   docker: ProjectDocker
+  /** Who acts for it (shared/identities.ts): its GitHub account, git author, signing key and Claude login. */
+  identityId: string
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
   createdAt: number
@@ -600,6 +603,8 @@ export type UiEvent =
   | { type: "runpod.build"; build: RunPodImageBuild }
   /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
   | { type: "docker.build"; build: DockerImageBuild }
+  /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
+  | { type: "identities"; identities: Identity[] }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

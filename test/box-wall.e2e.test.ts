@@ -3,6 +3,7 @@ import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import { credentialSet, GLOBAL_CREDENTIALS } from "../server/turnCredentials.js"
+import type { Identity } from "../shared/identities.js"
 import type { Project, Task } from "../shared/types.js"
 import { freePort, testConfig, waitFor } from "./helpers.js"
 
@@ -109,5 +110,29 @@ describe("the box wall", () => {
     await r.rest(t.id)
     const events = r.yard.store.listTaskMessages(t.id, 100).filter((m) => m.role === "event").map((m) => m.content)
     expect(events).toContainEqual(`Moved from ${first} to ${moved}: its project has its own Claude login or GitHub token, so it gets boxes no other project uses.`)
+  })
+
+  it("keeps two identities' tasks apart, and an identity's projects share its boxes", async () => {
+    const r = await start({ maxBoxes: 2, slotsPerBox: 4 })
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+    const site = await r.call<Project>("POST", "/api/projects", { name: "site", identityId: acme.id })
+    const blog = await r.call<Project>("POST", "/api/projects", { name: "blog", identityId: acme.id })
+    const plain = await r.project("plain")
+
+    const a = await r.task(site)
+    const boxA = await r.boxOf(a.id)
+    expect(r.yard.store.getKv(`box_creds:${boxA}`)).toBe(`identity:${acme.id}`)
+    const b = await r.task(plain)
+    const boxB = await r.boxOf(b.id)
+    expect(boxB).not.toBe(boxA)
+    // Another project of the same identity shares its box.
+    const c = await r.task(blog)
+    expect(await r.boxOf(c.id)).toBe(boxA)
+
+    // A third identity has no box it may use and none can be made: it waits, saying why.
+    const other = await r.call<Identity>("POST", "/api/identities", { name: "Other" })
+    const d = await r.task(await r.call<Project>("POST", "/api/projects", { name: "other", identityId: other.id }))
+    const waiting = await waitFor(() => r.yard.store.getTask(d.id)?.waitReason ?? null, "the task's wait reason")
+    expect(waiting).toMatch(/Waiting for a box of its identity: tasks of the Other identity never share a box/)
   })
 })
