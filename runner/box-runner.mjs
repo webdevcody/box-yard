@@ -19,8 +19,9 @@
 //   events.jsonl  append-only event log
 //   turn.pid      pid of the running turn (it leads a process group of its own)
 //   run.json      the running turn's record: pid, process identity, turn id, events offset
+//   signing.key   the identity's signing key for the next turn, when Box Yard keeps it; the turn takes it away
 
-import { spawn, execFile, execFileSync } from "node:child_process"
+import { spawn, spawnSync, execFile, execFileSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -245,6 +246,9 @@ async function runTurn() {
   // Answers to message_captain waits that ran out last turn; their replies come as this turn's messages.
   for (const f of fs.readdirSync(taskDir)) if (/^captain-reply-.*\.json$/.test(f)) fs.rmSync(path.join(taskDir, f), { force: true })
   await emit({ t: "turn_start", runner: RUNNER_VERSION })
+  prepareIdentityHome()
+  const unsigned = setupSigning()
+  if (unsigned) await emit({ t: "signing", ok: false, error: unsigned })
 
   const mcpConfigFile = path.join(taskDir, "mcp.json")
   fs.writeFileSync(
@@ -331,7 +335,155 @@ function claudeEnv() {
 function turnBaseEnv() {
   const env = { ...process.env }
   for (const k of task.unsetEnv ?? []) delete env[k]
-  return { ...env, ...task.env }
+  const base = { ...env, ...task.env }
+  return { ...base, ...signingEnv(base) }
+}
+
+// ---------------------------------------------------------------------------
+// Commit signing (docs/identities.md). task.json's `signing` says how this task's identity signs; a key Box Yard
+// keeps arrives as signing.key for one turn. The turn moves it to a 0700 folder outside the task (no archive takes
+// it), git gets its signing settings from env (GIT_CONFIG_COUNT), so they reach this turn's processes and nothing
+// else, and the folder is removed when the turn ends. With requireSigned, core.hooksPath points at hooks that stop
+// a push of commits its key didn't sign and otherwise run the repo's own hooks.
+
+const signingDir = path.join(os.tmpdir(), `boxyard-sign-${task.taskId ?? "none"}`)
+const signingKeyFile = path.join(taskDir, "signing.key")
+const allowedSigners = path.join(signingDir, "allowed_signers")
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`
+/** Every hook git runs from core.hooksPath on this side of a push. */
+const GIT_HOOKS = [
+  "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit", "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+  "pre-rebase", "post-checkout", "post-merge", "pre-push", "post-rewrite", "pre-auto-gc", "reference-transaction", "sendemail-validate", "post-index-change",
+]
+
+/**
+ * Get the turn's signing ready. Returns why its commits won't be signed, or null (signed, or no key to sign with).
+ * With requireSigned, the push guard goes in even when signing can't: the turn's commits then can't be pushed.
+ */
+function setupSigning() {
+  cleanupSigning()
+  let key = null
+  try {
+    key = fs.readFileSync(signingKeyFile, "utf8")
+  } catch {}
+  fs.rmSync(signingKeyFile, { force: true })
+  const s = task.signing
+  if (!s) return null
+  const problem = signingProblem(s, key)
+  if (problem && !s.requireSigned) return problem
+  const stopped = problem && `${problem}; the ${s.identity} identity requires signed commits, so this turn's pushes are stopped`
+  try {
+    // Not recursive, and just after removing it: a folder someone else made first (a shared /tmp) is refused,
+    // never written into.
+    fs.mkdirSync(signingDir, { mode: 0o700 })
+    if (!problem) {
+      if (s.kind === "file") fs.writeFileSync(path.join(signingDir, "key"), key, { mode: 0o600, flag: "wx" })
+      fs.writeFileSync(path.join(signingDir, "signs"), "")
+    }
+    if (s.requireSigned) writeSigningHooks(s)
+    // Last: signingEnv takes this file as the sign that the folder is ready.
+    fs.writeFileSync(allowedSigners, `box-yard namespaces="git" ${s.publicKey}\n`)
+  } catch (err) {
+    cleanupSigning()
+    return stopped || `the folder for its signing key couldn't be made (${signingDir}: ${err.code ?? err.message})`
+  }
+  return stopped || null
+}
+
+function signingProblem(s, key) {
+  if (s.problem) return s.problem
+  if (s.kind === "file" && !key) return `the ${s.identity} identity's signing key didn't reach this box`
+  const version = /git version (\d+)\.(\d+)/.exec(spawnSync("git", ["--version"], { encoding: "utf8" }).stdout ?? "")
+  if (!version || Number(version[1]) * 1000 + Number(version[2]) < 2034) return `git on this box ${version ? `is ${version[1]}.${version[2]}, and ` : ""}can't sign with SSH keys before 2.34`
+  if (s.program) {
+    try {
+      fs.accessSync(s.program, fs.constants.X_OK)
+    } catch {
+      return `the signing program ${s.program} isn't on this computer`
+    }
+  } else if (spawnSync("ssh-keygen", ["-?"], { stdio: "ignore" }).error?.code === "ENOENT") return "this box has no ssh-keygen, which git signs with"
+  else if (s.kind === "agent" && !{ ...process.env, ...task.env }.SSH_AUTH_SOCK) return "no SSH agent reaches this runner (SSH_AUTH_SOCK isn't set in Box Yard's environment)"
+  return null
+}
+
+function writeSigningHooks(s) {
+  const hooks = path.join(signingDir, "hooks")
+  fs.mkdirSync(hooks, { recursive: true, mode: 0o700 })
+  // The repo's own hooks folder, as git would find it without Box Yard's core.hooksPath.
+  const own = (name) => `by_own="$(GIT_CONFIG_COUNT=0 git rev-parse --git-path hooks 2>/dev/null)/${name}"`
+  for (const name of GIT_HOOKS) {
+    if (name === "pre-push") continue
+    fs.writeFileSync(path.join(hooks, name), `#!/bin/sh\n# Box Yard's core.hooksPath for this turn (requireSigned): the repo's own hook still runs.\n${own(name)}\n[ -x "$by_own" ] || exit 0\nexec "$by_own" "$@"\n`, { mode: 0o755 })
+  }
+  const refused = path.join(signingDir, "push-refused.txt")
+  fs.writeFileSync(
+    refused,
+    `box-yard: the ${s.identity} identity requires signed commits, and this push has commits its key (${s.fingerprint}) didn't sign. Nothing was pushed.\n` +
+      `box-yard: sign them again, e.g. git rebase --force-rebase --gpg-sign origin/${task.baseBranch || "main"}, then push. The commits:\n`,
+  )
+  fs.writeFileSync(
+    path.join(hooks, "pre-push"),
+    [
+      "#!/bin/sh",
+      "# Box Yard (requireSigned): stop a push of commits the identity's key didn't sign, then run the repo's own pre-push.",
+      `by_in=$(mktemp "\${TMPDIR:-/tmp}/boxyard-push.XXXXXX") || exit 1`,
+      `cat > "$by_in"`,
+      `by_bad=`,
+      `while read -r by_lref by_lsha by_rref by_rsha; do`,
+      `  case "$by_lsha" in *[!0]*) ;; *) continue ;; esac`,
+      `  case "$by_rref" in refs/boxyard/*) continue ;; esac`,
+      `  by_not=; case "$by_rsha" in *[!0]*) git cat-file -e "$by_rsha^{commit}" 2>/dev/null && by_not="^$by_rsha" ;; esac`,
+      `  by_bad="$by_bad$(git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile=${shq(allowedSigners)} log --format='%h %G?' "$by_lsha" $by_not --not --remotes 2>/dev/null | awk '$2 != "G" { n++; if (n <= 10) printf " %s", $1 }')"`,
+      `done < "$by_in"`,
+      `if [ -n "$by_bad" ]; then rm -f "$by_in"; cat ${shq(refused)} >&2; echo "box-yard:$by_bad" >&2; exit 1; fi`,
+      own("pre-push"),
+      `if [ -x "$by_own" ]; then "$by_own" "$@" < "$by_in"; by_s=$?; else by_s=0; fi`,
+      `rm -f "$by_in"`,
+      `exit $by_s`,
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  )
+}
+
+/** The git config that signs this turn's commits, as GIT_CONFIG_* env added after any `env` already has. */
+function signingEnv(env) {
+  const s = task.signing
+  if (!s || !fs.existsSync(allowedSigners)) return {}
+  const signs = fs.existsSync(path.join(signingDir, "signs"))
+  const pairs = [
+    ...(signs
+      ? [
+          ["gpg.format", "ssh"],
+          ["user.signingKey", s.kind === "file" ? path.join(signingDir, "key") : `key::${s.publicKey}`],
+          ["commit.gpgSign", "true"],
+          ...(s.program ? [["gpg.ssh.program", s.program]] : []),
+        ]
+      : []),
+    ["gpg.ssh.allowedSignersFile", allowedSigners],
+    ...(s.requireSigned ? [["core.hooksPath", path.join(signingDir, "hooks")]] : []),
+  ]
+  const n = Math.max(0, Number.parseInt(env.GIT_CONFIG_COUNT ?? "0", 10) || 0)
+  const out = { GIT_CONFIG_COUNT: String(n + pairs.length) }
+  pairs.forEach(([k, v], i) => {
+    out[`GIT_CONFIG_KEY_${n + i}`] = k
+    out[`GIT_CONFIG_VALUE_${n + i}`] = v
+  })
+  return out
+}
+
+function cleanupSigning() {
+  try {
+    fs.rmSync(signingDir, { recursive: true, force: true })
+  } catch {}
+}
+
+/** On this computer, an identity's own git and gh config folders (task.json identityHome), made on first use. */
+function prepareIdentityHome() {
+  if (!task.identityHome) return
+  try {
+    fs.mkdirSync(path.join(task.identityHome, "gh"), { recursive: true, mode: 0o700 })
+  } catch {}
 }
 
 /** Tokens in the context after one API call: its prompt side plus what it just wrote. */
@@ -1323,8 +1475,12 @@ if (mode === "turn" && !leadOwnGroup()) {
   // No terminal to hang up, but a stray SIGHUP mustn't end a turn either (nohup's ignore doesn't outlive a re-exec).
   process.on("SIGHUP", () => {})
   runTurn().then(
-    () => process.exit(0),
+    () => {
+      cleanupSigning()
+      process.exit(0)
+    },
     async (err) => {
+      cleanupSigning()
       try {
         await emit({ t: "turn_end", exitCode: 1, ok: false, error: `runner crashed: ${err?.stack ?? err}` })
       } catch {}

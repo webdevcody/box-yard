@@ -1,3 +1,5 @@
+import fs from "node:fs"
+import path from "node:path"
 import { z } from "zod"
 import type { DB } from "../db.js"
 import type { CredentialStore } from "../credentials.js"
@@ -19,6 +21,7 @@ import {
 } from "../../shared/identities.js"
 import { GithubTokenError, githubTokenInfo, githubVerifiedEmails, noreplyEmails, type GithubFetch } from "./github.js"
 import { tokenFingerprint, type SecretBox } from "./secretBox.js"
+import { SshKeyError, privateKeyInfo, publicKeyInfo } from "./sshKeys.js"
 
 interface IdentityRow {
   id: string
@@ -83,6 +86,19 @@ export const identityPatch = identityCreate.partial().strict()
 /** A token's owner is stored lower-case, as GitHub matches owners: "" is every owner the identity serves. */
 export const tokenInput = z.object({ owner: z.union([owner, z.literal("")]).default("").transform((o) => o.toLowerCase()), token: credentialValue }).strict()
 export const claudeInput = z.object({ kind: z.enum(IDENTITY_CLAUDE_KINDS), value: credentialValue }).strict()
+/** PUT /api/identities/:id/signing (shared IdentitySigningInput). */
+export const signingInput = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("file"), privateKey: z.string().min(64, "That's too short to be a private key").max(16_000, "That's too long to be an SSH private key"), requireSigned: z.boolean().optional() }).strict(),
+  z
+    .object({
+      kind: z.literal("agent"),
+      publicKey: z.string().trim().min(16).max(4000),
+      program: z.string().trim().min(1).max(1000).nullable().optional(),
+      requireSigned: z.boolean().optional(),
+    })
+    .strict(),
+])
+export const signingPatch = z.object({ requireSigned: z.boolean() }).strict()
 
 /** Env var a Claude credential kind logs `claude` in with. */
 export const CLAUDE_KIND_VAR: Record<IdentityClaudeKind, "ANTHROPIC_API_KEY" | "CLAUDE_CODE_OAUTH_TOKEN"> = {
@@ -97,6 +113,25 @@ export interface IdentityBase {
   claude: Record<string, string>
   githubToken: string
   author: { name: string; email: string } | null
+}
+
+/** How a project's turns sign their commits (task.json `signing`, and the key the runner writes for the turn). */
+export interface TurnSigning {
+  identity: string
+  kind: IdentitySigning["kind"]
+  publicKey: string
+  fingerprint: string
+  program: string | null
+  requireSigned: boolean
+  /** A "file" key's private key; null when this server's secret key can't open it. Always null for an agent key. */
+  privateKey: string | null
+}
+
+/** The key a project's pushes must be signed with, when its identity requires it. */
+export interface RequiredSigner {
+  identity: string
+  publicKey: string
+  fingerprint: string
 }
 
 /**
@@ -181,6 +216,8 @@ export class Identities {
         readable: this.d.secrets.open(s.ciphertext) !== null,
       }))
     const claude = secrets.find((s) => s.kind === "claude")
+    const key = secrets.find((s) => s.kind === "signing_key")
+    const signing = json<Omit<IdentitySigning, "readable"> | null>(r.signing_json, null)
     const projectIds = (this.d.db.prepare("SELECT id FROM projects WHERE identity_id = ? ORDER BY name COLLATE NOCASE").all(r.id) as { id: string }[]).map((p) => p.id)
     return {
       id: r.id,
@@ -192,7 +229,7 @@ export class Identities {
       owners: json<string[]>(r.owners_json, []),
       tokens,
       author: r.author_name && r.author_email ? { name: r.author_name, email: r.author_email, emailCheck: (r.email_check as EmailCheck | null) ?? "unknown" } : null,
-      signing: json<IdentitySigning | null>(r.signing_json, null),
+      signing: signing ? { ...signing, readable: signing.kind === "agent" || (key !== undefined && this.d.secrets.open(key.ciphertext) !== null) } : null,
       claude: claude && r.claude_kind ? { kind: r.claude_kind as IdentityClaudeKind, fingerprint: claude.fingerprint, readable: this.d.secrets.open(claude.ciphertext) !== null } : null,
       runners: json<Runner[] | null>(r.runners_json, null),
       coordinatorSees: r.coordinator_sees === "status" ? "status" : "everything",
@@ -239,7 +276,10 @@ export class Identities {
       if (current.isDefault) throw new BadRequestError("The Default identity keeps its name.")
       this.requireFreeName(body.name, id)
     }
-    if (body.runners !== undefined && body.runners !== null) this.requireRunnersFit(current, body.runners)
+    if (body.runners !== undefined && body.runners !== null) {
+      this.requireRunnersFit(current, body.runners)
+      if (current.signing?.kind === "agent" && !body.runners.includes("local")) throw new BadRequestError(`The ${current.name} identity signs with a key in this computer's SSH agent, so its projects run on this computer. Keep "local" in its runners, or give it a key file first.`)
+    }
     const sets: string[] = []
     const args: unknown[] = []
     const set = (col: string, v: unknown) => (sets.push(`${col} = ?`), args.push(v))
@@ -331,6 +371,64 @@ export class Identities {
     this.require(id)
     this.d.db.prepare("DELETE FROM identity_secrets WHERE identity_id = ? AND kind = 'claude'").run(id)
     this.d.db.prepare("UPDATE identities SET claude_kind = NULL, updated_at = ? WHERE id = ?").run(Date.now(), id)
+    this.changed()
+    return this.require(id)
+  }
+
+  /**
+   * Give an identity its commit signing key: a private key without a passphrase that Box Yard keeps (encrypted) and
+   * hands each turn, or a public key whose private half only this computer's SSH agent (or 1Password, `program`)
+   * holds. The Default identity may have one too: no other place holds a signing key.
+   */
+  async saveSigning(id: string, input: unknown, source = "pasted"): Promise<Identity> {
+    const current = this.require(id)
+    const body = parse(signingInput, input)
+    let info: { publicKey: string; fingerprint: string }
+    try {
+      info = body.kind === "file" ? await privateKeyInfo(body.privateKey) : await publicKeyInfo(body.publicKey)
+    } catch (err) {
+      throw new BadRequestError(err instanceof SshKeyError ? err.message : "Couldn't read that key.")
+    }
+    const program = body.kind === "agent" ? (body.program ?? null) : null
+    if (body.kind === "agent") {
+      if (program) requireProgram(program)
+      if (current.runners && !current.runners.includes("local")) throw new BadRequestError(`A key in this computer's SSH agent signs only for agents on this computer, and the ${current.name} identity runs only on ${current.runners.map((x) => RUNNER_PHRASE[x]).join(" or ")}. Add "local" to its runners, or save the key file instead.`)
+      const elsewhere = (this.d.db.prepare("SELECT name, runner FROM projects WHERE identity_id = ?").all(id) as { name: string; runner: string | null }[]).find((p) => p.runner !== "local")
+      if (elsewhere) throw new BadRequestError(`${elsewhere.name} uses the ${current.name} identity and runs on ${RUNNER_PHRASE[(elsewhere.runner as Runner | null) ?? "box"]}, where this computer's SSH agent can't sign. Run it on this computer first, or save the key file instead.`)
+    }
+    const signing: Omit<IdentitySigning, "readable"> = {
+      format: "ssh",
+      kind: body.kind,
+      publicKey: info.publicKey,
+      fingerprint: info.fingerprint,
+      program,
+      requireSigned: body.requireSigned ?? current.signing?.requireSigned ?? false,
+    }
+    this.d.db.transaction(() => {
+      if (body.kind === "file") this.putSecret(id, "signing_key", "", `${body.privateKey.trim()}\n`, { source })
+      else this.d.db.prepare("DELETE FROM identity_secrets WHERE identity_id = ? AND kind = 'signing_key'").run(id)
+      this.d.db.prepare("UPDATE identities SET signing_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify(signing), Date.now(), id)
+    })()
+    this.changed()
+    return this.require(id)
+  }
+
+  /** Turn requireSigned on or off for the identity's key. */
+  setRequireSigned(id: string, input: unknown): Identity {
+    const current = this.require(id)
+    const body = parse(signingPatch, input)
+    if (!current.signing) throw new BadRequestError(`The ${current.name} identity has no signing key yet. Save one first.`)
+    const { readable: _readable, ...signing } = current.signing
+    this.d.db.prepare("UPDATE identities SET signing_json = ?, updated_at = ? WHERE id = ?").run(JSON.stringify({ ...signing, requireSigned: body.requireSigned }), Date.now(), id)
+    this.changed()
+    return this.require(id)
+  }
+
+  /** Stop signing: the key Box Yard kept is forgotten. */
+  removeSigning(id: string): Identity {
+    this.require(id)
+    this.d.db.prepare("DELETE FROM identity_secrets WHERE identity_id = ? AND kind = 'signing_key'").run(id)
+    this.d.db.prepare("UPDATE identities SET signing_json = NULL, updated_at = ? WHERE id = ?").run(Date.now(), id)
     this.changed()
     return this.require(id)
   }
@@ -445,9 +543,26 @@ export class Identities {
   runnerProblem(identityId: string, runner: Runner): string | null {
     // Placement asks on every pass: the row alone, not the whole view (its secrets and projects).
     const r = this.row(identityId)
-    const runners = r ? json<Runner[] | null>(r.runners_json, null) : null
-    if (!r || !runners || runners.includes(runner)) return null
+    if (!r) return null
+    if (runner !== "local" && json<IdentitySigning | null>(r.signing_json, null)?.kind === "agent") return `the ${r.name} identity signs with a key in this computer's SSH agent, so it runs only on this computer (Settings › Identities)`
+    const runners = json<Runner[] | null>(r.runners_json, null)
+    if (!runners || runners.includes(runner)) return null
     return `the ${r.name} identity runs only on ${runners.map((x) => RUNNER_PHRASE[x]).join(" or ")} (Settings › Identities)`
+  }
+
+  /** How a project's turns sign their commits, or null when its identity has no signing key. */
+  signingFor(projectId: string): TurnSigning | null {
+    const r = this.row(this.idOf(projectId))
+    const s = r ? json<Omit<IdentitySigning, "readable"> | null>(r.signing_json, null) : null
+    if (!r || !s || s.format !== "ssh") return null
+    const privateKey = s.kind === "file" ? this.secret(r.id, "signing_key", "") || null : null
+    return { identity: r.name, kind: s.kind, publicKey: s.publicKey, fingerprint: s.fingerprint, program: s.program, requireSigned: s.requireSigned, privateKey }
+  }
+
+  /** The key every commit a project pushes must be signed with, or null when its identity doesn't require one. */
+  requiredSigner(projectId: string): RequiredSigner | null {
+    const s = this.signingFor(projectId)
+    return s?.requireSigned ? { identity: s.identity, publicKey: s.publicKey, fingerprint: s.fingerprint } : null
   }
 
   /** An identity's name, or null when there's none with that id. */
@@ -459,7 +574,11 @@ export class Identities {
   secretValues(): string[] {
     if (this.secretCache) return this.secretCache
     const rows = this.d.db.prepare("SELECT ciphertext FROM identity_secrets").all() as { ciphertext: string }[]
-    this.secretCache = rows.map((r) => this.d.secrets.open(r.ciphertext) ?? "").filter(Boolean)
+    // A signing key also goes line by line, so part of one printed alone is still caught.
+    this.secretCache = rows
+      .map((r) => this.d.secrets.open(r.ciphertext) ?? "")
+      .filter(Boolean)
+      .flatMap((v) => (v.includes("\n") ? [v, ...v.split("\n").map((l) => l.trim()).filter((l) => l.length >= 16 && !l.startsWith("-----"))] : [v]))
     return this.secretCache
   }
 }
@@ -468,6 +587,16 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const r = schema.safeParse(input)
   if (!r.success) throw new BadRequestError(r.error.issues.map((i) => (i.path.length ? `${i.path.join(".")}: ${i.message}` : i.message)).join("; "))
   return r.data
+}
+
+/** The program git signs with for an agent key runs on this computer: a full path to something that can run. */
+function requireProgram(program: string) {
+  if (!path.isAbsolute(program)) throw new BadRequestError("The signing program is a full path, like /Applications/1Password.app/Contents/MacOS/op-ssh-sign.")
+  try {
+    fs.accessSync(program, fs.constants.X_OK)
+  } catch {
+    throw new BadRequestError(`There's no program at ${program} on this computer that can run.`)
+  }
 }
 
 const uniqueOwners = (owners: string[]) => [...new Map(owners.map((o) => [o.toLowerCase(), o])).values()]

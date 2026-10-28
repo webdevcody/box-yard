@@ -53,7 +53,14 @@ export interface IdentitySigning {
   program: string | null
   /** Stop a push when one of its commits isn't signed by this key. */
   requireSigned: boolean
+  /** A "file" key this server's secret key can't open (the key changed): turns don't sign until it's saved again. */
+  readable: boolean
 }
+
+/** PUT /api/identities/:id/signing: a key Box Yard keeps, or one only this computer's SSH agent (or 1Password) holds. */
+export type IdentitySigningInput =
+  | { kind: "file"; privateKey: string; requireSigned?: boolean }
+  | { kind: "agent"; publicKey: string; program?: string | null; requireSigned?: boolean }
 
 export interface IdentityCheckResult {
   at: number
