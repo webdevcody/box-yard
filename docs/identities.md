@@ -22,7 +22,7 @@ Every project starts on the **Default** identity, which is Settings › Credenti
 | Signing key | An SSH key that signs every commit a turn makes, and optionally `requireSigned` (see [Signing](#signing)) |
 | Claude login | An API key or an OAuth token (`claude setup-token`). Without one, the identity uses the global login |
 | Runners | The runners its projects may use (`box`, `local`, `gpu`, `docker`), or every runner |
-| Coordinator sees | `everything` or `status`. Stored now; enforced in a later change |
+| Coordinator sees | `everything` (the default) or `status`: the Coordinator gets only the status of its projects' tasks (see [Coordinator sees: status only](#coordinator-sees-status-only)) |
 
 ## What a turn gets
 
@@ -85,6 +85,26 @@ Docker containers, GPU pods and the local runner are outside the wall: each alre
 
 An identity's runners are checked when a project is given the identity or a new "Runs on", when a task asks for its own runner, and when an identity's runners change (refused while a project of it runs elsewhere). A task pinned to a runner before its identity stopped allowing it waits and says why; it never runs there.
 
+## Coordinator sees: status only
+
+An identity set to `status` keeps its projects' content between Cody, their Captains and their agents. The Coordinator still sees that the work exists and where it stands, so it can route requests and report progress, but not what the work says. When Default is set to `status`, every project on Default is sealed too.
+
+- **What the Coordinator gets.** A sealed project's task titles, states, PRs and their state, branch, box, runner, turns, model and merge requests. Whether a task asks something or failed shows as `(status only: ask the project's Captain)`, not the question or the error. `list_projects` marks the project with `coordinatorSees` and gives its notes as a count.
+- **What it doesn't.** Replies (`lastReply`), questions, errors, summaries, previews and transcript lines; the project's notes and note suggestions; its artifacts (also as attachments); its Captain's compactions; its queued messages; its preview URLs (`get_preview_url`); its `search_history` hits (also the notices about its tasks kept in the Coordinator's chat, which `around` shows masked); and its tasks as `related_tasks` of a task elsewhere. A tool that would return them answers `Status only: …` and points at the project's Captain (`ask_captain`, `send_to_captain`). Tools that list across projects leave them out instead, and a `list_tasks` query matches only a sealed task's title and PR.
+- **Outside the tools.** The Coordinator's own summary and recap prompts leave a sealed task's question out. A compaction's task snapshot says `Status only: …` instead of the task's summary, and `read_compaction` masks snapshots written before the seal the same way. Hook notices about its tasks carry no prompt preview, and `{summary}` becomes `(status only: ask the project's Captain)` in a `message_coordinator` hook's prompt and in a `create_task` hook's task title (the new task's prompt keeps it).
+- **The Captain answers with state.** A sealed project's Captain is told to answer the Coordinator with the state of the work (what's done, what's running, which PRs are open, what waits on whom), not code, files, transcripts, notes or anyone's words. `ask_captain` and `wait_for_captain` return only its replies to the Coordinator, not the rest of its chat.
+- **Agents stay on their side.** An agent in a sealed project and one in an open project can't `message_agent` each other (either way, since a reply would come back across); the sender hears why and is pointed at its Captain. Agents within the sealed project, or between two sealed or two open projects, message as before.
+- **Still allowed.** Writes and controls: starting tasks, `send_to_task`, stop, retry, close, queued-message delivery, `save_note`, hooks and schedules (their prompts are configuration the Coordinator or Cody wrote, so the Coordinator still reads them).
+- **One-way for the model.** The Coordinator (or a Captain) can set an identity to `status` with `create_identity`, `update_identity` or `import_detected_identity`, but no tool sets it back to `everything`, moves a sealed project to an identity that shows everything (`assign_identity`), or deletes a sealed identity and moves its projects into a Default that shows everything. Cody does those in Settings › Identities or the project's *Identity* picker.
+
+It's a view, not a wall. What remains:
+
+- **The Captain's own words.** A Captain's reply to the Coordinator is sent as it is: the prompt asks for state only, but a Captain told to quote something can.
+- **Box Yard's API on this computer.** With no `BOXYARD_PASSWORD`, the API is open on loopback, and the Coordinator has `WebFetch`. Set a password to close that.
+- **What the Coordinator already knew.** Its earlier messages, its own compaction summaries and the compaction files it may `Read` keep what they held before the seal.
+- **Uploads.** The Coordinator may `Read` the uploads folder; an upload's path is random and only appears in content it no longer gets.
+- **GitHub.** The Coordinator gets each PR's URL, and for a public repo `WebFetch` can open the PR there. The seal covers Box Yard's views, not who can read the repo.
+
 ## In the web app
 
 **Settings › Identities** (after Credentials) has a card per identity: its account, owners, git author and whether GitHub verified the email, each token's owner, scopes, expiry and fingerprint, the signing key's fingerprint, its own Claude login if any, where it may run, its projects and its last test.
@@ -92,9 +112,10 @@ An identity's runners are checked when a project is given the identity or a new 
 - **Edit, Add and Delete are drafts.** Nothing is written until the dialog's Save, like every other section; Delete says which projects move to Default. A Save that fails partway keeps only what wasn't saved yet.
 - **Secrets go in, never out.** A token, a Claude login and a key file are typed or chosen into write-only fields and sent once, on Save. The card shows the fingerprint from then on. A key file is read in the browser and goes only to Box Yard.
 - **Test** checks the identity with GitHub (each token, push access to its projects' repos, the author email, the signing key) and keeps the result as its last test. It changes nothing else.
+- **Coordinator sees** is *Everything* or *Status only* on each card, saved with its draft (see [Coordinator sees: status only](#coordinator-sees-status-only)). Only here and in the project's picker can it go back to *Everything*.
 - **Import from this computer** runs the same detection as `detect_identities` (with GitHub unless *Ask GitHub too* is off) and lists a proposal per account with its evidence. Tick a proposal, untick any project that should stay, and Save: Box Yard reads the token and key by reference on the server, so they never pass through the page.
 
-**A project's identity** is picked in its Settings tab (*Identity*) and saved with the rest of the form. The picker says when the identity can't run on the project's runner, and Save waits while one of the project's tasks is running, so no turn switches accounts halfway.
+**A project's identity** is picked in its Settings tab (*Identity*) and saved with the rest of the form. The picker says when the identity can't run on the project's runner or shows the Coordinator status only, and Save waits while one of the project's tasks is running, so no turn switches accounts halfway.
 
 **Badges.** A project on another identity than Default shows its colour dot and name in the sidebar (just the dot when the sidebar is narrow), and the task's ⋯ details say which identity its turns act as. The project header doesn't.
 
@@ -136,9 +157,9 @@ A token or key itself is never taken through a tool: it goes in Settings › Ide
 | `detect_identities` | Reads this computer (and GitHub, online) and proposes identities with the evidence. Changes nothing | Maps its own project only |
 | `import_detected_identity` | A proposal becomes an identity, or updates the one for that login, and gets the proposal's projects | Gives it its own project only |
 | `create_identity` | A new identity, with a token and signing key by reference. Nothing is made when a reference can't be read | Yes |
-| `update_identity` | Fields, references, `remove_token`, `remove_claude` | Only an identity no other project uses, never Default |
-| `delete_identity` | Removes it; `move_projects_to_default` moves its projects first | Same as update |
-| `assign_identity` | Gives a project an identity: the runner has to fit and no task may be running | Its own project only |
+| `update_identity` | Fields, references, `remove_token`, `remove_claude`. `coordinator_sees` can go to `status`, never back | Only an identity no other project uses, never Default |
+| `delete_identity` | Removes it; `move_projects_to_default` moves its projects first, unless that would move sealed projects into a Default that shows everything | Same as update |
+| `assign_identity` | Gives a project an identity: the runner has to fit, no task may be running, and a sealed project can't move to an identity that shows everything | Its own project only |
 | `test_identity` | Checks with GitHub: each token (whose, scopes, expiry), push access to its projects' repos, the author email, the signing key. Saved as the last test | Its own project's identity, for its own repo; not saved |
 
 To try detection on this computer: `npm run test:detect` (read-only and offline; it prints logins, owners, emails and fingerprints only).
@@ -167,5 +188,4 @@ Every change is broadcast as an `identities` event.
 
 ## Coming next
 
-- The Coordinator's `status` view of an identity's projects.
 - GPG signing keys.
