@@ -1,4 +1,4 @@
-import { Box, type Snapshot } from "@upstash/box"
+import { Box, type BoxData, type Snapshot } from "@upstash/box"
 import fs from "node:fs"
 import type { Config } from "../config.js"
 import type { WorkerSize } from "../../shared/types.js"
@@ -12,6 +12,8 @@ const ROOT = "/workspace/home"
 const READ_CHUNK = 8 * 1024 * 1024 // server limit for one ranged read
 /** How long a snapshot of a big disk may take. The SDK gives up after 5 minutes; we keep waiting this long by name. */
 const SNAPSHOT_WAIT_MS = 30 * 60_000
+/** How long one Box.list answers usage probes for (each box is probed every minute or so; one list serves them all). */
+const LIST_TTL_MS = 50_000
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
@@ -50,6 +52,7 @@ export class UpstashProvider implements BoxProvider {
   readonly nodeBin = "node"
   readonly claudeBin = "claude"
   readonly maxUploadBytes = UPSTASH_MAX_UPLOAD_BYTES
+  readonly ownCgroup = true
   private cache = new Map<string, Box>()
   private cacheFor = ""
 
@@ -268,20 +271,39 @@ export class UpstashProvider implements BoxProvider {
     return boxes.filter((b) => b.status !== "deleted").map((b) => b.id)
   }
 
+  /**
+   * What Upstash says about a box: its size, keep-alive, and the CPU time and compute charge it has billed so far
+   * (`total_cpu_ns`, `total_compute_cost_usd`). One Box.list serves every box for LIST_TTL_MS. A box the list
+   * doesn't have, or a list that fails, leaves those fields out, and Box Yard measures or estimates instead.
+   */
   async usage(boxId: string): Promise<BoxUsageProbe> {
-    const box = await this.box(boxId)
-    const status = await retry(() => box.getStatus()).catch(() => ({}))
-    const raw = status as Record<string, unknown>
-    const diskBytes = await this.diskBytes(boxId).catch(() => null)
-    const size = sizeOf(raw) ?? sizeOf(box as unknown as Record<string, unknown>) ?? this.c.workerSize
+    const [listed, diskBytes] = await Promise.all([this.listed(boxId).catch(() => undefined), this.diskBytes(boxId).catch(() => null)])
+    const size = listed?.size === "small" || listed?.size === "medium" || listed?.size === "large" ? listed.size : this.c.workerSize
+    const cpuNs = numberOf(listed?.total_cpu_ns)
+    const computeUsd = numberOf(listed?.total_compute_cost_usd)
     return {
       size,
-      keepAlive: boolOf(raw, ["keepAlive", "keep_alive", "keepalive", "isKeepAlive"]) ?? boolOf(box as unknown as Record<string, unknown>, ["keepAlive", "keep_alive", "keepalive", "isKeepAlive"]) ?? false,
+      keepAlive: listed?.keep_alive ?? false,
       diskBytes,
-      activeMs: millisOf(raw, ["activeMs", "active_ms", "activeCpuMs", "active_cpu_ms", "cpuMs", "cpu_ms"]),
-      uptimeMs: millisOf(raw, ["uptimeMs", "uptime_ms", "uptime"]),
-      source: hasActualUsage(raw) ? "actual" : "estimated",
+      cpuNs,
+      computeUsd,
+      source: computeUsd != null ? "actual" : cpuNs != null ? "measured" : "estimated",
     }
+  }
+
+  private list: { at: number; key: string; boxes: Promise<Map<string, BoxData>> } | null = null
+
+  private async listed(boxId: string): Promise<BoxData | undefined> {
+    const key = this.apiKey
+    if (!this.list || this.list.key !== key || Date.now() - this.list.at > LIST_TTL_MS) {
+      const boxes = retry(() => Box.list({ apiKey: key })).then((all) => new Map(all.map((b) => [b.id, b])))
+      this.list = { at: Date.now(), key, boxes }
+      // A failed list isn't kept: the next probe asks again.
+      boxes.catch(() => {
+        if (this.list?.boxes === boxes) this.list = null
+      })
+    }
+    return (await this.list.boxes).get(boxId)
   }
 
   async destroy(boxId: string) {
@@ -307,24 +329,6 @@ export function isNotFound(err: unknown): boolean {
   return /not found/i.test(String((err as Error | null)?.message ?? ""))
 }
 
-function sizeOf(obj: Record<string, unknown>): BoxUsageProbe["size"] | undefined {
-  const v = String(obj.size ?? obj.boxSize ?? obj.runtimeSize ?? "").toLowerCase()
-  return v === "small" || v === "medium" || v === "large" ? v : undefined
-}
-
-function boolOf(obj: Record<string, unknown>, keys: string[]) {
-  for (const k of keys) if (typeof obj[k] === "boolean") return obj[k] as boolean
-  return undefined
-}
-
-function millisOf(obj: Record<string, unknown>, keys: string[]) {
-  for (const k of keys) {
-    const v = obj[k]
-    if (typeof v === "number" && Number.isFinite(v)) return Math.max(0, Math.round(k.toLowerCase().includes("second") ? v * 1000 : v))
-  }
-  return null
-}
-
-function hasActualUsage(obj: Record<string, unknown>) {
-  return millisOf(obj, ["activeMs", "active_ms", "activeCpuMs", "active_cpu_ms", "cpuMs", "cpu_ms", "uptimeMs", "uptime_ms", "uptime"]) !== null
+function numberOf(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null
 }
