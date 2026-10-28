@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
 import { AlertTriangle, ArrowDown, ArrowUp, ChevronRight, Info, Settings } from "lucide-react"
-import { useUsage } from "../lib/queries"
+import { useRaiseCloudLimit, useUsage } from "../lib/queries"
 import {
   CATEGORY_META,
   PERIODS,
@@ -36,6 +36,7 @@ const TOP_N = 10
 export function UsageView() {
   const [params, setParams] = useSearchParams()
   const openSettings = useOpenSettings()
+  const raise = useRaiseCloudLimit()
   const periodKey = (PERIODS.some((p) => p.key === params.get("period")) ? params.get("period") : "7d") as PeriodKey
   const customFrom = params.get("from")
   const customTo = params.get("to")
@@ -63,7 +64,7 @@ export function UsageView() {
           <p className="mt-1 text-sm text-zinc-500">What Claude and your boxes cost, and where it went.</p>
         </div>
         <Button size="sm" onClick={() => openSettings("costs")}>
-          <Settings className="h-3.5 w-3.5" /> Rates & budgets
+          <Settings className="h-3.5 w-3.5" /> Rates & cloud limits
         </Button>
       </header>
 
@@ -86,10 +87,21 @@ export function UsageView() {
           {data.budget.blocked && (
             <div className="flex gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
               <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
-              <div>
-                <div className="font-semibold">Budget exceeded. New agent turns are paused.</div>
-                <div className="mt-1 text-amber-200/80">Raise the daily or monthly budget in Settings to resume queued work.</div>
+              <div className="min-w-0 flex-1">
+                <div className="font-semibold">Cloud limit reached. New boxes wait; work already running goes on.</div>
+                <div className="mt-1 text-amber-200/80">
+                  {data.budget.daily.exceeded ? "Raise today's limit to start them now, or they start at midnight." : "Raise the monthly cloud limit in Settings to start them."}
+                </div>
               </div>
+              {data.budget.daily.exceeded ? (
+                <Button size="sm" variant="subtle" className="shrink-0 self-start" loading={raise.isPending} onClick={() => raise.mutate()} data-testid="usage-raise-cloud-limit">
+                  Raise today's limit
+                </Button>
+              ) : (
+                <Button size="sm" variant="subtle" className="shrink-0 self-start" onClick={() => openSettings("costs")}>
+                  Cloud limits
+                </Button>
+              )}
             </div>
           )}
 
@@ -228,7 +240,7 @@ function Budgets({ budget, today, onEdit }: { budget: BudgetStatus; today: Usage
   const resets = today ? new Date(today.since).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }) : null
   const crossesDay = today ? new Date(today.since).getHours() !== 0 || new Date(today.since).getMinutes() !== 0 : false
   return (
-    <Card title="Budgets" aside={<button onClick={onEdit} className="text-sky-400 hover:underline">Edit</button>}>
+    <Card title="Cloud limits" aside={<button onClick={onEdit} className="text-sky-400 hover:underline">Edit</button>}>
       <div className="space-y-4">
         <Meter label="Daily" hint={crossesDay && resets ? `since ${resets} (server day)` : "today"} state={budget.daily} onEdit={onEdit} />
         <Meter label="Monthly" hint="in the last 30 days" state={budget.monthly} onEdit={onEdit} />
@@ -252,11 +264,11 @@ function Meter({ label, hint, state, onEdit }: { label: string; hint: string; st
       </div>
       {on ? (
         <>
-          <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-sky-950/60" role="meter" aria-label={`${label} budget`} aria-valuemin={0} aria-valuemax={state.limitUsd} aria-valuenow={state.usedUsd}>
+          <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-sky-950/60" role="meter" aria-label={`${label} cloud limit`} aria-valuemin={0} aria-valuemax={state.limitUsd} aria-valuenow={state.usedUsd}>
             <div className={cx("h-full rounded-full", tone)} style={{ width: `${ratio * 100}%` }} />
           </div>
           <div className={cx("mt-1 text-xs", state.exceeded ? "text-red-300" : state.warning ? "text-amber-300" : "text-zinc-500")}>
-            {state.exceeded ? `Over budget (${hint}). New agent turns are paused.` : `${pct(state.usedUsd, state.limitUsd)} used ${hint} · ${money(Math.max(0, state.limitUsd - state.usedUsd))} left`}
+            {state.exceeded ? `At the limit (${hint}). New boxes wait; work already running goes on.` : `${pct(state.usedUsd, state.limitUsd)} used ${hint} · ${money(Math.max(0, state.limitUsd - state.usedUsd))} left`}
           </div>
         </>
       ) : (
@@ -427,7 +439,8 @@ function Row({ name, row, total, muted, nested }: { name: ReactNode; row: UsageB
 
 function BoxesTable({ period }: { period: UsagePeriodReport }) {
   const boxes = period.boxList.filter((b) => b.live || b.costUsd > 0)
-  const estimated = boxes.some((b) => b.source !== "actual")
+  const estimated = boxes.some((b) => b.source === "estimated")
+  const measured = !estimated && boxes.some((b) => b.source === "measured")
   return (
     <section className="min-w-0 rounded-xl border border-zinc-800/80 bg-zinc-900/30">
       <div className="flex items-baseline justify-between gap-3 px-4 pt-4 pb-3">
@@ -453,8 +466,10 @@ function BoxesTable({ period }: { period: UsagePeriodReport }) {
                     className="inline-flex cursor-help items-center gap-1 whitespace-nowrap"
                     title={
                       estimated
-                        ? "Estimated from your rates in Settings → Usage: active CPU hours, keep-alive time and disk. Upstash doesn't report per-box billing to Box Yard."
-                        : "Reported by the box provider."
+                        ? "Partly estimated: some boxes' CPU use wasn't measured, so the time turns ran on them counts, at your rates in Settings → Usage."
+                        : measured
+                          ? "The CPU time each box used (Upstash bills active CPU), at your rates in Settings → Usage, plus keep-alive and disk."
+                          : "Reported by the box provider."
                     }
                   >
                     {estimated ? "Est. cost" : "Cost"} {estimated && <Info className="h-3 w-3" />}

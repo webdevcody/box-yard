@@ -34,7 +34,7 @@ export const CATEGORY_META: Record<UsageCategory, { label: string; color: string
   captains: { label: "Captains", color: "#d95926", hint: "Per-project Captains" },
   agents: { label: "Agents", color: "#199e70", hint: "Task turns you or the Coordinator started" },
   schedules: { label: "Schedule runs", color: "#c98500", hint: "Task turns started by a schedule" },
-  boxes: { label: "Boxes", color: "#d55181", hint: "Upstash Box time and storage, estimated from your rates" },
+  boxes: { label: "Boxes", color: "#d55181", hint: "Upstash box CPU and storage: measured, or priced by Upstash" },
 }
 
 export type PeriodKey = "today" | "7d" | "30d" | "custom"

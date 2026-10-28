@@ -1,7 +1,9 @@
 import { Link } from "wouter"
 import { navigate } from "wouter/use-browser-location"
 import type { Task, WaitFor } from "../../../shared/types"
-import { cx } from "./ui"
+import { useRaiseCloudLimit } from "../lib/queries"
+import { useOpenSettings } from "./SettingsDialog"
+import { Button, cx } from "./ui"
 
 /** A queued task's wait reason cut around the tasks it names (Task.waitFor, in the order the text names them). */
 export function waitReasonParts(reason: string, waitFor: WaitFor[]): (string | WaitFor)[] {
@@ -56,4 +58,26 @@ export function WaitReason({ task, inLink, className }: { task: Pick<Task, "wait
       )}
     </span>
   )
+}
+
+/**
+ * The one-click way out of a wait (Task.waitFix): "Raise today's limit" when today's cloud limit holds back a new box,
+ * or the Usage settings when the monthly one does. Nothing for other waits.
+ */
+export function WaitFixButton({ task, className }: { task: Pick<Task, "waitFix">; className?: string }) {
+  const raise = useRaiseCloudLimit()
+  const openSettings = useOpenSettings()
+  if (task.waitFix === "raise-cloud-limit")
+    return (
+      <Button size="sm" variant="subtle" className={className} loading={raise.isPending} onClick={() => raise.mutate()} data-testid="wait-fix" title="One more day's worth until midnight">
+        Raise today's limit
+      </Button>
+    )
+  if (task.waitFix === "cloud-settings")
+    return (
+      <Button size="sm" variant="subtle" className={className} onClick={() => openSettings("costs")} data-testid="wait-fix">
+        Cloud limits
+      </Button>
+    )
+  return null
 }

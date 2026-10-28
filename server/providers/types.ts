@@ -1,4 +1,4 @@
-import type { WorkerSize } from "../../shared/types.js"
+import type { UsageSource, WorkerSize } from "../../shared/types.js"
 
 export interface ExecResult {
   exitCode: number
@@ -23,7 +23,11 @@ export interface BoxUsageProbe {
   activeMs?: number | null
   /** Actual provider uptime if the API exposes it. */
   uptimeMs?: number | null
-  source: "actual" | "estimated"
+  /** The box's CPU time so far, as the provider bills it (Upstash Box.list `total_cpu_ns`). A running total. */
+  cpuNs?: number | null
+  /** The box's compute charge so far in USD (Upstash Box.list `total_compute_cost_usd`). A running total. */
+  computeUsd?: number | null
+  source: UsageSource
 }
 
 /**
@@ -36,6 +40,12 @@ export interface BoxProvider {
   readonly nodeBin: string
   /** Claude binary inside the box. */
   readonly claudeBin: string
+  /**
+   * Each box is its own cgroup (Upstash Box), so the cgroup CPU counter the box probe reads (`usage_usec` in
+   * /sys/fs/cgroup/cpu.stat) is that box's own CPU time, which is what Upstash bills. Unset: the probe reads a
+   * shared cgroup (local folders share this machine's), so its CPU time says nothing about one box.
+   */
+  readonly ownCgroup?: boolean
   /** Folder inside a box that holds `.boxyard/` and `tasks/`. */
   root(boxId: string): string
   /**
