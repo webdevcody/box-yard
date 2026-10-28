@@ -300,9 +300,10 @@ export function NoticeCard({ taskId, className, children }: { taskId: string; cl
  * (lib/chatUpdates.ts ATTENTION_KINDS), and the colour keeps them apart from the quiet chips around them.
  */
 const NOTICE_ACCENT: Partial<Record<NoticeKind, string>> = {
-  needs_input: "border-amber-500/40 bg-amber-500/5",
-  failed: "border-red-500/40 bg-red-950/20",
-  merge: "border-merged-fg/40 bg-merged/5",
+  // `!`: NOTICE_CLASS sets the same properties.
+  needs_input: "border-amber-500/40! bg-amber-500/5!",
+  failed: "border-red-500/40! bg-red-950/20!",
+  merge: "border-merged-fg/40! bg-merged/5!",
 }
 
 /** A notice in the Coordinator chat (and Zen): a NoticeLayout, in a NoticeCard when it's about a task. */

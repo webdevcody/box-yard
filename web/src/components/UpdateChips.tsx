@@ -72,7 +72,8 @@ const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
             <span className="min-w-0 max-w-[55%] shrink truncate font-medium text-zinc-300">{v.source.label}</span>
           ))}
         {v.verb && <span className="max-w-[45%] min-w-0 shrink-[0.5] truncate text-zinc-400">{v.verb}</span>}
-        {v.preview && (
+        {/* Open, the text is right below: no preview. */}
+        {v.preview && !open && (
           <span data-testid="update-chip-preview" className={cx("min-w-0 flex-1 truncate", v.source ? "text-zinc-600" : "text-zinc-400")}>
             {v.source || v.verb ? "· " : ""}
             {v.preview}
