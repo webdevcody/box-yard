@@ -13,10 +13,11 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPc
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
+import { CloudMeter } from "./CloudMeter"
 import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
-import { PublishedCard } from "./PublishedNotices"
-import { groupPublished } from "../lib/publishedNotices"
+import { ChatRows, useCoordinatorRows } from "./UpdateChips"
+import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider } from "./SideThread"
 import { COORDINATOR_CHAT } from "../lib/threads"
@@ -92,6 +93,10 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const tail = useTail(messages, "chat")
   // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
   const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
+  // Updates fold into chips over the whole thread, so the rendered tail's rows don't change as it grows or trims.
+  const all = useMemo(() => splitQueued(messages).settled, [messages])
+  const rows = useCoordinatorRows(all)
+  const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
     if (projectId) return projects.data?.find((p) => p.id === projectId) ?? null
@@ -133,8 +138,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         <div className="relative flex min-w-0 flex-1 flex-col">
           <header
             className={cx(
-              // A container, so the voice chip shrinks to an icon in a narrow header (see VoiceControl).
-              "@container flex items-center gap-2",
+              // A container, so the cloud meter and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
+              // A column: the controls' row, then (in a narrow header) the cloud meter's strip.
+              "@container flex flex-col justify-center",
               // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
               zen ? "zen-column min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] sm:overflow-hidden sm:pt-[max(0.5rem,env(safe-area-inset-top))]"
                 : onClose ? "min-h-14 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-4"
@@ -142,46 +148,51 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 : "border-b border-zinc-900 px-4 py-3",
             )}
           >
-            <AgentIcon busy={Boolean(busy.data)} />
-            {zen && <RunningTasksBadge />}
-            <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
-              {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-              {zen && <span className="max-sm:hidden">Box Yard </span>}
-              Coordinator
+            <div className="flex min-w-0 items-center gap-2">
+              <AgentIcon busy={Boolean(busy.data)} />
+              {zen && <RunningTasksBadge />}
+              {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
+              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
+                {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+                {zen && <span className="max-sm:hidden">Box Yard </span>}
+                Coordinator
+              </div>
+              <CloudMeter variant="inline" />
+              <div className="ml-auto flex shrink-0 items-center gap-1">
+                {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
+                <VoiceControl />
+                {!zen && (
+                  <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
+                    <Expand className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
+                  <SettingsIcon className="h-3.5 w-3.5" />
+                </Button>
+                {busy.data && (
+                  <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
+                    <Square className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {zen && (
+                  <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
+                    <Shrink className="h-3.5 w-3.5" />
+                  </Button>
+                )}
+                {onClose && !zen && (
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    title="Close"
+                    aria-label="Close the Coordinator"
+                    className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
             </div>
-            <div className="ml-auto flex shrink-0 items-center gap-1">
-              {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
-              <VoiceControl />
-              {!zen && (
-                <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
-                  <Expand className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
-                <SettingsIcon className="h-3.5 w-3.5" />
-              </Button>
-              {busy.data && (
-                <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
-                  <Square className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              {zen && (
-                <Button size="sm" variant="ghost" title={`Leave Zen mode (Esc or ${ZEN_SHORTCUT_LABEL})`} aria-label="Leave Zen mode" onClick={leaveZen}>
-                  <Shrink className="h-3.5 w-3.5" />
-                </Button>
-              )}
-              {onClose && !zen && (
-                <button
-                  type="button"
-                  onClick={onClose}
-                  title="Close"
-                  aria-label="Close the Coordinator"
-                  className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-            </div>
+            <CloudMeter variant="strip" />
           </header>
           {!zen && (
             <ContextMeter
@@ -225,7 +236,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                <ChatLines messages={settled} onFollowUp={followUp} />
+                <ChatRows rows={shown} onFollowUp={followUp} />
                 <StreamingReply busy={Boolean(busy.data)} />
                 {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
               </StickyScroll>
@@ -321,10 +332,9 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
   )
 }
 
-/** The thread, with back-to-back "published" file notices folded into one card per task. */
+/** Messages Cody queued mid-turn. */
 const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {
-  const rows = useMemo(() => groupPublished(messages), [messages])
-  return rows.map((r) => (r.type === "files" ? <PublishedCard key={r.id} group={r.group} /> : <ChatLine key={r.id} m={r.message} onFollowUp={onFollowUp} />))
+  return messages.map((m) => <ChatLine key={m.id} m={m} onFollowUp={onFollowUp} />)
 })
 
 /** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */

@@ -155,7 +155,7 @@ describe("update_settings", () => {
         { key: "slotsPerBox", before: 1, after: 3 },
         { key: "maxBoxes", before: 2, after: 20 },
         { key: "runpod.maxHourlyUsd", before: 1, after: 2 },
-        { key: "budget.dailyUsd", before: 0, after: 5 },
+        { key: "budget.dailyUsd", before: 10, after: 5 },
         { key: "voice.openai.speed", before: 1, after: 1.25 },
       ]),
     )

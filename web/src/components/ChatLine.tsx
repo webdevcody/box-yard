@@ -13,6 +13,8 @@ import { QueuedChatMessage } from "./QueuedMessages"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
+import { ReplySources } from "./ReplySources"
+import type { UpdateSource } from "../lib/chatUpdates"
 import type { ChatMessage } from "../../../shared/types"
 
 /** Markdown that folds behind "Show more" when it's long. */
@@ -267,7 +269,7 @@ export function FullReplyLink({ taskId }: { taskId: string }) {
  * own links (a PR, a preview) would nest inside it and the outer link would swallow their clicks. Its own links
  * and buttons (a "Show all" toggle) keep their clicks.
  */
-export function NoticeCard({ taskId, children }: { taskId: string; children: ReactNode }) {
+export function NoticeCard({ taskId, className, children }: { taskId: string; className?: string; children: ReactNode }) {
   const [, navigate] = useLocation()
   const href = `/tasks/${taskId}`
   const open = (e: MouseEvent | KeyboardEvent) => {
@@ -287,11 +289,22 @@ export function NoticeCard({ taskId, children }: { taskId: string; children: Rea
       onClick={open}
       onAuxClick={open}
       onKeyDown={open}
-      className={cx(NOTICE_CLASS, "cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none")}
+      className={cx(NOTICE_CLASS, "cursor-pointer hover:opacity-90 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none", className)}
     >
       {children}
     </div>
   )
+}
+
+/**
+ * Notices that wait on Cody or went wrong get a coloured edge: the Coordinator chat never folds them into a chip
+ * (lib/chatUpdates.ts ATTENTION_KINDS), and the colour keeps them apart from the quiet chips around them.
+ */
+const NOTICE_ACCENT: Partial<Record<NoticeKind, string>> = {
+  // `!`: NOTICE_CLASS sets the same properties.
+  needs_input: "border-amber-500/40! bg-amber-500/5!",
+  failed: "border-red-500/40! bg-red-950/20!",
+  merge: "border-merged-fg/40! bg-merged/5!",
 }
 
 /** A notice in the Coordinator chat (and Zen): a NoticeLayout, in a NoticeCard when it's about a task. */
@@ -313,9 +326,16 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
       }
     />
   )
+  const accent = NOTICE_ACCENT[n.kind]
   return (
-    <div className={MESSAGE_BLOCK}>
-      {taskId ? <NoticeCard taskId={taskId}>{body}</NoticeCard> : <div className={NOTICE_CLASS}>{body}</div>}
+    <div id={`chat-${m.id}`} data-testid="notice-card" data-attention={accent ? n.kind : undefined} className={MESSAGE_BLOCK}>
+      {taskId ? (
+        <NoticeCard taskId={taskId} className={accent}>
+          {body}
+        </NoticeCard>
+      ) : (
+        <div className={cx(NOTICE_CLASS, accent)}>{body}</div>
+      )}
       <MessageActions text={m.content} anchorId={m.id} />
     </div>
   )
@@ -324,17 +344,18 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
 /**
  * A chat message. Its root names the message (`data-chat-id`): a selection in it can start a side thread on it, and
  * the threads it has show as markers under it (SideThread.tsx; nothing outside a chat with threads).
+ * `sources`: on a Coordinator reply, the updates it read (lib/chatUpdates.ts), named in a "from:" line under it.
  */
-export const ChatLine = memo(function ChatLine({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
+export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
   return (
     <div data-chat-id={m.id}>
-      <ChatLineBody m={m} onFollowUp={onFollowUp} />
+      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} />
       {m.role !== "tool" && <ThreadMarkers m={m} />}
     </div>
   )
 })
 
-function ChatLineBody({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message: string) => void }) {
+function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
@@ -404,8 +425,9 @@ function ChatLineBody({ m, onFollowUp }: { m: ChatMessage; onFollowUp: (message:
     )
   }
   return (
-    <div data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
+    <div id={`chat-${m.id}`} data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
+      {sources && <ReplySources sources={sources} />}
       <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
       <MessageActions text={m.content} anchorId={m.id} />
     </div>

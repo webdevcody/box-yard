@@ -39,6 +39,13 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
 const LEADING_EMOJI = /^\s*(\p{Extended_Pictographic})️?\s*/u
 const URL_RE = /(https?:\/\/[^\s<>()]+|\/artifacts\/[^\s<>()]+)/g
 
+/** A notice's kind from its leading emoji (and meta.kind for a compaction), without parsing the rest. */
+export function noticeKind(content: string, meta: Record<string, unknown> | null = null): NoticeKind {
+  if (meta?.kind === "compaction") return "compaction"
+  const emoji = content.match(LEADING_EMOJI)
+  return emoji ? (EMOJI_KIND[emoji[1]!] ?? "info") : "info"
+}
+
 /** Markdown to one line of plain text: no emphasis markers, link text instead of link syntax. */
 export function plainText(md: string): string {
   return md

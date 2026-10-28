@@ -6,11 +6,14 @@
  *   npx tsx scripts/smoke-box.ts --box <id> # run the checks against an existing box
  *
  * Checks: create + worker setup, exec, file write/read, a background process that
- * outlives the exec call, a real `claude -p` turn, cloning a private repo with
- * GITHUB_TOKEN, `gh` auth, public URLs, and pause/resume.
+ * outlives the exec call, no credentials stored on the box, a real `claude -p` turn,
+ * cloning a private repo with the turn's GITHUB_TOKEN through the box's credential
+ * helper, `gh` auth, public URLs, and pause/resume.
  */
 import { config } from "../server/config.js"
 import { UpstashProvider } from "../server/providers/upstash.js"
+import { q } from "../server/providers/types.js"
+import { turnEnv } from "../server/turnCredentials.js"
 
 const args = process.argv.slice(2)
 const keep = args.includes("--keep")
@@ -19,6 +22,9 @@ const repo = process.env.SMOKE_REPO ?? "webdevcody/box-yard"
 
 if (!config.upstashBoxApiKey) throw new Error("UPSTASH_BOX_API_KEY is not set")
 const p = new UpstashProvider(config)
+// A box holds no credentials: like a turn, each command that needs them gets them (task.json in a real turn).
+const creds = turnEnv({}, { claude: { CLAUDE_CODE_OAUTH_TOKEN: config.claudeOauthToken, ANTHROPIC_API_KEY: config.anthropicApiKey }, githubToken: config.githubToken })
+const withCreds = `export ${Object.entries(creds.env).map(([k, v]) => `${k}=${q(v)}`).join(" ")}; `
 const results: { name: string; ok: boolean; detail: string; ms: number }[] = []
 
 async function check(name: string, fn: () => Promise<string>) {
@@ -50,9 +56,11 @@ if (!boxId) process.exit(1)
 await check("health", async () => p.health(boxId))
 await check("exec", async () => sh(boxId, "echo hello && whoami && pwd && node --version && git --version"))
 await check("claude --version", async () => sh(boxId, "claude --version"))
-await check("env passed to box", async () =>
-  sh(boxId, 'for v in CLAUDE_CODE_OAUTH_TOKEN GITHUB_TOKEN IS_SANDBOX; do [ -n "${!v}" ] && echo "$v=set" || echo "$v=MISSING"; done'),
-)
+await check("no credentials in the box's env or git config", async () => {
+  const out = await sh(boxId, 'for v in CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GITHUB_TOKEN GH_TOKEN; do [ -n "${!v}" ] && echo "$v=set"; done; [ -e "$HOME/.git-credentials" ] && echo "~/.git-credentials exists"; [ -n "$IS_SANDBOX" ] || echo "IS_SANDBOX missing"; true')
+  if (out) throw new Error(out)
+  return "none"
+})
 await check("write + read file", async () => {
   await p.writeFile(boxId, `${p.root()}/.boxyard/smoke.txt`, "smoke ✓")
   const back = (await p.readFile(boxId, `${p.root()}/.boxyard/smoke.txt`)).toString("utf8")
@@ -75,16 +83,16 @@ await check("hold keeps a stream open", async () => {
 await check("real claude turn", async () => {
   const out = await sh(
     boxId,
-    `cd ${p.root()} && mkdir -p .boxyard/cc && CLAUDE_CONFIG_DIR=${p.root()}/.boxyard/cc claude -p 'Reply with exactly: pong' --output-format json`,
+    `${withCreds}cd ${p.root()} && mkdir -p .boxyard/cc && CLAUDE_CONFIG_DIR=${p.root()}/.boxyard/cc claude -p 'Reply with exactly: pong' --output-format json`,
   )
   const j = JSON.parse(out.split("\n").filter(Boolean).pop()!)
   if (j.is_error) throw new Error(out.slice(0, 400))
   return `result=${JSON.stringify(j.result)} session=${j.session_id}`
 })
 await check(`clone private repo ${repo}`, async () =>
-  sh(boxId, `cd /tmp && rm -rf smoke-clone && git clone -q --depth 1 https://x-access-token:$GITHUB_TOKEN@github.com/${repo}.git smoke-clone && git -C smoke-clone log --oneline -1`),
+  sh(boxId, `${withCreds}cd /tmp && rm -rf smoke-clone && GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 https://github.com/${repo}.git smoke-clone && git -C smoke-clone log --oneline -1`),
 )
-await check("gh cli", async () => sh(boxId, "command -v gh >/dev/null && GH_TOKEN=$GITHUB_TOKEN gh api user --jq .login || echo 'gh not installed'"))
+await check("gh cli", async () => sh(boxId, `${withCreds}command -v gh >/dev/null && gh api user --jq .login || echo 'gh not installed'`))
 await check("public url", async () => {
   await sh(boxId, `cd /tmp && (nohup node -e "require('http').createServer((q,s)=>s.end('box-ok')).listen(3999)" >/dev/null 2>&1 &); sleep 1; echo up`)
   const url = await p.publicUrl(boxId, 3999)
