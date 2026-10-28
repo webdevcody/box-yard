@@ -459,6 +459,7 @@ export class Orchestrator {
       effort: () => this.settings.get().orchestratorEffort,
       compactionsDir: this.compactionsDir,
       caller: { kind: "coordinator" },
+      claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
     }
   }

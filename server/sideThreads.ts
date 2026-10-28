@@ -23,6 +23,7 @@ import type { SettingsStore } from "./settings.js"
 import type { McpCaller } from "./mcp.js"
 import { listCompactions, readCompactionInfo, summaryBody } from "./compactions.js"
 import { resultUsageObject } from "./usage.js"
+import { serverClaudeEnv } from "./turnCredentials.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
 import type { ChatMessage, SideThread, SideThreadMessage } from "../shared/types.js"
@@ -90,6 +91,8 @@ export interface ThreadHost {
   compactionsDir: string
   /** The chat's MCP caller; the thread gets a read-only one like it. */
   caller: McpCaller
+  /** The chat's own Claude login (a Captain's project identity's), or null for Settings › Credentials'. */
+  claudeLogin(): Record<string, string> | null
   /** How its runs are counted in usage. */
   usage: { source: "orchestrator" | "captain"; projectId: string | null }
 }
@@ -440,9 +443,8 @@ export class SideThreads {
         host.effort(),
       ]
       const [bin, ...pre] = this.c.claudeBin.split(" ")
-      const env: NodeJS.ProcessEnv = { ...process.env, DISABLE_AUTOUPDATER: "1" }
-      for (const k of Object.keys(env)) if (k === "CLAUDECODE" || /^CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING)/.test(k)) delete env[k]
-      Object.assign(env, this.settings.credentials.claudeEnv())
+      // Like its chat's own `claude`: the chat's Claude login, and never the key identities' secrets are encrypted with.
+      const env = serverClaudeEnv(host.claudeLogin(), this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {

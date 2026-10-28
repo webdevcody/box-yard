@@ -622,6 +622,7 @@ class Captain {
       effort: () => this.settings.get().captainEffort,
       compactionsDir: this.compactionsDir,
       caller: { kind: "captain", projectId: id },
+      claudeLogin: () => this.claudeLogin(),
       usage: { source: "captain", projectId: id },
     }
   }

@@ -182,6 +182,31 @@ describe("identities over the API", () => {
     }
   })
 
+  it("run a side thread like its chat: a Captain's on its identity's Claude login, the Coordinator's on Settings', and neither gets the secret key", async () => {
+    process.env.BOXYARD_SECRET_KEY = "a-passphrase-for-this-test"
+    try {
+      const r = await start()
+      const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+      await r.call("PUT", `/api/identities/${acme.id}/claude`, { kind: "api_key", value: "acme-key-0001" })
+      const project = await r.call<Project>("POST", "/api/projects", { name: "acme-app", identityId: acme.id })
+      await r.call("POST", `/api/projects/${project.id}/captain/messages`, { content: "status" })
+      const reply = await waitFor(async () => (await r.call<{ id: string; role: string }[]>("GET", `/api/projects/${project.id}/captain/messages`)).find((m) => m.role === "assistant") ?? null, "the Captain's reply")
+      await waitFor(() => r.turns(true)[0] ?? null, "the Captain's run")
+      await r.call("POST", "/api/threads", { projectId: project.id, anchorId: reply.id, quote: "status", question: "Why?" })
+      const thread = await waitFor(() => r.turns(true)[1] ?? null, "the Captain side thread's run")
+      expect(thread.filter((l) => /^(ANTHROPIC|CLAUDE_CODE_OAUTH)/.test(l) || l === "SECRET_KEY_SET")).toEqual(["ANTHROPIC_API_KEY=acme-key-0001"])
+
+      await r.call("POST", "/api/chat", { content: "status" })
+      const chat = await waitFor(async () => (await r.call<{ id: string; role: string }[]>("GET", "/api/chat")).find((m) => m.role === "assistant") ?? null, "the Coordinator's reply")
+      const before = r.turns().length
+      await r.call("POST", "/api/threads", { anchorId: chat.id, quote: "status", question: "Why?" })
+      const coordinator = await waitFor(() => r.turns()[before] ?? null, "the Coordinator side thread's run")
+      expect(coordinator.filter((l) => /^(ANTHROPIC|CLAUDE_CODE_OAUTH)/.test(l) || l === "SECRET_KEY_SET")).toEqual(["ANTHROPIC_API_KEY=global-key"])
+    } finally {
+      delete process.env.BOXYARD_SECRET_KEY
+    }
+  })
+
   it("keep projects on runners their identity allows, and move them to Default when it's removed", async () => {
     const r = await start()
     const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme", runners: ["docker"] })
