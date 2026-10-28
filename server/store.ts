@@ -14,6 +14,7 @@ import type { ProjectGpuMachine } from "../shared/runpod.js"
 import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
+import { AUTO_SIZE_WINDOW_MS, type TurnPeak } from "../shared/autoSize.js"
 import type {
   AppNotification,
   Artifact,
@@ -85,6 +86,8 @@ export interface TurnFlags {
   interrupts?: number
   /** How many local-runner turns in a row this computer's sleep cut off, each resumed instead of failed (#104). */
   sleeps?: number
+  /** A turn that ran out of memory was retried on a bigger box (auto-sizing); a second one fails as usual. */
+  oomRetries?: number
   /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
   hookIds?: string[]
   /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
@@ -381,6 +384,20 @@ export interface ClaudeUsageRow {
   reported_cost_usd: number
   cost_estimated: number
   raw_usage_json: string
+}
+
+interface TurnPeakRow {
+  turn_id: string
+  project_id: string
+  task_id: string
+  box_id: string
+  box_size: string
+  at: number
+  mem_peak_bytes: number | null
+  cpu_peak_cores: number | null
+  cpu_busy_cores: number | null
+  disk_peak_bytes: number | null
+  oom: number
 }
 
 interface BoxUsageIntervalRow {
@@ -2721,6 +2738,35 @@ export class Store {
 
   removeBox(id: string) {
     this.db.prepare("DELETE FROM boxes WHERE id = ?").run(id)
+  }
+
+  // ---------- measured turns (auto-sizing) ----------
+
+  /** One measured turn (shared/autoSize.ts). Drops rows past the 14-day window as it goes. */
+  recordTurnPeak(row: TurnPeak & { turnId: string; projectId: string; taskId: string; boxId: string }) {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO turn_peaks (turn_id, project_id, task_id, box_id, box_size, at, mem_peak_bytes, cpu_peak_cores, cpu_busy_cores, disk_peak_bytes, oom)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.turnId, row.projectId, row.taskId, row.boxId, row.boxSize, row.at, row.memPeakBytes, row.cpuPeakCores, row.cpuBusyCores, row.diskPeakBytes, row.oom ? 1 : 0)
+    this.db.prepare("DELETE FROM turn_peaks WHERE at < ?").run(Date.now() - AUTO_SIZE_WINDOW_MS)
+  }
+
+  /** A project's measured turns in the last 14 days, oldest first. */
+  turnPeaks(projectId: string): TurnPeak[] {
+    const rows = this.db
+      .prepare("SELECT * FROM turn_peaks WHERE project_id = ? AND at >= ? ORDER BY at ASC")
+      .all(projectId, Date.now() - AUTO_SIZE_WINDOW_MS) as TurnPeakRow[]
+    return rows.map((r) => ({
+      boxSize: normalizeBoxSize(r.box_size as BoxSize),
+      at: r.at,
+      memPeakBytes: r.mem_peak_bytes,
+      cpuPeakCores: r.cpu_peak_cores,
+      cpuBusyCores: r.cpu_busy_cores,
+      diskPeakBytes: r.disk_peak_bytes,
+      oom: Boolean(r.oom),
+    }))
   }
 
   // ---------- schedules ----------
