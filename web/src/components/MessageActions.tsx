@@ -4,8 +4,8 @@
 // absolutely placed inside the message (no overlay, no portal), so it never moves the layout or catches other taps.
 import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject, type SyntheticEvent } from "react"
 import { createPortal } from "react-dom"
-import { Check, Copy, MessageSquarePlus, MoreHorizontal, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
-import { useQuoteToTask } from "./SelectionToTask"
+import { Check, Copy, MessageCircleQuestion, MessageSquarePlus, MoreHorizontal, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
+import { useAskAbout, useQuoteToTask } from "./SelectionToTask"
 import { toast } from "../lib/toast"
 import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
@@ -22,8 +22,13 @@ const BUTTON =
 /** Keeps the toolbar's clicks and keys from the row under it (a notice card opens its task, a notice row folds). */
 const stop = (e: SyntheticEvent) => e.stopPropagation()
 
-export const MessageActions = memo(function MessageActions({ text, className }: { text: string; className?: string }) {
+/** `anchorId`: the chat message's id, so Ask can start a side thread on it (in a chat that has them). */
+export const MessageActions = memo(function MessageActions({ text, anchorId, className }: { text: string; anchorId?: string; className?: string }) {
   const quote = useQuoteToTask()
+  const askAbout = useAskAbout()
+  const ask = anchorId ? askAbout : null
+  const askButton = useRef<HTMLButtonElement>(null)
+  const [asking, setAsking] = useState(false)
   const respond = useRef<HTMLButtonElement>(null)
   const more = useRef<HTMLButtonElement>(null)
   const [responding, setResponding] = useState(false)
@@ -85,7 +90,7 @@ export const MessageActions = memo(function MessageActions({ text, className }: 
       role="toolbar"
       aria-label="Message actions"
       data-message-actions
-      data-open={responding || menu || tapped || undefined}
+      data-open={responding || asking || menu || tapped || undefined}
       onClick={stop}
       onAuxClick={stop}
       onKeyDown={stop}
@@ -98,6 +103,25 @@ export const MessageActions = memo(function MessageActions({ text, className }: 
         className,
       )}
     >
+      {ask && (
+        <button
+          ref={askButton}
+          type="button"
+          data-testid="message-ask"
+          aria-haspopup="dialog"
+          aria-expanded={asking}
+          aria-label="Ask about this message in a side thread"
+          title="Ask about this message in a side thread"
+          onClick={() => {
+            setMenu(false)
+            setAsking(!asking)
+            ask.open(text, anchorId!, askButton.current!, () => setAsking(false))
+          }}
+          className={BUTTON}
+        >
+          <MessageCircleQuestion className="h-3.5 w-3.5" />
+        </button>
+      )}
       {quote && (
         <button
           ref={respond}

@@ -61,6 +61,7 @@ export function Composer({
   panelRef,
   handleRef,
   historyKey,
+  files: allowFiles = true,
 }: {
   onSubmit: (text: string, attachments: Attachment[]) => void | Promise<unknown>
   placeholder: string
@@ -71,6 +72,8 @@ export function Composer({
   panelRef: RefObject<HTMLElement | null>
   /** Whose sent prompts Up/Down walk through ("coordinator", "captain:<projectId>", "task:<taskId>"). */
   historyKey?: string
+  /** false: text only (a side thread): no attach button, and pasted or dropped files are left alone. */
+  files?: boolean
 }) {
   const [value, setValue] = useState("")
   // An older prompt shown as a gray ghost while browsing with Up/Down; the value stays empty until Enter takes it.
@@ -259,6 +262,7 @@ export function Composer({
   )
 
   const onPaste = (e: ClipboardEvent) => {
+    if (!allowFiles) return
     const pasted = Array.from(e.clipboardData.files)
     if (!pasted.length) return
     e.preventDefault()
@@ -270,7 +274,7 @@ export function Composer({
   addRef.current = add
   useEffect(() => {
     const panel = panelRef.current
-    if (!panel) return
+    if (!panel || !allowFiles) return
     const hasFiles = (e: globalThis.DragEvent) => Boolean(e.dataTransfer?.types?.includes("Files"))
     let depth = 0
     const enter = (e: globalThis.DragEvent) => {
@@ -311,7 +315,7 @@ export function Composer({
       window.removeEventListener("dragover", stray)
       window.removeEventListener("drop", stray)
     }
-  }, [panelRef])
+  }, [panelRef, allowFiles])
 
   return (
     <form
@@ -447,9 +451,11 @@ export function Composer({
               e.target.value = ""
             }}
           />
-          <Button type="button" variant="ghost" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" title="Attach files" onClick={() => picker.current?.click()}>
-            <Paperclip className="h-4 w-4" />
-          </Button>
+          {allowFiles && (
+            <Button type="button" variant="ghost" size="sm" className="h-11 w-11 !p-0 sm:h-8 sm:w-8" title="Attach files" onClick={() => picker.current?.click()}>
+              <Paperclip className="h-4 w-4" />
+            </Button>
+          )}
           <MicButton machine={dictation} />
           <div className="ml-auto flex items-center gap-1">
             {(overflowing || expanded) && (

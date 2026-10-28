@@ -11,6 +11,7 @@ import { placeMessage } from "./queued"
 import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
 import { onResume } from "./resume"
+import { applyThreadEvent } from "./threads"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 import type { RunPodStatus } from "../../../shared/runpod"
 import type { DockerStatus } from "../../../shared/docker"
@@ -59,6 +60,10 @@ export function useServerEvents(enabled: boolean): Connection {
             let text = ev.text
             while (events[i + 1]?.type === "chat.delta") text += (events[++i] as { text: string }).text
             apply({ type: "chat.delta", text })
+          } else if (ev.type === "thread.delta") {
+            let text = ev.text
+            while (events[i + 1]?.type === "thread.delta" && (events[i + 1] as { threadId: string }).threadId === ev.threadId) text += (events[++i] as { text: string }).text
+            apply({ ...ev, text })
           } else apply(ev)
         }
       })
@@ -100,6 +105,7 @@ export function useServerEvents(enabled: boolean): Connection {
     }
 
     const apply = (ev: UiEvent) => {
+      if (applyThreadEvent(qc, ev)) return
       switch (ev.type) {
         case "task":
           qc.setQueryData<Task[]>(keys.tasks, (list) => (list ? upsert(list, ev.task) : list))
