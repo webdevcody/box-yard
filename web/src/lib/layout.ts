@@ -28,3 +28,15 @@ export function coordinatorDock(viewport: number, sidebar: number, saved: number
   const docked = viewport >= SIDEBAR_DOCKED && max >= CHAT_MIN
   return { docked, width: Math.max(CHAT_MIN, Math.min(saved, max)), max: Math.max(CHAT_MIN, max) }
 }
+
+/** The room an open side thread asks for beside the docked Coordinator, and the narrowest it may squeeze the page to. */
+export const THREAD_ROOM = 416
+export const MAIN_MIN_THREAD = 320
+
+/**
+ * The docked Coordinator's width while a side thread is open: wider by THREAD_ROOM (the panel slides left and the
+ * thread takes the right), as far as the page keeps MAIN_MIN_THREAD; never narrower than without it.
+ */
+export function threadDockWidth(viewport: number, sidebar: number, width: number): number {
+  return Math.max(width, Math.min(width + THREAD_ROOM, viewport - sidebar - MAIN_MIN_THREAD))
+}
