@@ -16,9 +16,9 @@ import { AppLink, Elapsed, PrChip, StatusBadge, cx } from "./ui"
 const NO_TASKS: Task[] = []
 
 /**
- * The badge. It re-renders only when the count changes (useRunningCount), and its button is always 44px square
- * (pulled in by -mx-2 so it sits 12px from the robot and the title), so a count going 0 → 1 or 9 → 10 never moves
- * the title. Dimmed at 0.
+ * The badge. It re-renders only when the count changes (useRunningCount). Its button is always a 44px tap target,
+ * pulled in by -mx-3 so it takes only the circle's 20px of the row, 8px from the robot and the title; the circle
+ * grows inside it ("99+"), so a count going 0 → 1 or 9 → 10 never moves the title. Dimmed at 0.
  */
 export const RunningTasksBadge = memo(function RunningTasksBadge() {
   const count = useRunningCount().data ?? 0
@@ -36,7 +36,7 @@ export const RunningTasksBadge = memo(function RunningTasksBadge() {
         aria-label={`${label}: show them`}
         title={`${label} (queued, starting or working)`}
         onClick={() => setOpen(!open)}
-        className="group -mx-2 grid h-11 w-11 shrink-0 place-items-center rounded-full focus-visible:outline-none"
+        className="group -mx-3 grid h-11 w-11 shrink-0 place-items-center rounded-full focus-visible:outline-none"
       >
         <span
           className={cx(
