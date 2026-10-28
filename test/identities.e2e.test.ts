@@ -159,10 +159,20 @@ describe("identities over the API", () => {
     const saidToo = r.yard.store.listTaskMessages(other.id).map((m) => `${m.content} ${JSON.stringify(m.meta)}`)
     expect(saidToo.some((t) => t.includes("GITHUB_TOKEN=[redacted] ANTHROPIC_API_KEY=[redacted]"))).toBe(true)
 
+    // A side thread's answers and tool results too; what Cody asks is kept as written.
+    const thread = r.yard.store.createSideThread({ projectId: null, anchorId: "chat_anchor", quote: "env", sessionId: "s1" })
+    r.yard.store.addSideThreadMessage(thread.id, "user", "Is global-gh the token?")
+    r.yard.store.addSideThreadMessage(thread.id, "assistant", "It printed GITHUB_TOKEN=tok-acme-0002")
+    r.yard.store.addSideThreadMessage(thread.id, "tool", "Read", { output: "CLAUDE_CODE_OAUTH_TOKEN=acme-oauth-0001" })
+    const asked = r.yard.store.listSideThreadMessages(thread.id)
+    expect(asked.map((m) => m.content)).toEqual(["Is global-gh the token?", "It printed GITHUB_TOKEN=[redacted]", "Read"])
+    expect(asked[2]!.meta).toEqual({ output: "CLAUDE_CODE_OAUTH_TOKEN=[redacted]" })
+
     const everything = JSON.stringify([
       ...[task.id, other.id].flatMap((id) => r.yard.store.listTaskMessages(id)),
       ...r.yard.store.listCaptainMessages(project.id),
       ...r.yard.store.listChat(500),
+      ...asked.slice(1),
     ])
     for (const secret of ["tok-acme-0002", "acme-oauth-0001", "global-gh", "global-key"]) expect(everything).not.toContain(secret)
   })

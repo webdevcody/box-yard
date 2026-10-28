@@ -2189,6 +2189,7 @@ export class Store {
   }
 
   addSideThreadMessage(threadId: string, role: SideThreadRole, content: string, meta: Record<string, unknown> | null = null, id?: string): SideThreadMessage {
+    ;({ content, meta } = this.scrub(role, content, meta))
     const msg: SideThreadMessage = { id: id ?? newId("thm"), threadId, role, content, meta, createdAt: Date.now() }
     this.db.transaction(() => {
       this.db
