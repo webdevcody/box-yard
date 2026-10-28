@@ -18,13 +18,15 @@ export interface BoxMemory {
   cpuUsageUsec?: number | null
   /** CPUs the cgroup may use (cpu.max quota / period); absent when unlimited or unknown. */
   cpuLimit?: number | null
+  /** Processes the cgroup's OOM killer has killed so far (memory.events oom_kill); absent without it. */
+  oomKills?: number | null
 }
 
 /** Separates the memory/load part from the df lines in dfCommand's output. */
 export const MEM_MARK = "@@boxyard-mem"
 
 /**
- * Prints the cgroup v2 memory files and CPU use and limit, /proc/meminfo's totals, nproc and /proc/loadavg as `key value` lines.
+ * Prints the cgroup v2 memory files, its OOM kill count and CPU use and limit, /proc/meminfo's totals, nproc and /proc/loadavg as `key value` lines.
  * Always exits 0: a box without some of them still reports the rest.
  */
 export const memCommand = () =>
@@ -33,6 +35,7 @@ export const memCommand = () =>
     `for f in memory.current memory.max; do [ -r /sys/fs/cgroup/$f ] && echo "$f $(cat /sys/fs/cgroup/$f)"; done`,
     `grep -s '^inactive_file ' /sys/fs/cgroup/memory.stat`,
     `grep -s '^usage_usec ' /sys/fs/cgroup/cpu.stat`,
+    `grep -s '^oom_kill ' /sys/fs/cgroup/memory.events`,
     `[ -r /sys/fs/cgroup/cpu.max ] && echo "cpu.max $(cat /sys/fs/cgroup/cpu.max)"`,
     `grep -s -E '^(MemTotal|MemAvailable):' /proc/meminfo`,
     `echo "loadavg $(cat /proc/loadavg 2>/dev/null)"`,
@@ -77,6 +80,7 @@ export function parseMemory(stdout: string): BoxMemory | null {
   const load1 = num("loadavg")
   const cpus = num("nproc")
   const usage = num("usage_usec")
+  const oomKills = num("oom_kill")
   const [quota, period] = (kv.get("cpu.max") ?? "").split(/\s+/).map(Number)
   const cpuLimit = quota && period && quota > 0 && period > 0 ? quota / period : null
   return {
@@ -86,6 +90,7 @@ export function parseMemory(stdout: string): BoxMemory | null {
     cpus: cpus && cpus > 0 ? cpus : 1,
     ...(usage !== null && usage >= 0 ? { cpuUsageUsec: usage } : {}),
     ...(cpuLimit ? { cpuLimit } : {}),
+    ...(oomKills !== null && oomKills >= 0 ? { oomKills } : {}),
   }
 }
 

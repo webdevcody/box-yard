@@ -698,7 +698,7 @@ function LimitsPanel({
       <Row
         id={fid("ws")}
         label="Worker size"
-        help="Upstash Box size for newly created boxes, unless a project sets its own preferred size. Existing boxes keep their size until resized from the Boxes page."
+        help="Upstash Box size for newly created boxes, unless a project sets its own preferred size or auto-sizing (below) picked one from its runs. Existing boxes keep their size until resized from the Boxes page."
         hint={hint("workerSize")}
       >
         <Select id={fid("ws")} className="w-full" value={s.workerSize} onChange={(e) => set("workerSize", e.target.value as WorkerSize)}>
@@ -711,13 +711,13 @@ function LimitsPanel({
       </Row>
       <Row
         id={fid("are")}
-        label="Allow the Coordinator to resize boxes automatically"
-        help="The Coordinator, and Captains for boxes their project uses, may resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running tasks for it, and every resize they make sends you a notice with their reason."
+        label="Size and resize boxes automatically"
+        help="Box Yard sizes each project's new boxes from what its runs used (from 3 runs: the smallest with RAM for 1.25 × the peak of the last 14 days, bigger for disk or busy CPU), unless the project sets its own Box size, and a turn that runs out of memory carries on once on a bigger box. The Coordinator, and Captains for boxes their project uses, may also resize a box with resize_box: up when it keeps running low on disk, down when it sits mostly empty. They never stop running tasks for it, and every resize they make sends you a notice with their reason."
         hint={hint("autoResizeEnabled")}
       >
         <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
           <input id={fid("are")} type="checkbox" checked={s.autoResizeEnabled} onChange={(e) => set("autoResizeEnabled", e.target.checked)} data-testid="auto-resize" />
-          {s.autoResizeEnabled ? "Allowed" : "Off: only you resize boxes"}
+          {s.autoResizeEnabled ? "Allowed" : "Off: new boxes are Worker size, and only you resize boxes"}
         </label>
       </Row>
       <Row id={fid("arm")} label="Max size it may choose" help="resize_box refuses anything bigger. You can still pick any size yourself on the Boxes page." hint={hint("autoResizeMaxSize")}>
