@@ -16,6 +16,7 @@ import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loop
 import { attachmentNote } from "./orchestrator.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
+import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 import { agentCaptainLabel, captainSourceOf } from "../shared/captain.js"
 import { budgetLine, budgetNotes, noteLine, pruneAdvice, shortTokens } from "../shared/notes.js"
 import {
@@ -207,6 +208,11 @@ export class CaptainManager {
       this.tokens.set(projectId, token)
     }
     return token
+  }
+
+  /** What a side thread on a project's Captain chat forks. */
+  threadHost(projectId: string): ThreadHost {
+    return this.get(projectId).threadHost()
   }
 
   /** Which project a Captain MCP token belongs to, or null for any other token. */
@@ -602,6 +608,22 @@ class Captain {
     this.publishState()
     void this.drain()
     return this.state()
+  }
+
+  /** What a side thread on this Captain's chat forks (server/sideThreads.ts). Reading it never changes the session. */
+  threadHost(): ThreadHost {
+    const id = this.project.id
+    return {
+      cwd: this.workdir,
+      session: () => ({ id: this.store.getKv(sessionKey(id)) ?? "", started: this.store.getKv(startedKey(id)) === "1" }),
+      systemPrompt: () => this.systemPrompt(),
+      readRules: () => this.readRules(),
+      model: () => this.settings.get().captainModel,
+      effort: () => this.settings.get().captainEffort,
+      compactionsDir: this.compactionsDir,
+      caller: { kind: "captain", projectId: id },
+      usage: { source: "captain", projectId: id },
+    }
   }
 
   private session() {
@@ -1032,8 +1054,9 @@ class Captain {
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
           if (text && text !== NO_UPDATE) {
-            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
-            const m = this.store.addCaptainMessage(this.project.id, "assistant", text, meta)
+            // The session line it came from: a side thread on this message forks the session there.
+            const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId) }
+            const m = this.store.addCaptainMessage(this.project.id, "assistant", text, Object.keys(meta).length ? meta : null)
             this.hub.broadcast({ type: "captain.message", message: m })
           }
           for (const b of msg.message.content) {

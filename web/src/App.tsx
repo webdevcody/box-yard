@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useState, useSyncExternalStore } from "react"
-import { CHAT_MAX, CHAT_MIN, PAGE_PADDING, coordinatorDock } from "./lib/layout"
+import { CHAT_MAX, CHAT_MIN, PAGE_PADDING, coordinatorDock, threadDockWidth } from "./lib/layout"
+import { COORDINATOR_CHAT, useThreadShown } from "./lib/threads"
 import type { CSSProperties } from "react"
 import { Route, Switch } from "wouter"
 import { navigate } from "wouter/use-browser-location"
@@ -41,6 +42,9 @@ export function App() {
   const chatLimit = coordinatorDock(viewport, sidebarSize.width, CHAT_MAX).max
   const chatSize = useResizable({ key: "box-yard:chat-width", defaultWidth: 416, min: CHAT_MIN, max: CHAT_MAX, limit: chatLimit, edge: "left" })
   const dock = coordinatorDock(viewport, sidebarSize.width, chatSize.width)
+  // An open side thread gets the right side of the panel: the docked panel widens to make room for it.
+  const threadShown = useThreadShown(COORDINATOR_CHAT)
+  const dockWidth = threadShown ? threadDockWidth(viewport, sidebarSize.width, dock.width) : dock.width
   const closeNav = useCallback(() => setNavOpen(false), [])
   const closeChat = useCallback(() => setChatOpen(false), [])
   const openChat = useCallback(() => setChatOpen(true), [])
@@ -113,10 +117,16 @@ export function App() {
           zen
             ? "relative min-w-0 flex-1"
             : dock.docked
-              ? "relative shrink-0 border-l border-zinc-900"
-              : cx("fixed inset-y-0 right-0 z-40 w-full border-l border-zinc-900 transition-transform sm:max-w-md", chatOpen ? "translate-x-0" : "translate-x-full"),
+              ? // Eased only when a side thread opens or closes, not while its edge is dragged.
+                cx("relative shrink-0 border-l border-zinc-900", !chatSize.handle.dragging && "transition-[width] duration-300 ease-out motion-reduce:transition-none")
+              : cx(
+                  "fixed inset-y-0 right-0 z-40 w-full border-l border-zinc-900 transition-transform",
+                  // A drawer with a side thread open takes the window (a tablet shows them side by side).
+                  threadShown ? "sm:max-w-4xl" : "sm:max-w-md",
+                  chatOpen ? "translate-x-0" : "translate-x-full",
+                ),
         )}
-        style={!zen && dock.docked ? { width: dock.width } : undefined}
+        style={!zen && dock.docked ? { width: dockWidth } : undefined}
       >
         {!zen && dock.docked && <ResizeHandle {...chatSize.handle} className="block!" />}
         <ChatPanel onClose={dock.docked ? undefined : closeChat} zen={zen} />
