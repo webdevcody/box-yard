@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process"
+import { createHash } from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -24,6 +25,37 @@ export function normalizePublicKey(text: string): string | null {
   const [type, data] = text.trim().split(/\s+/)
   const key = `${type ?? ""} ${data ?? ""}`
   return PUBLIC_KEY_RE.test(key) ? key : null
+}
+
+/** A public key's "SHA256:…" fingerprint, as `ssh-keygen -l -E sha256` prints it, without running it. */
+export function fingerprintOfPublicKey(publicKey: string): string {
+  const data = publicKey.trim().split(/\s+/)[1] ?? ""
+  return `SHA256:${createHash("sha256").update(Buffer.from(data, "base64")).digest("base64").replace(/=+$/, "")}`
+}
+
+/**
+ * A key file on this computer, read where it is (detection): its public key, and whether ssh-keygen opens it without
+ * a passphrase (`copyable`: Box Yard could keep it and sign with it unattended). A security key's file (sk-…) is only a
+ * handle for the hardware, so it never counts as copyable. Nothing ssh-keygen prints but the public key is used.
+ */
+export async function keyFileInfo(file: string): Promise<SshKeyInfo & { copyable: boolean }> {
+  let publicKey: string | null = null
+  try {
+    publicKey = normalizePublicKey(fs.readFileSync(`${file}.pub`, "utf8"))
+  } catch {}
+  let copyable = false
+  try {
+    // -P "": a key with a passphrase fails here instead of asking for it.
+    const derived = normalizePublicKey(await keygen(["-y", "-P", "", "-f", file]))
+    if (derived) {
+      publicKey = derived
+      copyable = !derived.startsWith("sk-")
+    }
+  } catch (err) {
+    if (err instanceof SshKeyError) throw err
+  }
+  if (!publicKey) throw new SshKeyError("ssh-keygen couldn't read that key file, and there's no .pub file beside it.")
+  return { publicKey, fingerprint: fingerprintOfPublicKey(publicKey), copyable }
 }
 
 /** A private key without a passphrase: its public key and fingerprint. */

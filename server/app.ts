@@ -45,6 +45,7 @@ import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
+import { IdentityDetector } from "./identity/detect.js"
 import { SecretBox } from "./identity/secretBox.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
@@ -311,6 +312,8 @@ export function createBoxYard(
     github: opts.github?.fetch,
     mock: c.mock,
   })
+  /** Reads this computer's gh, git and ssh for detect_identities and the gh:/file:/agent: references (server-side only). */
+  const identityDetector = new IdentityDetector({ github: opts.github?.fetch })
   /** Every credential value in effect: no transcript keeps one, and no error shows one. */
   const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues()]
   store.transcriptSecrets = secretValues
@@ -521,7 +524,7 @@ export function createBoxYard(
   app.all(
     "/mcp",
     mcpHandler(
-      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), threads },
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads },
       mcpToken,
     ),
   )

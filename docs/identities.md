@@ -85,6 +85,51 @@ Docker containers, GPU pods and the local runner are outside the wall: each alre
 
 An identity's runners are checked when a project is given the identity or a new "Runs on", when a task asks for its own runner, and when an identity's runners change (refused while a project of it runs elsewhere). A task pinned to a runner before its identity stopped allowing it waits and says why; it never runs there.
 
+## Set up from this computer
+
+The Coordinator (or a project's Captain) can set identities up from what this computer already uses, so nobody has to work out which token, email and key go with which repo. It's how the Coordinator answers a clone, fetch or push that fails with 401, 403 or 404, or a question about GitHub accounts: it runs `detect_identities`, proposes the whole setup to Cody in one message, and imports only what Cody agrees to.
+
+**What detection reads.** Read-only; it changes nothing:
+
+- `gh auth status`: the github.com accounts `gh` is signed in to, the active one, its git protocol, token scopes and where gh keeps the token. Another host (GitHub Enterprise) is noted, not proposed.
+- `git config --global --includes`: the global author and signing setup, and each `includeIf` block's file (`user.*`, `gpg.*`, `commit.gpgsign`, `core.sshCommand`; credential helpers by name only).
+- For an `includeIf "gitdir:…"` block, the `origin` remotes of the repos under its folder (three levels down, 400 folders at most, each `.git/config` read as text), so the block's repo owners are known.
+- `~/.ssh/config`'s hosts that reach GitHub, the public keys beside `~/.ssh` key files (or `ssh-keygen -y` without a passphrase), and fingerprints of the keys `core.sshCommand -i` pushes with.
+- **Online** (the default), for each account it asks GitHub with that account's own `gh` token, read on the server and never returned: `GET /user`, `/user/orgs`, `/user/emails`, the account's SSH and signing keys, and `GET /repos/:owner/:name` for each project's repo (push access, 404, SAML SSO). `online: false` skips GitHub.
+
+The env it runs `gh`, `git` and `ssh-keygen` with drops `GH_TOKEN`, `GITHUB_TOKEN`, the enterprise tokens, `GH_HOST`, `GIT_DIR` and `GIT_CONFIG_*`, and never prompts.
+
+**What it proposes.** One identity per github.com account:
+
+- An `includeIf` block goes with the account whose verified emails hold its email, whose GitHub keys hold its SSH or signing key, or whose login or orgs own its repos. The active account takes the global author.
+- A project goes to the account that can push to its repo (online), or that owns it (offline); a project on Default stays there when Default's token is that account already. Projects nothing clearly matches stay where they are, with the reason.
+- A token is named `gh:github.com:<login>` and a signing key `file:~/.ssh/<key>` or `agent:SHA256:…`. A proposal holds no value.
+
+**Importing.** `import_detected_identity` reads the token from `gh` and the key by reference again, on the server, and checks the token with GitHub before saving it, encrypted. An identity Box Yard already has for the login is updated instead. Then the proposal's projects move to it, each only while it has no task running.
+
+**What a reference may name.**
+
+- `gh:<login>` (or `gh:<host>:<login>`): an account `gh` is signed in to here.
+- `file:<path>`: a key file without a passphrase, in `~/.ssh` (symlinks resolved) or the one a git config here names as `user.signingkey`; at most 16 KB and a private key. A key this computer also logs in to SSH servers with (`~/.ssh/id_*`, an `IdentityFile`, a `core.sshCommand -i` key) is refused for an identity whose projects may run on boxes, since each box would hold a copy: make a signing key of its own (`ssh-keygen -t ed25519 -N "" -C box-yard-signing -f ~/.ssh/box_yard_signing`), or keep its projects on this computer (`runners: ["local"]`).
+- `agent:<SHA256:… or public key>`: a key in a git config here, in `~/.ssh/*.pub` or in the SSH agent (`ssh-add -L`). Its identity runs only on the local runner.
+
+A token or key itself is never taken through a tool: it goes in Settings › Identities. Tool errors never repeat what was passed in, and any token or key shape in one is redacted.
+
+### MCP tools
+
+| Tool | What it does | A Captain |
+| --- | --- | --- |
+| `list_identities` | Every identity: login, owners, author and its email check, signing fingerprint, Claude login kind, runners, projects, last test | Sees every identity, but only its own project in them (others as a count) |
+| `detect_identities` | Reads this computer (and GitHub, online) and proposes identities with the evidence. Changes nothing | Maps its own project only |
+| `import_detected_identity` | A proposal becomes an identity, or updates the one for that login, and gets the proposal's projects | Gives it its own project only |
+| `create_identity` | A new identity, with a token and signing key by reference. Nothing is made when a reference can't be read | Yes |
+| `update_identity` | Fields, references, `remove_token`, `remove_claude` | Only an identity no other project uses, never Default |
+| `delete_identity` | Removes it; `move_projects_to_default` moves its projects first | Same as update |
+| `assign_identity` | Gives a project an identity: the runner has to fit and no task may be running | Its own project only |
+| `test_identity` | Checks with GitHub: each token (whose, scopes, expiry), push access to its projects' repos, the author email, the signing key. Saved as the last test | Its own project's identity, for its own repo; not saved |
+
+To try detection on this computer: `npm run test:detect` (read-only and offline; it prints logins, owners, emails and fingerprints only).
+
 ## API
 
 | Route | Body | What it does |
@@ -106,7 +151,6 @@ Every change is broadcast as an `identities` event.
 
 ## Coming next
 
-- MCP tools (`list_identities`, `create_identity`, `detect_identities`, …), so the Coordinator can find the GitHub accounts, emails and keys this computer already uses and set identities up without a value ever passing through the model.
-- Settings › Identities in the web app, an identity picker on each project, and badges.
+- Settings › Identities in the web app (with "Import from this computer"), an identity picker on each project, and badges.
 - The Coordinator's `status` view of an identity's projects.
 - GPG signing keys.
