@@ -9,7 +9,7 @@ import { buildMcpServer, type McpCaller } from "../server/mcp.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { BoxUsageProbe } from "../server/providers/types.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
-import type { BoxEvent, BoxResize, BoxSize, Project, Task } from "../shared/types.js"
+import type { BoxEvent, BoxInfo, BoxResize, BoxSize, Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // The box history log: every path that creates, resizes, deletes, loses or cleans a box writes one row saying what
@@ -29,6 +29,15 @@ class SizedBoxes extends LocalProvider {
   }
   async listIds(): Promise<string[]> {
     return fs.existsSync(this.baseDir) ? fs.readdirSync(this.baseDir).filter((d) => d.startsWith("local-")) : []
+  }
+}
+
+/** Sized boxes whose streamed reads (archives) can be made to fail. */
+class FlakyArchives extends SizedBoxes {
+  failStreams = false
+  override async execStream(boxId: string, command: string, onOutput: (chunk: string) => void) {
+    if (this.failStreams) throw new Error("stream refused")
+    return super.execStream(boxId, command, onOutput)
   }
 }
 
@@ -121,7 +130,8 @@ async function mcpAs(r: Running, caller: McpCaller) {
 }
 
 /** Reach into TaskManager's timers' state, so a test can run a pass now instead of waiting it out. */
-const internals = (r: Running) => r.yard.tasks as unknown as { lastEventAt: Map<string, number>; lastBoxProbeAt: Map<string, number>; lastOrphanSweepAt: number }
+const internals = (r: Running) =>
+  r.yard.tasks as unknown as { lastEventAt: Map<string, number>; lastBoxProbeAt: Map<string, number>; lastOrphanSweepAt: number; idleArchiveRetryAt: Map<string, number> }
 
 describe("box history: create and resize", () => {
   it("records placement, the resize migration's new box, the old box's delete and the resize itself, with who and why", async () => {
@@ -319,6 +329,45 @@ describe("box history: delete, clear, cleanup, lost, idle, orphans", () => {
     const [swept] = (await history(r, "?type=orphan_deleted")).events
     expect(swept).toMatchObject({ boxId: orphan, actor: "orphan-sweep", size: null, projects: [], taskIds: [], detail: null })
     expect(fs.existsSync(r.provider.root(orphan))).toBe(false)
+  })
+
+  it("keeps an idle box while a workspace on it isn't archived, retries the archive, and retires the box once it lands", async () => {
+    const provider = new FlakyArchives(tmpDir("boxes-"), FAKE_CLAUDE)
+    const r = await start({ boxIdleDeleteMinutes: 5 }, provider)
+    const p = await project(r, "alpha")
+    const t = await settled(r, (await task(r, p.id, "first")).id)
+    // Its archive predates its last turn, and archiving fails for now.
+    r.yard.store.updateTask(t.id, { lastArchivedAt: 1 }, { touch: false })
+    r.yard.store.db.prepare("UPDATE boxes SET last_used_at = ? WHERE id = ?").run(Date.now() - 30 * 60_000, t.boxId)
+    provider.failStreams = true
+    const held = await waitFor(async () => {
+      await r.yard.tasks.maintain()
+      const box = (await call<BoxInfo[]>(r, "GET", "/api/boxes")).find((b) => b.id === t.boxId)
+      return box?.idleHeld?.includes("keeps failing") ? box : null
+    }, "the idle box to say why it stays")
+    expect(held.idleHeld).toMatch(/^Kept though idle: archiving first keeps failing \(.+\); Box Yard retries every 10 min$/)
+    expect((await history(r, `?boxId=${t.boxId}&type=deleted`)).events).toHaveLength(0)
+    expect(r.yard.store.getBox(t.boxId!)).not.toBeNull()
+
+    // Archiving works again: the next retry lands it, and the sweep after that retires the box.
+    provider.failStreams = false
+    internals(r).idleArchiveRetryAt.clear()
+    await r.yard.tasks.maintain()
+    await waitFor(() => (r.yard.store.getTaskRow(t.id)!.last_archived_at ?? 0) > 1, "the retried archive")
+    await r.yard.tasks.maintain()
+    const [retired] = (await history(r, `?boxId=${t.boxId}&type=deleted`)).events
+    expect(retired).toMatchObject({ actor: "janitor", taskIds: [t.id] })
+    expect(r.yard.store.getBox(t.boxId!)).toBeNull()
+  })
+
+  it("keeps an idle box while a task on it waits for a turn", async () => {
+    const r = await start({ boxIdleDeleteMinutes: 5 })
+    const p = await project(r, "alpha")
+    const t = await settled(r, (await task(r, p.id, "first")).id)
+    r.yard.store.db.prepare("UPDATE boxes SET last_used_at = ? WHERE id = ?").run(Date.now() - 30 * 60_000, t.boxId)
+    r.yard.store.updateTask(t.id, { status: "queued" }, { touch: false })
+    await r.yard.tasks.maintain()
+    expect((await history(r, `?boxId=${t.boxId}&type=deleted`)).events).toHaveLength(0)
   })
 })
 

@@ -55,6 +55,12 @@ const TONE_TEXT = { ok: "text-zinc-300", warn: "font-medium text-amber-300", err
 /** A box's details live at /boxes#<id>, so links from tasks, the palette and Usage open them directly. */
 const boxHref = (id: string) => `/boxes#${encodeURIComponent(id)}`
 
+const USAGE_SOURCE_TITLE: Record<BoxInfo["usageSource"], string> = {
+  actual: "Upstash's own compute charge for this box, plus disk",
+  measured: "The CPU time the box used, at your rates in Settings › Usage, plus disk",
+  estimated: "Estimated: the time turns ran on it at your rates in Settings › Usage (its CPU use wasn't measured)",
+}
+
 export function BoxesView() {
   const boxes = useBoxes()
   const tasks = useTasks()
@@ -688,10 +694,10 @@ function BoxDetails({
           <BoxTimes createdAt={box.createdAt} lastUsedAt={box.lastUsedAt} />
         </Fact>
         <Fact label="Active hours">
-          <span title="Estimated active CPU time tracked by Box Yard">{hours(box.activeMs)}</span>
+          <span title={box.usageSource === "estimated" ? "Time a turn ran on this box: Box Yard hasn't read its CPU use yet" : "CPU time the box used (core-hours), which is what Upstash bills"}>{hours(box.activeMs)}</span>
         </Fact>
         <Fact label="Cost">
-          <span title={box.usageSource === "actual" ? "Provider usage data was available." : "Estimated from Box Yard runtime and disk probes."}>
+          <span title={USAGE_SOURCE_TITLE[box.usageSource]}>
             {money(box.estimatedCostUsd)} <span className="text-zinc-500">{box.usageSource}</span>
           </span>
         </Fact>
