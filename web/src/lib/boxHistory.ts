@@ -45,6 +45,7 @@ export const EVENT_TONE: Record<BoxEventType, EventTone> = {
   snapshot_fallback: "warn",
   started: "info",
   stopped: "muted",
+  reused: "info",
 }
 
 export const eventLabel = (e: Pick<BoxEvent, "type">) => boxEventLabel(e.type)
