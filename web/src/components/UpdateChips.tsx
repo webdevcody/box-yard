@@ -8,6 +8,7 @@ import { AppLink, Markdown, cx } from "./ui"
 import { ChatLine, FullReplyLink, NoticeProject } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
+import { ThreadMarkers } from "./SideThread"
 import { NOTICE_ICON } from "./noticeIcons"
 import { chipView, coordinatorRows, groupPreview, itemMessages, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
 import { splitNotice } from "../lib/captainTranscript"
@@ -60,7 +61,7 @@ const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
   const { icon, className, label } = v.captain ? { icon: Bot, className: "text-sky-400", label: "Captain" } : NOTICE_ICON[v.kind]
   const Icon = icon
   return (
-    <div id={`chat-${m.id}`} data-testid="update-chip" data-open={open || undefined} className={MESSAGE_BLOCK}>
+    <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="update-chip" data-open={open || undefined} className={MESSAGE_BLOCK}>
       <ChipLine open={open} onToggle={toggle} title={[v.source?.label, v.verb, v.preview].filter(Boolean).join(" ")}>
         <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />
         {v.source &&
@@ -81,7 +82,8 @@ const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
         )}
       </ChipLine>
       {open && <NoticeBody m={m} />}
-      <MessageActions text={m.content} />
+      <MessageActions text={m.content} anchorId={m.id} />
+      <ThreadMarkers m={m} />
     </div>
   )
 })
