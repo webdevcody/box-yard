@@ -16,8 +16,8 @@ import { VoiceControl } from "./VoiceControl"
 import { CloudMeter } from "./CloudMeter"
 import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
-import { PublishedCard } from "./PublishedNotices"
-import { groupPublished } from "../lib/publishedNotices"
+import { ChatRows, useCoordinatorRows } from "./UpdateChips"
+import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -91,6 +91,10 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const tail = useTail(messages, "chat")
   // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
   const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
+  // Updates fold into chips over the whole thread, so the rendered tail's rows don't change as it grows or trims.
+  const all = useMemo(() => splitQueued(messages).settled, [messages])
+  const rows = useCoordinatorRows(all)
+  const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
     if (projectId) return projects.data?.find((p) => p.id === projectId) ?? null
@@ -224,7 +228,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 </div>
               </div>
             )}
-            <ChatLines messages={settled} onFollowUp={followUp} />
+            <ChatRows rows={shown} onFollowUp={followUp} />
             <StreamingReply busy={Boolean(busy.data)} />
             {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
           </StickyScroll>
@@ -316,10 +320,9 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
   )
 }
 
-/** The thread, with back-to-back "published" file notices folded into one card per task. */
+/** Messages Cody queued mid-turn. */
 const ChatLines = memo(function ChatLines({ messages, onFollowUp }: { messages: ChatMessage[]; onFollowUp: (message: string) => void }) {
-  const rows = useMemo(() => groupPublished(messages), [messages])
-  return rows.map((r) => (r.type === "files" ? <PublishedCard key={r.id} group={r.group} /> : <ChatLine key={r.id} m={r.message} onFollowUp={onFollowUp} />))
+  return messages.map((m) => <ChatLine key={m.id} m={m} onFollowUp={onFollowUp} />)
 })
 
 /** The reply being streamed. Only this re-renders per streamed chunk, not the thread above it. */
