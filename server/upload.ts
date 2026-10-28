@@ -2,7 +2,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { providerOf, q, type BoxProvider } from "./providers/types.js"
-import { errorMessage } from "./util/retry.js"
+import { errorMessage, failedStep } from "./util/retry.js"
 
 /**
  * Upstash Box refuses one uploaded file over 100 MB ("file exceeds maximum size of 100 MB"; the docs: "Each file can
@@ -11,6 +11,12 @@ import { errorMessage } from "./util/retry.js"
 export const UPSTASH_MAX_UPLOAD_BYTES = 100 * 1000 * 1000
 /** The largest part putFile sends, whatever the limit: about 90 MB. */
 const PART_MAX_BYTES = 90 * 1000 * 1000
+
+/** "230.4 MB", "90 MB", "512 KB": a size in the decimal units upload limits are stated in. */
+export function uploadSize(bytes: number): string {
+  const [n, unit] = bytes >= 1e9 ? [bytes / 1e9, "GB"] : bytes >= 1e6 ? [bytes / 1e6, "MB"] : bytes >= 1e3 ? [bytes / 1e3, "KB"] : [bytes, "bytes"]
+  return `${Number(n.toFixed(1))} ${unit}`
+}
 
 /** The part size for a provider's per-file limit: 90% of it, at most PART_MAX_BYTES. */
 export const uploadPartBytes = (limit: number) => Math.max(1, Math.min(PART_MAX_BYTES, Math.floor(limit * 0.9)))
@@ -37,7 +43,8 @@ export function statedUploadLimit(err: unknown): number | null {
  * parts and is joined on the box: each part is uploaded next to the destination, appended to `<destination>.boxyard-join`
  * and deleted, so the box needs room for the file plus one part, and so does this machine. Each append checks the join's
  * size first, so an exec that runs twice doesn't append twice; the whole file is moved into place only when its size is
- * right (any older file there is removed first). A failure leaves neither the join nor a part behind. A box that
+ * right (any older file there is removed first). A failure leaves neither the join nor a part behind, and its error
+ * names the part ("part 2 of 3 (90 MB) failed: …"); callers name the file. A box that
  * refuses one upload for its size without advertising a limit (or advertising too high a one) gets the file again in
  * parts under the limit the refusal states, else Upstash's 100 MB. Returns how many uploads it took.
  */
@@ -77,7 +84,9 @@ async function putParts(p: BoxProvider, boxId: string, localPath: string, destin
         got += n
       }
       fs.writeFileSync(local, buf.subarray(0, want))
-      await p.uploadFile(boxId, local, piece)
+      await p.uploadFile(boxId, local, piece).catch((err) => {
+        throw failedStep(`part ${i + 1} of ${parts} (${uploadSize(want)})`, err)
+      })
       const end = offset + want
       const res = await p.exec(
         boxId,

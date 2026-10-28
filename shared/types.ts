@@ -186,6 +186,8 @@ export interface Task {
   /** The one-click fix the UI offers next to the wait reason, when there is one (e.g. raise today's cloud limit). */
   waitFix?: WaitFix | null
   turnCount: number
+  /** When the turn running now started (ms since epoch); null between turns. */
+  turnStartedAt?: number | null
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
   /** Changes whenever the queued messages do (added, edited, cancelled, being delivered); "" when none. */
