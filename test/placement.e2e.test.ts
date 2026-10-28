@@ -4,6 +4,7 @@ import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
 import type { BoxInfo, Project, Task } from "../shared/types.js"
 import { LocalProvider } from "../server/providers/local.js"
+import { BOX_PICK_WHY, placementView } from "../shared/placement.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Which box a task lands on: a project's tasks stay together, new projects get
@@ -127,5 +128,88 @@ describe("box placement", () => {
     expect(used.size).toBe(2)
     const list = await boxes(r)
     expect(list.every((x) => x.projects.join() === "alpha")).toBe(true)
+  })
+})
+
+describe("reusing idle boxes", () => {
+  const events = (r: Running, id: string) =>
+    r.yard.store
+      .listTaskMessages(id)
+      .filter((m) => m.role === "event")
+      .map((m) => m.content)
+  const archived = (r: Running, id: string) => waitFor(() => r.yard.store.getTaskRow(id)?.last_archived_at ?? null, `task ${id}'s archive`)
+
+  it("gives another project's idle box to a project that needs one, parking its workspaces in the archive", async () => {
+    const r = await start({ maxBoxes: 3, slotsPerBox: 2 })
+    const a = await project(r, "alpha")
+    const b = await project(r, "beta")
+    const a1 = await until(r, (await task(r, a.id, "a1")).id, "done")
+    expect(a1.placement?.now).toMatchObject({ boxId: a1.boxId, how: "new" })
+    await archived(r, a1.id)
+
+    // Idle long enough (no wait in a test): beta gets alpha's box instead of a new one.
+    r.yard.tasks.placementTuning.reuseIdleMs = 0
+    const b1 = await until(r, (await task(r, b.id, "b1")).id, "done")
+    expect(b1.boxId).toBe(a1.boxId)
+    expect(b1.placement?.now).toMatchObject({ boxId: a1.boxId, how: "reused" })
+    expect(placementView(b1).label).toBe(`Local box · ${a1.boxId} · small · reused idle box`)
+    expect(placementView(b1).reason).toBe(BOX_PICK_WHY.reused)
+    expect(await boxes(r)).toHaveLength(1)
+    expect(events(r, b1.id)).toContainEqual(expect.stringMatching(new RegExp(`^Placed on box ${a1.boxId}, idle for \\d+ min, rather than making a new box\\.$`)))
+
+    // Alpha's task left it with its workspace in the archive; the box is beta's now, and the history says why.
+    const parked = await getTask(r, a1.id)
+    expect(parked.boxId).toBeNull()
+    expect(events(r, a1.id)).toContain(`Workspace parked in the archive: box ${a1.boxId} was idle and went to project beta. It comes back on the next message.`)
+    expect(r.yard.store.getKv(`box_owner:${a1.boxId}`)).toBe(b.id)
+    const reused = r.yard.tasks.history.list().find((e) => e.type === "reused")
+    expect(reused).toMatchObject({ boxId: a1.boxId, actor: "scheduler", detail: "From alpha to beta; 1 workspace parked in the archive." })
+    expect(reused!.reason).toMatch(/^Idle for \d+ min and beta needed a box: reusing it instead of making a new one\.$/)
+    expect(reused!.projects.map((p) => p.name)).toEqual(["alpha"])
+
+    // Alpha's next message brings its workspace back, on a new box while beta's was used a moment ago.
+    r.yard.tasks.placementTuning.reuseIdleMs = 5 * 60_000
+    await call(r, "POST", `/api/tasks/${a1.id}/messages`, { content: "and one more" })
+    const back = await until(r, a1.id, "done")
+    expect(back.boxId).toBeTruthy()
+    expect(back.boxId).not.toBe(b1.boxId)
+    expect(back.placement?.now?.how).toBe("new")
+  })
+
+  it("leaves a box used a moment ago to its project", async () => {
+    const r = await start({ maxBoxes: 3, slotsPerBox: 2 })
+    const a = await project(r, "alpha")
+    const b = await project(r, "beta")
+    const a1 = await until(r, (await task(r, a.id, "a1")).id, "done")
+    await archived(r, a1.id)
+    // Used a moment ago: a box idle less than reuseIdleMs (5 min by default) stays alpha's.
+    const b1 = await until(r, (await task(r, b.id, "b1")).id, "done")
+    expect(b1.boxId).not.toBe(a1.boxId)
+    expect(b1.placement?.now?.how).toBe("new")
+    expect(r.yard.tasks.history.list().some((e) => e.type === "reused")).toBe(false)
+  })
+
+  it("never gives a box to a project of another credential set", async () => {
+    const r = await start({ maxBoxes: 3, slotsPerBox: 2 })
+    const a = await project(r, "alpha")
+    const own = await call<Project>(r, "POST", "/api/projects", { name: "own", env: { GITHUB_TOKEN: "own-gh" } })
+    const a1 = await until(r, (await task(r, a.id, "a1")).id, "done")
+    await archived(r, a1.id)
+    r.yard.tasks.placementTuning.reuseIdleMs = 0
+    const o1 = await until(r, (await task(r, own.id, "o1")).id, "done")
+    expect(o1.boxId).not.toBe(a1.boxId)
+    expect((await getTask(r, a1.id)).boxId).toBe(a1.boxId)
+    expect(r.yard.tasks.history.list().some((e) => e.type === "reused")).toBe(false)
+  })
+
+  it("says a task shares a box when the pool can't grow", async () => {
+    const r = await start({ maxBoxes: 1, slotsPerBox: 2 })
+    const a = await project(r, "alpha")
+    const b = await project(r, "beta")
+    const a1 = await until(r, (await task(r, a.id, "a1")).id, "done")
+    const b1 = await until(r, (await task(r, b.id, "b1")).id, "done")
+    expect(b1.boxId).toBe(a1.boxId)
+    expect(b1.placement?.now?.how).toBe("shared")
+    expect(placementView(b1).label).toContain("· shared box")
   })
 })

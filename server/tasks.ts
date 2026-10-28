@@ -28,7 +28,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type BoxFanout, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
@@ -65,6 +65,7 @@ import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
+import type { BoxPick } from "../shared/placement.js"
 import { SNAPSHOT_STEP_LABELS, snapshotSkipReason, type ProjectSnapshot, type SnapshotInitiator, type SnapshotJob, type SnapshotStep } from "../shared/snapshots.js"
 import { SCRATCH_MARKER, depsSaveScript, depsSaveSummary, stripCounts, stripScript, stripSummary } from "./boxSnapshot.js"
 import { TURN_SH, parseRunRecord, parseTurnProbe, turnKillScript, turnProbeScript, whileTurnRuns, type TurnProbe } from "./turnProcess.js"
@@ -73,6 +74,7 @@ import {
   initiatorLabel,
   resizeSummary,
   resizeTitle,
+  BOX_SIZE_SPECS,
   scaleDownFit as scaleDownFitCheck,
   sizeSpecLine,
   type BoxResize,
@@ -151,6 +153,12 @@ const CLOUD_SPEND_CACHE_MS = 5_000
 const CLOUD_RATE_WINDOW_MS = 15 * 60_000
 /** kv: the day and limits the cloud spend notices were last posted for ({ day, warned, reached }). */
 const CLOUD_NOTICED_KEY = "cloud_limit_noticed"
+/** kv: until when (ms since epoch) Cody allowed more new boxes than the hour's free ones (allowMoreBoxes). */
+const FANOUT_ALLOWED_KEY = "box_fanout_allowed_until"
+/** How long an OK for more boxes lasts, and the window the free ones are counted over. */
+const FANOUT_WINDOW_MS = 60 * 60_000
+/** The fan-out question is posted at most this often while boxes wait on it. */
+const FANOUT_NOTICE_MS = 30 * 60_000
 const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)"
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
@@ -460,8 +468,29 @@ export class TaskManager {
    * once right now (Settings › Boxes created at once, halved by a rate limit and grown back by one per new box).
    */
   private boxCreate = { failures: 0, retryAt: 0, window: Number.POSITIVE_INFINITY }
-  /** Box creation backoff timings. Tests shorten them. */
-  readonly boxCreateTuning = { retryBaseMs: 2_000, retryMaxMs: 60_000, rateLimitMs: 10_000 }
+  /**
+   * Box creation backoff timings, and its pace: at most `paceCreates` creates start in any `paceWindowMs` (5 a
+   * minute), and the scheduler makes up to `freePerHour` boxes an hour on its own before the rest wait on Cody's OK.
+   * Tests change them.
+   */
+  readonly boxCreateTuning = { retryBaseMs: 2_000, retryMaxMs: 60_000, rateLimitMs: 10_000, paceCreates: 5, paceWindowMs: 60_000, freePerHour: 15 }
+  /** When each of the scheduler's box creates in the last hour started: the pace and the fan-out question count them. */
+  private createStarts: number[] = []
+  /** A pass to run when the pace lets the next create start. */
+  private paceTimer: NodeJS.Timeout | null = null
+  /** New boxes the queue wants past the hour's free ones (they wait on allowMoreBoxes), what they'd cost, and when the question was last posted. */
+  private fanout = { wanted: 0, upToHourlyUsd: 0, noticedAt: 0 }
+  /** Tasks that wait for those boxes: their wait reason says so, with the "allow-boxes" fix. */
+  private fanoutHeld = new Set<string>()
+  /**
+   * Placement: another project's box idle this long (no turn, every workspace archived, nothing of its projects
+   * waiting) is given to a project that needs one rather than a new box being made. Tests change it.
+   */
+  readonly placementTuning = { reuseIdleMs: 5 * 60_000 }
+  /** How pickBox picked the box it just returned for a task, for `assign` to keep (Task.placement.now.how). */
+  private pickedHow = new Map<string, BoxPick>()
+  /** New boxes and the tasks that were waiting when each was made: one of them landing there is on a "new box". */
+  private madeFor = new Map<string, Set<string>>()
   private agentMsgLog = new Map<string, number[]>()
   private archiving = new Set<string>()
   /** Each task's last archive error, until an archive succeeds. */
@@ -642,6 +671,7 @@ export class TaskManager {
     for (const t of this.timers) clearInterval(t)
     if (this.emitBoxesTimer) clearTimeout(this.emitBoxesTimer)
     if (this.directoryTimer) clearTimeout(this.directoryTimer)
+    if (this.paceTimer) clearTimeout(this.paceTimer)
     for (const h of this.holds.values()) h.abort()
     this.holds.clear()
   }
@@ -2648,16 +2678,98 @@ export class TaskManager {
       const more = Math.min(Math.ceil(n / this.growthSlots(projectId)), cap ? cap.max - cap.used.size : Infinity) - creating
       if (more > 0) need.set(projectId, more)
     }
-    // Several at once, up to Settings › Boxes created at once (each finished create runs another pass). The project
-    // with the fewest boxes on their way goes next, so one project's big fan-out doesn't hold up another's single
-    // task. createBox counts itself in `creatingFor` before its first await.
+    // Several at once, up to Settings › Boxes created at once and the pace (each finished create runs another pass),
+    // and up to the hour's free ones unless Cody allowed more. The project with the fewest boxes on their way goes
+    // next, so one project's big fan-out doesn't hold up another's single task. createBox counts itself in
+    // `creatingFor` and `createStarts` before its first await.
     const cap = this.createConcurrency()
-    while (need.size && this.canCreateBox(cap)) {
+    while (need.size && this.fanoutRoom() > 0 && this.canCreateBox(cap)) {
       const [projectId, more] = [...need].reduce((best, next) => ((this.creatingFor.get(next[0]) ?? 0) < (this.creatingFor.get(best[0]) ?? 0) ? next : best))
       void this.createBox(projectId)
       if (more > 1) need.set(projectId, more - 1)
       else need.delete(projectId)
     }
+    this.askForMoreBoxes(waiting, this.fanoutRoom() === 0 ? need : new Map())
+  }
+
+  /**
+   * The boxes a big queue still wants once the hour's free ones are made wait on one OK from Cody: their tasks say so
+   * with the "allow-boxes" fix, and the Coordinator hears it, with what they'd cost, at most every half hour. Tasks the
+   * boxes on their way will take go on waiting for those.
+   */
+  private askForMoreBoxes(waiting: TaskRow[], left: Map<string, number>) {
+    const rates = this.settings.get().costRates.boxActiveCpuHourlyUsd
+    let wanted = 0
+    let upTo = 0
+    for (const [projectId, n] of left) {
+      const size = this.newBoxSize(projectId)
+      wanted += n
+      upTo += n * BOX_SIZE_SPECS[size].cpu * rates[size]
+    }
+    const held = new Set<string>()
+    for (const projectId of left.keys()) {
+      let covered = (this.creatingFor.get(projectId) ?? 0) * this.growthSlots(projectId)
+      for (const row of waiting) {
+        if (row.project_id !== projectId || !this.wantsBox.has(row.id)) continue
+        if (covered-- > 0) continue
+        held.add(row.id)
+      }
+    }
+    // A newly held task may take a free slot beside another project meanwhile (pickBox): one more pass to let it.
+    const fresh = [...held].some((id) => !this.fanoutHeld.has(id))
+    this.fanout.wanted = wanted
+    this.fanout.upToHourlyUsd = upTo
+    this.fanoutHeld = held
+    if (fresh) this.schedule()
+    if (!wanted) return
+    const wait = this.fanoutWait()
+    for (const id of held) {
+      const row = this.store.getTaskRow(id)
+      if (row && this.wantsTurn(row) && !row.wait_reason) this.setWaitReason(id, wait, null, [], "allow-boxes")
+    }
+    const now = Date.now()
+    if (now - this.fanout.noticedAt < FANOUT_NOTICE_MS) return
+    this.fanout.noticedAt = now
+    const free = this.boxCreateTuning.freePerHour
+    this.notice(
+      withOwner(
+        `🙋 **New boxes** need Cody's OK: the queue wants ${boxCount(wanted)} more than the ${free} an hour Box Yard makes without asking, up to ${usd(upTo)}/h if every core is busy. Allow them for an hour from a waiting task or the cloud meter, or with allow_more_boxes.`,
+        this.owner(),
+      ),
+      { kind: "box_fanout" },
+      { coordinator: true },
+    )
+  }
+
+  /**
+   * A held task's wait reason (fanoutHeld). No counts or $/h: they change as the queue does, and each change would be
+   * another line in the task's log. The meter's sheet and the Coordinator's notice carry them.
+   */
+  private fanoutWait(): string {
+    return `Waiting for a new box: the queue wants more than the ${this.boxCreateTuning.freePerHour} an hour Box Yard makes without asking; allow more for an hour`
+  }
+
+  /**
+   * Let the scheduler make as many boxes as the queue needs for the next hour (still under the daily cloud limit, the
+   * ceiling and the pace). The tasks waiting on it are placed at once.
+   */
+  allowMoreBoxes(by: "user" | "coordinator" = "user"): BoxFanout {
+    const now = Date.now()
+    this.store.setKv(FANOUT_ALLOWED_KEY, String(now + FANOUT_WINDOW_MS))
+    const wanted = this.fanout.wanted
+    this.fanout.wanted = 0
+    this.fanout.upToHourlyUsd = 0
+    this.fanoutHeld.clear()
+    const who = by === "user" ? withOwner("Cody", this.owner()) : "The Coordinator"
+    this.notice(`⚙️ **New boxes** allowed: ${who} let Box Yard make more than ${this.boxCreateTuning.freePerHour} boxes in the next hour${wanted ? ` (${boxCount(wanted)} were waiting)` : ""}.`, { kind: "box_fanout" })
+    this.schedule()
+    this.emitBoxes()
+    return this.boxFanout(now)
+  }
+
+  /** The fan-out question's state, for the cloud meter. */
+  boxFanout(now = Date.now()): BoxFanout {
+    return { freePerHour: this.boxCreateTuning.freePerHour, wanted: this.fanout.wanted, upToHourlyUsd: this.fanout.upToHourlyUsd, allowedUntil: this.fanoutAllowedUntil(now) }
   }
 
   /** Box creates that may run at once: Settings › Boxes created at once, fewer for a while after a rate limit. */
@@ -2665,9 +2777,42 @@ export class TaskManager {
     return Math.max(1, Math.min(this.settings.get().boxCreateConcurrency, this.boxCreate.window))
   }
 
-  /** Another box create may start: the pool has room, no backoff is running and fewer than `cap` are on their way. */
+  /** Another box create may start: the pool has room, no backoff is running, fewer than `cap` are on their way and the pace allows one. */
   private canCreateBox(cap: number) {
-    return this.poolCreates < cap && Date.now() >= this.boxCreate.retryAt && this.poolHasRoom()
+    return this.poolCreates < cap && Date.now() >= this.boxCreate.retryAt && this.poolHasRoom() && this.paceWait() === 0
+  }
+
+  /**
+   * How long until the pace lets another create start (0: now): at most 5 start in any minute, so a big queue gets
+   * its boxes over a few minutes rather than in one burst the provider may refuse. When it's not now, a pass is set
+   * for then.
+   */
+  private paceWait(now = Date.now()): number {
+    const { paceCreates, paceWindowMs } = this.boxCreateTuning
+    const recent = this.createStarts.filter((at) => now - at < paceWindowMs)
+    if (recent.length < paceCreates) return 0
+    const wait = recent[recent.length - paceCreates]! + paceWindowMs - now
+    if (!this.paceTimer && !this.stopped) {
+      this.paceTimer = setTimeout(() => {
+        this.paceTimer = null
+        this.schedule()
+      }, wait + 50)
+      this.paceTimer.unref()
+    }
+    return wait
+  }
+
+  /** New boxes the scheduler may still make on its own this hour: `freePerHour` less those started in the last hour, or no limit while Cody's OK lasts. */
+  private fanoutRoom(now = Date.now()): number {
+    if (this.fanoutAllowedUntil(now)) return Number.POSITIVE_INFINITY
+    this.createStarts = this.createStarts.filter((at) => now - at < FANOUT_WINDOW_MS)
+    return Math.max(0, this.boxCreateTuning.freePerHour - this.createStarts.length)
+  }
+
+  /** The end of Cody's OK for more boxes, while it lasts; else null. */
+  private fanoutAllowedUntil(now = Date.now()): number | null {
+    const until = Number(this.store.getKv(FANOUT_ALLOWED_KEY) ?? 0)
+    return until > now ? until : null
   }
 
   /** Box creation keeps failing (twice or more in a row, and backing off): placement stops counting on new boxes. */
@@ -3542,8 +3687,9 @@ export class TaskManager {
    * Pick a box for a task. A project keeps its work together, so the order is:
    * 1. a box that already hosts this project (warm repo mirror, shared files),
    * 2. an empty box,
-   * 3. nothing yet, when the pool has room: a new box is made for the project,
-   * 4. a free slot on a box another project uses (the pool is full).
+   * 3. another project's idle box, given to this project (`reuseIdleBox`),
+   * 4. nothing yet, when the pool has room: a new box is made for the project,
+   * 5. a free slot on a box another project uses (no new box can be made, or the new one waits on Cody's OK).
    * Only boxes of at least the project's box size count (`minBoxSize`); when none has a free slot and the pool
    * is full, `ensureSizedBox` grows an idle box or the task waits with the reason. A project at its own Max boxes
    * only uses the boxes it already has, and a box's agents and task folders are capped by the strictest of its own
@@ -3554,6 +3700,7 @@ export class TaskManager {
    * Returns null to wait; `wantsBox` tells the scheduler to grow the pool.
    */
   private async pickBox(taskId: string, exclude?: string, busyHere: Wait | null = null, waitHere: string | null = null): Promise<string | null> {
+    this.pickedHow.delete(taskId)
     const row = this.store.getTaskRow(taskId)
     const projectId = row?.project_id
     const preferred = projectId ? this.store.getKv(projectBoxKey(projectId)) : null
@@ -3586,9 +3733,24 @@ export class TaskManager {
     const busy: Wait[] = busyHere ? [busyHere] : []
     // A new box may be made for it: the pool has room, and so does its project (its own Max boxes).
     const canGrow = this.poolHasRoom() && !cap?.full
+    // How the box it lands on was picked: a new one made while it waited, or a slot beside another project.
+    const how = (b: { id: string; rank: number }): BoxPick | null => (b.rank === 2 ? "shared" : this.madeFor.get(b.id)?.has(taskId) ? "new" : null)
+    let reuseTried = false
     for (const b of candidates) {
-      if (b.rank === 2 && canGrow) {
-        // Rather than crowd another project's box, make one for this project.
+      if (b.rank === 2 && !reuseTried && row) {
+        // Its project has no box with room: another project's idle box goes to it before a new one is made.
+        reuseTried = true
+        const reused = await this.reuseIdleBox(row, candidates.filter((c) => c.rank === 2).map((c) => c.id))
+        if (reused) {
+          this.wantsBox.delete(taskId)
+          this.holdForDisk(taskId, [])
+          this.pickedHow.set(taskId, "reused")
+          return reused
+        }
+      }
+      // Rather than crowd another project's box, make one for this project. One whose new box waits on Cody's OK
+      // (past the hour's free ones) takes a free slot beside another project meanwhile.
+      if (b.rank === 2 && canGrow && !this.fanoutHeld.has(taskId)) {
         this.wantsBox.add(taskId)
         this.holdForDisk(taskId, low, busy[0], waitHere)
         return null
@@ -3607,6 +3769,8 @@ export class TaskManager {
       if (b.residents < b.maxResidentPerBox || this.evictOne(b.id, taskId)) {
         this.wantsBox.delete(taskId)
         this.holdForDisk(taskId, [])
+        const picked = how(b)
+        if (picked) this.pickedHow.set(taskId, picked)
         return b.id
       }
     }
@@ -3617,6 +3781,8 @@ export class TaskManager {
       const cleaned = this.diskRetried.has(taskId) ? candidates.find((c) => c.id === low.find((l) => l.state === "exhausted")?.boxId) : undefined
       if (cleaned && (cleaned.residents < cleaned.maxResidentPerBox || this.evictOne(cleaned.id, taskId))) {
         this.holdForDisk(taskId, [])
+        const picked = how(cleaned)
+        if (picked) this.pickedHow.set(taskId, picked)
         return cleaned.id
       }
       // No box of the project's size has a free slot and the pool (or the project) can't grow.
@@ -3627,7 +3793,9 @@ export class TaskManager {
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
     const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : walled && !candidates.length ? this.walledReason(creds) : this.noNewBoxReason()) : null
-    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, !canGrow && !cap?.full ? this.cloudBlock() : null)
+    // A cloud limit is named on any wait it causes; the ceiling's fix only goes with the reason that says the pool is full.
+    const noBox = !canGrow && !cap?.full ? (this.cloudBlock() ?? (!busy[0] && !low.length && !waitHere ? this.noNewBox() : null)) : null
+    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, noBox)
     return null
   }
 
@@ -3751,7 +3919,10 @@ export class TaskManager {
     }
     // A cloud limit is why no new box helps: the reason says so, and the task offers the fix.
     if (reason && noBox && !reason.includes(noBox.text)) reason = `${reason}; no new box: ${noBox.text}`
-    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [], reason && noBox ? noBox.fix : null)
+    // Its new box waits on Cody's OK for more boxes than the hour's free ones (askForMoreBoxes).
+    const held = !reason && this.wantsBox.has(taskId) && this.fanoutHeld.has(taskId)
+    if (held) reason = this.fanoutWait()
+    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [], reason && noBox ? noBox.fix : held ? "allow-boxes" : null)
   }
 
   /** `by`: the tasks the reason names as holding it back, in its order (Task.waitFor), so the UI can link them. */
@@ -4132,7 +4303,11 @@ export class TaskManager {
     )
     let port = PORT_BASE
     while (used.has(port)) port += 10
-    this.store.updateTask(taskId, { boxId, portBase: port }, opts)
+    const placedHow = this.pickedHow.get(taskId) ?? null
+    this.pickedHow.delete(taskId)
+    this.store.updateTask(taskId, { boxId, portBase: port, placedHow }, opts)
+    const made = this.madeFor.get(boxId)
+    if (made?.delete(taskId) && !made.size) this.madeFor.delete(boxId)
     const projectId = this.store.getTaskRow(taskId)?.project_id
     if (projectId) this.store.setKv(projectBoxKey(projectId), boxId)
     return boxId
@@ -4166,6 +4341,75 @@ export class TaskManager {
     return true
   }
 
+  /**
+   * Give another project's idle box to `row`'s project rather than make a new one: of `boxIds` (boxes of the same
+   * credential set with a free slot, from pickBox), the least recently used one that can go. Its workspaces are parked
+   * in the archive (they come back on their next message, on any box) and the box is this project's from now on.
+   * Returns the box, or null when none can go.
+   */
+  private async reuseIdleBox(row: TaskRow, boxIds: string[]): Promise<string | null> {
+    const now = Date.now()
+    const boxes = boxIds
+      .map((id) => this.store.getBox(id))
+      .filter((b): b is BoxRow => Boolean(b) && this.canReuse(b!, row, now))
+      .sort((a, b) => a.last_used_at - b.last_used_at)
+    for (const box of boxes) {
+      if (await this.memoryBlock(box.id, row.id)) continue
+      if ((await this.diskRoom(box.id, row)) !== "ok") continue
+      // Checked again: the disk and memory probes awaited, and a turn may have started there meanwhile.
+      if (!this.canReuse(box, row, Date.now())) continue
+      this.repurposeBox(box, row)
+      return box.id
+    }
+    return null
+  }
+
+  /**
+   * A box that may go to `row`'s project: ready and untouched by any operation, idle for `reuseIdleMs`, every task
+   * on it resting with nothing queued and its workspace in the archive, and nothing of the projects it hosts
+   * waiting for a turn (that work would want this box back). pickBox only offers boxes of the project's credential
+   * set, so the box wall holds.
+   */
+  private canReuse(box: BoxRow, row: TaskRow, now: number): boolean {
+    if (box.status !== "ready" || this.boxOps.has(box.id) || this.janitor.isRunning(box.id)) return false
+    if (now - box.last_used_at < this.placementTuning.reuseIdleMs) return false
+    if (this.boxCreds(box.id) !== this.projectCreds(row.project_id)) return false
+    const residents = this.store.listTaskRows({ boxId: box.id }).filter((r) => r.id !== row.id)
+    const resting = (r: TaskRow) =>
+      !r.current_turn_id && RESTING.includes(r.status) && !this.wantsTurn(r) && !this.archiving.has(r.id) && (!r.session_started || this.archiveHoldsWorkspace(r))
+    if (!residents.every(resting)) return false
+    const hosted = this.projectsOnBox(box.id).filter((p) => p !== row.project_id)
+    return !hosted.some((p) => this.store.listTaskRows({ projectId: p }).some((r) => (r.box_id === null || r.box_id === box.id) && this.wantsTurn(r)))
+  }
+
+  /** Hand an idle box to `row`'s project: park its workspaces in the archive and make it the project's box. */
+  private repurposeBox(box: BoxRow, row: TaskRow) {
+    const residents = this.store.listTaskRows({ boxId: box.id }).filter((r) => r.id !== row.id)
+    const name = (id: string) => this.store.getProjectName(id) ?? id
+    const from = this.projectsOnBox(box.id).filter((p) => p !== row.project_id)
+    const to = name(row.project_id)
+    const idleMin = Math.max(1, Math.round((Date.now() - box.last_used_at) / 60_000))
+    // Recorded first, so the history row names the projects it hosted.
+    this.recordBoxEvent({
+      boxId: box.id,
+      type: "reused",
+      actor: { kind: "scheduler" },
+      reason: `Idle for ${idleMin} min and ${to} needed a box: reusing it instead of making a new one.`,
+      detail: `From ${from.map(name).join(", ") || "no project"} to ${to}${residents.length ? `; ${residents.length === 1 ? "1 workspace" : `${residents.length} workspaces`} parked in the archive` : ""}.`,
+    })
+    for (const r of residents) {
+      this.store.updateTask(r.id, { boxId: null, portBase: null, previews: [] }, { touch: false })
+      void this.removeTaskDir(box.id, r.id).catch(() => {})
+      this.addEvent(r.id, `Workspace parked in the archive: box ${box.id} was idle and went to project ${to}. It comes back on the next message.`)
+      this.emitTask(r.id)
+    }
+    // The box is this project's now: the others' tasks look for a box of their own next time.
+    for (const p of this.store.listProjects()) if (p.id !== row.project_id && this.store.getKv(projectBoxKey(p.id)) === box.id) this.store.setKv(projectBoxKey(p.id), null)
+    this.store.setKv(boxOwnerKey(box.id), row.project_id)
+    this.addEvent(row.id, `Placed on box ${box.id}, idle for ${idleMin} min, rather than making a new box.`)
+    this.emitBoxes()
+  }
+
   private boxLabels(projectId?: string | null) {
     const project = projectId ? this.store.getProject(projectId) : null
     return ["boxyard", this.installLabel(), ...(project ? [`p-${slugify(project.name)}`] : [])]
@@ -4174,6 +4418,7 @@ export class TaskManager {
   private async createBox(projectId?: string) {
     this.creatingBoxes++
     this.poolCreates++
+    this.createStarts.push(Date.now())
     if (projectId) this.creatingFor.set(projectId, (this.creatingFor.get(projectId) ?? 0) + 1)
     const placeholder = `creating-${randomUUID().slice(0, 8)}`
     const size = this.newBoxSize(projectId)
@@ -4202,6 +4447,8 @@ export class TaskManager {
         detail: createdDetail(made, project?.name),
         taskIds: waiting,
       })
+      for (const box of this.madeFor.keys()) if (!this.store.getBox(box)) this.madeFor.delete(box)
+      if (waiting.length) this.madeFor.set(id, new Set(waiting))
       this.afterCreateFor(id, projectId, made, { kind: "scheduler" })
       void this.refreshBoxUsage(id, true).finally(() => {
         this.emitBoxes()
@@ -6059,6 +6306,7 @@ export class TaskManager {
       idleDeleteMinutes: idleDelete,
       list,
       gpu,
+      fanout: this.boxFanout(now),
     }
   }
 
@@ -6085,6 +6333,13 @@ export class TaskManager {
       this.notice(`⚠️ **Cloud spend** reached 80%: ${what}. At the limit new boxes wait; running work goes on.`, { kind: "cloud_limit" }, { coordinator: true })
     }
     this.store.setKv(CLOUD_NOTICED_KEY, JSON.stringify(seen))
+  }
+
+  /** A new box can't be made because a cloud limit or the box ceiling is reached: why, and its one-click fix; else null. */
+  private noNewBox(): { text: string; fix: WaitFix } | null {
+    const cloud = this.cloudBlock()
+    if (cloud) return cloud
+    return this.store.listBoxes().length >= this.limits().maxBoxes ? { text: "the pool is at its limit", fix: "box-settings" } : null
   }
 
   /** A new box can't be made because a cloud limit is reached: the reason and its one-click fix, or null. */

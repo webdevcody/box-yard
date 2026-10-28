@@ -737,6 +737,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN wait_fix TEXT;
   `,
   `
+  -- How placement picked a task's box (Task.placement.now.how): a new box, another project's idle box reused, or a
+  -- slot beside another project's tasks. Null for its project's own box; cleared when the task leaves the box.
+  ALTER TABLE tasks ADD COLUMN placed_how TEXT;
+  `,
+  `
   -- Project identities (shared/identities.ts, docs/identities.md): who acts for a project. The Default identity is
   -- Settings › Credentials, and every existing project starts on it, so nothing changes until Cody picks another.
   CREATE TABLE identities (
