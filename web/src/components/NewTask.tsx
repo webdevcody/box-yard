@@ -25,7 +25,7 @@ const subscribeNarrow = (cb: () => void) => {
   return () => mq?.removeEventListener("change", cb)
 }
 const isNarrow = () => window.matchMedia?.(NARROW).matches ?? false
-const useNarrow = () => useSyncExternalStore(subscribeNarrow, isNarrow, () => false)
+export const useNarrow = () => useSyncExternalStore(subscribeNarrow, isNarrow, () => false)
 
 /** Popover width (26rem) and its gap to the trigger and the window edges. */
 const WIDTH = 416
@@ -321,7 +321,7 @@ export function quotePreview(text: string, max = 240) {
 }
 
 /** Esc closes; Tab and Shift+Tab stay inside the panel. */
-function trapKeys(e: ReactKeyboardEvent, root: HTMLElement | null, close: () => void) {
+export function trapKeys(e: ReactKeyboardEvent, root: HTMLElement | null, close: () => void) {
   if (e.key === "Escape") {
     e.preventDefault()
     e.stopPropagation()
@@ -341,14 +341,14 @@ function trapKeys(e: ReactKeyboardEvent, root: HTMLElement | null, close: () => 
   }
 }
 
-type Align = "end" | "center"
+export type Align = "end" | "center"
 
 /**
  * Fixed-position style that puts the panel under the trigger, its right edge on the trigger's (or its left edge
  * on the trigger's when there's no room to the left; or centred on it), inside the window, and above the trigger
  * when there's more room there. Follows scrolling and resizes.
  */
-function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, align: Align): CSSProperties {
+export function useAnchor(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, align: Align): CSSProperties {
   // Placed from the first render: a hidden panel couldn't take focus.
   const [style, setStyle] = useState<CSSProperties>(() => anchorStyle(trigger.current, 0, align))
   useLayoutEffect(() => {
