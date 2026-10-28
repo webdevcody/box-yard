@@ -21,7 +21,11 @@ function box(over: Partial<CloudBox> = {}): CloudBox {
   return { id: "box-1", status: "ready", size: "small", projects: ["web"], runningTurns: 0, todayUsd: 0.4, totalUsd: 2, idleSince: null, deletesAt: null, idleHeld: null, ...over }
 }
 
-function status(over: Partial<CloudStatus["spend"]> = {}, list: CloudBox[] = [box({ runningTurns: 2 }), box({ id: "box-2", idleSince: now - 18 * MIN, deletesAt: now + 12 * MIN })]): CloudStatus {
+function status(
+  over: Partial<CloudStatus["spend"]> = {},
+  list: CloudBox[] = [box({ runningTurns: 2 }), box({ id: "box-2", idleSince: now - 18 * MIN, deletesAt: now + 12 * MIN })],
+  fanout: Partial<CloudStatus["fanout"]> = {},
+): CloudStatus {
   return {
     spend: { todayUsd: 3.1, dailyLimitUsd: 10, raisedUsd: 0, raiseToUsd: 20, monthUsd: 3.1, monthlyLimitUsd: 0, state: "ok", blockedReason: null, source: "measured", ...over },
     hourlyUsd: 0.42,
@@ -30,6 +34,7 @@ function status(over: Partial<CloudStatus["spend"]> = {}, list: CloudBox[] = [bo
     idleDeleteMinutes: 30,
     list,
     gpu: null,
+    fanout: { freePerHour: 15, wanted: 0, upToHourlyUsd: 0, allowedUntil: null, ...fanout },
   }
 }
 
@@ -134,6 +139,35 @@ describe("cloud meter", () => {
     act(() => chip().click())
     expect(sheet()!.textContent).toContain("No daily cloud limit")
     expect(sheet()!.textContent).toContain("No boxes right now")
+  })
+})
+
+describe("new boxes past the hour's free ones", () => {
+  it("turn the meter amber, and its sheet allows them for an hour", async () => {
+    render(createElement(CloudMeter, { variant: "inline" }), status({}, undefined, { wanted: 7, upToHourlyUsd: 1.4 }))
+    expect(chip().dataset.state).toBe("warning")
+    expect(chip().getAttribute("aria-label")).toContain("7 new boxes wait for your OK")
+    act(() => chip().click())
+    expect(document.querySelector("[data-testid=cloud-fanout]")!.textContent).toContain(
+      "7 new boxes wait for your OK: the queue wants more than the 15 an hour Box Yard makes without asking. Up to $1.40/h if every core is busy.",
+    )
+    replies["POST /api/cloud/allow-boxes"] = status({}, undefined, { allowedUntil: now + 60 * MIN })
+    act(() => document.querySelector<HTMLButtonElement>("[data-testid=allow-more-boxes]")!.click())
+    await settle()
+    expect(requests).toContainEqual({ method: "POST", url: "/api/cloud/allow-boxes" })
+    expect(chip().dataset.state).toBe("ok")
+    expect(document.querySelector("[data-testid=cloud-fanout]")).toBeNull()
+    expect(sheet()!.textContent).toContain("More than 15 new boxes an hour allowed until")
+  })
+
+  it("offers Allow more boxes on a task waiting for them", async () => {
+    replies["POST /api/cloud/allow-boxes"] = status()
+    render(createElement(WaitFixButton, { task: { waitFix: "allow-boxes" } }), status())
+    const fix = document.querySelector<HTMLButtonElement>("[data-testid=wait-fix]")!
+    expect(fix.textContent).toBe("Allow more boxes")
+    act(() => fix.click())
+    await settle()
+    expect(requests).toContainEqual({ method: "POST", url: "/api/cloud/allow-boxes" })
   })
 })
 

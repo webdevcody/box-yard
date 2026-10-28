@@ -1196,6 +1196,11 @@ export function createBoxYard(
     tasks.raiseCloudLimit("user")
     res.json(await tasks.cloudStatus())
   })
+  // "Allow more boxes": past the ones Box Yard makes in an hour without asking, for the next hour.
+  api.post("/cloud/allow-boxes", async (_req, res) => {
+    tasks.allowMoreBoxes("user")
+    res.json(await tasks.cloudStatus())
+  })
   api.get("/boxes", (_req, res) => {
     // Boxes deleted outside Box Yard drop out in the background (throttled); the SSE "boxes" update follows.
     void tasks.reconcileBoxes()
