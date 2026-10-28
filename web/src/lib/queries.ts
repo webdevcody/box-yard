@@ -458,6 +458,16 @@ export function useRaiseCloudLimit() {
   })
 }
 
+/** "Allow more boxes": past the ones Box Yard makes in an hour without asking, for the next hour; tasks waiting on it start. */
+export function useAllowMoreBoxes() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<CloudStatus>("/api/cloud/allow-boxes", { method: "POST", body: {} }),
+    onSuccess: (status) => qc.setQueryData(keys.cloud, status),
+    onError: fail("Couldn't allow more boxes"),
+  })
+}
+
 // ------------------------------------------------------------------ RunPod GPU (Settings › RunPod GPU)
 
 /** Settings, pods, volumes, Docker and the image build. Polled while open: pods change at RunPod, not here. */

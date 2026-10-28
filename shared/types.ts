@@ -152,10 +152,12 @@ export interface WaitFor {
 
 /**
  * A one-click way out of a wait (Task.waitFix). "raise-cloud-limit": today's cloud limit blocks a new box (raise it
- * until midnight); "cloud-settings": the monthly cloud limit does (Settings › Usage).
+ * until midnight); "cloud-settings": the monthly cloud limit does (Settings › Usage); "allow-boxes": the queue wants
+ * more new boxes than Box Yard makes in an hour without asking (allow them for an hour); "box-settings": the box
+ * ceiling does (Settings › Boxes & limits).
  */
-export type WaitFix = "raise-cloud-limit" | "cloud-settings"
-export const WAIT_FIXES: readonly WaitFix[] = ["raise-cloud-limit", "cloud-settings"]
+export type WaitFix = "raise-cloud-limit" | "cloud-settings" | "allow-boxes" | "box-settings"
+export const WAIT_FIXES: readonly WaitFix[] = ["raise-cloud-limit", "cloud-settings", "allow-boxes", "box-settings"]
 
 export interface Task {
   id: string
@@ -912,6 +914,20 @@ export interface CloudStatus {
   list: CloudBox[]
   /** RunPod GPU pods: their $/hour now against the cap for all pods; null when RunPod isn't set up. */
   gpu: { pods: number; hourlyUsd: number; capUsd: number } | null
+  /** New boxes past the ones Box Yard makes in an hour without asking. */
+  fanout: BoxFanout
+}
+
+/**
+ * Box Yard makes up to `freePerHour` new boxes an hour on its own. When the queue wants more, the rest wait on one OK
+ * (allow them for an hour): `wanted` is how many wait for it, `upToHourlyUsd` what they'd cost an hour with every core
+ * busy, `allowedUntil` the end of an OK given (ms since epoch), or null.
+ */
+export interface BoxFanout {
+  freePerHour: number
+  wanted: number
+  upToHourlyUsd: number
+  allowedUntil: number | null
 }
 
 export interface UsageReport {
