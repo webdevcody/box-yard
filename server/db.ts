@@ -715,6 +715,28 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN docker_dockerfile TEXT;
   `,
   `
+  -- Box cost from measured CPU (Upstash bills active CPU core-hours, not wall-clock). The last cumulative counters
+  -- read from the box's cgroup (cpu.stat usage_usec) and from the provider (Box.list total_cpu_ns and
+  -- total_compute_cost_usd), and what they measured that isn't in box_usage_intervals yet. From here on
+  -- box_usage_intervals.active_ms is CPU core-ms, and compute_usd is the provider's own figure for the interval.
+  ALTER TABLE boxes ADD COLUMN cgroup_cpu_usec INTEGER;
+  ALTER TABLE boxes ADD COLUMN provider_cpu_ns INTEGER;
+  ALTER TABLE boxes ADD COLUMN provider_compute_usd REAL;
+  ALTER TABLE boxes ADD COLUMN pending_cpu_ms REAL NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN pending_compute_usd REAL NOT NULL DEFAULT 0;
+  -- The part of active_ms whose price is fixed (intervals with compute_usd), and that price; the rest is priced with
+  -- Settings' rates. Since the provider began pricing the box: its compute total, and the measured CPU's price.
+  ALTER TABLE boxes ADD COLUMN priced_active_ms INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN priced_usd REAL NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN provider_usd REAL NOT NULL DEFAULT 0;
+  ALTER TABLE boxes ADD COLUMN measured_usd REAL NOT NULL DEFAULT 0;
+  ALTER TABLE box_usage_intervals ADD COLUMN compute_usd REAL;
+  `,
+  `
+  -- The one-click fix a queued task's wait reason offers (Task.waitFix), e.g. raise-cloud-limit.
+  ALTER TABLE tasks ADD COLUMN wait_fix TEXT;
+  `,
+  `
   -- Project identities (shared/identities.ts, docs/identities.md): who acts for a project. The Default identity is
   -- Settings › Credentials, and every existing project starts on it, so nothing changes until Cody picks another.
   CREATE TABLE identities (

@@ -16,6 +16,7 @@ import {
   WORKER_SIZES,
   type AutoCompact,
   type BoxSize,
+  type BudgetSettings,
   type CostRates,
   type Project,
   type Settings,
@@ -47,6 +48,8 @@ import {
 } from "../shared/tts.js"
 
 const KEY = "settings"
+/** Set once upgradeForCloudLimit has run. */
+const CLOUD_LIMIT_UPGRADE_KEY = "settings_upgrade_cloud_limit"
 
 export const DEFAULT_SETTINGS: Settings = {
   ownerName: DEFAULT_OWNER_NAME,
@@ -68,7 +71,8 @@ export const DEFAULT_SETTINGS: Settings = {
   autoResizeMaxSize: "large",
   // Off: a task whose project needs a bigger box than any free one waits for it; placement never resizes a box.
   placementResizeEnabled: false,
-  maxBoxes: 5,
+  // A safety ceiling, not a budget: Settings › Daily cloud limit keeps spend in check.
+  maxBoxes: 50,
   boxCreateConcurrency: BOX_CREATE_CONCURRENCY.default,
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
@@ -78,9 +82,10 @@ export const DEFAULT_SETTINGS: Settings = {
     boxKeepAliveMonthlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].keepAliveMonthlyUsd])) as Record<BoxSize, number>,
     boxStorageGbMonthUsd: 0.1,
   },
-  budget: { dailyUsd: 0, monthlyUsd: 0 },
+  // What boxes may cost: per day (raisable until midnight from the cloud meter) and over 30 days (0: no limit).
+  budget: { dailyUsd: 10, monthlyUsd: 0 },
   maxResidentPerBox: SIZE_DEFAULTS.small.maxResidentPerBox,
-  boxIdleDeleteMinutes: 0,
+  boxIdleDeleteMinutes: 30,
   workspaceRetentionDays: 7,
   archiveRetentionDays: 7,
   archiveKeepTouchedDays: 30,
@@ -379,6 +384,36 @@ export class SettingsStore {
     if (!parsed.success) throw new BadRequestError(parsed.error.issues.map((i) => i.message).join("; "))
     this.store.setKv(KEY, JSON.stringify({ ...this.saved(), ...parsed.data }))
     return this.info()
+  }
+
+  /**
+   * Once per install, for the daily cloud limit: the old defaults it replaces give way. A saved budget of $0 a day and
+   * $0 a month (the old "off", which the UI saved along with any other change) becomes the $10 daily limit, and a saved
+   * Max boxes under the new ceiling (it was the pool's cap) becomes the ceiling. Returns what changed, for a notice.
+   */
+  upgradeForCloudLimit(): string[] {
+    if (this.store.getKv(CLOUD_LIMIT_UPGRADE_KEY)) return []
+    this.store.setKv(CLOUD_LIMIT_UPGRADE_KEY, String(Date.now()))
+    let raw: Record<string, unknown>
+    try {
+      raw = JSON.parse(this.store.getKv(KEY) ?? "{}")
+    } catch {
+      return []
+    }
+    if (!raw || typeof raw !== "object") return []
+    const changed: string[] = []
+    const budget = raw.budget as Partial<BudgetSettings> | undefined
+    if (budget && !budget.dailyUsd && !budget.monthlyUsd) {
+      delete raw.budget
+      changed.push(`Daily cloud limit: $${DEFAULT_SETTINGS.budget.dailyUsd} (it was off)`)
+    }
+    if (typeof raw.maxBoxes === "number" && raw.maxBoxes < DEFAULT_SETTINGS.maxBoxes) {
+      changed.push(`Box ceiling: ${this.c.maxBoxes ?? DEFAULT_SETTINGS.maxBoxes} (Max boxes was ${raw.maxBoxes}; it's a safety stop under Advanced now)`)
+      delete raw.maxBoxes
+    }
+    if (!changed.length) return []
+    this.store.setKv(KEY, JSON.stringify(raw))
+    return changed
   }
 
   /** Forget saved values (all, or the named ones) so env vars and defaults apply again. */
