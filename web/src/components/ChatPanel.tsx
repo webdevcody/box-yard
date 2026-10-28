@@ -13,6 +13,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPc
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
+import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { groupPublished } from "../lib/publishedNotices"
@@ -142,6 +143,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             )}
           >
             <AgentIcon busy={Boolean(busy.data)} />
+            {zen && <RunningTasksBadge />}
             <div className="min-w-0 truncate text-sm font-semibold text-zinc-100">
               {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
               {zen && <span className="max-sm:hidden">Box Yard </span>}

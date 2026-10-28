@@ -175,6 +175,8 @@ export interface Task {
   /** The tasks holding it back that the wait reason names, in the order it names them (each `title` is in the text), so the UI links them. */
   waitFor: WaitFor[]
   turnCount: number
+  /** When the turn running now started (ms since epoch); null between turns. */
+  turnStartedAt?: number | null
   /** Messages waiting to be sent in the next turn. */
   pendingCount: number
   /** Changes whenever the queued messages do (added, edited, cancelled, being delivered); "" when none. */
