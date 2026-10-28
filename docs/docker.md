@@ -7,7 +7,7 @@ Use it when you want the local runner's speed and price (free, no network hop) w
 ## Setup (once per Box Yard install)
 
 1. **Docker.** Install Docker Desktop (or Docker Engine on Linux) and start it. Box Yard finds the `docker` CLI on the PATH or in Docker Desktop's usual places (`DOCKER_BIN` pins one). Settings › Docker shows whether it's running, and how many CPUs and how much memory it has for all containers.
-2. **A Claude key.** Settings › Credentials › Claude, or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` in the project's env. `claude setup-token` makes one. A container can't use this computer's own `claude` login, because macOS keeps it in the keychain and no host folder is mounted.
+2. **A Claude key.** Settings › Credentials › Claude, the project identity's Claude login (Settings › Identities), or `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` in the project's or the task's env. `claude setup-token` makes one. A container can't use this computer's own `claude` login, because macOS keeps it in the keychain and no host folder is mounted. Box Yard asks the same resolver that writes the turn's `task.json` (docs/identities.md), so a task waits for a key only when its turns really would have none.
 3. **GitHub.** The same token boxes and pods get: Settings › Credentials › GitHub, or the project's own `GITHUB_TOKEN`. When Box Yard runs on this computer (Setup › Where agents run: This computer or Docker containers) and none is set, it uses this computer's `gh` login, as the local runner does.
 4. **The image** (optional). The first task builds it, which takes a few minutes. **Settings › Docker › Build image now** builds it ahead of time.
 
@@ -62,8 +62,8 @@ Box Yard runs every command with `docker exec -i <container> bash -c 'eval "$(ca
 
 ## Credentials and isolation
 
-- **In the container only, in memory only.** A turn's credentials (the Claude key, `GITHUB_TOKEN`, the project's env) reach the container in `task.json`, as on boxes. On Docker, `task.json` is written to a tmpfs (`/run/boxyard/<task>.json`, mode 0700, in the container's memory) and linked from the task folder.
-  - Credentials are never in the image or a layer: the build context is only the Dockerfile, and a Dockerfile with something shaped like a key is refused.
+- **In the container only, in memory only.** A turn's credentials (the Claude key, `GITHUB_TOKEN`, the project's env) reach the container in `task.json`, as on boxes. On Docker, `task.json` is written to a tmpfs (`/run/boxyard/<task>.json`, mode 0700, in the container's memory) and linked from the task folder. So is an identity's signing key (`/run/boxyard/<task>.signing.key`), which the runner keeps on the tmpfs while the turn signs and removes after (docs/identities.md).
+  - Credentials are never in the image or a layer: the build context is only the Dockerfile, and a Dockerfile holding something shaped like a key, or any credential value in effect (Settings › Credentials and every identity's), is refused. The build log never shows one.
   - They're never in `docker run -e`, `docker inspect` or a command line.
   - The tmpfs is gone when the container stops or is deleted.
 - **GitHub.**
@@ -101,7 +101,7 @@ It leaves Box Yard's image for the next run. The unit tests (`test/docker-provid
 | You see | Do |
 | --- | --- |
 | `Waiting: Docker isn't installed …` / `… not running …` | Start Docker Desktop. Tasks start within a few seconds of Docker answering |
-| `Waiting: a Docker container can't use this computer's own claude login …` | Add a Claude key in Settings › Credentials |
+| `Waiting: a Docker container can't use this computer's own claude login …` | Add a Claude key in Settings › Credentials or on the project's identity |
 | A container stops with exit code 137, or agents get killed | It ran out of memory: raise Memory per container, and Docker Desktop's own memory if that's the limit |
 | `No 20 free ports in a row from …` | Something else uses those ports: change Preview ports from |
 | `The image … has no node` (or git, claude) | A project's own image needs bash, node, git and claude: build on Box Yard's with a Dockerfile instead |

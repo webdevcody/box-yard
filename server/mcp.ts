@@ -1094,7 +1094,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
-      await tasks.requireRunner(a.runs_on)
+      await tasks.requireRunner(a.runs_on, projectId, a.env)
       const t = tasks.createTask({
         projectId,
         title: a.title,
@@ -1189,14 +1189,20 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           for (const ref of new Set(item.attachments ?? [])) if (!a.attachments?.includes(ref)) check(`${where} attachments "${ref}"`, () => attachmentSource(ref))
           for (const ref of new Set(item.related_tasks ?? [])) if (!a.related_tasks?.includes(ref)) check(`${where} related_tasks "${ref}"`, () => task(ref))
         })
-        // Each runner asked for is checked once; every item that wants one that can't run is listed.
-        const runners = new Map<Runner, string | null>()
-        for (const r of new Set(a.tasks.map((item) => item.runs_on ?? a.runs_on).filter((r): r is Runner => Boolean(r)))) {
-          runners.set(r, await tasks.requireRunner(r).then(() => null, (err: unknown) => errorMessage(err)))
-        }
+        // Each runner asked for is checked once per Claude login (an item's env can bring its own); every item that wants one that can't run is listed.
+        const runners = new Map<string, Promise<string | null>>()
+        const why = await Promise.all(
+          a.tasks.map((item) => {
+            const r = item.runs_on ?? a.runs_on
+            if (!r) return null
+            const env = { ...a.env, ...item.env }
+            const key = `${r} ${tasks.turnCredentials(p.id, env).claudeFrom}`
+            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env).then(() => null, (err: unknown) => errorMessage(err)))
+            return runners.get(key)!
+          }),
+        )
         a.tasks.forEach((item, i) => {
-          const why = runners.get((item.runs_on ?? a.runs_on)!)
-          if (why) problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": runs_on "${item.runs_on ?? a.runs_on}": ${why}`)
+          if (why[i]) problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": runs_on "${item.runs_on ?? a.runs_on}": ${why[i]}`)
         })
         if (problems.length) {
           const shown = problems.slice(0, 25)
@@ -1264,7 +1270,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       // Refused before anything is sent, so a refusal leaves no message behind.
       const risk = a.interrupt && !a.allow_merge_interrupt ? tasks.mergeInterruptRisk(store.getTaskRow(before.id)!) : null
       if (risk) return fail(`${risk} Nothing was sent. Send it without interrupt (it goes out when the turn ends), or pass allow_merge_interrupt: true if it can't wait.`)
-      await tasks.requireRunner(a.runs_on)
+      await tasks.requireRunner(a.runs_on, before.projectId, store.taskEnv(before.id))
       if (a.runs_on) tasks.setRunsOn(before.id, a.runs_on)
       const how = delivery(before)
       const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, attachmentsOf(a.attachments), {

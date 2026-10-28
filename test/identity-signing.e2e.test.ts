@@ -92,6 +92,28 @@ printf '%s' "$prompt" | exec ${FAKE_CLAUDE} "$@"
   return claude
 }
 
+/**
+ * Boxes with a tmpfs for secrets, as Docker's containers have (DockerProvider: `secretsDir`, and writeFile keeps a
+ * task folder's signing.key there, linked from the folder). Gives the folder standing in for the tmpfs, and what
+ * each signing.key write held there.
+ */
+function holdSecrets(boxes: LocalProvider) {
+  const secrets = tmpDir("secrets-tmpfs-")
+  const writes: string[] = []
+  Object.assign(boxes, { secretsDir: secrets })
+  const write = boxes.writeFile.bind(boxes)
+  boxes.writeFile = async (boxId, file, content) => {
+    if (path.basename(file) !== "signing.key") return write(boxId, file, content)
+    writes.push(String(content))
+    const held = path.join(secrets, `${path.basename(path.dirname(file))}.signing.key`)
+    fs.writeFileSync(held, content, { mode: 0o600 })
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.rmSync(file, { force: true })
+    fs.symlinkSync(held, file)
+  }
+  return { secrets, writes }
+}
+
 const running: { yard: BoxYard; server: Server }[] = []
 afterEach(async () => {
   for (const r of running.splice(0)) {
@@ -179,6 +201,56 @@ describe("commit signing", () => {
     expect(after.lines.some((l) => l.startsWith("SIGNING_KEY="))).toBe(false)
   })
 
+  it("in a box with a tmpfs for secrets (Docker), keeps the key there for the turn, never on the box's disk, and removes both copies", async () => {
+    let secrets = ""
+    const r = await start({ boxes: (boxes) => (secrets = holdSecrets(boxes).secrets) })
+    const key = keyPair()
+    const o = origin()
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme", author: { name: "Acme Bot", email: "bot@acme.dev" } })
+    await r.call("PUT", `/api/identities/${acme.id}/signing`, { kind: "file", privateKey: key.privateKey, requireSigned: true })
+    const p = await r.project("acme-app", acme.id, { url: o.url })
+
+    const { lines, task } = await r.runTask(p, "Add a file [ownhook] [commit] [push]")
+    expect(lines).toContain("SIG signed by the turn G")
+    expect(lines).toContain("KEY_MODE=600")
+    // The hooks still run from the folder on disk (a tmpfs for secrets is noexec), and the repo's own still runs.
+    expect(lines).toContain("PUSH_EXIT=0")
+    expect(lines).toContain("OWN_HOOK_RAN")
+    expect(lines).toContain(`SIGNING_KEY=${path.join(secrets, `sign-${task.id}.key`)}`)
+    expect(o.signatures(`refs/heads/${task.branch}`, key.pub)).toEqual(["signed by the turn G"])
+    // Gone with the turn: the runner's copy, the one Box Yard delivered, its link and the folder on disk.
+    expect(fs.readdirSync(secrets)).toEqual([])
+    expect(fs.existsSync(path.join(r.yard.tasks.taskDir(task.boxId!, task.id), "signing.key"))).toBe(false)
+    expect(fs.existsSync(path.join(os.tmpdir(), `boxyard-sign-${task.id}`))).toBe(false)
+  })
+
+  it("only unlinks a delivered signing.key that links outside the tmpfs for secrets", async () => {
+    let secrets = ""
+    const elsewhere = path.join(tmpDir("not-secrets-"), "keep.txt")
+    fs.writeFileSync(elsewhere, "keep me\n")
+    const r = await start({
+      boxes: (boxes) => {
+        secrets = holdSecrets(boxes).secrets
+        const write = boxes.writeFile.bind(boxes)
+        // The delivered key links somewhere else (as a planted link would): the runner must not delete that file.
+        boxes.writeFile = async (boxId, file, content) => {
+          await write(boxId, file, content)
+          if (path.basename(file) !== "signing.key") return
+          fs.rmSync(path.join(secrets, `${path.basename(path.dirname(file))}.signing.key`))
+          fs.rmSync(file)
+          fs.symlinkSync(elsewhere, file)
+        }
+      },
+    })
+    const key = keyPair()
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+    await r.call("PUT", `/api/identities/${acme.id}/signing`, { kind: "file", privateKey: key.privateKey })
+    const p = await r.project("acme-app", acme.id)
+    const { task } = await r.runTask(p, "Hi")
+    expect(fs.readFileSync(elsewhere, "utf8")).toBe("keep me\n")
+    expect(fs.existsSync(path.join(r.yard.tasks.taskDir(task.boxId!, task.id), "signing.key"))).toBe(false)
+  })
+
   it("with requireSigned, a push of unsigned commits is stopped, in the turn and at its end", async () => {
     const r = await start()
     const key = keyPair()
@@ -245,6 +317,30 @@ describe("commit signing", () => {
     expect(keyAtStart).toBe(true)
     expect(path.basename(taskDir)).toBe(task.id)
     await waitFor(() => !fs.existsSync(path.join(taskDir, "signing.key")), "the key to go")
+  })
+
+  it("empties the tmpfs copy of the key when the turn's runner doesn't start", async () => {
+    let writes: string[] = []
+    let started = false
+    const r = await start({
+      boxes: (boxes) => {
+        writes = holdSecrets(boxes).writes
+        const exec = boxes.exec.bind(boxes)
+        boxes.exec = (boxId, command) => {
+          if (started || !/^cd '[^']+' && .*box-runner\.mjs' turn /m.test(command)) return exec(boxId, command)
+          started = true
+          return Promise.resolve({ exitCode: 1, stdout: "", stderr: "no node here" })
+        }
+      },
+    })
+    const key = keyPair()
+    const acme = await r.call<Identity>("POST", "/api/identities", { name: "Acme" })
+    await r.call("PUT", `/api/identities/${acme.id}/signing`, { kind: "file", privateKey: key.privateKey })
+    const p = await r.project("acme-app", acme.id)
+    await r.call<Task>("POST", "/api/tasks", { projectId: p.id, title: "Work", prompt: "Hi" })
+    // The key for the turn, then (its runner didn't start) nothing over it.
+    await waitFor(() => started && writes.length >= 2, "the tmpfs copy to be emptied")
+    expect(writes.slice(0, 2)).toEqual([key.privateKey, ""])
   })
 
   it("with requireSigned, a turn that can't sign can't push either, and says why", async () => {

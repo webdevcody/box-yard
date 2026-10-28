@@ -12,8 +12,9 @@ import { FolderDockerProvider } from "../server/providers/dockerFolders.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { DockerRunner } from "../server/tasks.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
-import { DEFAULT_DOCKER_SETTINGS, dockerBoxId, type DockerStatus } from "../shared/docker.js"
+import { DEFAULT_DOCKER_SETTINGS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, type DockerStatus } from "../shared/docker.js"
 import { placementView } from "../shared/placement.js"
+import type { Identity } from "../shared/identities.js"
 import type { Project, Task } from "../shared/types.js"
 import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
@@ -218,5 +219,44 @@ describe("Docker runner: when Docker can't run", () => {
     const p = await project(r, "boxes", "box")
     const coordinator = await mcpAs(r, { kind: "coordinator" })
     await expect(coordinator("create_tasks", { project: p.id, tasks: [{ title: "x", prompt: "y", runs_on: "docker" }] })).rejects.toThrow(/Docker is installed but not running/)
+  })
+
+  // Not mock mode, so a Claude key is needed: the one a turn would get (turnCredentials), wherever it comes from.
+  it("waits for a Claude key only when the turn would get none: the task's env, its project's or its identity's counts", async () => {
+    const r = await start({ ownDocker: true, config: { mock: false } })
+    r.docker!.problem = null
+    const p = await project(r, "keyless", "docker")
+    const keyless = r.yard.tasks.createTask({ projectId: p.id, title: "keyless", prompt: "write a haiku" })
+    await until(r, keyless.id, (x) => x.status === "queued" && x.waitReason === `Waiting: ${DOCKER_NEEDS_CLAUDE_KEY}`, "to wait for a Claude key")
+    const own = r.yard.tasks.createTask({ projectId: p.id, title: "own key", prompt: "write a haiku", env: { ANTHROPIC_API_KEY: "task-key-0001" } })
+    await done(r, own.id)
+    expect(getTask(r, keyless.id)).toMatchObject({ status: "queued", boxId: null })
+
+    // The project's identity gets a Claude login: the waiting task starts on it.
+    const acme = await call<Identity>(r, "POST", "/api/identities", { name: "Acme" })
+    await call(r, "PUT", `/api/identities/${acme.id}/claude`, { kind: "api_key", value: "acme-key-0001" })
+    await call(r, "PATCH", `/api/projects/${p.id}`, { identityId: acme.id })
+    await done(r, keyless.id)
+    expect(getTask(r, keyless.id).boxId).toBe(dockerBoxId(p.id))
+  })
+
+  it("refuses runs_on docker without a Claude key for that task, and takes one from the task's env or the project's identity", async () => {
+    const r = await start({ ownDocker: true, config: { mock: false } })
+    r.docker!.problem = null
+    const p = await project(r, "boxes", "box")
+    const coordinator = await mcpAs(r, { kind: "coordinator" })
+    await expect(coordinator("create_task", { project: p.id, title: "x", prompt: "y", runs_on: "docker" })).rejects.toThrow(DOCKER_NEEDS_CLAUDE_KEY)
+    // All or nothing: only the item without a key is a problem.
+    const batch = coordinator("create_tasks", { project: p.id, tasks: [{ title: "a", prompt: "y" }, { title: "b", prompt: "y", env: { CLAUDE_CODE_OAUTH_TOKEN: "task-oauth-0001" } }], runs_on: "docker" })
+    await expect(batch).rejects.toThrow(/one problem[\s\S]*- #1 "a": runs_on "docker"/)
+    const keyed = await coordinator("create_task", { project: p.id, title: "keyed", prompt: "y", runs_on: "docker", env: { ANTHROPIC_API_KEY: "task-key-0002" } })
+    expect(getTask(r, keyed.id).runsOn).toBe("docker")
+    await done(r, keyed.id)
+
+    const acme = await call<Identity>(r, "POST", "/api/identities", { name: "Acme" })
+    await call(r, "PUT", `/api/identities/${acme.id}/claude`, { kind: "oauth_token", value: "acme-oauth-0001" })
+    await call(r, "PATCH", `/api/projects/${p.id}`, { identityId: acme.id })
+    const created = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "on acme", prompt: "y", runsOn: "docker" })
+    expect(created.runsOn).toBe("docker")
   })
 })

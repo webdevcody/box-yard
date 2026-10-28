@@ -5,7 +5,8 @@ import { DOCKER_NOT_INSTALLED, DOCKER_NOT_RUNNING, DockerEngine } from "../serve
 import { DockerImages, baseImageTag, projectImageTag } from "../server/docker/images.js"
 import { DOCKER_SECRETS_DIR, DockerProvider } from "../server/providers/docker.js"
 import { DEFAULT_DOCKER_SETTINGS, NO_PROJECT_DOCKER, dockerBoxId, type DockerSettings, type ProjectDocker } from "../shared/docker.js"
-import { tmpDir } from "./helpers.js"
+import { createBoxYard } from "../server/app.js"
+import { testConfig, tmpDir } from "./helpers.js"
 
 // The Docker runner against a fake docker CLI (test/fake-docker.mjs), which keeps containers and volumes in a JSON
 // file and logs every call: what Box Yard asks Docker for, that nothing of this computer is mounted, that no secret
@@ -112,7 +113,7 @@ describe("DockerProvider", () => {
     expect(events.map((e) => e.kind)).toEqual(["created", "started"])
   })
 
-  it("sends commands and files on stdin, keeps task.json on the tmpfs, and never puts a secret on a command line", async () => {
+  it("sends commands and files on stdin, keeps task.json and signing.key on the tmpfs, and never puts a secret on a command line", async () => {
     const { p } = provider()
     await p.wake(BOX)
     await p.exec(BOX, `export GITHUB_TOKEN=${GH_SECRET} && git push`)
@@ -125,11 +126,23 @@ describe("DockerProvider", () => {
     expect(write.args!.at(-1)).toContain(`cat > '${DOCKER_SECRETS_DIR}/task_1.json.tmp'`)
     expect(write.args!.at(-1)).toContain(`ln -sfn '${DOCKER_SECRETS_DIR}/task_1.json' '/workspace/tasks/task_1/task.json'`)
     expect(write.stdin).toContain(SECRET)
+    expect(p.secretsDir).toBe(DOCKER_SECRETS_DIR)
+
+    const KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+    await p.writeFile(BOX, "/workspace/tasks/task_1/signing.key", KEY)
+    const key = calls().at(-1)!
+    expect(key.args!.at(-1)).toMatch(/^umask 077 && /)
+    expect(key.args!.at(-1)).toContain(`cat > '${DOCKER_SECRETS_DIR}/task_1.signing.key.tmp'`)
+    expect(key.args!.at(-1)).toContain(`ln -sfn '${DOCKER_SECRETS_DIR}/task_1.signing.key' '/workspace/tasks/task_1/signing.key'`)
+    expect(key.stdin).toBe(KEY)
+    // Only a task folder's: a file of that name elsewhere is an ordinary file.
+    await p.writeFile(BOX, "/workspace/tasks/task_1/work/signing.key", "not a key")
+    expect(calls().at(-1)!.args!.at(-1)).toContain("/workspace/tasks/task_1/work/signing.key.boxyard-tmp")
 
     await p.writeFile(BOX, "/workspace/tasks/task_1/prompt.md", "hello")
     expect(calls().at(-1)!.args!.at(-1)).toContain("/workspace/tasks/task_1/prompt.md.boxyard-tmp")
 
-    for (const c of calls()) expect(JSON.stringify(c.args ?? [])).not.toMatch(new RegExp(`${SECRET}|${GH_SECRET}`))
+    for (const c of calls()) expect(JSON.stringify(c.args ?? [])).not.toMatch(new RegExp(`${SECRET}|${GH_SECRET}|PRIVATE KEY`))
   })
 
   it("starts a stopped container again when a command needs it", async () => {
@@ -313,6 +326,19 @@ describe("DockerImages", () => {
     fs.appendFileSync(path.join(dir, "Dockerfile"), `ENV ANTHROPIC_API_KEY=${SECRET}\n`)
     await expect(images(dir).ensure("prj_abc")).rejects.toThrow(/Refusing to build: something shaped like a key is in Dockerfile/)
     expect(builds()).toEqual([])
+  })
+
+  it("refuses a project's Dockerfile holding an identity's secret too, in the app", async () => {
+    const yard = createBoxYard(testConfig({ dockerBin: FAKE }), { webDir: "/nonexistent", realDocker: { claudeBin: "claude" } })
+    try {
+      const acme = yard.identities.create({ name: "Acme" })
+      yard.identities.saveClaude(acme.id, { kind: "api_key", value: "acme-claude-0001-not-key-shaped" })
+      const p = yard.store.createProject({ name: "own-image", docker: { image: null, dockerfile: "FROM node\nRUN echo acme-claude-0001-not-key-shaped\n" } })
+      await expect(yard.docker.images.ensure(p.id)).rejects.toThrow(/Refusing to build: line 2/)
+      expect(builds()).toEqual([])
+    } finally {
+      yard.stop()
+    }
   })
 
   it("Box Yard's own docker/ builds: only public tools, and the git config that clears other credential helpers", () => {

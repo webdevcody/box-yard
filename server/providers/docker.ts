@@ -67,7 +67,8 @@ const isRunningError = (stderr: string) => /is not running|is paused/i.test(stde
  * - CPU, memory and process limits from Settings › Docker, the default bridge network (git, npm and the Claude API
  *   need it), and the image's user (Box Yard's: "agent", uid 1000, with sudo inside the container only).
  * Commands run with `docker exec -i` and arrive on stdin, so no token is ever on a command line. A turn's credentials
- * reach it in task.json, which `writeFile` keeps on a tmpfs (DOCKER_SECRETS_DIR). Stopping the container (idle)
+ * reach it in task.json and its signing key in signing.key, which `writeFile` keeps on a tmpfs (DOCKER_SECRETS_DIR,
+ * also the runner's `secretsDir`), never on the volume. Stopping the container (idle)
  * keeps the volume; `destroy` removes both. Every container and volume carries this install's labels, and nothing
  * here touches one that doesn't.
  */
@@ -75,6 +76,7 @@ export class DockerProvider implements BoxProvider {
   readonly name = "docker"
   readonly nodeBin = "node"
   readonly claudeBin: string
+  readonly secretsDir = DOCKER_SECRETS_DIR
   private readonly waking = new Map<string, Promise<void>>()
   private listed: { at: number; containers: DockerContainerState[] } | null = null
   /** Each container's first published port, as last read, so a preview link doesn't need `docker inspect`. */
@@ -321,9 +323,10 @@ export class DockerProvider implements BoxProvider {
   async writeFile(boxId: string, filePath: string, content: string | Buffer): Promise<void> {
     const dir = path.posix.dirname(filePath)
     let command: string
-    if (path.posix.basename(filePath) === "task.json" && path.posix.dirname(dir) === `${ROOT}/tasks`) {
-      // The turn's credentials: kept in memory (the tmpfs), linked from the task folder where the runner reads them.
-      const held = `${DOCKER_SECRETS_DIR}/${path.posix.basename(dir)}.json`
+    const name = path.posix.basename(filePath)
+    if ((name === "task.json" || name === "signing.key") && path.posix.dirname(dir) === `${ROOT}/tasks`) {
+      // The turn's credentials and signing key: kept in memory (the tmpfs), linked from the task folder where the runner reads them.
+      const held = `${DOCKER_SECRETS_DIR}/${path.posix.basename(dir)}.${name === "task.json" ? "json" : "signing.key"}`
       command = `umask 077 && cat > ${q(held + ".tmp")} && mv ${q(held + ".tmp")} ${q(held)} && mkdir -p ${q(dir)} && ln -sfn ${q(held)} ${q(filePath)}`
     } else {
       const tmp = `${filePath}.boxyard-tmp`

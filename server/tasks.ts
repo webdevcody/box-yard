@@ -59,7 +59,7 @@ import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpo
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { GLOBAL_CREDENTIALS, credentialSet, identityHomeEnv, ownGithubToken, turnEnv } from "./turnCredentials.js"
+import { GLOBAL_CREDENTIALS, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type TurnEnv } from "./turnCredentials.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
@@ -559,8 +559,11 @@ export class TaskManager {
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
   /** Hands an agent's message_captain to its project's Captain (CaptainManager.fromAgent); null when there are no Captains. */
   onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
-  /** Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can. */
-  runnerProblem: ((runner: Runner) => Promise<string | null>) | null = null
+  /**
+   * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
+   * `claudeKey` says whether the task's turns would have a Claude key (turnCredentials); undefined: the global one.
+   */
+  runnerProblem: ((runner: Runner, claudeKey?: boolean) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** RunPod GPU pods, or null when this install has no GPU runner. */
@@ -795,10 +798,12 @@ export class TaskManager {
   /**
    * Throws a clear 400 when a task asked to run on `runner` (its runs_on) can't: this computer lacks claude or its
    * sign-in, or there are no Upstash boxes. Nothing falls back to the other runner. No runner asked for: no check.
+   * With the task's project (and its own env), a Claude key its turns would get counts (a Docker container needs one).
    */
-  async requireRunner(runner: Runner | null | undefined): Promise<void> {
+  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}): Promise<void> {
     if (!runner || !this.runnerProblem) return
-    const problem = await this.runnerProblem(runner)
+    const claudeKey = projectId && this.store.getProject(projectId) ? this.turnCredentials(projectId, taskEnv).claudeFrom !== null : undefined
+    const problem = await this.runnerProblem(runner, claudeKey)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
@@ -3081,6 +3086,16 @@ export class TaskManager {
     return ownGithubToken(this.store.projectEnv(projectId)) || (project ? this.identities.base(projectId, project.repo).githubToken : "")
   }
 
+  /**
+   * The one credential resolver: what a turn of this project, with the task's own env vars on top, logs in with
+   * (`turnEnv` over the project's identity, docs/identities.md). taskJson hands it to every runner, and Docker's
+   * Claude-key checks ask it too, so no runner reads Settings › Credentials, an identity or a project's env itself.
+   */
+  turnCredentials(projectId: string, taskEnv: Record<string, string> = {}): TurnEnv {
+    const own = { ...this.store.projectEnv(projectId), ...taskEnv }
+    return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
+  }
+
   /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
   private projectCreds(projectId: string): string {
     return credentialSet(projectId, this.store.projectEnv(projectId), this.identities.idOf(projectId))
@@ -3447,7 +3462,7 @@ export class TaskManager {
       this.setWaitReason(row.id, "Waiting: Docker containers aren't available on this Box Yard")
       return null
     }
-    const problem = (await this.docker.problem()) ?? this.dockerClaudeProblem(row.project_id)
+    const problem = (await this.docker.problem()) ?? this.dockerClaudeProblem(row)
     if (problem) {
       this.dockerWait(row, problem)
       return null
@@ -3465,11 +3480,13 @@ export class TaskManager {
     return target
   }
 
-  /** A Docker project's agents need a Claude key (Settings › Credentials, or the project's env): a container can't use this computer's login. */
-  private dockerClaudeProblem(projectId: string): string | null {
-    if (this.c.mock || Object.keys(this.settings.credentials.claudeEnv()).length || this.identities.ownClaude(projectId)) return null
-    const env = this.store.projectEnv(projectId)
-    return env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY ? null : DOCKER_NEEDS_CLAUDE_KEY
+  /**
+   * A Docker task's turns need a Claude key (its env, its project's or identity's, or Settings › Credentials): a
+   * container can't use this computer's login. Asked of turnCredentials, so it's the key the turn would really get.
+   */
+  private dockerClaudeProblem(row: TaskRow): string | null {
+    if (this.c.mock) return null
+    return this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom ? null : DOCKER_NEEDS_CLAUDE_KEY
   }
 
   /** Put a task in its project's container. A full one (DOCKER_MAX_TASKS folders, one preview port each) parks an archived, resting one. */
@@ -4700,8 +4717,11 @@ export class TaskManager {
       if (this.stopRequested.has(taskId)) await this.killTurn(this.requireRow(taskId)).catch(() => {})
     } catch (err) {
       this.release(boxId, taskId)
-      // A key sent for a turn that never started doesn't stay on the box.
-      if (keyWaiting && !this.stopped) await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      // A key sent for a turn that never started doesn't stay on the box. Emptied first: in Docker that's the tmpfs copy.
+      if (keyWaiting && !this.stopped) {
+        await this.provider.writeFile(boxId, `${dir}/signing.key`, "").catch(() => {})
+        await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      }
       // Box Yard is stopping, and its database may be closed already: the next start picks the task up.
       if (this.stopped) {
         try {
@@ -4898,13 +4918,12 @@ export class TaskManager {
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null) {
     // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
-    const own = { ...this.store.projectEnv(project.id), ...this.store.taskEnv(row.id) }
-    const { env, unsetEnv, claudeFrom } = turnEnv(own, this.identities.base(project.id, project.repo))
+    const { env, unsetEnv, claudeFrom } = this.turnCredentials(project.id, this.store.taskEnv(row.id))
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
     // On this computer, an identity other than Default doesn't get the owner's git config or gh login.
     const home = this.identityHome(boxId, project.id)
-    if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in own)) env[k] = v
+    if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in env)) env[k] = v
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
     return {
       taskId: row.id,
@@ -4935,6 +4954,8 @@ export class TaskManager {
           }
         : null,
       identityHome: home,
+      // Where the runner keeps the turn's signing key: the box's memory when it has a tmpfs for secrets (Docker).
+      secretsDir: provider.secretsDir ?? null,
       publicUrl: this.c.publicUrl || null,
       redis: this.redis ? { url: this.c.redisUrl, token: this.c.redisToken, key: redisEventsKey(row.id) } : null,
     }
