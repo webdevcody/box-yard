@@ -25,6 +25,25 @@ export interface Place {
   podId?: string | null
   /** Docker: the container's name. */
   container?: string | null
+  /** Worker boxes, where its workspace is now: how placement picked the box (null: its project's own box). */
+  how?: BoxPick | null
+}
+
+/**
+ * How placement picked a worker box: a new one made for the task, another project's idle box given to its project
+ * rather than making one, or a slot beside another project's tasks because no box could be made right then.
+ */
+export const BOX_PICKS = ["new", "reused", "shared"] as const
+export type BoxPick = (typeof BOX_PICKS)[number]
+export const isBoxPick = (v: unknown): v is BoxPick => BOX_PICKS.includes(v as BoxPick)
+
+export const BOX_PICK_LABEL: Record<BoxPick, string> = { new: "new box", reused: "reused idle box", shared: "shared box" }
+
+/** The details' line on why that box. */
+export const BOX_PICK_WHY: Record<BoxPick, string> = {
+  new: "A new box was made for it: no box of its project had a free slot.",
+  reused: "Another project's box sat idle, so it went to this project instead of a new box being made. Its workspaces wait in the archive.",
+  shared: "It runs beside another project's tasks: no new box could be made right then.",
 }
 
 /** Which setting picked the runner: the task's own Runs on, or its project's. */
@@ -62,13 +81,13 @@ const podName = (p: Place) => (p.podId ? `pod ${shortPodId(p.podId)}` : `pod #${
 
 const join = (parts: (string | null | undefined)[]) => parts.filter(Boolean).join(" · ")
 
-/** The full form: "This computer", "Upstash · pure-lobster · small", "RunPod · RTX A5000 · pod 3x9k2a", "Docker · boxyard-task-1". */
+/** The full form: "This computer", "Upstash · pure-lobster · small" (" · reused idle box"), "RunPod · RTX A5000 · pod 3x9k2a", "Docker · boxyard-task-1". */
 export function placeLabel(p: Place): string {
   switch (p.kind) {
     case "local":
       return PLACE_NAME.local
     case "box":
-      return join([boxProviderName(p), p.boxId, p.size])
+      return join([boxProviderName(p), p.boxId, p.size, p.how && BOX_PICK_LABEL[p.how]])
     case "gpu":
       return join([PLACE_NAME.gpu, p.gpu, podName(p)])
     case "docker":
@@ -105,7 +124,7 @@ export interface PlacementView {
   chosenBy: RunnerSource
   /** "This task's Runs on: this computer" / "Project's Runs on: an Upstash box". */
   setting: string
-  /** Why it's where it is when that isn't simply its runner: it's waiting to move, or it's archived. */
+  /** Why it's where it is when that isn't simply its runner: it's waiting to move, it's archived, or how its box was picked. */
   reason: string | null
   /** The box id (and size) for the details, when there is a box. */
   place: Place | null
@@ -145,7 +164,9 @@ export function placementView(t: PlacementTask, projectRunner?: Runner): Placeme
       short: placeShort(p.now),
       reason: moving
         ? `It's set to run on ${RUNNER_PHRASE[p.runner]}, but its workspace is still here: it moves before a turn once its archive and push hold all the work.`
-        : null,
+        : p.now.how
+          ? BOX_PICK_WHY[p.now.how]
+          : null,
       place: p.now,
     }
   }
