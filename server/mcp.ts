@@ -37,6 +37,7 @@ import { RUNNERS, type Runner } from "../shared/runner.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
+import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -60,10 +61,15 @@ export interface McpDeps {
   coordinatorCompactionsDir?: string
   /** Where new projects run (the setup choice). Without it, Upstash boxes. */
   defaultRunner?: () => Runner
+  /** Side threads' read-only tokens (server/sideThreads.ts). */
+  threads?: { callerForToken(token: string): McpCaller | null }
 }
 
-/** Who is calling the MCP server. Captains only see and touch their own project. */
-export type McpCaller = { kind: "coordinator" } | { kind: "captain"; projectId: string }
+/**
+ * Who is calling the MCP server. Captains only see and touch their own project. A read-only caller (a side thread
+ * of either chat) sees the same tools but may only run THREAD_TOOLS.
+ */
+export type McpCaller = ({ kind: "coordinator" } | { kind: "captain"; projectId: string }) & { readOnly?: boolean }
 
 type ToolResult = { content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[]; isError?: boolean }
 const ok = (value: unknown): ToolResult => ({
@@ -170,6 +176,16 @@ function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
   }) as typeof server.registerTool
 }
 
+/**
+ * A side thread's tools: every tool stays listed with its description (so the thread's fork keeps the chat's prompt
+ * cache), but only THREAD_TOOLS run; the rest answer READ_ONLY_REFUSAL. The CLI's allowlist refuses them first.
+ */
+function readOnlyTools(server: McpServer) {
+  const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: unknown) => RegisteredTool
+  const refuse = async () => ({ content: [{ type: "text" as const, text: READ_ONLY_REFUSAL }], isError: true })
+  server.registerTool = ((name: string, config: Record<string, unknown>, cb: unknown) => register(name, config, THREAD_TOOLS.has(name) ? cb : refuse)) as typeof server.registerTool
+}
+
 /** The box settings create_project and update_project take. */
 interface BoxSettingsArgs {
   box_size?: BoxSize | null
@@ -207,6 +223,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const ownerName = deps.settings?.get().ownerName
   const owner = (text: string) => withOwner(text, ownerName)
   nameOwnerInTools(server, ownerName)
+  if (caller.readOnly) readOnlyTools(server)
   const scopeId = caller.kind === "captain" ? caller.projectId : null
   const ownProject = (): Project => {
     const p = scopeId ? store.getProject(scopeId) : null
@@ -2454,6 +2471,8 @@ function callerFor(deps: McpDeps, token: string, auth: string | undefined): McpC
   const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : null
   if (!bearer) return null
   if (bearer === token) return { kind: "coordinator" }
+  const thread = deps.threads?.callerForToken(bearer)
+  if (thread) return thread
   const projectId = deps.captains?.projectForToken(bearer)
   return projectId ? { kind: "captain", projectId } : null
 }

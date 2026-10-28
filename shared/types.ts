@@ -381,6 +381,38 @@ export interface ChatMessage {
 }
 
 /**
+ * A side thread: a question about a passage highlighted in the Coordinator chat (projectId null) or a project
+ * Captain's chat, answered in its own Claude session forked from that chat at the highlighted message. Closing it in
+ * the UI only hides it; it stays reopenable from its marker until deleted.
+ */
+export interface SideThread {
+  id: string
+  /** null: the Coordinator chat; else that project's Captain chat. */
+  projectId: string | null
+  /** The chat message the highlight is in. */
+  anchorId: string
+  /** The highlighted text, as selected. */
+  quote: string
+  /** How the thread got the chat's context: a fork of its session at the message, or (after a compaction) its summary. null until the first answer. */
+  context: "fork" | "summary" | null
+  /** A turn is running. */
+  busy: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type SideThreadRole = "user" | "assistant" | "tool" | "error"
+
+export interface SideThreadMessage {
+  id: string
+  threadId: string
+  role: SideThreadRole
+  content: string
+  meta: Record<string, unknown> | null
+  createdAt: number
+}
+
+/**
  * Who sent a Captain a message: Cody from the Captain tab, the Coordinator (send_to_captain/ask_captain), a schedule,
  * a hook, or an agent in the project (message_captain; meta has taskId, taskTitle and waitSeconds).
  */
@@ -555,6 +587,10 @@ export type UiEvent =
   | { type: "orchestrator.state"; state: OrchestratorState }
   | { type: "captain.message"; message: CaptainMessage }
   | { type: "captain.state"; state: CaptainState }
+  | { type: "thread"; thread: SideThread }
+  | { type: "thread.message"; message: SideThreadMessage }
+  | { type: "thread.delta"; threadId: string; text: string }
+  | { type: "thread.deleted"; threadId: string; projectId: string | null }
   | { type: "settings"; info: SettingsInfo }
   /** Settings › Voice text-to-speech choices changed (keys only as set/unset). */
   | { type: "tts"; info: TtsInfo }

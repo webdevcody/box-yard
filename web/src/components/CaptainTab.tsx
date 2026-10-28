@@ -38,6 +38,7 @@ import { Composer } from "./Composer"
 import { ContextMeter, ContextMiniBar, formatTokens } from "./ContextMeter"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { SelectionToTask } from "./SelectionToTask"
+import { SideThreadPane, ThreadChatProvider, ThreadMarkers } from "./SideThread"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import type { SelectionTaskSource } from "../lib/selectionTask"
 import { Modal } from "./Modal"
@@ -107,52 +108,58 @@ export function CaptainTab({ project }: { project: Project }) {
   const lastActive = Math.max(list.at(-1)?.createdAt ?? 0, state.data?.usage.updatedAt ?? 0) || null
 
   return (
-    <section
-      ref={panel}
-      data-testid="captain-chat"
-      // Open at the bottom: the shared Composer's own border-t and bottom padding end the card, as in ChatPanel.
-      className="relative flex min-h-[32rem] flex-1 flex-col overflow-hidden rounded-t-xl border border-b-0 border-zinc-900 bg-zinc-950"
-    >
-      <CaptainHeader projectId={project.id} state={state.data} lastActive={lastActive} />
-      {state.data?.error && (
-        <div className="flex gap-2 border-b border-red-900/50 bg-red-950/30 px-4 py-2 text-xs text-red-300">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 wrap-anywhere">{state.data.error}</span>
-        </div>
-      )}
-
-      <SelectionToTask source={selectionSource} onPrompt={submit}>
-        <StickyScroll
-          handle={thread}
-          count={list.length}
-          resetKey={project.id}
-          restoreKey="captain"
-          hidden={tail.hidden}
-          onLoadEarlier={tail.loadEarlier}
-          onTrim={tail.trim}
-          className="px-3 py-4 sm:px-4"
-          contentClassName="mx-auto max-w-3xl space-y-3"
-        >
-          {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
-          {tail.visible.map((row) => (
-            <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
-          ))}
-          {busy && (
-            // Just the dots, like the Coordinator's: the header's robot says it's working.
-            <div data-testid="captain-working" className="flex gap-1 px-1 py-2">
-              {[0, 1, 2].map((i) => (
-                <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
-              ))}
+    <ThreadChatProvider value={project.id}>
+      <section
+        ref={panel}
+        data-testid="captain-chat"
+        // Open at the bottom: the shared Composer's own border-t and bottom padding end the card, as in ChatPanel.
+        // A `coord` container: an open side thread sits beside the chat when it's wide, over it when not.
+        className="@container/coord relative flex min-h-[32rem] flex-1 overflow-hidden rounded-t-xl border border-b-0 border-zinc-900 bg-zinc-950"
+      >
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <CaptainHeader projectId={project.id} state={state.data} lastActive={lastActive} />
+          {state.data?.error && (
+            <div className="flex gap-2 border-b border-red-900/50 bg-red-950/30 px-4 py-2 text-xs text-red-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0 wrap-anywhere">{state.data.error}</span>
             </div>
           )}
-          {queued.map((m) => (
-            <InboundMessage key={m.id} m={m} />
-          ))}
-        </StickyScroll>
-      </SelectionToTask>
 
-      <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} historyKey={`captain:${project.id}`} />
-    </section>
+          <SelectionToTask source={selectionSource} onPrompt={submit}>
+            <StickyScroll
+              handle={thread}
+              count={list.length}
+              resetKey={project.id}
+              restoreKey="captain"
+              hidden={tail.hidden}
+              onLoadEarlier={tail.loadEarlier}
+              onTrim={tail.trim}
+              className="px-3 py-4 sm:px-4"
+              contentClassName="mx-auto max-w-3xl space-y-3"
+            >
+              {list.length === 0 && !messages.isLoading && <EmptyCaptain project={project} onPick={submit} />}
+              {tail.visible.map((row) => (
+                <Row key={row.id} row={row} open={openGroups.has(row.id)} onToggle={toggleGroup} onFollowUp={followUp} />
+              ))}
+              {busy && (
+                // Just the dots, like the Coordinator's: the header's robot says it's working.
+                <div data-testid="captain-working" className="flex gap-1 px-1 py-2">
+                  {[0, 1, 2].map((i) => (
+                    <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-sky-400/70" style={{ animationDelay: `${i * 120}ms` }} />
+                  ))}
+                </div>
+              )}
+              {queued.map((m) => (
+                <InboundMessage key={m.id} m={m} />
+              ))}
+            </StickyScroll>
+          </SelectionToTask>
+
+          <Composer onSubmit={submit} placeholder={busy ? "Queue another message…" : "Message the Captain…"} textareaRef={box} panelRef={panel} historyKey={`captain:${project.id}`} />
+        </div>
+        <SideThreadPane chat={project.id} />
+      </section>
+    </ThreadChatProvider>
   )
 }
 
@@ -190,7 +197,15 @@ const Row = memo(function Row({
   onFollowUp: (message: string) => void
 }) {
   if (row.type === "message")
-    return row.message.role === "user" ? <InboundMessage m={row.message} /> : <ChatLine m={row.message} onFollowUp={onFollowUp} />
+    return row.message.role === "user" ? (
+      // Like a ChatLine: named for a side thread on it, with its threads under it.
+      <div data-chat-id={row.message.id}>
+        <InboundMessage m={row.message} />
+        <ThreadMarkers m={row.message} />
+      </div>
+    ) : (
+      <ChatLine m={row.message} onFollowUp={onFollowUp} />
+    )
   if (row.type === "notice") return <NoticeRow m={row.message} />
   if (row.type === "files") return <PublishedRow group={row.group} />
   return <NoticeGroup id={row.id} items={row.items} messages={row.messages} open={open} onToggle={onToggle} />
@@ -251,7 +266,7 @@ const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }
       </div>
       {m.content && <CollapsibleMarkdown>{m.content}</CollapsibleMarkdown>}
       <AttachmentList files={m.meta?.attachments} />
-      {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} />}
+      {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} anchorId={m.id} />}
     </div>
   )
   // Queued (sent mid-turn): the bubble, then the Queued label with Edit and Delete under it.

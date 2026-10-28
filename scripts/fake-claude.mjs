@@ -36,12 +36,17 @@
 // The Merge PR button's standard message ("Merge your pull request #N") stands in for `gh pr merge` when
 // FAKE_GH_STATE names a file: the worker writes {"state":"MERGED"} there for a test's fake GitHub to read.
 // FAKE_CLAUDE_COMPACT_FAIL=1 makes /compact fail (after the summary was written), FAKE_CLAUDE_BAD_SUMMARY=1 the summary.
+// Side threads: `--resume <id> --resume-session-at <uuid> --fork-session --session-id <new>` copies the session's turns
+// up to the one that printed <uuid> into a new session (the original is left alone), as the real CLI forks. Every
+// assistant line carries a uuid. A side thread's reply says how many earlier turns it sees and quotes the last one's
+// prompt; "try <tool>" in its question calls that Box Yard tool and quotes the result (a read-only check).
 
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import http from "node:http"
 import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
 
 const args = process.argv.slice(2)
 const flag = (name) => {
@@ -61,10 +66,17 @@ fs.mkdirSync(sessionsDir, { recursive: true })
 
 const resumeId = flag("--resume")
 const newId = flag("--session-id")
-const sessionId = resumeId ?? newId
+const fork = args.includes("--fork-session")
+const resumeAt = flag("--resume-session-at") ?? args.find((a) => a.startsWith("--resume-session-at="))?.slice("--resume-session-at=".length)
+if (resumeId && newId && !fork) {
+  console.error("Error: --session-id can only be used with --continue or --resume if --fork-session is also specified.")
+  process.exit(1)
+}
+const sessionId = fork ? (newId ?? randomUUID()) : (resumeId ?? newId)
 const sessionFile = sessionId ? path.join(sessionsDir, `${sessionId}.json`) : null
+const resumeFile = resumeId ? path.join(sessionsDir, `${resumeId}.json`) : null
 
-if (resumeId && !fs.existsSync(sessionFile)) {
+if (resumeId && !fs.existsSync(resumeFile)) {
   console.error(`No conversation found with session ID: ${resumeId}`)
   process.exit(1)
 }
@@ -81,12 +93,29 @@ const fmt = (n) => (n >= 1e6 ? `${n / 1e6}m` : n >= 1e3 ? `${Math.round(n / 100)
 // Record how we were called, so tests can check flags (set FAKE_CLAUDE_LOG to a file).
 // FAKE_CLAUDE_LOG_FULL=1 logs the whole prompt instead of its first 120 characters.
 
-const session = resumeId ? JSON.parse(fs.readFileSync(sessionFile, "utf8")) : { id: sessionId, turns: [] }
+const session = resumeId ? JSON.parse(fs.readFileSync(resumeFile, "utf8")) : { id: sessionId, turns: [] }
 session.tokens ??= 0
+if (resumeAt) {
+  // Only the turns up to and including the one that printed that line, like the real CLI's chain cut.
+  const at = session.turns.findIndex((t) => (t.uuids ?? []).includes(resumeAt))
+  if (at < 0) {
+    console.error(`No message found with message.uuid of: ${resumeAt}`)
+    process.exit(1)
+  }
+  session.turns = session.turns.slice(0, at + 1)
+}
+if (fork) Object.assign(session, { id: sessionId, forkedFrom: resumeId, forkedAt: resumeAt ?? null })
+/** The uuids of the assistant lines this run prints (a later fork can cut there). */
+const uuids = []
 const usageNow = () => ({ input_tokens: session.tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 10 })
 const out = (obj) => {
   // Every assistant message carries the usage of its API call, like the real CLI.
-  if (obj.type === "assistant") obj.message.usage = usageNow()
+  if (obj.type === "assistant") {
+    obj.message.usage = usageNow()
+    obj.uuid = randomUUID()
+    obj.session_id = session.id
+    uuids.push(obj.uuid)
+  }
   if (flag("--output-format") !== "stream-json") return // plain text mode prints only the text
   process.stdout.write(JSON.stringify(obj) + "\n")
 }
@@ -203,8 +232,28 @@ async function notesRetro(mcp, prompt) {
   return "(no update)"
 }
 
+/** A side thread's turn: what it can see of the chat it forked, and any tool its question asks to try. */
+async function sideThread(mcp, prompt) {
+  const earlier = session.turns.filter((t) => !t.thread)
+  const question = prompt.includes("[Box Yard side thread]") ? (prompt.split(/'s question:\n/).pop() ?? prompt) : prompt
+  const lines = [`Side thread answer (mock Claude). I can see ${earlier.length} earlier chat turn${earlier.length === 1 ? "" : "s"}${session.forkedFrom ? " (forked)" : ""}.`]
+  const last = earlier.at(-1)
+  if (last) lines.push(`The last one asked: "${last.prompt.split("\n").filter((l) => l.trim() && !l.startsWith("[Yard now]") && !l.startsWith("- ")).pop()?.slice(0, 120) ?? ""}"`)
+  if (/Your session for this thread was started fresh/.test(prompt)) lines.push("I started fresh from the summary.")
+  lines.push(`You asked: ${question.trim().slice(0, 200)}`)
+  const tool = question.match(/\btry (\w+)/i)
+  if (tool) lines.push(`${tool[1]} said: ${(await useTool(mcp, tool[1], tool[1] === "create_task" ? { project: "demo", title: "From a side thread", prompt: "x" } : {})).slice(0, 300)}`)
+  if (/\[slow\]/i.test(question)) await sleep(2000)
+  await say(lines.join("\n\n"))
+  return lines.join("\n")
+}
+
 async function orchestrator(mcp, prompt) {
   if (prompt.includes("📝 **Notes retro**")) return notesRetro(mcp, prompt)
+  if (prompt.includes("[Box Yard side thread]") || session.thread) {
+    session.thread = true
+    return sideThread(mcp, prompt)
+  }
   const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
   const lines = []
   let m
@@ -375,7 +424,7 @@ process.stdin.on("end", async () => {
   }
   // Like the real CLI, a session exists from its first turn's start: a turn killed halfway can be resumed. Its turns
   // list gets this one at the end.
-  if (sessionFile && !resumeId) fs.writeFileSync(sessionFile, JSON.stringify(session))
+  if (sessionFile && (!resumeId || fork)) fs.writeFileSync(sessionFile, JSON.stringify(session))
   let result = ""
   let mcp = null
   if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")
@@ -410,7 +459,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  session.turns.push({ prompt, result, at: Date.now() })
+  session.turns.push({ prompt, result, at: Date.now(), uuids, ...(session.thread ? { thread: true } : {}) })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
     type: "result",

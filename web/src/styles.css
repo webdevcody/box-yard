@@ -186,3 +186,14 @@ body.resizing iframe {
     animation: agent-fade 2.4s ease-in-out infinite;
   }
 }
+
+/* Passages that have a side thread (lib/threadHighlight.ts), tinted in place; the open thread's is stronger. */
+::highlight(side-thread) {
+  background-color: color-mix(in oklab, var(--color-yard-400) 14%, transparent);
+  text-decoration: underline dotted color-mix(in oklab, var(--color-yard-400) 70%, transparent);
+  text-underline-offset: 3px;
+}
+::highlight(side-thread-open) {
+  background-color: color-mix(in oklab, var(--color-yard-400) 32%, transparent);
+  color: var(--color-zinc-50);
+}

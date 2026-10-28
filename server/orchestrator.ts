@@ -30,6 +30,7 @@ import {
 import { routingInstructions } from "./routing.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
+import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -446,6 +447,21 @@ export class Orchestrator {
     }
   }
 
+  /** What a side thread on this chat forks (server/sideThreads.ts). Reading it never changes the session. */
+  threadHost(): ThreadHost {
+    return {
+      cwd: this.workdir,
+      session: () => ({ id: this.store.getKv(SESSION_KEY) ?? "", started: this.store.getKv(STARTED_KEY) === "1" }),
+      systemPrompt: () => this.systemPrompt(),
+      readRules: () => this.readRules(),
+      model: () => this.settings.get().orchestratorModel,
+      effort: () => this.settings.get().orchestratorEffort,
+      compactionsDir: this.compactionsDir,
+      caller: { kind: "coordinator" },
+      usage: { source: "orchestrator", projectId: null },
+    }
+  }
+
   private session() {
     let id = this.store.getKv(SESSION_KEY)
     if (!id) {
@@ -731,8 +747,9 @@ export class Orchestrator {
           if (quiet) return
           if (text && text !== NO_UPDATE) {
             const parsed = parseNextSteps(text)
-            const meta = parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : null
-            const m = this.store.addChat("assistant", parsed.content, meta)
+            // The session line it came from: a side thread on this message forks the session there.
+            const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId) }
+            const m = this.store.addChat("assistant", parsed.content, Object.keys(meta).length ? meta : null)
             this.hub.broadcast({ type: "chat.message", message: m })
             reply = m
           } else if (text === NO_UPDATE) reply = null

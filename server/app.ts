@@ -13,6 +13,7 @@ import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
 import { TaskManager, type DockerRunner, type GpuRunner, type TaskManagerDeps } from "./tasks.js"
 import { Orchestrator } from "./orchestrator.js"
+import { MAX_QUESTION_CHARS, MAX_QUOTE_CHARS, SideThreads } from "./sideThreads.js"
 import { CaptainManager } from "./captains.js"
 import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js"
 import { SettingsTools } from "./settingsTools.js"
@@ -151,6 +152,16 @@ const schemas = {
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  sideThread: z.object({
+    id: idSchema,
+    /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
+    projectId: z.string().min(1).nullish(),
+    anchorId: z.string().min(1).max(100),
+    quote: z.string().trim().min(1).max(MAX_QUOTE_CHARS),
+    question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
+    messageId: idSchema,
+  }),
+  sideThreadMessage: z.object({ id: idSchema, content: z.string().trim().min(1).max(MAX_QUESTION_CHARS) }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
@@ -237,6 +248,7 @@ export interface BoxYard {
   tasks: TaskManager
   orchestrator: Orchestrator
   captains: CaptainManager
+  threads: SideThreads
   scheduler: Scheduler
   settings: SettingsStore
   /** The Coordinator's get_settings / update_settings, on the Settings UI's save paths. */
@@ -357,6 +369,7 @@ export function createBoxYard(
   const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
   const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
+  const threads = new SideThreads(c, store, hub, settings, mcpUrl, (projectId) => (projectId ? captains.threadHost(projectId) : orchestrator.threadHost()))
   tasks.onNotice = (content, meta, opts) => {
     const wake = opts.wake !== false
     const handled = captains.notice(content, meta, { wake })
@@ -479,7 +492,7 @@ export function createBoxYard(
   app.all(
     "/mcp",
     mcpHandler(
-      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner() },
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), threads },
       mcpToken,
     ),
   )
@@ -1035,6 +1048,31 @@ export function createBoxYard(
   api.post("/chat/messages/:messageId/restore", (req, res) => {
     res.json(orchestrator.restoreQueued(req.params.messageId!))
   })
+  // ---- side threads: a question about a highlighted passage in the Coordinator chat (no projectId) or a Captain's
+  const threadChat = (v: unknown) => (typeof v === "string" && v ? v : null)
+  api.get("/threads", (req, res) => {
+    res.json(threads.list(threadChat(req.query.projectId)))
+  })
+  api.post("/threads", (req, res) => {
+    const body = parse(schemas.sideThread, req.body)
+    res.status(201).json(threads.create({ ...body, projectId: body.projectId ?? null }))
+  })
+  api.get("/threads/:id/messages", (req, res) => {
+    res.json(threads.messages(req.params.id!))
+  })
+  api.post("/threads/:id/messages", (req, res) => {
+    const body = parse(schemas.sideThreadMessage, req.body)
+    res.status(201).json(threads.send(req.params.id!, body.content, body.id))
+  })
+  api.post("/threads/:id/stop", (req, res) => {
+    threads.get(req.params.id!)
+    threads.stop(req.params.id!)
+    res.json({ ok: true })
+  })
+  api.delete("/threads/:id", (req, res) => {
+    threads.delete(req.params.id!)
+    res.json({ ok: true })
+  })
   api.get("/orchestrator", (_req, res) => {
     res.json(orchestrator.state())
   })
@@ -1234,6 +1272,7 @@ export function createBoxYard(
     tasks,
     orchestrator,
     captains,
+    threads,
     scheduler,
     settings,
     settingsTools,
@@ -1254,6 +1293,7 @@ export function createBoxYard(
       stopHold = startSelfHold(c, () => {
         if (orchestrator.busy) return true
         if (captains.anyBusy()) return true
+        if (threads.anyBusy) return true
         if (store.listTaskRows({ status: ["queued", "starting", "working"] }).length) return true
         // Without QStash nothing wakes a paused box for a schedule, so stay up for ones due soon.
         if (!qstash) {
@@ -1270,6 +1310,7 @@ export function createBoxYard(
       tasks.stop()
       captains.stop()
       orchestrator.stop()
+      threads.stopAll()
       stopSnapshots?.()
       stopHold?.()
       hub.close()
