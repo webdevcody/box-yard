@@ -33,6 +33,15 @@ describe("parseMemory", () => {
     expect(parseMemory("@@boxyard-mem\nMemTotal: 1000 kB\nMemAvailable: 250 kB\nloadavg \nnproc ")).toEqual({ usedBytes: 750 * 1024, totalBytes: 1000 * 1024, load1: 0, cpus: 1 })
   })
 
+  it("reads the cgroup's CPU time and CPU limit (what Upstash bills), when it has them", () => {
+    // This box (Oct 27): a small Upstash box is a 2-CPU cgroup (cpu.max 200000 100000) on a 64-CPU host.
+    const out = [UPSTASH, "usage_usec 3867533805", "cpu.max 200000 100000"].join("\n")
+    expect(parseMemory(out)).toMatchObject({ cpus: 64, cpuUsageUsec: 3867533805, cpuLimit: 2 })
+    expect(parseMemory([UPSTASH, "usage_usec 12", "cpu.max max 100000"].join("\n"))).toMatchObject({ cpuUsageUsec: 12 })
+    expect(parseMemory([UPSTASH, "cpu.max max 100000"].join("\n"))).not.toHaveProperty("cpuLimit")
+    expect(parseMemory(UPSTASH)).not.toHaveProperty("cpuUsageUsec")
+  })
+
   it("ignores a cgroup limit bigger than the machine", () => {
     const out = ["@@boxyard-mem", "memory.current 100", `memory.max ${2 ** 62}`, "MemTotal: 1000 kB", "MemAvailable: 500 kB", "nproc 1"].join("\n")
     expect(parseMemory(out)?.totalBytes).toBe(1000 * 1024)

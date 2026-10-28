@@ -1190,6 +1190,15 @@ export function createBoxYard(
     const q = req.query as Record<string, string | undefined>
     res.json(store.listArtifacts({ projectId: q.projectId, taskId: q.taskId }))
   })
+  // The cloud meter: box spend today against Settings › Daily cloud limit, $/hour now, and the boxes.
+  api.get("/cloud", async (_req, res) => {
+    res.json(await tasks.cloudStatus())
+  })
+  // "Raise today's limit": one more day's worth until midnight; boxes waiting on the limit are made at once.
+  api.post("/cloud/raise", async (_req, res) => {
+    tasks.raiseCloudLimit("user")
+    res.json(await tasks.cloudStatus())
+  })
   api.get("/boxes", (_req, res) => {
     // Boxes deleted outside Box Yard drop out in the background (throttled); the SSE "boxes" update follows.
     void tasks.reconcileBoxes()
