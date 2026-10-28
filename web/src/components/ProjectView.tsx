@@ -8,6 +8,7 @@ import {
   useDeleteProject,
   useDocker,
   useHooks,
+  useProjectAutoSize,
   useProjects,
   useRunPod,
   useSchedules,
@@ -39,6 +40,7 @@ import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { useOpenSettings } from "./SettingsDialog"
 import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
+import { AUTO_SIZE_MIN_RUNS } from "../../../shared/autoSize"
 import { RUNPOD_CLOUDS, RUNPOD_MACHINE_LIMITS, shortGpu, type ProjectGpuMachine, type RunPodCloud } from "../../../shared/runpod"
 import { GpuTypePicker } from "./GpuTypePicker"
 import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
@@ -388,6 +390,7 @@ const bySize = (k: "slotsPerBox" | "maxResidentPerBox") => WORKER_SIZES.map((z) 
  */
 function ProjectBoxSettings(p: {
   info: SettingsInfo | undefined
+  projectId: string
   /** The project's name, for the line that says what Tasks running at once does. */
   name: string
   local: boolean
@@ -421,6 +424,14 @@ function ProjectBoxSettings(p: {
   const agents = perBox("slotsPerBox")
   const folders = perBox("maxResidentPerBox")
   const pool = s ? String(s.maxBoxes) : "the pool's"
+  // Box size left blank: auto-sizing's pick from the project's runs (Settings › Size and resize boxes automatically), else Worker size.
+  const autoSize = useProjectAutoSize(p.projectId).data
+  const worker = s?.workerSize ?? "Settings › Worker size"
+  const auto = autoSize?.enabled
+    ? autoSize.size
+      ? { field: autoSize.label, option: `Auto: ${autoSize.label}` }
+      : { field: `${worker} (Worker size) until ${AUTO_SIZE_MIN_RUNS} runs are measured (${autoSize.runs} so far)`, option: `Auto: ${worker} until measured` }
+    : null
   return (
     <section className="@container space-y-3 rounded-lg border border-zinc-800/80 p-3" aria-labelledby="project-boxes" data-testid="project-boxes">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
@@ -442,13 +453,14 @@ function ProjectBoxSettings(p: {
       <OverrideField
         id="project-box-size"
         label="Box size"
-        global={`${s?.workerSize ?? "Settings"} (Worker size)`}
+        kind={auto ? "auto" : "global"}
+        global={auto ? auto.field : `${s?.workerSize ?? "Settings"} (Worker size)`}
         set={Boolean(p.boxSize)}
         onClear={() => p.setBoxSize("")}
-        hint="New boxes made for this project are this size, and its tasks only run on boxes at least this big. Boxes it already has keep their size; resize them from the Boxes page."
+        hint={`${auto ? "Auto: Box Yard sizes its boxes from what its runs used, the smallest with RAM for 1.25 × the peak of the last 14 days, and a turn that runs out of memory carries on once on a bigger box. A size set here overrides that: n" : "N"}ew boxes made for this project are this size, and its tasks only run on boxes at least this big. Boxes it already has keep their size; resize them from the Boxes page.`}
       >
         <Select id="project-box-size" className="w-full min-w-0 sm:w-80" value={p.boxSize} onChange={(e) => p.setBoxSize(e.target.value as BoxSize | "")} data-testid="project-box-size">
-          <option value="">Global: {s?.workerSize ?? "Settings › Worker size"}</option>
+          <option value="">{auto ? auto.option : `Global: ${worker}`}</option>
           {BOX_SIZES.map((size) => (
             <option key={size} value={size}>
               {BOX_SIZE_SPECS[size].label}: {sizeSpecLine(size)}
@@ -577,6 +589,7 @@ function ProjectBoxSettings(p: {
 function OverrideField({
   id,
   label,
+  kind = "global",
   global,
   set,
   onClear,
@@ -586,6 +599,8 @@ function OverrideField({
 }: {
   id: string
   label: string
+  /** What applies when it's blank: the global setting, or Box Yard's own pick ("auto", the Box size). */
+  kind?: "global" | "auto"
   global: string
   set: boolean
   onClear: () => void
@@ -602,14 +617,14 @@ function OverrideField({
       <div className="flex flex-wrap items-center gap-2">
         {children}
         {set && (
-          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={onClear} title={`Clear this project's ${label.toLowerCase()}: the global one applies`} data-testid={`${id}-clear`}>
-            <X className="h-3.5 w-3.5" /> Use global
+          <Button type="button" variant="ghost" size="sm" className="shrink-0" onClick={onClear} title={`Clear this project's ${label.toLowerCase()}: the ${kind} one applies`} data-testid={`${id}-clear`}>
+            <X className="h-3.5 w-3.5" /> Use {kind}
           </Button>
         )}
       </div>
       <p className="text-xs text-zinc-500">
         <span className={set ? undefined : "text-zinc-300"} data-testid={`${id}-source`}>
-          {set ? `Overrides global: ${global}.` : `Using global: ${global}.`}
+          {set ? `Overrides ${kind}: ${global}.` : `Using ${kind}: ${global}.`}
         </span>{" "}
         {hint}
       </p>
@@ -876,6 +891,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       </div>
       <ProjectBoxSettings
         info={settings.data}
+        projectId={project.id}
         name={name}
         local={runner === "local"}
         gpu={runner === "gpu"}
