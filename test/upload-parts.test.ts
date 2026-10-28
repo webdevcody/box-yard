@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import { execFileSync, spawnSync } from "node:child_process"
 import { LocalProvider } from "../server/providers/local.js"
-import { UPSTASH_MAX_UPLOAD_BYTES, isUploadTooBig, putFile, uploadPartBytes } from "../server/upload.js"
+import { UPSTASH_MAX_UPLOAD_BYTES, isUploadTooBig, putFile, statedUploadLimit, uploadPartBytes, uploadSize } from "../server/upload.js"
 import { ArchiveDecoder, archiveOutcome, archiveScript } from "../server/archive.js"
 import { tmpDir } from "./helpers.js"
 
@@ -15,6 +15,8 @@ class LimitedBox extends LocalProvider {
   readonly execs: string[] = []
   failUpload = 0
   doubleExec = false
+  /** Refuses uploads over this many bytes without advertising it (maxUploadBytes stays as given). */
+  refuseOver = 0
   constructor(
     dir: string,
     readonly maxUploadBytes: number | undefined,
@@ -25,6 +27,7 @@ class LimitedBox extends LocalProvider {
     const bytes = fs.statSync(localPath).size
     this.uploads.push(bytes)
     if (this.maxUploadBytes && bytes > this.maxUploadBytes) throw Object.assign(new Error("file exceeds maximum size of 100 MB"), { statusCode: 400 })
+    if (this.refuseOver && bytes > this.refuseOver) throw Object.assign(new Error(`file exceeds maximum size of ${this.refuseOver / 1000} KB`), { statusCode: 400 })
     if (this.uploads.length === this.failUpload) throw new Error("socket hang up")
     return super.uploadFile(boxId, localPath, destination)
   }
@@ -89,15 +92,63 @@ describe("putFile", () => {
     const { p, id, src, dest } = await box(100 * KB)
     p.failUpload = 2
     fs.writeFileSync(src, random(250 * KB))
-    await expect(putFile(p, id, src, dest)).rejects.toThrow("socket hang up")
+    // The error names the part (parts of 92,160 bytes: 90% of the 102,400-byte limit).
+    await expect(putFile(p, id, src, dest)).rejects.toThrow(/^part 2 of 3 \(92\.2 KB\) failed: socket hang up$/)
     expect(fs.readdirSync(path.dirname(dest))).toEqual([])
   })
 
-  it("without a known limit it sends the file whole, and a refusal says why", async () => {
+  it("a part refused for its size still reads as a refusal for size, naming the part", async () => {
+    const { p, id, src, dest } = await box(100 * KB)
+    p.refuseOver = 50 * KB
+    fs.writeFileSync(src, random(250 * KB))
+    const err = await putFile(p, id, src, dest).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toBe("part 1 of 3 (92.2 KB) failed: file exceeds maximum size of 51.2 KB")
+    expect(isUploadTooBig(err)).toBe(true)
+    expect(err).toMatchObject({ statusCode: 400 })
+    expect(fs.readdirSync(path.dirname(dest))).toEqual([])
+  })
+
+  it("states sizes in the decimal units upload limits use", () => {
+    expect(uploadSize(230_412_345)).toBe("230.4 MB")
+    expect(uploadSize(90_000_000)).toBe("90 MB")
+    expect(uploadSize(92_160)).toBe("92.2 KB")
+    expect(uploadSize(1_500_000_000)).toBe("1.5 GB")
+    expect(uploadSize(12)).toBe("12 bytes")
+  })
+
+  it("without a known limit it sends the file whole", async () => {
     const { p, id, src, dest } = await box(undefined)
     fs.writeFileSync(src, random(250 * KB))
     await putFile(p, id, src, dest)
     expect(p.uploads).toEqual([250 * KB])
+  })
+
+  it("reads the limit a size refusal states", () => {
+    expect(statedUploadLimit(new Error("file exceeds maximum size of 100 MB"))).toBe(100_000_000)
+    expect(statedUploadLimit(new Error("File exceeds maximum file size of 1.5GB"))).toBe(1_500_000_000)
+    expect(statedUploadLimit(new Error("payload too large"))).toBeNull()
+  })
+
+  it("a box that refuses a file for its size without advertising a limit gets it in parts under the stated limit", async () => {
+    const { p, id, src, dest } = await box(undefined)
+    p.refuseOver = 100 * KB
+    const data = random(250 * KB + 3)
+    fs.writeFileSync(src, data)
+    expect(await putFile(p, id, src, dest)).toEqual({ parts: 3 })
+    expect(fs.readFileSync(dest).equals(data)).toBe(true)
+    // The whole file first, then three parts 10% under the stated limit.
+    expect(p.uploads[0]).toBe(250 * KB + 3)
+    expect(p.uploads.slice(1).every((b) => b <= 0.9 * 100 * KB)).toBe(true)
+    expect(fs.readdirSync(path.dirname(dest))).toEqual(["restore-task_a.tgz"])
+  })
+
+  it("a refusal for another reason isn't retried in parts", async () => {
+    const { p, id, src, dest } = await box(undefined)
+    p.failUpload = 1
+    fs.writeFileSync(src, random(250 * KB))
+    await expect(putFile(p, id, src, dest)).rejects.toThrow("socket hang up")
+    expect(p.uploads).toHaveLength(1)
   })
 })
 

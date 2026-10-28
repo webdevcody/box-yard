@@ -99,8 +99,11 @@ export const config = {
   /** Largest file Cody can attach to a message, in MB. */
   maxUploadMb: int("BOXYARD_MAX_UPLOAD_MB", 20),
 
-  /** Max worker boxes alive at once (the free plan allows about 5). */
-  maxBoxes: int("BOX_POOL_MAX", 5),
+  /**
+   * The box ceiling: most worker boxes alive at once, a safety stop (Settings › Advanced). The daily cloud limit is
+   * what keeps spend in check; boxes are made as work needs them.
+   */
+  maxBoxes: int("BOX_POOL_MAX", 50),
   /** Worker boxes created at the same time when many tasks wait for one. */
   boxCreateConcurrency: int("BOX_CREATE_CONCURRENCY", BOX_CREATE_CONCURRENCY.default),
   /** Max agents running at once across all boxes. 0 = no cap beyond boxes x slots. */
@@ -111,8 +114,8 @@ export const config = {
   slotsPerBox: int("BOX_SLOTS", sizeDefaults.slotsPerBox),
   /** Task folders kept in one box before old, finished ones are evicted. */
   maxResidentPerBox: int("BOX_MAX_RESIDENT", sizeDefaults.maxResidentPerBox),
-  /** Delete a worker box after this many minutes with no running turn. 0 = never. */
-  boxIdleDeleteMinutes: int("BOX_IDLE_DELETE_MINUTES", 0),
+  /** Delete a worker box after this many minutes with no running turn (once every workspace on it is archived). 0 = never. */
+  boxIdleDeleteMinutes: int("BOX_IDLE_DELETE_MINUTES", 30),
   /** Park archived resting task folders from boxes after this many idle days. 0 = keep folders. */
   workspaceRetentionDays: int("BOXYARD_WORKSPACE_RETENTION_DAYS", 7),
   /** Prune orphan and long-done archives after this many days. 0 = keep archives. */

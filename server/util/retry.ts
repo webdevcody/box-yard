@@ -37,6 +37,17 @@ export function errorMessage(err: unknown): string {
   return String(err)
 }
 
+/**
+ * "<step> failed: <err's message>", so an error names the step it came from. Keeps err's status and code (isTransient,
+ * isUploadTooBig and the like still read them) and err as its cause.
+ */
+export function failedStep(step: string, err: unknown): Error {
+  const out = new Error(`${step} failed: ${errorMessage(err)}`, { cause: err })
+  const e = err as { statusCode?: unknown; status?: unknown; code?: unknown } | null
+  for (const key of ["statusCode", "status", "code"] as const) if (e?.[key] !== undefined) Object.assign(out, { [key]: e[key] })
+  return out
+}
+
 /** True when a provider refused for sending too much too fast: HTTP 429, or a "rate limit" / "too many requests" message. */
 export function isRateLimited(err: unknown): boolean {
   const e = err as { statusCode?: number; status?: number; message?: string }

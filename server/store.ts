@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto"
 import type { DB } from "./db.js"
-import { BOX_SIZES, shouldNotify } from "../shared/types.js"
+import { BOX_SIZES, WAIT_FIXES, shouldNotify, weakerSource } from "../shared/types.js"
 import { activityLine } from "../shared/activity.js"
+import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
@@ -19,6 +20,8 @@ import type {
   BoxUsageTotals,
   BudgetSettings,
   BudgetStatus,
+  UsageSource,
+  WaitFix,
   ChatMessage,
   ChatRole,
   ClaudeUsageTotals,
@@ -112,6 +115,7 @@ export interface TaskRow {
   wait_reason: string | null
   wait_box_size: string | null
   wait_for_json?: string | null
+  wait_fix?: string | null
   turn_count: number
   port_base: number | null
   event_cursor: string | null
@@ -317,7 +321,7 @@ export interface BoxRow {
   last_metered_at: number | null
   disk_bytes: number | null
   disk_updated_at: number | null
-  usage_source: "actual" | "estimated"
+  usage_source: UsageSource
   disk_free_bytes: number | null
   disk_total_bytes: number | null
   disk_checked_at: number | null
@@ -327,6 +331,20 @@ export interface BoxRow {
   mem_total_bytes: number | null
   load_avg: number | null
   cpu_count: number | null
+  /** Last cumulative CPU readings: the box's cgroup (µs) and the provider's total (ns); null before the first. */
+  cgroup_cpu_usec: number | null
+  provider_cpu_ns: number | null
+  /** Last cumulative compute cost the provider reported for the box; null before the first (or never). */
+  provider_compute_usd: number | null
+  /** Measured CPU core-ms and provider-priced compute $ not in box_usage_intervals yet (meterBoxes moves them). */
+  pending_cpu_ms: number
+  pending_compute_usd: number
+  /** The part of active_ms whose price is fixed (intervals with compute_usd), and that price. */
+  priced_active_ms: number
+  priced_usd: number
+  /** Since the provider began pricing the box: its compute total, and what the measured CPU cost at Settings' rates. */
+  provider_usd: number
+  measured_usd: number
 }
 
 /** Who ran a Claude turn. Captain rows written before "captain" existed are "orchestrator" rows with a project id. */
@@ -372,7 +390,9 @@ interface BoxUsageIntervalRow {
   active_ms: number
   uptime_ms: number
   disk_bytes: number | null
-  source: "actual" | "estimated"
+  source: UsageSource
+  /** The provider's own compute cost for the interval; null: priced from active_ms with Settings' rates. */
+  compute_usd: number | null
 }
 
 type TaskPatch = Partial<{
@@ -394,6 +414,7 @@ type TaskPatch = Partial<{
   waitReason: string | null
   waitBoxSize: BoxSize | null
   waitFor: WaitFor[]
+  waitFix: WaitFix | null
   turnCount: number
   portBase: number | null
   eventCursor: string | null
@@ -437,6 +458,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   waitReason: "wait_reason",
   waitBoxSize: "wait_box_size",
   waitFor: "wait_for_json",
+  waitFix: "wait_fix",
   turnCount: "turn_count",
   portBase: "port_base",
   eventCursor: "event_cursor",
@@ -1084,6 +1106,7 @@ export class Store {
       waitReason: row.status === "queued" ? (row.wait_reason ?? null) : null,
       waitBoxSize: row.status === "queued" && row.wait_reason && row.wait_box_size ? normalizeBoxSize(row.wait_box_size) : null,
       waitFor: row.status === "queued" && row.wait_reason ? json<WaitFor[]>(row.wait_for_json ?? null, []) : [],
+      waitFix: row.status === "queued" && row.wait_reason && (WAIT_FIXES as readonly string[]).includes(row.wait_fix ?? "") ? (row.wait_fix as WaitFix) : null,
       turnCount: row.turn_count,
       turnStartedAt: row.current_turn_id ? this.turnStartedAt(row.current_turn_id) : null,
       pendingCount: pending.n,
@@ -2315,14 +2338,16 @@ export class Store {
     activeMs: number
     uptimeMs: number
     diskBytes?: number | null
-    source: "actual" | "estimated"
+    source: UsageSource
+    /** The provider's own compute cost for the interval, when it reports one. */
+    computeUsd?: number | null
   }) {
     if (input.endedAt <= input.startedAt || input.uptimeMs <= 0) return
     this.db
       .prepare(
         `INSERT INTO box_usage_intervals
-          (id, box_id, provider, size, keep_alive, started_at, ended_at, active_ms, uptime_ms, disk_bytes, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, box_id, provider, size, keep_alive, started_at, ended_at, active_ms, uptime_ms, disk_bytes, source, compute_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         newId("bu"),
@@ -2336,7 +2361,37 @@ export class Store {
         Math.max(0, Math.round(input.uptimeMs)),
         input.diskBytes ?? null,
         input.source,
+        typeof input.computeUsd === "number" && Number.isFinite(input.computeUsd) ? Math.max(0, input.computeUsd) : null,
       )
+  }
+
+  /**
+   * A cumulative CPU reading for a box: its cgroup's (cpu.stat usage_usec, in µs) or the provider's total
+   * (Box.list total_cpu_ns, in ns). Each reading adds what the counter grew by since the last one to the box's pending CPU, which TaskManager.meterBoxes moves into the next interval. A counter
+   * that went down (the box restarted) counts from zero. The cgroup is the box's whole CPU, so once Box Yard reads
+   * it, the provider's CPU total (which may count less) only moves its own baseline.
+   */
+  accrueBoxCpu(id: string, from: "cgroup" | "provider", reading: number, now = Date.now()) {
+    if (!Number.isFinite(reading) || reading < 0) return
+    const row = this.getBox(id)
+    if (!row) return
+    const last = from === "cgroup" ? row.cgroup_cpu_usec : row.provider_cpu_ns
+    const counts = from === "cgroup" || row.cgroup_cpu_usec === null || row.cgroup_cpu_usec === undefined
+    const grew = !counts ? 0 : last !== null && last !== undefined ? (reading >= last ? reading - last : reading) : freshBox(row, now) ? reading : 0
+    const ms = from === "cgroup" ? grew / 1000 : grew / 1e6
+    this.db
+      .prepare(`UPDATE boxes SET ${from === "cgroup" ? "cgroup_cpu_usec" : "provider_cpu_ns"} = ?, pending_cpu_ms = pending_cpu_ms + ? WHERE id = ?`)
+      .run(Math.round(reading), ms, id)
+  }
+
+  /** The provider's cumulative compute cost for a box (Box.list total_compute_cost_usd): like accrueBoxCpu, in $. */
+  accrueBoxCompute(id: string, totalUsd: number, now = Date.now()) {
+    if (!Number.isFinite(totalUsd) || totalUsd < 0) return
+    const row = this.getBox(id)
+    if (!row) return
+    const last = row.provider_compute_usd
+    const grew = last !== null && last !== undefined ? (totalUsd >= last ? totalUsd - last : totalUsd) : freshBox(row, now) ? totalUsd : 0
+    this.db.prepare("UPDATE boxes SET provider_compute_usd = ?, pending_compute_usd = pending_compute_usd + ? WHERE id = ?").run(totalUsd, grew, id)
   }
 
   usageReport(settings: { costRates: CostRates; budget: BudgetSettings }, now = Date.now(), period?: { from: number; to: number }): UsageReport {
@@ -2349,7 +2404,7 @@ export class Store {
     return {
       generatedAt: now,
       rates: settings.costRates,
-      budget: budgetStatus(settings.budget, windows),
+      budget: budgetStatus(settings.budget, windows, todaysRaise(this, now)),
       windows,
       projects,
       tasks,
@@ -2388,8 +2443,8 @@ export class Store {
           activeMs: r.active_ms,
           uptimeMs: r.uptime_ms,
           diskBytes: r.disk_bytes,
-          costUsd: boxCost({ activeMs: r.active_ms, uptimeMs: r.uptime_ms, diskBytes: r.disk_bytes, size, keepAlive }, rates),
-          source: r.source === "actual" ? "actual" : "estimated",
+          costUsd: intervalCost(r, rates),
+          source: sourceOf(r.source),
         }
       },
     )
@@ -2470,22 +2525,32 @@ export class Store {
   }
 
   private boxTotalsSince(since: number, rates: CostRates): BoxUsageTotals {
+    return this.boxSpendSince(since, rates).totals
+  }
+
+  /** Box spend since `since`, in total and per box (an interval that started earlier counts its share). */
+  boxSpendSince(since: number, rates: CostRates): { totals: BoxUsageTotals; byBox: Map<string, { costUsd: number; activeMs: number; source: UsageSource }> } {
     const rows = this.db.prepare("SELECT * FROM box_usage_intervals WHERE ended_at >= ? ORDER BY ended_at ASC").all(since) as BoxUsageIntervalRow[]
     const out: BoxUsageTotals = { activeMs: 0, uptimeMs: 0, diskBytes: 0, costUsd: 0, source: "actual" }
+    const byBox = new Map<string, { costUsd: number; activeMs: number; source: UsageSource }>()
     for (const r of rows) {
       const span = Math.max(1, r.ended_at - r.started_at)
       const overlap = Math.max(0, r.ended_at - Math.max(since, r.started_at))
       if (!overlap) continue
       const share = Math.min(1, overlap / span)
       const activeMs = r.active_ms * share
-      const uptimeMs = r.uptime_ms * share
+      const cost = intervalCost(r, rates, share)
       out.activeMs += activeMs
-      out.uptimeMs += uptimeMs
+      out.uptimeMs += r.uptime_ms * share
       out.diskBytes = Math.max(out.diskBytes, r.disk_bytes ?? 0)
-      out.costUsd += boxCost({ activeMs, uptimeMs, diskBytes: r.disk_bytes, size: r.size, keepAlive: Boolean(r.keep_alive) }, rates)
-      if (r.source !== "actual") out.source = "estimated"
+      out.costUsd += cost
+      out.source = weakerSource(out.source, sourceOf(r.source))
+      const box = byBox.get(r.box_id) ?? byBox.set(r.box_id, { costUsd: 0, activeMs: 0, source: "actual" }).get(r.box_id)!
+      box.costUsd += cost
+      box.activeMs += activeMs
+      box.source = weakerSource(box.source, sourceOf(r.source))
     }
-    return out
+    return { totals: out, byBox }
   }
 
   private boxUsageTotal(row: BoxRow, rates: CostRates, now: number): UsageBoxTotal {
@@ -2498,8 +2563,8 @@ export class Store {
       activeMs: row.active_ms ?? 0,
       uptimeMs,
       diskBytes: row.disk_bytes ?? null,
-      estimatedCostUsd: boxCost({ activeMs: row.active_ms ?? 0, uptimeMs, diskBytes: row.disk_bytes, size: normalizeBoxSize(row.size), keepAlive: Boolean(row.keep_alive) }, rates),
-      usageSource: row.usage_source ?? "estimated",
+      estimatedCostUsd: boxRowCost(row, rates, now),
+      usageSource: sourceOf(row.usage_source),
     }
   }
 
@@ -2563,7 +2628,7 @@ export class Store {
       diskUpdatedAt: number | null
       size: BoxSize
       keepAlive: boolean
-      usageSource: "actual" | "estimated"
+      usageSource: UsageSource
       diskFreeBytes: number | null
       diskTotalBytes: number | null
       diskCheckedAt: number | null
@@ -2573,6 +2638,12 @@ export class Store {
       memTotalBytes: number | null
       loadAvg: number | null
       cpuCount: number | null
+      pendingCpuMs: number
+      pendingComputeUsd: number
+      pricedActiveMs: number
+      pricedUsd: number
+      providerUsd: number
+      measuredUsd: number
     }>,
   ) {
     const sets: string[] = []
@@ -2594,6 +2665,12 @@ export class Store {
       memTotalBytes: "mem_total_bytes",
       loadAvg: "load_avg",
       cpuCount: "cpu_count",
+      pendingCpuMs: "pending_cpu_ms",
+      pendingComputeUsd: "pending_compute_usd",
+      pricedActiveMs: "priced_active_ms",
+      pricedUsd: "priced_usd",
+      providerUsd: "provider_usd",
+      measuredUsd: "measured_usd",
     } as const
     for (const [k, v] of Object.entries(patch) as [keyof typeof cols, unknown][]) {
       if (v === undefined) continue
@@ -2914,19 +2991,101 @@ function totals(row: Partial<ClaudeUsageTotals> | undefined | null): ClaudeUsage
   }
 }
 
+/** A stored usage source; anything unknown (an older build's) reads as estimated. */
+export const sourceOf = (s: unknown): UsageSource => (s === "actual" || s === "measured" ? s : "estimated")
+
 export function normalizeBoxSize(size: unknown): BoxSize {
   return typeof size === "string" && (BOX_SIZES as readonly string[]).includes(size) ? (size as BoxSize) : "small"
 }
 
+/**
+ * What a stretch of a box's life costs at Upstash's prices (https://upstash.com/pricing/box): CPU it used (`activeMs`,
+ * core-ms) at its size's rate per active CPU hour, unless the provider priced it itself (`computeUsd`, added as is),
+ * plus storage per GB-month. A keep-alive box pays only its fixed monthly fee: "This is the only charge for that Keep
+ * Alive box, so you are not billed separately for CPU or storage on it" (https://upstash.com/docs/box/overall/keep-alive).
+ * Memory is free. An idle box (no CPU) costs only its storage.
+ */
 export function boxCost(
-  box: { activeMs: number; uptimeMs: number; diskBytes?: number | null; size: BoxSize; keepAlive: boolean },
+  box: { activeMs: number; uptimeMs: number; diskBytes?: number | null; size: BoxSize; keepAlive: boolean; computeUsd?: number | null },
   rates: CostRates,
 ): number {
   const size = normalizeBoxSize(box.size)
-  const active = (Math.max(0, box.activeMs) / 3_600_000) * rates.boxActiveCpuHourlyUsd[size]
-  const keepAlive = box.keepAlive ? (Math.max(0, box.uptimeMs) / MONTH_MS) * rates.boxKeepAliveMonthlyUsd[size] : 0
+  if (box.keepAlive) return (Math.max(0, box.uptimeMs) / MONTH_MS) * rates.boxKeepAliveMonthlyUsd[size]
+  const active = (Math.max(0, box.activeMs) / 3_600_000) * rates.boxActiveCpuHourlyUsd[size] + Math.max(0, box.computeUsd ?? 0)
   const storage = (((box.diskBytes ?? 0) / GB) * Math.max(0, box.uptimeMs) * rates.boxStorageGbMonthUsd) / MONTH_MS
-  return active + keepAlive + storage
+  return active + storage
+}
+
+/** A metered interval's cost: the provider's own compute figure when it has one, else its CPU at Settings' rates. */
+const intervalCost = (r: BoxUsageIntervalRow, rates: CostRates, share = 1) =>
+  boxCost(
+    {
+      activeMs: r.compute_usd === null || r.compute_usd === undefined ? r.active_ms * share : 0,
+      computeUsd: r.compute_usd === null || r.compute_usd === undefined ? null : r.compute_usd * share,
+      uptimeMs: r.uptime_ms * share,
+      diskBytes: r.disk_bytes,
+      size: r.size,
+      keepAlive: Boolean(r.keep_alive),
+    },
+    rates,
+  )
+
+/** A box's cost over its whole life so far, from its row: the part whose price is fixed, and the rest of its CPU at Settings' rates. */
+export function boxRowCost(b: BoxRow, rates: CostRates, now = Date.now()): number {
+  return boxCost(
+    {
+      activeMs: Math.max(0, (b.active_ms ?? 0) - (b.priced_active_ms ?? 0)),
+      computeUsd: b.priced_usd ?? 0,
+      uptimeMs: Math.max(0, now - b.created_at),
+      diskBytes: b.disk_bytes,
+      size: normalizeBoxSize(b.size),
+      keepAlive: Boolean(b.keep_alive),
+    },
+    rates,
+  )
+}
+
+/** A box made this recently started its CPU and cost counters with it, so their first reading is all its own use. */
+const FRESH_BOX_MS = 15 * 60_000
+const freshBox = (row: Pick<BoxRow, "created_at">, now: number) => now - row.created_at < FRESH_BOX_MS
+
+/**
+ * What one meter tick moves out of a box's row into a usage interval (TaskManager.meterBoxes), and how the row changes.
+ *
+ * - CPU: what the box's counters measured since the last tick ("measured"). A box nothing measured yet (no reading,
+ *   or a provider without its own cgroup, like local folders) counts wall-clock time while a turn runs ("estimated").
+ * - Price: the CPU at Settings' rate for the box's size, so a change of rates reprices it. Once the provider prices
+ *   the box itself (Upstash's total_compute_cost_usd), the interval's price is fixed: whichever of the provider's
+ *   total and the measured CPU's price is higher grows by this much. The bill is never under-counted, even if the
+ *   provider's total leaves some CPU out. The interval is "actual" while the provider's figure is the higher one.
+ */
+export function meterTick(b: BoxRow, rateUsdPerCpuHour: number, elapsedMs: number, running: boolean) {
+  const measured = (b.cgroup_cpu_usec ?? null) !== null || (b.provider_cpu_ns ?? null) !== null
+  const cpuMs = measured ? Math.max(0, b.pending_cpu_ms ?? 0) : running ? elapsedMs : 0
+  const base: Parameters<Store["meterBox"]>[1] = { activeMs: (b.active_ms ?? 0) + cpuMs, pendingCpuMs: 0, pendingComputeUsd: 0 }
+  if ((b.provider_compute_usd ?? null) === null) {
+    const source: UsageSource = measured ? "measured" : "estimated"
+    return { activeMs: cpuMs, computeUsd: null, source, patch: { ...base, usageSource: source } }
+  }
+  const before = Math.max(b.measured_usd ?? 0, b.provider_usd ?? 0)
+  // Unmeasured CPU is a guess, so then the provider's figure stands alone.
+  const measuredUsd = (b.measured_usd ?? 0) + (measured ? (cpuMs / 3_600_000) * rateUsdPerCpuHour : 0)
+  const providerUsd = (b.provider_usd ?? 0) + Math.max(0, b.pending_compute_usd ?? 0)
+  const computeUsd = Math.max(0, Math.max(measuredUsd, providerUsd) - before)
+  const source: UsageSource = providerUsd >= measuredUsd ? "actual" : "measured"
+  return {
+    activeMs: cpuMs,
+    computeUsd,
+    source,
+    patch: {
+      ...base,
+      usageSource: source,
+      pricedActiveMs: (b.priced_active_ms ?? 0) + cpuMs,
+      pricedUsd: (b.priced_usd ?? 0) + computeUsd,
+      providerUsd,
+      measuredUsd,
+    },
+  }
 }
 
 function usageWindows(now: number): Pick<UsageWindow, "key" | "label" | "since">[] {
@@ -2939,16 +3098,17 @@ function usageWindows(now: number): Pick<UsageWindow, "key" | "label" | "since">
   ]
 }
 
-function budgetStatus(budget: BudgetSettings, windows: UsageWindow[]): BudgetStatus {
-  const today = windows.find((w) => w.key === "today")?.totalCostUsd ?? 0
-  const month = windows.find((w) => w.key === "30d")?.totalCostUsd ?? 0
+/** The cloud limits (Settings › Daily / Monthly cloud limit) against what boxes cost; today's raises count today. */
+function budgetStatus(budget: BudgetSettings, windows: UsageWindow[], raisedToday: number): BudgetStatus {
+  const today = windows.find((w) => w.key === "today")?.boxes.costUsd ?? 0
+  const month = windows.find((w) => w.key === "30d")?.boxes.costUsd ?? 0
   const state = (usedUsd: number, limitUsd: number) => ({
     limitUsd,
     usedUsd,
     exceeded: limitUsd > 0 && usedUsd >= limitUsd,
     warning: limitUsd > 0 && usedUsd >= limitUsd * 0.8,
   })
-  const daily = state(today, budget.dailyUsd)
+  const daily = state(today, budget.dailyUsd > 0 ? budget.dailyUsd + raisedToday : 0)
   const monthly = state(month, budget.monthlyUsd)
   return { daily, monthly, blocked: daily.exceeded || monthly.exceeded }
 }
