@@ -480,7 +480,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .enum(BOX_SIZES)
       .nullable()
       .optional()
-      .describe("Size of new boxes made for the project, and the smallest box its tasks run on. null: Settings › Worker size."),
+      .describe(
+        "Size of new boxes made for the project, and the smallest box its tasks run on. null: auto-sizing picks it from what the project's turns used (boxSettings.boxSize in list_projects says what it picked), else Settings › Worker size. Set it only to override auto-sizing.",
+      ),
     agents_per_box: z
       .number()
       .int()
@@ -1847,7 +1849,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           // Projects that set their own box settings (a Captain sees only its own).
           projects: Object.fromEntries(
             (scopeId ? [ownProject()] : store.listProjects())
-              .filter((p) => p.boxSize || p.agentsPerBox !== null || p.wholeMachine || p.tasksPerBox !== null || p.maxBoxes !== null)
+              .filter((p) => p.boxSize || tasks.autoBoxSize(p.id).size || p.agentsPerBox !== null || p.wholeMachine || p.tasksPerBox !== null || p.maxBoxes !== null)
               .map((p) => [p.name, tasks.projectBoxSettings(p)]),
           ),
         },
