@@ -18,6 +18,7 @@ import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
 import { playSendSound } from "./sendSound"
+import { runningCount } from "./runningTasks"
 import type {
   BoxCleanup,
   BoxContents,
@@ -28,6 +29,7 @@ import type {
   Artifact,
   Attachment,
   BoxInfo,
+  CloudStatus,
   CaptainCompaction,
   CaptainMessage,
   CaptainState,
@@ -90,6 +92,8 @@ export const keys = {
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
+  /** The cloud meter: today's box spend against the daily cloud limit, and the boxes (GET /api/cloud). */
+  cloud: ["cloud"] as const,
   /** A project's hooks, or "global" for the Coordinator's. */
   hooks: (scope: string) => ["hooks", scope] as const,
   hookRuns: (scope: string) => ["hook-runs", scope] as const,
@@ -152,6 +156,9 @@ export function useRunningTask(projectId: string) {
   )
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
 }
+
+/** How many tasks are running (lib/runningTasks). Re-renders only when the count changes, not on every task update. */
+export const useRunningCount = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: runningCount })
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
@@ -418,6 +425,13 @@ export const useUsage = (range?: { from: number; to: number; live: boolean }) =>
     placeholderData: keepPreviousData,
   })
 
+/**
+ * The cloud meter. Polled, not refetched on every live box event: the server sums today's spend (cached 5 s), and
+ * the meter moves in cents, so a 15-second refresh is live enough.
+ */
+export const useCloud = () =>
+  useQuery({ queryKey: keys.cloud, queryFn: () => api<CloudStatus>("/api/cloud"), refetchInterval: 15_000, staleTime: 5_000 })
+
 export const useChatStream = () =>
   useQuery({ queryKey: keys.chatStream, queryFn: () => "", initialData: "", staleTime: Infinity, gcTime: Infinity })
 export const useChatBusy = () =>
@@ -430,6 +444,19 @@ export const useChatBusy = () =>
 // ------------------------------------------------------------------ mutations
 
 const fail = (title: string) => (err: Error) => toast.error(title, err.message)
+
+/** "Raise today's limit": a day's worth more cloud spend until midnight; boxes waiting on the limit start. */
+export function useRaiseCloudLimit() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api<CloudStatus>("/api/cloud/raise", { method: "POST", body: {} }),
+    onSuccess: (status) => {
+      qc.setQueryData(keys.cloud, status)
+      void qc.invalidateQueries({ queryKey: keys.usage })
+    },
+    onError: fail("Couldn't raise today's cloud limit"),
+  })
+}
 
 // ------------------------------------------------------------------ RunPod GPU (Settings › RunPod GPU)
 
