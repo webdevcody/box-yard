@@ -7,7 +7,7 @@ import { z } from "zod"
 import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
-import { Store, BadRequestError, NotFoundError } from "./store.js"
+import { Store, BadRequestError, ConflictError, NotFoundError } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
@@ -45,7 +45,8 @@ import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
-import { IdentityDetector } from "./identity/detect.js"
+import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
+import { assignChecked, detectFor, importDetected, importInput, runningTask, testRepos } from "./identity/setup.js"
 import { SecretBox } from "./identity/secretBox.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
@@ -295,6 +296,8 @@ export function createBoxYard(
     tts?: Pick<TtsOptions, "fetch" | "WebSocket" | "timeoutMs" | "voicesTtlMs">
     /** Stand-ins for the services the setup Test buttons call (tests). GitHub's comes from `github.fetch`. */
     setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs" | "localCheck">
+    /** A made-up home folder and PATH for identity detection to read instead of this computer's (tests, mock screenshots). */
+    detect?: Pick<DetectOptions, "home" | "env">
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -313,7 +316,7 @@ export function createBoxYard(
     mock: c.mock,
   })
   /** Reads this computer's gh, git and ssh for detect_identities and the gh:/file:/agent: references (server-side only). */
-  const identityDetector = new IdentityDetector({ github: opts.github?.fetch })
+  const identityDetector = new IdentityDetector({ ...opts.detect, github: opts.github?.fetch })
   /** Every credential value in effect: no transcript keeps one, and no error shows one. */
   const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues()]
   store.transcriptSecrets = secretValues
@@ -621,6 +624,9 @@ export function createBoxYard(
     const body = parse(schemas.projectPatch, req.body)
     const before = store.getProject(req.params.id!)
     if (before && (body.identityId !== undefined || body.runner !== undefined)) requireIdentityRunner(body.identityId ?? before.identityId, body.runner ?? before.runner ?? "box")
+    // Like assign_identity: a running turn keeps the account it started with.
+    const busy = before && body.identityId !== undefined && body.identityId !== before.identityId ? runningTask(store, before.id) : undefined
+    if (busy) throw new ConflictError(`${before!.name} has a task running ("${busy.title}"). Change its identity when the task rests, so no turn switches accounts halfway.`)
     const project = store.updateProject(req.params.id!, body)
     hub.broadcast({ type: "project", project })
     // A smaller notes budget for this project can put it over: its Captain hears about it.
@@ -673,6 +679,35 @@ export function createBoxYard(
   })
   api.delete("/identities/:id/signing", (req, res) => {
     res.json(identities.removeSigning(req.params.id!))
+  })
+  /** Settings › Identities › Import from this computer: detection over every project. Read-only: it changes nothing. */
+  api.post("/identities/detect", async (req, res) => {
+    const body = parse(z.object({ online: z.boolean().optional() }), req.body ?? {})
+    res.json(await detectFor(identities, identityDetector, store.listProjects(), { online: body.online ?? true, scope: "ui", defaultIsGh: settings.credentials.source("githubToken") === "gh" }))
+  })
+  /** Import one of that detection's proposals (it's run again when it's over 30 minutes old); its projects move unless a turn of theirs is running. */
+  api.post("/identities/import", async (req, res) => {
+    const body = parse(importInput, req.body)
+    const detection =
+      identityDetector.recent("ui") ??
+      (await detectFor(identities, identityDetector, store.listProjects(), { online: true, scope: "ui", defaultIsGh: settings.credentials.source("githubToken") === "gh" }))
+    const assign = (ref: string, identityId: string) => {
+      const p = store.getProject(ref)
+      if (!p) throw new NotFoundError(`Project ${ref} not found`)
+      const r = assignChecked(identities, store, p, identityId)
+      if (r.changed) {
+        hub.broadcast({ type: "project", project: store.getProject(p.id)! })
+        tasks.schedule()
+      }
+      return r.line
+    }
+    const r = await importDetected(identities, identityDetector, detection, body, assign)
+    res.status(r.created ? 201 : 200).json(r)
+  })
+  /** Check the identity with GitHub (tokens, push access to its projects' repos, author email, signing key); saved as its last test. */
+  api.post("/identities/:id/test", async (req, res) => {
+    const i = identities.require(req.params.id!)
+    res.json(await identities.test(i.id, testRepos(store, i), { save: true }))
   })
   api.delete("/projects/:id", async (req, res) => {
     const id = req.params.id!

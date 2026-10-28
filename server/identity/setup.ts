@@ -1,8 +1,11 @@
-import { BadRequestError } from "../store.js"
+import { BadRequestError, ConflictError, type Store } from "../store.js"
 import { errorMessage } from "../util/retry.js"
+import { ownGithubToken } from "../turnCredentials.js"
 import type { Runner } from "../../shared/runner.js"
-import type { CoordinatorSees, Identity, IdentityColor, IdentityDetection } from "../../shared/identities.js"
-import type { Identities } from "./identities.js"
+import type { Project, Task } from "../../shared/types.js"
+import { identityPhrase, type CoordinatorSees, type Identity, type IdentityColor, type IdentityDetection } from "../../shared/identities.js"
+import { z } from "zod"
+import { identityCreate, type Identities } from "./identities.js"
 import type { IdentityDetector } from "./detect.js"
 
 // Identities from references (docs/identities.md › Set up from this computer): create_identity, update_identity and
@@ -83,6 +86,18 @@ export interface ImportInput {
   projects?: string[]
 }
 
+/** POST /api/identities/import: Settings › Identities › Import from this computer. */
+export const importInput = identityCreate
+  .partial()
+  .extend({
+    login: z.string().trim().min(1).max(39),
+    signingKeyRef: z.string().max(1000).nullable().optional(),
+    signingProgram: z.string().max(1000).nullable().optional(),
+    requireSigned: z.boolean().optional(),
+    projects: z.array(z.string().max(64)).max(1000).optional(),
+  })
+  .strict()
+
 const defined = <T extends object>(o: T) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>
 
 /**
@@ -154,8 +169,52 @@ export async function importDetected(
     try {
       lines.push(await assign(ref, identity.id))
     } catch (err) {
-      lines.push(`${ref}: not moved: ${errorMessage(err)}`)
+      lines.push(`${p.projects.find((x) => x.id === ref)?.name ?? ref}: not moved: ${errorMessage(err)}`)
     }
   }
   return { identity: ids.require(identity.id), created: !existing, lines }
+}
+
+/** The project's task whose turn is running: an identity switch waits for it, so no turn changes accounts halfway. */
+export function runningTask(store: Store, projectId: string): Task | undefined {
+  return store.listTasks({ projectId }).find((t) => t.status === "starting" || t.status === "working")
+}
+
+/**
+ * assign_identity, the import's projects and Settings › Identities: give a project an identity, or refuse (409 while a
+ * turn of it runs, 400 when its runner doesn't fit). The caller broadcasts the project and schedules when `changed`.
+ */
+export function assignChecked(ids: Identities, store: Store, p: Project, identityId: string): { changed: boolean; line: string } {
+  const i = ids.require(identityId)
+  if (p.identityId === i.id) return { changed: false, line: `${p.name}: uses ${identityPhrase(i)} already.` }
+  const busy = runningTask(store, p.id)
+  if (busy) throw new ConflictError(`${p.name} has a task running (${busy.id}, "${busy.title}"). Assign it when the task rests, so no turn switches accounts halfway.`)
+  const problem = ids.runnerProblem(i.id, p.runner ?? "box")
+  if (problem) throw new BadRequestError(`${p.name} can't use it: ${problem}.`)
+  ids.assign(p.id, i.id)
+  return { changed: true, line: `${p.name}: now uses ${identityPhrase(i)}; its resting tasks move to its boxes on their next turn.` }
+}
+
+/** The repos test_identity checks: the identity's projects' (only `onlyProjectId`'s when given). */
+export function testRepos(store: Store, i: Identity, onlyProjectId?: string | null) {
+  return i.projectIds
+    .filter((id) => !onlyProjectId || id === onlyProjectId)
+    .flatMap((id) => {
+      const p = store.getProject(id)
+      return p ? [{ name: p.name, repo: p.repo, ownToken: Boolean(ownGithubToken(store.projectEnv(p.id))) }] : []
+    })
+}
+
+/**
+ * detect_identities and Settings › Identities: detection mapped over these projects. When Settings › Credentials uses
+ * gh's token, the Default identity is gh's active account; otherwise, online, it's whoever the saved token belongs to.
+ */
+export async function detectFor(ids: Identities, detector: IdentityDetector, projects: Project[], o: { online: boolean; scope: string; defaultIsGh: boolean }) {
+  return detector.detect({
+    projects: projects.map((p) => ({ id: p.id, name: p.name, repo: p.repo, identityId: p.identityId })),
+    identities: ids.list(),
+    online: o.online,
+    defaultLogin: o.defaultIsGh ? undefined : o.online ? await ids.defaultLogin() : null,
+    scope: o.scope,
+  })
 }

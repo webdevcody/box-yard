@@ -8,9 +8,11 @@ import {
   useDeleteProject,
   useDocker,
   useHooks,
+  useIdentities,
   useProjectAutoSize,
   useProjects,
   useRunPod,
+  useRunningTask,
   useSchedules,
   useSettings,
   useSetup,
@@ -38,6 +40,7 @@ import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
 import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { useOpenSettings } from "./SettingsDialog"
+import { IdentityBadge } from "./IdentityBadge"
 import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { AUTO_SIZE_MIN_RUNS } from "../../../shared/autoSize"
@@ -45,7 +48,7 @@ import { RUNPOD_CLOUDS, RUNPOD_MACHINE_LIMITS, shortGpu, type ProjectGpuMachine,
 import { GpuTypePicker } from "./GpuTypePicker"
 import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
-import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
+import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, RUNNER_PHRASE, type Runner } from "../../../shared/runner"
 import { DOCKERFILE_TEMPLATE, type ProjectDocker } from "../../../shared/docker"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -702,7 +705,7 @@ function ProjectDockerSettings({ draft, setDraft }: { draft: DockerDraft; setDra
       <p className="text-xs text-zinc-500">
         Each task works in this project's own container on this computer: only its workspace volume is mounted (no folder of yours, no Docker socket), and the GitHub and Claude credentials from
         Settings › Credentials are put inside it, never in the image. Previews reach http://localhost.{" "}
-        <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("docker")}>
+        <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("docker")}>
           Settings › Docker
         </button>
       </p>
@@ -768,6 +771,13 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [docker, setDocker] = useState<DockerDraft>(() => dockerDraft(project.docker))
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
+  const [identityId, setIdentityId] = useState(project.identityId)
+  const identities = useIdentities().data
+  const identity = identities?.find((i) => i.id === identityId)
+  // Who it acts as can't change mid-turn: the server refuses, so the form says so first.
+  const running = useRunningTask(project.id)
+  const identityBusy = identityId !== project.identityId && running
+  const identityMisfit = identity?.runners && !identity.runners.includes(runner) ? identity : null
   const settings = useAgentSettings()
   const server = useSettings()
   const setup = useSetup()
@@ -778,7 +788,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -824,6 +834,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           ...(runner === "docker" ? { docker: dockerOf(docker) } : {}),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
+          ...(identityId !== project.identityId ? { identityId } : {}),
         })
         onDone()
       }}
@@ -876,7 +887,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
             {runner === "gpu"
               ? "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."
               : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
-            <button type="button" className="text-yard-300 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
+            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
               Settings › RunPod GPU
             </button>
           </p>
@@ -888,6 +899,39 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           </div>
         )}
         {runner === "docker" && <ProjectDockerSettings draft={docker} setDraft={setDocker} />}
+      </div>
+      <div className="space-y-2">
+        <Field label="Identity" hint="Who its agents act as on GitHub: the account's token, the git author its commits get and the key that signs them. Default is Settings › Credentials.">
+          <div className="flex flex-wrap items-center gap-2">
+            <Select className="w-full sm:w-80" value={identityId} onChange={(e) => setIdentityId(e.target.value)} data-testid="project-identity">
+              {!identities && <option value={identityId}>Loading…</option>}
+              {identities?.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.name}
+                  {i.githubLogin && i.githubLogin !== i.name ? ` · ${i.githubLogin}` : ""}
+                  {i.runners && !i.runners.includes(runner) ? ` (not on ${RUNNER_LABEL[runner]})` : ""}
+                </option>
+              ))}
+            </Select>
+            {identity && <IdentityBadge identity={identity} />}
+          </div>
+        </Field>
+        <p className="text-xs text-zinc-500">
+          <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("identities")}>
+            Settings › Identities
+          </button>{" "}
+          adds accounts, or imports the ones on this computer.
+        </p>
+        {identityMisfit && (
+          <p role="note" className="text-xs text-amber-300" data-testid="identity-misfit">
+            The {identityMisfit.name} identity runs only on {identityMisfit.runners!.map((r) => RUNNER_PHRASE[r]).join(" or ")}: pick another runner or identity.
+          </p>
+        )}
+        {identityBusy && (
+          <p role="note" className="text-xs text-amber-300" data-testid="identity-busy">
+            "{running.title}" is running. Change the identity when it rests, so no turn switches accounts halfway.
+          </p>
+        )}
       </div>
       <ProjectBoxSettings
         info={settings.data}
@@ -1009,7 +1053,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <Button type="button" variant="ghost" onClick={() => void cancel()}>
             Cancel
           </Button>
-          <Button type="submit" variant="primary" disabled={!dirty} data-testid="project-settings-save">
+          <Button type="submit" variant="primary" disabled={!dirty || Boolean(identityMisfit) || Boolean(identityBusy)} data-testid="project-settings-save">
             Save
           </Button>
         </div>

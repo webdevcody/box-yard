@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "credentials" | "runpod" | "docker" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "credentials" | "identities" | "runpod" | "docker" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -29,6 +29,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "Credentials",
     description:
       "Where agents run, and the keys Box Yard works with: Upstash boxes, Claude and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Saved changes apply from the next turn, no restart needed.",
+    fields: [],
+  },
+  {
+    key: "identities",
+    label: "Identities",
+    description:
+      "Who each project acts as on GitHub: the account its token belongs to, the git author its commits get and the key that signs them, and optionally its own Claude login. Default is Settings › Credentials. Tokens and keys go in and never come back: only fingerprints show.",
     fields: [],
   },
   {
@@ -110,7 +117,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", container: "docker", containers: "docker" }
+const ALIASES: Record<string, SettingsSection> = { identity: "identities", accounts: "identities", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", container: "docker", containers: "docker" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

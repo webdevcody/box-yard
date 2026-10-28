@@ -1,11 +1,13 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react"
 import { Link } from "wouter"
 import { FolderGit2, FolderOpen } from "lucide-react"
 import type { Project } from "../../../shared/types"
-import { useReorderProjects } from "../lib/queries"
+import { useIdentities, useReorderProjects } from "../lib/queries"
 import { applyOrder, dropIndex, movedAnnouncement, moveItem, shiftFor } from "../lib/projectOrder"
 import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
+import { IdentityBadge } from "./IdentityBadge"
+import { DEFAULT_IDENTITY_ID } from "../../../shared/identities"
 import { IS_MAC } from "./CommandPalette"
 
 /** A sidebar row: Yard, Inbox… and each project. */
@@ -76,6 +78,8 @@ export const ProjectList = memo(function ProjectList({
   onCreate: () => void
 }) {
   const { mutate: save } = useReorderProjects()
+  const identityList = useIdentities().data
+  const identities = useMemo(() => new Map((identityList ?? []).map((i) => [i.id, i])), [identityList])
   // The order just dropped, shown until the cache catches up (the mutation writes it a few microtasks later).
   const [optimistic, setOptimistic] = useState<string[] | null>(null)
   useEffect(() => setOptimistic(null), [projects])
@@ -348,6 +352,8 @@ export const ProjectList = memo(function ProjectList({
           const href = `/projects/${p.id}`
           const n = active.get(p.id) ?? 0
           const held = drag?.id === p.id
+          // Only a project that isn't on Default shows whose it is.
+          const identity = p.identityId !== DEFAULT_IDENTITY_ID ? identities.get(p.identityId) : undefined
           return (
             <Link
               key={p.id}
@@ -364,14 +370,23 @@ export const ProjectList = memo(function ProjectList({
               style={rowStyle(i, p.id)}
               className={cx(
                 navItem(location.startsWith(href)),
-                "select-none [-webkit-touch-callout:none]",
+                "@container select-none [-webkit-touch-callout:none]",
                 held && "cursor-grabbing bg-zinc-800 text-zinc-50 shadow-lg ring-1 shadow-black/40 ring-zinc-700",
               )}
             >
               {p.repo ? <FolderGit2 className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
               <span className="truncate">{p.name}</span>
-              {attention.has(p.id) && <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-amber-400" title="A task needs you" />}
-              {!attention.has(p.id) && n > 0 && <span className="ml-auto text-xs text-sky-400">{n}</span>}
+              {identity ? (
+                <span className="ml-auto flex min-w-0 shrink items-center gap-2">
+                  <IdentityBadge identity={identity} fold className="max-w-[7rem]" />
+                  {attention.has(p.id) ? <span className="h-2 w-2 shrink-0 rounded-full bg-amber-400" title="A task needs you" /> : n > 0 && <span className="text-xs text-sky-400">{n}</span>}
+                </span>
+              ) : (
+                <>
+                  {attention.has(p.id) && <span className="ml-auto h-2 w-2 shrink-0 rounded-full bg-amber-400" title="A task needs you" />}
+                  {!attention.has(p.id) && n > 0 && <span className="ml-auto text-xs text-sky-400">{n}</span>}
+                </>
+              )}
             </Link>
           )
         })}

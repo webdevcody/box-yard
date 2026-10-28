@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The task header: three rows (breadcrumb, title + actions, one meta row) with the rest in the ⋯ details.
-import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
@@ -63,6 +63,8 @@ describe("TaskHeader", () => {
 
   beforeEach(() => {
     localStorage.clear()
+    // The ⋯ details read the identities list; no request leaves the test (happy-dom's origin is localhost:3000).
+    vi.stubGlobal("fetch", () => new Promise(() => {}))
     host = document.createElement("div")
     document.body.append(host)
     root = createRoot(host)
@@ -72,6 +74,7 @@ describe("TaskHeader", () => {
     act(() => root.unmount())
     host.remove()
     document.body.innerHTML = ""
+    vi.unstubAllGlobals()
   })
 
   const render = (t: Task, files: Artifact[] = []) =>

@@ -85,6 +85,19 @@ Docker containers, GPU pods and the local runner are outside the wall: each alre
 
 An identity's runners are checked when a project is given the identity or a new "Runs on", when a task asks for its own runner, and when an identity's runners change (refused while a project of it runs elsewhere). A task pinned to a runner before its identity stopped allowing it waits and says why; it never runs there.
 
+## In the web app
+
+**Settings › Identities** (after Credentials) has a card per identity: its account, owners, git author and whether GitHub verified the email, each token's owner, scopes, expiry and fingerprint, the signing key's fingerprint, its own Claude login if any, where it may run, its projects and its last test.
+
+- **Edit, Add and Delete are drafts.** Nothing is written until the dialog's Save, like every other section; Delete says which projects move to Default. A Save that fails partway keeps only what wasn't saved yet.
+- **Secrets go in, never out.** A token, a Claude login and a key file are typed or chosen into write-only fields and sent once, on Save. The card shows the fingerprint from then on. A key file is read in the browser and goes only to Box Yard.
+- **Test** checks the identity with GitHub (each token, push access to its projects' repos, the author email, the signing key) and keeps the result as its last test. It changes nothing else.
+- **Import from this computer** runs the same detection as `detect_identities` (with GitHub unless *Ask GitHub too* is off) and lists a proposal per account with its evidence. Tick a proposal, untick any project that should stay, and Save: Box Yard reads the token and key by reference on the server, so they never pass through the page.
+
+**A project's identity** is picked in its Settings tab (*Identity*) and saved with the rest of the form. The picker says when the identity can't run on the project's runner, and Save waits while one of the project's tasks is running, so no turn switches accounts halfway.
+
+**Badges.** A project on another identity than Default shows its colour dot and name in the sidebar (just the dot when the sidebar is narrow), and the task's ⋯ details say which identity its turns act as. The project header doesn't.
+
 ## Set up from this computer
 
 The Coordinator (or a project's Captain) can set identities up from what this computer already uses, so nobody has to work out which token, email and key go with which repo. It's how the Coordinator answers a clone, fetch or push that fails with 401, 403 or 404, or a question about GitHub accounts: it runs `detect_identities`, proposes the whole setup to Cody in one message, and imports only what Cody agrees to.
@@ -145,12 +158,14 @@ To try detection on this computer: `npm run test:detect` (read-only and offline;
 | `PUT /api/identities/:id/signing` | `{ kind: "file", privateKey, requireSigned? }` or `{ kind: "agent", publicKey, program?, requireSigned? }` | Save its signing key (replaces the old one) |
 | `PATCH /api/identities/:id/signing` | `{ requireSigned }` | Turn `requireSigned` on or off |
 | `DELETE /api/identities/:id/signing` | | Stop signing |
-| `PATCH /api/projects/:id` | `{ identityId }` | Give a project an identity (also on `POST /api/projects`) |
+| `POST /api/identities/detect` | `{ online? }` | Detection's proposals (see above). Changes nothing |
+| `POST /api/identities/import` | `{ login, name?, color?, owners?, author?, runners?, requireSigned?, projects? }` | Import the last detection's proposal for `login`: 201 when it made the identity, 200 when it updated one. `projects` (ids) narrows which move; `lines` say what happened |
+| `POST /api/identities/:id/test` | | Check it with GitHub; saved as its last test |
+| `PATCH /api/projects/:id` | `{ identityId }` | Give a project an identity (also on `POST /api/projects`). 409 while one of its tasks is running |
 
 Every change is broadcast as an `identities` event.
 
 ## Coming next
 
-- Settings › Identities in the web app (with "Import from this computer"), an identity picker on each project, and badges.
 - The Coordinator's `status` view of an identity's projects.
 - GPG signing keys.
