@@ -5,13 +5,14 @@ import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
-import { placeKindOf, type Place, type TaskPlacement } from "../shared/placement.js"
+import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
 import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
+import { AUTO_SIZE_WINDOW_MS, type TurnPeak } from "../shared/autoSize.js"
 import type {
   AppNotification,
   Artifact,
@@ -110,6 +111,8 @@ export interface TurnFlags {
   interrupts?: number
   /** How many local-runner turns in a row this computer's sleep cut off, each resumed instead of failed (#104). */
   sleeps?: number
+  /** A turn that ran out of memory was retried on a bigger box (auto-sizing); a second one fails as usual. */
+  oomRetries?: number
   /** Hooks whose prompts started this turn (their inputs were in it), so they don't fire on it again. */
   hookIds?: string[]
   /** The same for the turn before, kept while the task rests (a PR merged later still knows who asked). */
@@ -168,6 +171,7 @@ export interface TaskRow {
   runs_on?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
+  placed_how?: string | null
   /** Who started the task: cody, orchestrator, captain:<project>, schedule or hook:<hook>; null on old rows. */
   source: string | null
   pr_head_sha: string | null
@@ -406,6 +410,20 @@ export interface ClaudeUsageRow {
   raw_usage_json: string
 }
 
+interface TurnPeakRow {
+  turn_id: string
+  project_id: string
+  task_id: string
+  box_id: string
+  box_size: string
+  at: number
+  mem_peak_bytes: number | null
+  cpu_peak_cores: number | null
+  cpu_busy_cores: number | null
+  disk_peak_bytes: number | null
+  oom: number
+}
+
 interface BoxUsageIntervalRow {
   id: string
   box_id: string
@@ -464,6 +482,7 @@ type TaskPatch = Partial<{
   prLabels: string[]
   mergeRequest: StoredMergeRequest | null
   pushState: PushState | null
+  placedHow: BoxPick | null
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -508,6 +527,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
   pushState: "push_state_json",
+  placedHow: "placed_how",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -1179,7 +1199,7 @@ export class Store {
     const projectRunner = this.projectRunner(row.project_id)
     const own = taskRunsOn(row)
     return {
-      now: row.box_id ? this.placeOf(row.box_id) : null,
+      now: row.box_id ? { ...this.placeOf(row.box_id), ...(isBoxPick(row.placed_how) ? { how: row.placed_how } : {}) } : null,
       last: row.box_id ? null : json<(Place & { leftAt: number }) | null>(row.last_place_json ?? null, null),
       runner: own ?? projectRunner,
       chosenBy: own ? "task" : "project",
@@ -1376,13 +1396,15 @@ export class Store {
         : undefined
     const sets: string[] = []
     const args: unknown[] = []
-    // A box letting the task go: remember where it ran, so a resting, archived task still says where (Task.placement.last).
-    if (patch.boxId === null) {
+    if (patch.boxId !== undefined) {
       const was = (this.db.prepare("SELECT box_id FROM tasks WHERE id = ?").get(id) as { box_id: string | null } | undefined)?.box_id
-      if (was) {
+      // A box letting the task go: remember where it ran, so a resting, archived task still says where (Task.placement.last).
+      if (patch.boxId === null && was) {
         sets.push("last_place_json = ?")
         args.push(JSON.stringify({ ...this.placeOf(was), leftAt: Date.now() }))
       }
+      // How its box was picked is about that box only.
+      if (patch.placedHow === undefined && was !== patch.boxId) sets.push("placed_how = NULL")
     }
     for (const [key, value] of Object.entries(patch) as [keyof TaskPatch, unknown][]) {
       if (value === undefined) continue
@@ -2790,6 +2812,35 @@ export class Store {
 
   removeBox(id: string) {
     this.db.prepare("DELETE FROM boxes WHERE id = ?").run(id)
+  }
+
+  // ---------- measured turns (auto-sizing) ----------
+
+  /** One measured turn (shared/autoSize.ts). Drops rows past the 14-day window as it goes. */
+  recordTurnPeak(row: TurnPeak & { turnId: string; projectId: string; taskId: string; boxId: string }) {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO turn_peaks (turn_id, project_id, task_id, box_id, box_size, at, mem_peak_bytes, cpu_peak_cores, cpu_busy_cores, disk_peak_bytes, oom)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(row.turnId, row.projectId, row.taskId, row.boxId, row.boxSize, row.at, row.memPeakBytes, row.cpuPeakCores, row.cpuBusyCores, row.diskPeakBytes, row.oom ? 1 : 0)
+    this.db.prepare("DELETE FROM turn_peaks WHERE at < ?").run(Date.now() - AUTO_SIZE_WINDOW_MS)
+  }
+
+  /** A project's measured turns in the last 14 days, oldest first. */
+  turnPeaks(projectId: string): TurnPeak[] {
+    const rows = this.db
+      .prepare("SELECT * FROM turn_peaks WHERE project_id = ? AND at >= ? ORDER BY at ASC")
+      .all(projectId, Date.now() - AUTO_SIZE_WINDOW_MS) as TurnPeakRow[]
+    return rows.map((r) => ({
+      boxSize: normalizeBoxSize(r.box_size as BoxSize),
+      at: r.at,
+      memPeakBytes: r.mem_peak_bytes,
+      cpuPeakCores: r.cpu_peak_cores,
+      cpuBusyCores: r.cpu_busy_cores,
+      diskPeakBytes: r.disk_peak_bytes,
+      oom: Boolean(r.oom),
+    }))
   }
 
   // ---------- schedules ----------

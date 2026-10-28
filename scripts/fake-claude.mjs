@@ -27,6 +27,7 @@
 // A line "message captain: <msg>" sends <msg> with message_captain (fire-and-forget); "message captain wait: <msg>"
 // or "message captain wait <seconds>: <msg>" waits (default 30 s). The final reply quotes each tool result.
 // [hang] keeps the turn running for two minutes (until it's stopped).
+// FAKE_CLAUDE_GATE (env) holds each turn until a test says how it ends; see worker().
 // With no marker the worker writes a file, publishes it, and marks itself done.
 // [noop] marks the run done with outcome "noop" (a quiet schedule run), even alongside [ask] or [fail].
 // [pr] ends the turn without mark_done, like an agent that opened a PR and waits for review.
@@ -325,6 +326,29 @@ async function worker(mcp, prompt) {
     await sleep(Number(slow[1]) * 1000)
   }
   if (/\[hang\]/i.test(prompt)) await sleep(120_000)
+  // FAKE_CLAUDE_GATE=<path>: each turn takes the next number n (a line in <path>.turns) and waits for <path>.<n>:
+  // "fail" exits with an error, "kill" dies by SIGKILL (as the out-of-memory killer does), anything else carries on.
+  // A test acts on the box while the turn runs. A test that fails before it says gives up the turn after 2 minutes,
+  // so no fake agent is left waiting.
+  const gate = process.env.FAKE_CLAUDE_GATE
+  if (gate) {
+    fs.appendFileSync(`${gate}.turns`, `${process.pid}\n`)
+    const n = fs.readFileSync(`${gate}.turns`, "utf8").trim().split("\n").length
+    const giveUp = Date.now() + 120_000
+    while (!fs.existsSync(`${gate}.${n}`)) {
+      if (Date.now() > giveUp) {
+        console.error(`FAKE_CLAUDE_GATE: nothing said how turn ${n} ends`)
+        process.exit(3)
+      }
+      await sleep(50)
+    }
+    const verdict = fs.readFileSync(`${gate}.${n}`, "utf8").trim()
+    if (verdict === "kill") process.kill(process.pid, "SIGKILL")
+    if (verdict === "fail") {
+      console.error(`fake failure requested by FAKE_CLAUDE_GATE (turn ${n})`)
+      process.exit(3)
+    }
+  }
   const noop = /\[noop\]/i.test(prompt)
   const markNoop = () => useTool(mcp, "mark_done", { summary: "Nothing to do this run.", outcome: "noop" })
   if (/\[fail\]/i.test(prompt)) {

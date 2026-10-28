@@ -602,6 +602,12 @@ export function createBoxYard(
     hub.broadcast({ type: "project.deleted", projectId: id })
     res.json({ ok: true })
   })
+  /** The box size auto-sizing picks for the project from its measured runs (shared/autoSize.ts), for its settings. */
+  api.get("/projects/:id/auto-size", (req, res) => {
+    const project = store.getProject(req.params.id!)
+    if (!project) throw new NotFoundError(`Project ${req.params.id} not found`)
+    res.json(tasks.autoBoxSize(project.id))
+  })
   // ---- project snapshots (shared/snapshots.ts): new boxes for the project start from one
   /** The project's snapshot and its running or last snapshot job. */
   api.get("/projects/:id/snapshot", (req, res) => {
@@ -1154,6 +1160,11 @@ export function createBoxYard(
   // "Raise today's limit": one more day's worth until midnight; boxes waiting on the limit are made at once.
   api.post("/cloud/raise", async (_req, res) => {
     tasks.raiseCloudLimit("user")
+    res.json(await tasks.cloudStatus())
+  })
+  // "Allow more boxes": past the ones Box Yard makes in an hour without asking, for the next hour.
+  api.post("/cloud/allow-boxes", async (_req, res) => {
+    tasks.allowMoreBoxes("user")
     res.json(await tasks.cloudStatus())
   })
   api.get("/boxes", (_req, res) => {

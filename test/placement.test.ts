@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { placeKindOf, placeLabel, placeShort, placementLine, placementView, type Place, type TaskPlacement } from "../shared/placement.js"
+import { BOX_PICK_WHY, placeKindOf, placeLabel, placeShort, placementLine, placementView, type Place, type TaskPlacement } from "../shared/placement.js"
 import { tmpDir } from "./helpers.js"
 
 const upstash: Place = { kind: "box", boxId: "pure-lobster", provider: "upstash", size: "small" }
@@ -79,6 +79,16 @@ describe("placement labels", () => {
     expect(placementView({ ...t, status: "working", boxId: "this-computer" })).toMatchObject({ state: "here", kind: "local" })
   })
 
+  it("says how placement picked its box: a new one, another project's idle one, or a slot beside another project", () => {
+    expect(placeLabel({ ...upstash, how: "reused" })).toBe("Upstash · pure-lobster · small · reused idle box")
+    expect(placeShort({ ...upstash, how: "reused" })).toBe("Upstash · small")
+    const v = placementView(task(placed({ now: { ...upstash, how: "shared" } })))
+    expect(v).toMatchObject({ label: "Upstash · pure-lobster · small · shared box", reason: BOX_PICK_WHY.shared })
+    expect(placementLine(task(placed({ now: { ...upstash, how: "new" } })))).toBe("Upstash · pure-lobster · small · new box (project's Runs on)")
+    // Its project's own box says nothing more.
+    expect(placementView(task(placed({ now: { ...upstash, how: null } }))).reason).toBeNull()
+  })
+
   it("reads as one line in the MCP task tools", () => {
     expect(placementLine(task(placed({ now: upstash })))).toBe("Upstash · pure-lobster · small (project's Runs on)")
     expect(placementLine(task(placed({ runner: "local", chosenBy: "task" }), "queued"))).toBe("not placed yet → This computer (pinned by this task's runs_on)")
@@ -95,10 +105,16 @@ describe("Task.placement from the store", () => {
     expect(t.placement).toEqual({ now: null, last: null, runner: "box", chosenBy: "task", projectRunner: "box" })
 
     expect(store.updateTask(t.id, { boxId: "pure-lobster", status: "working" }).placement?.now).toEqual({ kind: "box", boxId: "pure-lobster", provider: "upstash", size: "medium" })
+    // How its box was picked stays while it's on that box (a turn starting there writes the same box), and goes with it.
+    expect(store.updateTask(t.id, { boxId: "pure-lobster", placedHow: "reused" }).placement?.now?.how).toBe("reused")
+    expect(store.updateTask(t.id, { boxId: "pure-lobster", status: "working" }).placement?.now?.how).toBe("reused")
+    expect(store.getTaskRow(t.id)?.placed_how).toBe("reused")
     const rested = store.updateTask(t.id, { boxId: null, status: "idle", lastArchivedAt: now })
     expect(rested.placement?.now).toBeNull()
     expect(rested.placement?.last).toMatchObject({ kind: "box", boxId: "pure-lobster", size: "medium" })
     expect(placementView(rested).label).toBe("Upstash · pure-lobster · medium · archived")
+    expect(store.getTaskRow(t.id)?.placed_how).toBeNull()
+    expect(rested.placement?.last?.how).toBeUndefined()
     // A later release with no box keeps the remembered place.
     expect(store.updateTask(t.id, { boxId: null }).placement?.last?.boxId).toBe("pure-lobster")
 

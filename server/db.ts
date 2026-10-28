@@ -737,6 +737,30 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN wait_fix TEXT;
   `,
   `
+  -- How placement picked a task's box (Task.placement.now.how): a new box, another project's idle box reused, or a
+  -- slot beside another project's tasks. Null for its project's own box; cleared when the task leaves the box.
+  ALTER TABLE tasks ADD COLUMN placed_how TEXT;
+  `,
+  `
+  -- Auto-sizing (shared/autoSize.ts): what each measured turn used on its Upstash box, read by the box probe while only
+  -- its project's turns ran there, and whether the box's cgroup killed a process for memory meanwhile. 14 days kept.
+  -- A deleted task's runs still count for its project.
+  CREATE TABLE turn_peaks (
+    turn_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL,
+    box_id TEXT NOT NULL,
+    box_size TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    mem_peak_bytes INTEGER,
+    cpu_peak_cores REAL,
+    cpu_busy_cores REAL,
+    disk_peak_bytes INTEGER,
+    oom INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX turn_peaks_project ON turn_peaks(project_id, at);
+  `,
+  `
   -- Side threads (server/sideThreads.ts): a question about a passage highlighted in the Coordinator chat (project_id
   -- NULL) or a project Captain's chat (that project). anchor_id is the chat message the passage is in; session_id the
   -- thread's own Claude session, forked from the chat's at that message (context 'fork') or started fresh from the
