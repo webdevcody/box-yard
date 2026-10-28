@@ -298,6 +298,7 @@ export function recapPrompt(task: Pick<Task, "title" | "prompt" | "summary" | "p
 /** When the Coordinator or a Captain should call resize_box (both prompts share it). */
 export const RESIZE_GUIDANCE =
   `boxes come in ${BOX_SIZE_ORDER.map((size) => `${size} (${BOX_SIZE_SPECS[size].cpu} vCPU, ${BOX_SIZE_SPECS[size].ramGb} GB RAM, about ${BOX_SIZE_SPECS[size].workDiskGb} GB work disk)`).join(", ")}. ` +
+  "Box Yard sizes each project's new boxes itself from what its turns used (auto-sizing: boxSettings.boxSize says \"auto: …\"), and a turn that runs out of memory carries on once on a bigger box, so set a project's box_size only to override that. " +
   "resize_box moves a box to another size, up or down, when Cody's Settings allow it. " +
   "Resize up when a box keeps hitting low disk and cleanup (clean_up_box, or Box Yard's own) frees little, or when a project's clone plus build needs more than about 40% of a small box's disk. " +
   "Scale down a box that has sat mostly empty (little disk in use, few or no agents) for days. " +

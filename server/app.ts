@@ -710,6 +710,12 @@ export function createBoxYard(
     hub.broadcast({ type: "project.deleted", projectId: id })
     res.json({ ok: true })
   })
+  /** The box size auto-sizing picks for the project from its measured runs (shared/autoSize.ts), for its settings. */
+  api.get("/projects/:id/auto-size", (req, res) => {
+    const project = store.getProject(req.params.id!)
+    if (!project) throw new NotFoundError(`Project ${req.params.id} not found`)
+    res.json(tasks.autoBoxSize(project.id))
+  })
   // ---- project snapshots (shared/snapshots.ts): new boxes for the project start from one
   /** The project's snapshot and its running or last snapshot job. */
   api.get("/projects/:id/snapshot", (req, res) => {

@@ -7,6 +7,7 @@ import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import type { ProjectSnapshotState } from "./projectSnapshot"
 import type { SnapshotJob } from "../../../shared/snapshots"
+import type { ProjectAutoSize } from "../../../shared/autoSize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
 import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type IdentityDetection, type IdentityInput, type IdentitySigningInput, type IdentityClaudeKind } from "../../../shared/identities"
 import type { TtsInfo } from "../../../shared/tts"
@@ -105,6 +106,8 @@ export const keys = {
   /** A project's snapshot and its running or last snapshot job. */
   projectSnapshot: (projectId: string) => ["project-snapshot", projectId] as const,
   identities: ["identities"] as const,
+  /** The box size auto-sizing picks for a project (shared/autoSize.ts). */
+  projectAutoSize: (projectId: string) => ["project-auto-size", projectId] as const,
 }
 
 /** `?projectId=…` for a project's hooks, `?scope=global` for the Coordinator's. */
@@ -1117,6 +1120,10 @@ export function useResizeBox() {
 /** A project's snapshot and its running or last snapshot job; SSE project.snapshot keeps the job live. */
 export const useProjectSnapshot = (projectId: string) =>
   useQuery({ queryKey: keys.projectSnapshot(projectId), queryFn: () => api<ProjectSnapshotState>(`/api/projects/${encodeURIComponent(projectId)}/snapshot`) })
+
+/** The box size auto-sizing picks for a project from its measured runs, for its Box size setting. It moves only as turns end. */
+export const useProjectAutoSize = (projectId: string) =>
+  useQuery({ queryKey: keys.projectAutoSize(projectId), queryFn: () => api<ProjectAutoSize>(`/api/projects/${encodeURIComponent(projectId)}/auto-size`), staleTime: 30_000 })
 
 /** Take (or replace) a project's snapshot from one of its boxes. Answers with the running job; the toast follows it. */
 export function useTakeSnapshot() {
