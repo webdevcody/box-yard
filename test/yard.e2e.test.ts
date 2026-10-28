@@ -3,7 +3,7 @@ import fs from "node:fs"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Config } from "../server/config.js"
-import type { AppNotification, BoxInfo, ChatMessage, Project, Task, TaskMessage, UsageReport } from "../shared/types.js"
+import type { AppNotification, BoxInfo, ChatMessage, CloudStatus, Project, Task, TaskMessage, UsageReport } from "../shared/types.js"
 import { NEXT_STEPS_META_KEY } from "../shared/nextSteps.js"
 import { fakeRedis, freePort, testConfig, waitFor } from "./helpers.js"
 
@@ -110,24 +110,44 @@ describe("box yard end to end", () => {
     expect(usage.tasks.find((x) => x.taskId === t.id)?.claude.totalTokens).toBeGreaterThan(0)
   })
 
-  it("pauses new agent turns when a budget is exceeded", async () => {
+  it("at today's cloud limit new boxes wait with the reason and a fix; a raise makes the box", async () => {
     const r = await start()
-    r.yard.store.recordClaudeUsage({
-      source: "orchestrator",
-      runKind: "turn",
-      startedAt: Date.now(),
-      endedAt: Date.now(),
-      usage: { input_tokens: 1 },
-      costUsd: 2,
-    })
+    // $2 of box spend today (a box that's gone now); the daily cloud limit is $1.
+    const now = Date.now()
+    r.yard.store.recordBoxUsageInterval({ boxId: "gone-box", provider: "local", size: "small", keepAlive: false, startedAt: now - 60_000, endedAt: now, activeMs: 60_000, uptimeMs: 60_000, source: "actual", computeUsd: 2 })
     await call(r, "PUT", "/api/agent-settings", { budget: { dailyUsd: 1, monthlyUsd: 0 } })
     const p = await project(r, "budget")
-    const t = await task(r, p.id, "Paused", "write things")
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    const queued = await getTask(r, t.id)
-    expect(queued.status).toBe("queued")
+    const t = await task(r, p.id, "Waits", "write things")
+    const waiting = await waitFor(async () => {
+      const got = await getTask(r, t.id)
+      return got.waitReason ? got : null
+    }, "a wait reason")
+    expect(waiting.status).toBe("queued")
+    expect(waiting.waitReason).toContain("today's cloud spend is $2 of its $1 limit")
+    expect(waiting.waitFix).toBe("raise-cloud-limit")
     expect(await call<BoxInfo[]>(r, "GET", "/api/boxes")).toHaveLength(0)
     expect((await call<UsageReport>(r, "GET", "/api/usage")).budget.blocked).toBe(true)
+    const cloud = await call<CloudStatus>(r, "GET", "/api/cloud")
+    expect(cloud.spend).toMatchObject({ todayUsd: 2, dailyLimitUsd: 1, state: "reached" })
+    const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
+    expect(chat.filter((m) => m.role === "notice" && m.content.startsWith("⚠️ **Cloud spend** hit the limit"))).toHaveLength(1)
+
+    // One click: today's limit goes past today's spend by a day's worth, and the task gets its box.
+    const raised = await call<CloudStatus>(r, "POST", "/api/cloud/raise")
+    expect(raised.spend).toMatchObject({ dailyLimitUsd: 3, raisedUsd: 2, state: "ok" })
+    await untilStatus(r, t.id, "done")
+    expect((await getTask(r, t.id)).waitFix ?? null).toBeNull()
+  })
+
+  it("doesn't count Claude spend against the cloud limit, and a raise needs a limit", async () => {
+    const r = await start()
+    r.yard.store.recordClaudeUsage({ source: "orchestrator", runKind: "turn", startedAt: Date.now(), endedAt: Date.now(), usage: { input_tokens: 1 }, costUsd: 2 })
+    await call(r, "PUT", "/api/agent-settings", { budget: { dailyUsd: 1, monthlyUsd: 0 } })
+    const p = await project(r, "claude spend")
+    const t = await task(r, p.id, "Runs", "write things")
+    await untilStatus(r, t.id, "done")
+    await call(r, "PUT", "/api/agent-settings", { budget: { dailyUsd: 0, monthlyUsd: 0 } })
+    await expect(call(r, "POST", "/api/cloud/raise")).rejects.toThrow(/no daily cloud limit/)
   })
 
   it("asks Cody a question, then resumes the same session with the answer", async () => {

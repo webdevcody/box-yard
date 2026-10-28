@@ -14,7 +14,7 @@ import { LineIcon, META_CHIP, cx, timeAgo } from "./ui"
 export const PLACE_ICON: Record<PlaceKind, LucideIcon> = { local: Laptop, box: Boxes, gpu: Cpu, docker: Container }
 
 /** Local is amber like the unsandboxed warning; the rest are calm. Muted while it's only where it will go or went. */
-const tone = (v: PlacementView) => (v.state !== "here" ? "text-zinc-500" : v.kind === "local" ? "text-amber-200" : "text-zinc-300")
+export const placeTone = (v: PlacementView) => (v.state !== "here" ? "text-zinc-500" : v.kind === "local" ? "text-amber-200" : "text-zinc-300")
 
 /** The full tooltip: every line the header's popover shows. */
 export const placementTitle = (v: PlacementView) => [v.label, v.setting, v.pinned ? "Pinned: this task overrides its project" : "", v.reason ?? "", v.kind === "local" ? LOCAL_UNSANDBOXED : ""].filter(Boolean).join("\n")
@@ -32,7 +32,7 @@ export const PlacementCardChip = memo(function PlacementCardChip({ task }: { tas
       aria-label={`Runs on: ${v.label}${v.pinned ? ", pinned" : ""}`}
       data-testid="card-placement"
       data-state={v.state}
-      className={cx("inline-flex shrink-0 items-center gap-0.5", tone(v))}
+      className={cx("inline-flex shrink-0 items-center gap-0.5", placeTone(v))}
       title={placementTitle(v)}
     >
       <Icon className="h-3.5 w-3.5" aria-hidden />

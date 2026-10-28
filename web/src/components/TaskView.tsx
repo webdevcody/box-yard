@@ -30,7 +30,7 @@ import { projectContext, taskContext, type SelectionTaskSource } from "../lib/se
 import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
 import { useOwnerName } from "../lib/queries"
-import { WaitReason } from "./WaitReason"
+import { WaitFixButton, WaitReason } from "./WaitReason"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -87,9 +87,12 @@ export function TaskView({ id }: { id: string }) {
       {task.status === "queued" && task.waitReason && (
         <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
           <WaitIcon task={task} className="h-4 w-4 shrink-0 text-amber-300" />
-          <span>
-            <WaitReason task={task} />. It starts on its own once there is room{task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.
+          <span className="min-w-0 flex-1">
+            {/* A wait with a fix says when it ends itself ("…, or it resets at midnight"). */}
+            <WaitReason task={task} />.
+            {!task.waitFix && ` It starts on its own once there is room${task.waitBoxSize ? `, and never on a box smaller than ${task.waitBoxSize}` : ""}.`}
           </span>
+          <WaitFixButton task={task} className="shrink-0" />
         </div>
       )}
       {task.status === "failed" && task.error && (

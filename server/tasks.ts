@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
-import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxCost, normalizeBoxSize } from "./store.js"
+import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxRowCost, meterTick, normalizeBoxSize, sourceOf } from "./store.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
 import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
@@ -28,18 +28,19 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFor } from "../shared/types.js"
+import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
 import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
+import { cloudSpend, localDay, raiseToday, startOfLocalDay, usd } from "./cloudLimit.js"
 import { userMessageLabel } from "../shared/sender.js"
 import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
-import { errorMessage, isRateLimited } from "./util/retry.js"
-import { isUploadTooBig, putFile } from "./upload.js"
+import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
+import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { PrTracker, prNumber, type PrChange } from "./prs.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
@@ -139,6 +140,17 @@ interface Wait {
 const asWait = (text: string | null): Wait | null => (text ? { text, by: [] } : null)
 /** The tasks a reason names (agentRefs: the first two, then "and N more"). */
 const waitFor = (agents: BoxAgent[]): WaitFor[] => named(agents).map((a) => ({ taskId: a.taskId, title: a.title }))
+/**
+ * The shortest usage interval meterBoxes writes. CPU counters are read about once a minute, so finer rows would only
+ * make the cloud spend sums (placement asks often) slower.
+ */
+const METER_MIN_MS = 15_000
+/** How long a cloud spend reading serves placement before it's summed again. */
+const CLOUD_SPEND_CACHE_MS = 5_000
+/** The cloud meter's $/hour is the boxes' spend over this window, as an hourly rate. */
+const CLOUD_RATE_WINDOW_MS = 15 * 60_000
+/** kv: the day and limits the cloud spend notices were last posted for ({ day, warned, reached }). */
+const CLOUD_NOTICED_KEY = "cloud_limit_noticed"
 const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)"
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
 const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
@@ -185,6 +197,8 @@ const RECONCILE_MS = 5 * 60_000
 export const RECONCILE_LOOK_MS = 60_000
 /** Tries at restoring an archive before the task restarts from a recap instead (prepareWorkspace). */
 const RESTORE_ATTEMPTS = 2
+/** How often the idle-box sweep retries a workspace archive that failed, before the box may be deleted. */
+const IDLE_ARCHIVE_RETRY_MS = 10 * 60_000
 /** Regenerable dirs left out of workspace archives, by name (tracked ones are checked out again on restore). */
 const ARCHIVE_EXCLUDED_DIRS = [
   "node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", ".venv", "__pycache__", "target",
@@ -469,7 +483,11 @@ export class TaskManager {
   /** Boxes the last probe couldn't reach, since when (the next probe that reaches one clears it). */
   private unreachable = new Map<string, number>()
   private checkingReach = new Set<string>()
-  private budgetNoticeAt = 0
+  /** Idle boxes kept past Settings › Idle box deletion because a workspace on them isn't archived yet: why. */
+  private idleHeld = new Map<string, string>()
+  /** When the idle sweep may retry each task's failed archive (retryIdleArchives). */
+  private idleArchiveRetryAt = new Map<string, number>()
+  private cloudCache: { at: number; key: string; spend: CloudSpend } | null = null
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
   /** Every box lifecycle event and who did it (server/boxHistory.ts); write it with recordBoxEvent. */
@@ -592,6 +610,18 @@ export class TaskManager {
 
   async start() {
     this.recover()
+    const upgraded = this.settings.upgradeForCloudLimit()
+    if (upgraded.length) {
+      const env = process.env.BOX_POOL_MAX ? ` BOX_POOL_MAX=${process.env.BOX_POOL_MAX} in Box Yard's environment still sets the ceiling; remove it to use Settings.` : ""
+      this.notice(
+        withOwner(
+          `⚙️ **Box limits** changed: boxes are made as work needs them, and a daily cloud limit keeps spend in check. ${upgraded.join("; ")}. Cody can change both in Settings.${env}`,
+          this.owner(),
+        ),
+        { kind: "cloud_limit" },
+        { coordinator: true },
+      )
+    }
     this.timers.push(setInterval(() => void this.poll(), this.c.pollMs))
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
     this.publishDirectory()
@@ -1385,10 +1415,11 @@ export class TaskManager {
         cleanup: this.janitor.current(b.id),
         operation: this.boxOperation(b.id),
         resize: this.resizeReport(b.id),
-        estimatedCostUsd: boxCost({ activeMs: b.active_ms ?? 0, uptimeMs, diskBytes: b.disk_bytes, size, keepAlive: Boolean(b.keep_alive) }, rates),
-        usageSource: b.usage_source ?? "estimated",
+        estimatedCostUsd: boxRowCost(b, rates, now),
+        usageSource: sourceOf(b.usage_source),
         createdAt: b.created_at,
         lastUsedAt: b.last_used_at,
+        idleHeld: this.idleHeld.get(b.id) ?? null,
       }
     })
   }
@@ -2545,7 +2576,7 @@ export class TaskManager {
 
   private async schedulePass() {
     this.meterBoxes()
-    if (this.budgetBlocked()) return
+    this.noticeCloudSpend()
     const waiting = this.store
       .listTaskRows()
       .filter((r) => this.wantsTurn(r))
@@ -2568,6 +2599,12 @@ export class TaskManager {
           this.store.updateTask(row.id, { status: "queued" })
           this.emitTask(row.id)
         }
+        continue
+      }
+      // Placement awaited: the box it picked may have gone meanwhile (the idle sweep, a delete, a lost box). The task
+      // stays queued and the next pass places it again.
+      if (!ownRunnerOf(boxId) && !isLocalRunnerBox(boxId) && (this.store.getBox(boxId)?.status !== "ready" || this.boxOps.has(boxId))) {
+        this.schedule()
         continue
       }
       const turnId = randomUUID()
@@ -3590,7 +3627,7 @@ export class TaskManager {
     }
     // Every box of its size is full and none can be added: say so rather than wait without a reason.
     const poolFull = !this.wantsBox.has(taskId) && !canGrow ? (cap?.full ? this.projectFullReason(projectId!, cap.max) : walled && !candidates.length ? this.walledReason(creds) : this.noNewBoxReason()) : null
-    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull)
+    this.holdForDisk(taskId, low, busy[0], waitHere ?? poolFull, !canGrow && !cap?.full ? this.cloudBlock() : null)
     return null
   }
 
@@ -3614,7 +3651,8 @@ export class TaskManager {
   private async ensureSizedBox(row: TaskRow, min: BoxSize, own: { max: number; used: Set<string> } | null = null) {
     const waitFor = `Waiting for a ${min} box`
     // A project at its own Max boxes waits for (or grows) one of its own boxes; a box on its way for another doesn't help.
-    const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : "the pool is full"
+    const cloud = own ? null : this.cloudBlock()
+    const full = own ? `${this.store.getProjectName(row.project_id) ?? row.project_id} is at its limit of ${boxCount(own.max)}` : (cloud?.text ?? "the pool is full")
     const pending = this.sizedBoxComing(min, own?.used)
     if (pending) return this.setWaitReason(row.id, `${waitFor}: ${pending}`, min)
     // Settings › Resize an idle box when no big-enough box is free (off by default): off, the task just waits.
@@ -3634,7 +3672,7 @@ export class TaskManager {
       }
       return this.setWaitReason(row.id, `${waitFor}: ${this.sizedBoxComing(min) ?? `resizing box ${box.id}`}`, min)
     }
-    this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min)
+    this.setWaitReason(row.id, `${waitFor}: ${full} and no box is idle to resize`, min, [], cloud?.fix ?? null)
   }
 
   /**
@@ -3700,7 +3738,7 @@ export class TaskManager {
    * Say on a queued task why it's waiting when that's about disk space (or else `busy`: Agents per box, memory; or
    * else `waitHere`: no free slot on the box its workspace is on), or clear it.
    */
-  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: Wait | null, waitHere?: string | null) {
+  private holdForDisk(taskId: string, low: { boxId: string; state: "running" | "exhausted" }[], busy?: Wait | null, waitHere?: string | null, noBox?: { text: string; fix: WaitFix } | null) {
     const first = low[0]
     let reason: string | null = null
     if (!first && busy) reason = this.wantsBox.has(taskId) ? `Waiting for a new box: ${busy.text}` : `Waiting: ${busy.text}`
@@ -3711,17 +3749,22 @@ export class TaskManager {
         reason = `Waiting for disk cleanup on ${low.find((l) => this.janitor.isRunning(l.boxId))?.boxId ?? first.boxId}`
       } else reason = `Waiting for disk space on ${first.boxId}: cleanup couldn't free enough room`
     }
-    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [])
+    // A cloud limit is why no new box helps: the reason says so, and the task offers the fix.
+    if (reason && noBox && !reason.includes(noBox.text)) reason = `${reason}; no new box: ${noBox.text}`
+    this.setWaitReason(taskId, reason, null, !first && busy ? busy.by : [], reason && noBox ? noBox.fix : null)
   }
 
   /** `by`: the tasks the reason names as holding it back, in its order (Task.waitFor), so the UI can link them. */
-  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null, by: WaitFor[] = []) {
+  private setWaitReason(taskId: string, reason: string | null, size: BoxSize | null = null, by: WaitFor[] = [], fix: WaitFix | null = null) {
     const row = this.store.getTaskRow(taskId)
     const waitFor = reason ? by : []
+    const waitFix = reason ? fix : null
     const same = (row?.wait_for_json ?? null) === (waitFor.length ? JSON.stringify(waitFor) : null)
-    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null) && same)) return
-    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null, waitFor }, { touch: false })
-    if (reason) this.addEvent(taskId, `${reason}.`)
+    const sameFix = (row?.wait_fix ?? null) === waitFix
+    if (!row || ((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === (reason ? size : null) && same && sameFix)) return
+    this.store.updateTask(taskId, { waitReason: reason, waitBoxSize: reason ? size : null, waitFor, waitFix }, { touch: false })
+    // A fix appearing or going with the same reason isn't news for the task's log.
+    if (reason && !((row.wait_reason ?? null) === reason && (row.wait_box_size ?? null) === size && same)) this.addEvent(taskId, `${reason}.`)
     this.emitTask(taskId)
   }
 
@@ -3873,6 +3916,8 @@ export class TaskManager {
         // A probe without the memory part (an old or fake df) keeps the last reading.
         ...(mem ? { memUsedBytes: mem.usedBytes, memTotalBytes: mem.totalBytes, loadAvg: mem.load1, cpuCount: mem.cpus } : {}),
       })
+      // The box's own CPU time, which is what Upstash bills (a shared cgroup's, like local folders', says nothing).
+      if (typeof mem?.cpuUsageUsec === "number" && providerOf(this.provider, boxId).ownCgroup) this.store.accrueBoxCpu(boxId, "cgroup", mem.cpuUsageUsec, now)
       // A real change is worth a Boxes update (df runs often while placing), and so is a stale
       // "measured … ago" on the page.
       const changed =
@@ -4058,18 +4103,23 @@ export class TaskManager {
     return true
   }
 
-  /** Why a task with no free slot can't count on a new box: the pool is at Max boxes, or creating boxes keeps failing. */
+  /**
+   * Why a task with no free slot can't count on a new box: a cloud limit is reached, the pool is at its ceiling (Max
+   * boxes), or creating boxes keeps failing.
+   */
   private noNewBoxReason() {
+    const cloud = this.cloudBlock()
+    if (cloud) return `Waiting for a new box: ${cloud.text}`
     if (this.store.listBoxes().length < this.limits().maxBoxes && this.boxCreateFailing()) {
       return "Waiting for a free slot or a new box: creating boxes keeps failing, so Box Yard retries with backoff"
     }
     return "Waiting for a free slot: every box is full and the pool is at its limit"
   }
 
-  /** Room to create another box (and box creation isn't failing right now). */
+  /** Room to create another box: under the ceiling and today's cloud limit, and box creation isn't failing right now. */
   private poolHasRoom() {
     // listBoxes() includes the placeholders of boxes being created.
-    return !this.boxCreateFailing() && this.store.listBoxes().length < this.limits().maxBoxes
+    return !this.boxCreateFailing() && this.store.listBoxes().length < this.limits().maxBoxes && !this.cloudSpend().blockedReason
   }
 
   /** Give a task a home on a box, with its own block of preview ports. */
@@ -4509,7 +4559,9 @@ export class TaskManager {
         used.add(name)
         // Upload, not writeFile: Upstash rejects a base64 write body over ~10 MB,
         // so any attachment over ~7.5 MB failed with "invalid request body". putFile splits one over 100 MB.
-        await putFile(this.provider, boxId, file.path, `${folder}/${name}`)
+        await putFile(this.provider, boxId, file.path, `${folder}/${name}`).catch((err) => {
+          throw failedStep(`uploading the attached file ${file.name} (${uploadSize(file.size)}) to the box`, err)
+        })
         lines.push(`- ${folder}/${name} (${file.mime}, ${file.size} bytes)`)
       }
       const note = lines.length ? `\n\nAttached files (open images and other files with the Read tool):\n${lines.join("\n")}` : ""
@@ -4621,13 +4673,15 @@ export class TaskManager {
     const remote = `${root}/.boxyard/restore-${row.id}.tgz`
     let from: "git" | "partial" | null = null
     try {
-      // In parts when it's over the box's upload limit (Upstash: 100 MB per file).
-      await putFile(this.provider, boxId, row.archive_path!, remote)
+      // In parts when it's over the box's upload limit (Upstash: 100 MB per file). Each failure names its step.
+      await putFile(this.provider, boxId, row.archive_path!, remote).catch((err) => {
+        throw failedStep(`restoring workspace failed: uploading its ${uploadSize(fs.statSync(row.archive_path!).size)} archive to the box`, err)
+      })
       const res = await this.provider.exec(
         boxId,
         `mkdir -p ${q(tasks)} && tar xzf ${q(remote)} -C ${q(tasks)} && rm -f ${q(remote)} && mkdir -p ${q(dir + "/work")} && rm -f ${q(dir + "/turn.pid")} ${q(dir + "/run.json")}`,
       )
-      if (res.exitCode !== 0) throw new Error(`restoring workspace failed: ${res.stderr.slice(-500)}`)
+      if (res.exitCode !== 0) throw new Error(`restoring workspace failed: unpacking its archive on the box failed: ${(res.stderr || res.stdout).trim().slice(-500) || `exit code ${res.exitCode}`}`)
       // A thin archive (git-thin/) gets its repo back from the mirror or GitHub plus its bundle of unpushed commits.
       if (mirror) await this.restoreThinGit(boxId, dir, mirror)
       if (mirror) await this.relinkSharedObjects(boxId, dir, mirror)
@@ -5932,23 +5986,116 @@ export class TaskManager {
 
   // ------------------------------------------------------------------ usage and budget
 
-  private budgetBlocked() {
-    const waiting = this.store
-      .listTaskRows()
-      .some((r) => !r.current_turn_id && (r.status === "queued" || (r.status !== "failed" && (r.compact_pending || this.store.hasInputs(r.id)))))
-    if (!waiting) return false
-    const budget = this.store.usageBudgetStatus(this.settings.get())
-    if (!budget.blocked) return false
+  /**
+   * Box spend against Settings › Daily cloud limit, cached for a few seconds (placement asks for every task).
+   * `fresh` reads it again (after a raise or a settings change).
+   */
+  cloudSpend(fresh = false): CloudSpend {
     const now = Date.now()
-    if (now - this.budgetNoticeAt > 30 * 60_000) {
-      this.budgetNoticeAt = now
-      const parts = [
-        budget.daily.exceeded ? `daily budget $${budget.daily.limitUsd.toFixed(2)} (used $${budget.daily.usedUsd.toFixed(2)})` : "",
-        budget.monthly.exceeded ? `monthly budget $${budget.monthly.limitUsd.toFixed(2)} (used $${budget.monthly.usedUsd.toFixed(2)})` : "",
-      ].filter(Boolean)
-      this.notice(`⚠️ Usage budget exceeded (${parts.join(", ")}). New agent turns are paused until you raise the budget in Settings or the window resets.`)
+    const s = this.settings.get()
+    // A change of limits or rates in Settings counts at once.
+    const key = JSON.stringify([s.budget, s.costRates])
+    if (!fresh && this.cloudCache?.key === key && now - this.cloudCache.at < CLOUD_SPEND_CACHE_MS) return this.cloudCache.spend
+    const spend = cloudSpend(this.store, s.budget, s.costRates, now)
+    this.cloudCache = { at: now, key, spend }
+    return spend
+  }
+
+  /** "Raise today's limit": one more day's worth until midnight. New boxes may be made again at once. */
+  raiseCloudLimit(by: "user" | "coordinator" | "captain" = "user"): CloudSpend {
+    const s = this.settings.get()
+    if (s.budget.dailyUsd <= 0) throw new BadRequestError("There's no daily cloud limit to raise (Settings › Usage › Daily cloud limit is off)")
+    const raised = raiseToday(this.store, s.budget, this.cloudSpend(true).todayUsd)
+    const spend = this.cloudSpend(true)
+    const who = by === "user" ? withOwner("Cody", this.owner()) : by === "coordinator" ? "The Coordinator" : "A Captain"
+    this.notice(`⚙️ **Cloud limit** raised: ${who} raised today's limit to ${usd(spend.dailyLimitUsd)} (Settings says ${usd(s.budget.dailyUsd)}; ${usd(raised)} more until midnight).`, { kind: "cloud_limit" })
+    this.schedule()
+    this.emitBoxes()
+    return spend
+  }
+
+  /** The cloud meter (GET /api/cloud): spend against the limits, $/hour now, and every box with what it cost today. */
+  async cloudStatus(): Promise<CloudStatus> {
+    this.meterBoxes()
+    const now = Date.now()
+    const s = this.settings.get()
+    const spend = cloudSpend(this.store, s.budget, s.costRates, now)
+    this.cloudCache = { at: now, key: JSON.stringify([s.budget, s.costRates]), spend }
+    const today = this.store.boxSpendSince(startOfLocalDay(now), s.costRates).byBox
+    const recent = this.store.boxSpendSince(now - CLOUD_RATE_WINDOW_MS, s.costRates).totals.costUsd
+    const idleDelete = s.boxIdleDeleteMinutes
+    const list: CloudBox[] = [...this.store.listBoxes(), ...this.store.listDeletingBoxes()].map((b) => {
+      const residents = this.store.listTaskRows({ boxId: b.id })
+      const runningTurns = residents.filter(holdsSlot).length
+      const idleSince = b.status === "ready" && runningTurns === 0 ? b.last_used_at : null
+      return {
+        id: b.id,
+        status: b.status,
+        size: normalizeBoxSize(b.size),
+        projects: [...new Set(residents.map((r) => this.store.getProjectName(r.project_id) ?? r.project_id))],
+        runningTurns,
+        todayUsd: today.get(b.id)?.costUsd ?? 0,
+        totalUsd: boxRowCost(b, s.costRates, now),
+        idleSince,
+        deletesAt: idleSince !== null && idleDelete > 0 ? idleSince + idleDelete * 60_000 : null,
+        idleHeld: this.idleHeld.get(b.id) ?? null,
+      }
+    })
+    let gpu: CloudStatus["gpu"] = null
+    if (this.gpu?.enabled()) {
+      const pods = await this.gpu.provider.listPods().catch(() => null)
+      if (pods) gpu = { pods: pods.length, hourlyUsd: pods.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0), capUsd: this.gpu.settings().totalMaxHourlyUsd }
     }
-    return true
+    return {
+      spend,
+      hourlyUsd: (recent * 3_600_000) / CLOUD_RATE_WINDOW_MS,
+      boxes: {
+        running: list.filter((b) => b.runningTurns > 0).length,
+        idle: list.filter((b) => b.status === "ready" && b.runningTurns === 0).length,
+        creating: list.filter((b) => b.status === "creating").length,
+        total: list.filter((b) => b.status !== "deleting").length,
+      },
+      ceiling: s.maxBoxes,
+      idleDeleteMinutes: idleDelete,
+      list,
+      gpu,
+    }
+  }
+
+  /** Say once a day when cloud spend reaches 80% of today's limit, and when it reaches the limit (again after a raise). */
+  private noticeCloudSpend() {
+    const spend = this.cloudSpend()
+    if (spend.state === "ok") return
+    const day = localDay(Date.now())
+    let seen: { day?: string; warned?: number; reached?: number } = {}
+    try {
+      seen = JSON.parse(this.store.getKv(CLOUD_NOTICED_KEY) ?? "{}") ?? {}
+    } catch {}
+    if (seen.day !== day) seen = { day }
+    const limit = spend.dailyLimitUsd || spend.monthlyLimitUsd
+    if (spend.state === "reached") {
+      if (seen.reached === limit) return
+      seen.reached = seen.warned = limit
+      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Coordinator, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
+      this.notice(`⚠️ **Cloud spend** hit the limit: ${spend.blockedReason}. New boxes wait ${raise}; running agents keep going, and free slots on the boxes there are still used.`, { kind: "cloud_limit" }, { coordinator: true })
+    } else {
+      if (seen.warned === limit) return
+      seen.warned = limit
+      const what = spend.dailyLimitUsd > 0 && spend.todayUsd >= spend.dailyLimitUsd * 0.8 ? `${usd(spend.todayUsd)} of today's ${usd(spend.dailyLimitUsd)} limit` : `${usd(spend.monthUsd)} of the ${usd(spend.monthlyLimitUsd)} monthly limit`
+      this.notice(`⚠️ **Cloud spend** reached 80%: ${what}. At the limit new boxes wait; running work goes on.`, { kind: "cloud_limit" }, { coordinator: true })
+    }
+    this.store.setKv(CLOUD_NOTICED_KEY, JSON.stringify(seen))
+  }
+
+  /** A new box can't be made because a cloud limit is reached: the reason and its one-click fix, or null. */
+  private cloudBlock(): { text: string; fix: WaitFix } | null {
+    const spend = this.cloudSpend()
+    if (!spend.blockedReason) return null
+    const daily = spend.blockedReason.startsWith("today")
+    return {
+      text: daily ? `${spend.blockedReason} (raise today's limit, or it resets at midnight)` : `${spend.blockedReason} (raise it in Settings › Usage)`,
+      fix: daily ? "raise-cloud-limit" : "cloud-settings",
+    }
   }
 
   /** Logs the turn's Claude usage; returns the turn's own cost (the CLI reports the session's running total), or null when it reported none. */
@@ -5977,27 +6124,31 @@ export class TaskManager {
     return hasCost ? cost : null
   }
 
+  /** Move each box's measured CPU (or, unmeasured, its running time) into a priced usage interval: see meterTick. */
   private meterBoxes(now = Date.now()) {
+    const rates = this.settings.get().costRates
     for (const box of this.store.listBoxes()) {
       if (box.status === "deleting" || box.status === "lost") continue
       const last = box.last_metered_at ?? box.created_at
       const elapsed = Math.max(0, now - last)
-      if (elapsed < 1000) continue
+      if (elapsed < METER_MIN_MS) continue
       const running = this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id)
-      const activeMs = running ? elapsed : 0
+      const size = normalizeBoxSize(box.size)
+      const tick = meterTick(box, rates.boxActiveCpuHourlyUsd[size], elapsed, running)
       this.store.recordBoxUsageInterval({
         boxId: box.id,
         provider: box.provider,
-        size: normalizeBoxSize(box.size),
+        size,
         keepAlive: Boolean(box.keep_alive),
         startedAt: last,
         endedAt: now,
-        activeMs,
+        activeMs: tick.activeMs,
         uptimeMs: elapsed,
         diskBytes: box.disk_bytes,
-        source: box.usage_source ?? "estimated",
+        source: tick.source,
+        computeUsd: tick.computeUsd,
       })
-      this.store.meterBox(box.id, { activeMs: (box.active_ms ?? 0) + activeMs, lastMeteredAt: now })
+      this.store.meterBox(box.id, { ...tick.patch, lastMeteredAt: now })
     }
   }
 
@@ -6021,10 +6172,11 @@ export class TaskManager {
       ...(probe.size ? { size: normalizeBoxSize(probe.size) } : {}),
       ...(typeof probe.keepAlive === "boolean" ? { keepAlive: probe.keepAlive } : {}),
       ...(typeof probe.diskBytes === "number" ? { diskBytes: probe.diskBytes, diskUpdatedAt: now } : {}),
-      usageSource: probe.source,
     }
+    // The provider's running totals: meterBoxes prices what they grew by (see meterTick).
+    if (typeof probe.cpuNs === "number") this.store.accrueBoxCpu(boxId, "provider", probe.cpuNs, now)
+    if (typeof probe.computeUsd === "number") this.store.accrueBoxCompute(boxId, probe.computeUsd, now)
     const row = this.store.getBox(boxId)
-    if (row && typeof probe.activeMs === "number" && probe.activeMs > (row.active_ms ?? 0)) patch.activeMs = probe.activeMs
     if (row && patch.size && patch.size !== normalizeBoxSize(row.size) && !this.boxOps.has(boxId)) {
       this.recordBoxEvent({
         boxId,
@@ -6121,7 +6273,12 @@ export class TaskManager {
     if (this.stopped) return
     const now = Date.now()
     this.meterBoxes(now)
-    for (const box of this.store.listBoxes()) void this.refreshBoxUsage(box.id)
+    for (const box of this.store.listBoxes()) {
+      void this.refreshBoxUsage(box.id)
+      // A box running a turn has its CPU read every minute (one df there), so its spend and $/hour stay current.
+      if (box.status === "ready" && providerOf(this.provider, box.id).ownCgroup && this.store.listTaskRows({ boxId: box.id }).some((r) => r.current_turn_id))
+        void this.probeDisk(box.id, 60_000).catch(() => null)
+    }
     const active = this.store.listTaskRows({ status: ["working", "starting"] })
     const checkedBoxes = new Map<string, Awaited<ReturnType<BoxProvider["health"]>>>()
     const health = async (boxId: string) => {
@@ -6191,20 +6348,39 @@ export class TaskManager {
     const idleDelete = this.limits().boxIdleDeleteMinutes
     if (idleDelete > 0) {
       for (const box of this.store.listBoxes()) {
-        if (box.status !== "ready" || this.boxOps.has(box.id)) continue
-        if (now - box.last_used_at < idleDelete * 60_000) continue
+        if (box.status !== "ready" || this.boxOps.has(box.id)) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
+        if (now - box.last_used_at < idleDelete * 60_000) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
         const residents = this.store.listTaskRows({ boxId: box.id })
-        if (residents.some((r) => r.current_turn_id || this.store.hasInputs(r.id))) continue
-        if (residents.some((r) => !this.hasFreshArchive(r))) continue
+        // A task about to start here, or waiting for a turn, keeps the box (placement may be picking it right now).
+        if (residents.some((r) => r.current_turn_id || r.status === "starting" || this.wantsTurn(r) || this.store.hasInputs(r.id))) {
+          this.idleHeld.delete(box.id)
+          continue
+        }
+        // Only a workspace its archive holds may go (one no agent ever ran in has nothing to keep). One whose archive
+        // failed is retried every IDLE_ARCHIVE_RETRY_MS, and the box stays, saying why, until it lands: a box never
+        // goes with work only it has.
+        const unsaved = residents.filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
+        if (unsaved.length) {
+          this.retryIdleArchives(box.id, unsaved, now)
+          continue
+        }
+        this.idleHeld.delete(box.id)
         console.log(`[box-yard] deleting idle box ${box.id}`)
         await this.loseBox(box.id, "Box retired after being idle; workspaces are archived.", true, {
           type: "deleted",
           actor: { kind: "janitor" },
           reason: `Idle for ${Math.round((now - box.last_used_at) / 60_000)} min (Settings retires boxes after ${idleDelete} min); every workspace was archived.`,
         })
-        await this.provider.destroy(box.id).catch(() => {})
+        // A delete that doesn't go through leaves a box with no row: the orphan sweep deletes it (cleanupOrphanBoxes).
+        await this.provider.destroy(box.id).catch((err) => console.warn(`[box-yard] destroy idle box ${box.id}: ${errorMessage(err)}; the orphan sweep retries it`))
       }
-    }
+    } else this.idleHeld.clear()
     if (now - this.lastRetentionAt > 5 * 60_000) {
       this.lastRetentionAt = now
       await this.maintainRestingStorage(now)
@@ -6228,6 +6404,27 @@ export class TaskManager {
     await this.sweepGpuPods(now)
     await this.sweepDocker(now)
     this.schedule()
+  }
+
+  /**
+   * An idle box due for deletion holds workspaces its archives don't: archive them again (each at most every
+   * IDLE_ARCHIVE_RETRY_MS, so a failing one doesn't hammer the box), and keep the box until they land. The reason is
+   * on the box (BoxInfo.idleHeld) so the cost of keeping it isn't silent.
+   */
+  private retryIdleArchives(boxId: string, unsaved: TaskRow[], now: number) {
+    for (const r of unsaved) {
+      if (this.archiving.has(r.id) || now < (this.idleArchiveRetryAt.get(r.id) ?? 0)) continue
+      this.idleArchiveRetryAt.set(r.id, now + IDLE_ARCHIVE_RETRY_MS)
+      void this.archive(r.id).catch((err) => console.warn(`[box-yard] idle archive ${r.id}: ${errorMessage(err)}`))
+    }
+    const failing = unsaved.find((r) => this.archiveErrors.has(r.id))
+    const why = failing
+      ? `Kept though idle: archiving ${failing.title} keeps failing (${this.archiveErrors.get(failing.id)}); Box Yard retries every ${Math.round(IDLE_ARCHIVE_RETRY_MS / 60_000)} min`
+      : `Kept though idle: archiving ${unsaved.length === 1 ? unsaved[0]!.title : `${unsaved.length} tasks`} first`
+    if (this.idleHeld.get(boxId) !== why) {
+      this.idleHeld.set(boxId, why)
+      this.emitBoxes()
+    }
   }
 
   /**
@@ -6410,6 +6607,7 @@ export class TaskManager {
     this.unreachable.delete(boxId)
     this.reserved.delete(boxId)
     this.lowBoxes.delete(boxId)
+    this.idleHeld.delete(boxId)
     for (const [taskId, held] of this.diskHold) if (held === boxId) this.diskHold.delete(taskId)
     for (const row of this.store.listTaskRows({ boxId })) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })

@@ -11,7 +11,7 @@ import type {
   UsagePeriodBox,
   UsagePeriodReport,
 } from "../shared/types.js"
-import { USAGE_CATEGORIES } from "../shared/types.js"
+import { USAGE_CATEGORIES, weakerSource, type UsageSource } from "../shared/types.js"
 
 /** A claude_usage row in the period, with the names it points at. */
 export interface PeriodClaudeRow {
@@ -44,7 +44,7 @@ export interface PeriodBoxInterval {
   uptimeMs: number
   diskBytes: number | null
   costUsd: number
-  source: "actual" | "estimated"
+  source: UsageSource
 }
 
 export interface PeriodInput {
@@ -182,7 +182,7 @@ export function buildUsagePeriod(input: PeriodInput): UsagePeriodReport {
     box.activeMs += iv.activeMs * share
     box.uptimeMs += iv.uptimeMs * share
     box.costUsd += iv.costUsd * share
-    if (iv.source !== "actual") box.source = "estimated"
+    box.source = weakerSource(box.source, iv.source)
     if (iv.endedAt >= box.lastAt) Object.assign(box, { lastAt: iv.endedAt, size: iv.size, keepAlive: iv.keepAlive, diskBytes: iv.diskBytes || box.diskBytes })
     for (let t = start; t < end; ) {
       const b = bucketAt(t)
@@ -204,12 +204,12 @@ export function buildUsagePeriod(input: PeriodInput): UsagePeriodReport {
     boxes.uptimeMs += b.uptimeMs
     boxes.costUsd += b.costUsd
     if (b.uptimeMs > 0) boxes.diskBytes = Math.max(boxes.diskBytes, b.diskBytes ?? 0)
-    if (b.uptimeMs > 0 && b.source !== "actual") boxes.source = "estimated"
+    if (b.uptimeMs > 0) boxes.source = weakerSource(boxes.source, b.source)
   }
   categories.boxes.costUsd = boxes.costUsd
 
   // Boxes appear in every breakdown so each one sums to the period total.
-  const boxRow = (): UsageBreakdownRow => ({ key: "boxes", label: "Boxes", detail: "Shared infrastructure, estimated", other: true, category: "boxes", turns: 0, tokens: 0, costUsd: boxes.costUsd })
+  const boxRow = (): UsageBreakdownRow => ({ key: "boxes", label: "Boxes", detail: boxes.source === "actual" ? "Shared infrastructure" : `Shared infrastructure, ${boxes.source}`, other: true, category: "boxes", turns: 0, tokens: 0, costUsd: boxes.costUsd })
   const withBoxes = (rows: UsageBreakdownRow[]) => (boxes.costUsd > 0 ? [...rows, boxRow()] : rows)
   const sourceRows = sources.list().map((row) => {
     if (row.key === "captains") return { ...row, children: captainsByProject.list() }

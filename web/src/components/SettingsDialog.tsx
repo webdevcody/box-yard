@@ -754,26 +754,41 @@ function LimitsPanel({
         </label>
       </Row>
       <SizeCapacityTable s={s} sources={shownSources} changed={overrides} />
-      <Row id={fid("mb")} label="Max boxes" help="Most worker boxes alive at once." hint={hint("maxBoxes")}>
-        <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} />
-      </Row>
-      <Row
-        id={fid("bcc")}
-        label="Boxes created at once"
-        help="When many tasks wait for a box (say a Captain starts a batch of tasks), Box Yard creates up to this many boxes in parallel, still within Max boxes. Lower it if your box provider rate-limits box creation; Box Yard also backs off by itself when a create fails or is rate-limited."
-        hint={hint("boxCreateConcurrency")}
+      {/* Rarely touched: open when one of them isn't the default, so a ceiling set on purpose (or by env) shows. */}
+      <details
+        className="border-t border-zinc-900 py-4"
+        data-testid="limits-advanced"
+        open={(["maxBoxes", "boxCreateConcurrency"] as const).some((k) => shownSources?.[k] && shownSources[k] !== "default") || undefined}
       >
-        <input
-          id={fid("bcc")}
-          type="number"
-          min={BOX_CREATE_CONCURRENCY.min}
-          max={BOX_CREATE_CONCURRENCY.max}
-          className={inputClass}
-          value={s.boxCreateConcurrency}
-          onChange={int("boxCreateConcurrency")}
-          data-testid="box-create-concurrency"
-        />
-      </Row>
+        <summary className="cursor-pointer text-sm font-medium text-zinc-300 select-none hover:text-zinc-100">Advanced: box ceiling and how fast boxes are made</summary>
+        <div className="mt-4">
+          <Row
+            id={fid("mb")}
+            label="Max boxes (safety ceiling)"
+            help="A safety stop, not a budget: the most worker boxes alive at once, however much work waits. What keeps spend in check is the daily cloud limit (Settings › Usage); boxes start when work needs one and are deleted when idle."
+            hint={hint("maxBoxes")}
+          >
+            <input id={fid("mb")} type="number" min={1} max={100} className={inputClass} value={s.maxBoxes} onChange={int("maxBoxes")} data-testid="max-boxes" />
+          </Row>
+          <Row
+            id={fid("bcc")}
+            label="Boxes created at once"
+            help="When many tasks wait for a box (say a Captain starts a batch of tasks), Box Yard creates up to this many boxes in parallel, still within Max boxes. Lower it if your box provider rate-limits box creation; Box Yard also backs off by itself when a create fails or is rate-limited."
+            hint={hint("boxCreateConcurrency")}
+          >
+            <input
+              id={fid("bcc")}
+              type="number"
+              min={BOX_CREATE_CONCURRENCY.min}
+              max={BOX_CREATE_CONCURRENCY.max}
+              className={inputClass}
+              value={s.boxCreateConcurrency}
+              onChange={int("boxCreateConcurrency")}
+              data-testid="box-create-concurrency"
+            />
+          </Row>
+        </div>
+      </details>
       <Row
         id={fid("spb")}
         label="Tasks running at once per box"
@@ -1127,8 +1142,24 @@ function CostsPanel({
   return (
     <Panel section="costs">
       <Row
+        id={fid("daily-budget")}
+        label="Daily cloud limit"
+        help="What boxes may cost per day, by the CPU they use (Claude isn't counted). At 80% Box Yard says so; at the limit new boxes wait until midnight while work already running goes on, and the Coordinator's cloud meter offers Raise today's limit. 0: no daily limit."
+        hint={hint("budget")}
+      >
+        {money(s.budget.dailyUsd, (n) => set("budget", { ...s.budget, dailyUsd: n }), fid("daily-budget"))}
+      </Row>
+      <Row
+        id={fid("monthly-budget")}
+        label="Monthly cloud limit"
+        help="Box spend over the last 30 days. At it, new boxes wait until the spend drops under it or you raise it. 0: no monthly limit."
+        hint={hint("budget")}
+      >
+        {money(s.budget.monthlyUsd, (n) => set("budget", { ...s.budget, monthlyUsd: n }), fid("monthly-budget"))}
+      </Row>
+      <Row
         label="Active CPU rates"
-        help="Estimated Upstash Box active CPU cost per hour. Defaults match the public Small / Medium / Large rates."
+        help="Upstash bills the CPU a box uses, per core-hour: a box busy on 2 cores for an hour uses 2. Box Yard measures each box's CPU and prices it at these rates, unless Upstash reports its own charge for the box. Defaults match the public Small / Medium / Large rates."
         hint={hint("costRates")}
       >
         <div className="grid grid-cols-3 gap-2">
@@ -1144,7 +1175,7 @@ function CostsPanel({
       </Row>
       <Row
         label="Keep-alive rates"
-        help="Monthly keep-alive rates, prorated by box uptime when a provider reports keep-alive is enabled."
+        help="A keep-alive box costs its monthly fee and no CPU charge, prorated by uptime, when the provider reports keep-alive is on."
         hint={hint("costRates")}
       >
         <div className="grid grid-cols-3 gap-2">
@@ -1161,14 +1192,8 @@ function CostsPanel({
       <Row id={fid("storage")} label="Storage rate" help="Storage and snapshot cost per GB-month. Disk use is probed from boxes when available." hint={hint("costRates")}>
         {money(s.costRates.boxStorageGbMonthUsd, (n) => set("costRates", { ...s.costRates, boxStorageGbMonthUsd: n }), fid("storage"))}
       </Row>
-      <Row id={fid("daily-budget")} label="Daily budget" help="0 disables the daily budget. At 80% Box Yard warns; at 100% queued agent turns pause." hint={hint("budget")}>
-        {money(s.budget.dailyUsd, (n) => set("budget", { ...s.budget, dailyUsd: n }), fid("daily-budget"))}
-      </Row>
-      <Row id={fid("monthly-budget")} label="Monthly budget" help="0 disables the 30-day budget window. Raising this value resumes queued turns immediately." hint={hint("budget")}>
-        {money(s.budget.monthlyUsd, (n) => set("budget", { ...s.budget, monthlyUsd: n }), fid("monthly-budget"))}
-      </Row>
       <div className="mt-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
-        Claude Code costs come from the CLI's result JSON. Box costs use provider usage when exposed by the API; otherwise active CPU and storage are labeled estimates.
+        Claude Code costs come from the CLI's result JSON and don't count against the cloud limits. A box's cost is Upstash's own charge when its API reports one, its measured CPU at these rates when that's more, and the time a turn ran (labeled an estimate) while neither is known. RunPod GPU pods have their own hourly caps (Settings › RunPod GPU).
       </div>
     </Panel>
   )
