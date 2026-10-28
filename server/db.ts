@@ -742,6 +742,25 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN placed_how TEXT;
   `,
   `
+  -- Auto-sizing (shared/autoSize.ts): what each measured turn used on its Upstash box, read by the box probe while only
+  -- its project's turns ran there, and whether the box's cgroup killed a process for memory meanwhile. 14 days kept.
+  -- A deleted task's runs still count for its project.
+  CREATE TABLE turn_peaks (
+    turn_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL,
+    box_id TEXT NOT NULL,
+    box_size TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    mem_peak_bytes INTEGER,
+    cpu_peak_cores REAL,
+    cpu_busy_cores REAL,
+    disk_peak_bytes INTEGER,
+    oom INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX turn_peaks_project ON turn_peaks(project_id, at);
+  `,
+  `
   -- Project identities (shared/identities.ts, docs/identities.md): who acts for a project. The Default identity is
   -- Settings › Credentials, and every existing project starts on it, so nothing changes until Cody picks another.
   CREATE TABLE identities (
