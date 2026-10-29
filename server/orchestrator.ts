@@ -32,6 +32,9 @@ import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds, type StatusOn
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
+import { MISSING_SESSION, codexErrorText } from "./codex.js"
+import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
+import { codexModel, type AgentCli } from "../shared/agentCli.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -42,6 +45,8 @@ export const MAX_AUTO_TURNS = 8
 const NO_UPDATE = "(no update)"
 const SESSION_KEY = "orchestrator_session"
 const STARTED_KEY = "orchestrator_session_started"
+/** The CLI the session belongs to (null: Claude Code, from before Codex). Another CLI can't resume it. */
+const SESSION_CLI_KEY = "orchestrator_session_cli"
 const USAGE_KEY = "orchestrator_usage"
 /** The summary file the next turn starts with: set by a compaction, cleared once a turn has seen it. */
 const RECAP_KEY = "orchestrator_recap"
@@ -139,6 +144,7 @@ export class Orchestrator {
     mcp: { url: string; token: string },
     private readonly settings: SettingsStore,
   ) {
+    this.mcp = mcp
     this.workdir = path.join(c.dataDir, "orchestrator")
     this.compactionsDir = compactionsDir(c.dataDir)
     fs.mkdirSync(this.compactionsDir, { recursive: true })
@@ -149,6 +155,18 @@ export class Orchestrator {
   }
 
   private readonly mcpConfig: string
+  private readonly mcp: { url: string; token: string }
+
+  /** The CLI the Coordinator runs on now (Settings › Coordinator). */
+  private cli(): AgentCli {
+    return this.settings.get().orchestratorCli
+  }
+
+  /** Its model: Settings › Coordinator › Model, or its Codex model when it runs on Codex (null: Codex's default). */
+  private model(): string | null {
+    const st = this.settings.get()
+    return st.orchestratorCli === "codex" ? codexModel(null, st.orchestratorCodexModel) : st.orchestratorModel
+  }
 
   /**
    * Projects whose identity lets the Coordinator see their status only (app.ts wires Identities in). Its summaries,
@@ -397,7 +415,8 @@ export class Orchestrator {
     try {
       const s = this.session()
       const before = this.usage().tokens
-      const model = this.settings.get().orchestratorModel
+      const cli = this.cli()
+      const model = this.model() ?? "codex"
       this.compactionSystemPrompt = this.systemPrompt()
       const summary = await this.run(this.summaryPrompt(), s.id, true, "summary")
       const text = cleanSummary(summary.text)
@@ -419,18 +438,26 @@ export class Orchestrator {
         markdown: files.markdown,
         tasks: taskSnapshots,
       })
-      const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
-      if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
-      // /compact keeps the session id; if a CLI version ever changed it, follow it.
-      let id = s.id
-      if (compact.sessionId && compact.sessionId !== s.id) {
-        id = compact.sessionId
-        this.store.setKv(SESSION_KEY, id)
+      let after: { tokens: number; window: number } | null = null
+      if (cli === "codex") {
+        // Codex has no /compact to run headless: the next turn starts a new session from this summary (RECAP_KEY).
+        this.resetSession()
+        this.compactionSystemPrompt = null
+        this.setUsage(null)
+      } else {
+        const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
+        if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
+        // /compact keeps the session id; if a CLI version ever changed it, follow it.
+        let id = s.id
+        if (compact.sessionId && compact.sessionId !== s.id) {
+          id = compact.sessionId
+          this.store.setKv(SESSION_KEY, id)
+        }
+        this.compactionSystemPrompt = null
+        const report = await this.run("/context", id, true, "context")
+        after = report.ok ? parseContextReport(report.raw) : null
+        this.setUsage(after?.tokens ?? null, after?.window)
       }
-      this.compactionSystemPrompt = null
-      const report = await this.run("/context", id, true, "context")
-      const after = report.ok ? parseContextReport(report.raw) : null
-      this.setUsage(after?.tokens ?? null, after?.window)
       finishCompaction(files.markdownFile, after?.tokens ?? null)
       this.store.finishOrchestratorCompaction(files.id, after?.tokens ?? null, fs.readFileSync(files.markdownFile, "utf8"))
       // The /compact summary leaves out what this one says: the next turn starts with it.
@@ -468,6 +495,12 @@ export class Orchestrator {
       claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
     }
+  }
+
+  /** Forget the session: the next turn starts a new one. */
+  private resetSession() {
+    this.store.setKv(SESSION_KEY, randomUUID())
+    this.store.setKv(STARTED_KEY, null)
   }
 
   private session() {
@@ -557,7 +590,7 @@ export class Orchestrator {
       .map((m) =>
         m.meta?.source === "hook" && typeof m.meta.hookName === "string"
           ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
-          : m.content + attachmentNote(m.meta?.attachments, this.owner()),
+          : m.content + (this.cli() === "codex" ? codexAttachmentNote : attachmentNote)(m.meta?.attachments, this.owner()),
       )
       .filter((text) => text.trim())
   }
@@ -585,6 +618,8 @@ export class Orchestrator {
     const answering = this.unansweredUserMessages()
     const messages = this.promptText(answering)
     if (!messages.length) return
+    // Codex sees attached images with the message itself; Claude Code opens them with Read.
+    const images = this.cli() === "codex" ? answering.flatMap((m) => attachedImages(m.meta?.attachments)) : []
     // Messages sent during the last turn move to now, right before this turn's reply.
     const moved = this.store.deliverQueued("chat_messages", answering.map((m) => m.id))
     for (const d of moved) {
@@ -599,7 +634,7 @@ export class Orchestrator {
     ]
       .filter(Boolean)
       .join("\n\n")
-    await this.runPrompt(prompt)
+    await this.runPrompt(prompt, images)
   }
 
   /** A one-glance view of the yard, so the orchestrator never works from stale memory. */
@@ -611,13 +646,15 @@ export class Orchestrator {
     return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
   }
 
-  private async runPrompt(body: string): Promise<{ ok: boolean; error: string }> {
+  private async runPrompt(body: string, images: string[] = []): Promise<{ ok: boolean; error: string }> {
     const recapFile = this.store.getKv(RECAP_KEY)
     const compacted = recapFile ? this.recap(recapFile) : null
     const prompt = [compacted, this.yardNow(), body].filter(Boolean).join("\n\n")
     const s = this.session()
-    let result = await this.run(prompt, s.id, s.started)
-    if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
+    // A session the other CLI started can't be resumed: start over the same way as when it's gone.
+    const switched = s.started && (this.store.getKv(SESSION_CLI_KEY) ?? "claude") !== this.cli()
+    let result: RunResult = switched ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null } : await this.run(prompt, s.id, s.started, "turn", images)
+    if (!result.ok && s.started && MISSING_SESSION.test(result.error)) {
       // Session file is gone (new machine, wiped data). Start over with the last summary and a recap.
       const fresh = randomUUID()
       this.store.setKv(SESSION_KEY, fresh)
@@ -628,7 +665,7 @@ export class Orchestrator {
         .join("\n")
       const last = compacted ? null : this.latestSummary()
       const saved = last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false, "turn", images)
     }
     if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
     if (!result.ok) {
@@ -673,7 +710,8 @@ export class Orchestrator {
   /** Box Yard's part of the system prompt. Settings are read here, so changes apply from the next run. */
   private systemPrompt(): string {
     const st = this.settings.get()
-    return `${withOwner(ORCHESTRATOR_PROMPT, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
+    const base = `${withOwner(ORCHESTRATOR_PROMPT, st.ownerName)}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
+    return st.orchestratorCli === "codex" ? `${base}\n\n${codexManagerNote(st.ownerName)}` : base
   }
 
   /** Read access is limited to these folders (absolute paths use a `//` prefix in permission rules). */
@@ -682,19 +720,39 @@ export class Orchestrator {
     return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {
+  /** How this run starts: Claude Code with its flags, or Codex (which has no /compact or /context: see doCompact). */
+  private launch(kind: RunKind, sessionId: string, resume: boolean, images: string[]): ChatLaunch {
+    const st = this.settings.get()
+    if (st.orchestratorCli === "codex") {
+      return codexChatLaunch({
+        c: this.c,
+        credentials: this.settings.credentials,
+        mcp: this.mcp,
+        resume: resume ? sessionId : null,
+        model: this.model(),
+        effort: st.orchestratorEffort,
+        instructions: (kind === "summary" ? this.compactionSystemPrompt : null) ?? this.systemPrompt(),
+        images,
+      })
+    }
+    this.writeMcpConfig()
+    const [bin, ...pre] = this.c.claudeBin.split(" ")
+    // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
+    return { cli: "claude", bin: bin!, args: [...pre, ...this.claudeArgs(kind, sessionId, resume)], env: serverClaudeEnv(null, this.settings.credentials.claudeEnv()), translate: null, after() {} }
+  }
+
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", images: string[] = []): Promise<RunResult> {
     return new Promise((resolve) => {
-      this.writeMcpConfig()
-      const args = this.claudeArgs(kind, sessionId, resume)
-      const [bin, ...pre] = this.c.claudeBin.split(" ")
-      // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
-      const env = serverClaudeEnv(null, this.settings.credentials.claudeEnv())
+      // Codex compacts on its own and has no /context: doCompact starts a fresh session from the summary instead.
+      if (this.cli() === "codex" && (kind === "compact" || kind === "context")) return resolve({ ok: true, error: "", text: "", raw: "", sessionId: null })
+      const launch = this.launch(kind, sessionId, resume, images)
+      const cliName = launch.cli === "codex" ? `codex (${this.c.codexBin})` : `claude (${this.c.claudeBin})`
 
       let child: ChildProcess
       try {
-        child = spawn(bin!, [...pre, ...args], { cwd: this.workdir, env, stdio: ["pipe", "pipe", "pipe"] })
+        child = spawn(launch.bin, launch.args, { cwd: this.workdir, env: launch.env, stdio: ["pipe", "pipe", "pipe"] })
       } catch (err) {
-        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
+        resolve({ ok: false, error: `Couldn't start ${launch.cli}: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
         return
       }
       this.child = child
@@ -718,14 +776,21 @@ export class Orchestrator {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
 
       const onLine = (line: string) => {
-        // stop() closed the database; the run's last lines have nowhere to go.
-        if (this.stopped) return
+        if (launch.translate) {
+          for (const m of launch.translate(line)) onMsg(m)
+          return
+        }
         let msg: any
         try {
           msg = JSON.parse(line)
         } catch {
           return
         }
+        onMsg(msg)
+      }
+      const onMsg = (msg: any) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         if (typeof msg.session_id === "string") seenSession = msg.session_id
         if (msg.type === "stream_event") {
           if (quiet) return
@@ -736,7 +801,12 @@ export class Orchestrator {
           return
         }
         if (msg.type === "system" && msg.subtype === "init") {
-          if (kind === "turn") this.store.setKv(STARTED_KEY, "1")
+          if (kind === "turn") {
+            // Codex names its own thread: that's the session the next turn resumes.
+            if (launch.cli === "codex" && seenSession) this.store.setKv(SESSION_KEY, seenSession)
+            this.store.setKv(STARTED_KEY, "1")
+            this.store.setKv(SESSION_CLI_KEY, launch.cli)
+          }
           return
         }
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
@@ -816,13 +886,14 @@ export class Orchestrator {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        launch.after()
         if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
           this.store.recordClaudeUsage({
             source: "orchestrator",
             runKind: kind,
-            sessionId,
-            model: resultModel ?? this.settings.get().orchestratorModel,
+            sessionId: seenSession ?? sessionId,
+            model: resultModel ?? this.model() ?? "codex",
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,
@@ -834,9 +905,9 @@ export class Orchestrator {
         // Lets the client speak a one-line summary of the reply (lib/speech.ts).
         if (!quiet) this.hub.broadcast({ type: "chat.turn", startedAt, replyId: reply?.id ?? null })
         const base = { text: said, raw, sessionId: seenSession }
-        if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
-        if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })
-        resolve({ ...base, ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`) })
+        if (err) return resolve({ ...base, ok: false, error: `Couldn't run ${cliName}: ${err.message}` })
+        if (code === 0 && !resultError && (sawResult || launch.cli === "claude")) return resolve({ ...base, ok: true, error: "" })
+        resolve({ ...base, ok: false, error: resultError ?? ((launch.cli === "codex" ? codexErrorText(stderr) : stderr.trim()) || `${launch.cli} exited with code ${code}${sawResult ? "" : " before answering"}`) })
       }
       child.on("error", (err) => finish(null, err))
       child.on("close", (code) => finish(code))

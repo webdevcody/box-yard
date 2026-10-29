@@ -6,6 +6,7 @@ import http from "node:http"
 import { config as baseConfig, type Config } from "../server/config.js"
 
 export const FAKE_CLAUDE = `${process.execPath} ${path.resolve("scripts/fake-claude.mjs")}`
+export const FAKE_CODEX = `${process.execPath} ${path.resolve("scripts/fake-codex.mjs")}`
 
 export function tmpDir(prefix = "box-yard-test-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
@@ -36,11 +37,14 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     redisToken: "",
     claudeOauthToken: "",
     anthropicApiKey: "",
+    codexAuthJson: "",
+    codexApiKey: "",
     githubToken: "",
     elevenlabsApiKey: "",
     openaiApiKey: "",
     ttsProvider: "",
     claudeBin: FAKE_CLAUDE,
+    codexBin: FAKE_CODEX,
     mock: true,
     maxBoxes: 2,
     slotsPerBox: 2,

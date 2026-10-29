@@ -9,6 +9,16 @@ import type { Effort } from "../shared/types.js"
 /** What either CLI prints when the session it was told to resume isn't there (Claude Code, then Codex). */
 export const MISSING_SESSION = /no conversation found|session.*not found|no rollout found/i
 
+/** Codex's stderr without its tracing lines ("2026-10-29T… ERROR codex_models_manager: …"): what it said went wrong. */
+export function codexErrorText(stderr: string, lines = 5): string {
+  return stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !/^\d{4}-\d\d-\d\dT[\d:.]+Z\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s/.test(l))
+    .slice(-lines)
+    .join("\n")
+}
+
 // ------------------------------------------------------------------ the ChatGPT login (auth.json)
 
 /** A Codex login file (`~/.codex/auth.json`), as Settings › Credentials keeps it. */
