@@ -321,7 +321,7 @@ function CoordinatorContext({ zen, state, queued, onCompact }: { zen: boolean; s
         aria-label={`${reading}: more`}
         title={reading}
         data-testid="context-menu-button"
-        className={cx(menu, warn && "text-amber-300 hover:text-amber-200")}
+        className={cx(menu, warn && "text-amber-300! hover:text-amber-200!")}
       >
         {waiting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MoreHorizontal className="h-3.5 w-3.5" />}
       </Button>
