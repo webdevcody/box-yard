@@ -7,6 +7,7 @@ import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { DEFAULT_AGENT_CLI, isAgentCli, type AgentCli } from "../shared/agentCli.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -171,6 +172,8 @@ export interface TaskRow {
   routing_reason: string | null
   /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
   runs_on?: string | null
+  /** The CLI its agent runs on, 'claude' or 'codex'; null on rows from before Codex: Claude Code. */
+  agent_cli?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
   placed_how?: string | null
@@ -330,6 +333,7 @@ interface ProjectRow {
   docker_image?: string | null
   docker_dockerfile?: string | null
   identity_id?: string | null
+  agent_cli?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -596,6 +600,8 @@ interface TaskCompactionRow {
 }
 
 const taskRunsOn = (row: { runs_on?: string | null }) => parseRunsOn(row.runs_on)
+/** The CLI a task's agent runs on: the one it was created with; older rows ran on Claude Code. */
+export const taskAgentCli = (row: { agent_cli?: string | null }): AgentCli => (isAgentCli(row.agent_cli) ? row.agent_cli : DEFAULT_AGENT_CLI)
 
 const oneLine = (text: string | null | undefined, max = 200) => {
   const t = (text ?? "").replace(/\s+/g, " ").trim()
@@ -782,6 +788,7 @@ export class Store {
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
+      agentCli: isAgentCli(row.agent_cli) ? row.agent_cli : null,
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
       wholeMachine: row.whole_machine === 1,
       tasksPerBox: row.tasks_per_box ?? null,
@@ -883,6 +890,8 @@ export class Store {
     gpuMachine?: Partial<ProjectGpuMachine>
     docker?: Partial<ProjectDocker>
     identityId?: string
+    /** The CLI its new tasks run on; null/omitted uses Settings › Box agents. */
+    agentCli?: AgentCli | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
   }): Project {
@@ -911,6 +920,7 @@ export class Store {
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
+    if (input.agentCli) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     return this.getProject(id)!
   }
 
@@ -959,6 +969,8 @@ export class Store {
       notesMaxTokens?: number | null
       /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
       identityId?: string
+      /** The CLI its new tasks run on; null clears it (Settings › Box agents applies). Its existing tasks keep theirs. */
+      agentCli?: AgentCli | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -987,6 +999,7 @@ export class Store {
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
+    if (patch.agentCli !== undefined) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(patch.agentCli, id)
     return this.getProject(id)!
   }
 
@@ -1207,6 +1220,7 @@ export class Store {
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
+      agentCli: taskAgentCli(row),
       model: row.model ?? null,
       effort: row.effort ?? null,
       claudeCostUsd: usage.costUsd,
@@ -1328,6 +1342,8 @@ export class Store {
     startedBy?: string | null
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
+    /** The CLI its agent runs on for good (TaskRow.agent_cli); omitted: Claude Code. */
+    agentCli?: AgentCli | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1356,6 +1372,7 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
+    if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     return this.getTask(id)!
   }
 

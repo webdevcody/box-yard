@@ -67,6 +67,8 @@ const sizeDefaults = SIZE_DEFAULTS[size]
 const mock = env.BOXYARD_MOCK === "1"
 const fakeClaude = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/fake-claude.mjs")
 const fakeClaudeSrc = path.resolve(process.cwd(), "scripts/fake-claude.mjs")
+const fakeCodex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/fake-codex.mjs")
+const fakeCodexSrc = path.resolve(process.cwd(), "scripts/fake-codex.mjs")
 
 export type ProviderName = "upstash" | "local"
 
@@ -144,6 +146,9 @@ export const config = {
 
   claudeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
+  /** Codex's ChatGPT login (the whole ~/.codex/auth.json, or it base64-encoded) and API key (docs/codex.md). Optional. */
+  codexAuthJson: env.CODEX_AUTH_JSON ?? "",
+  codexApiKey: env.CODEX_API_KEY ?? "",
   githubToken: env.GITHUB_TOKEN ?? "",
   /** RunPod GPU pods (Settings › RunPod GPU, docs/runpod.md). Optional. */
   runpodApiKey: env.RUNPOD_API_KEY ?? "",
@@ -162,6 +167,8 @@ export const config = {
   mockHeavy: mock && env.BOXYARD_MOCK_HEAVY === "1",
   /** Claude binary used by the orchestrator (and by local workers). */
   claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
+  /** Codex binary for agents set to run on Codex (docs/codex.md); mock mode uses a stand-in. */
+  codexBin: mock ? `${process.execPath} ${fs.existsSync(fakeCodex) ? fakeCodex : fakeCodexSrc}` : (env.CODEX_BIN ?? "codex"),
   /** What Box Yard calls its human in prompts and labels; empty means the Settings default ("Cody"). */
   ownerName: env.BOXYARD_OWNER_NAME?.trim() ?? "",
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",

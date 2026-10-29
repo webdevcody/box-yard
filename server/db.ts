@@ -829,6 +829,12 @@ export const MIGRATIONS: string[] = [
     VALUES ('idn_default', 'Default', 'slate', 1, CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
   ALTER TABLE projects ADD COLUMN identity_id TEXT NOT NULL DEFAULT 'idn_default';
   `,
+  // Which CLI an agent runs on (shared/agentCli.ts, docs/codex.md): a project's choice for its new tasks (null:
+  // Settings › Box agents), and the one each task started on (null on older rows: Claude Code).
+  `
+  ALTER TABLE projects ADD COLUMN agent_cli TEXT;
+  ALTER TABLE tasks ADD COLUMN agent_cli TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
