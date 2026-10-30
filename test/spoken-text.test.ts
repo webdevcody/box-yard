@@ -124,6 +124,11 @@ describe("spoken announcements", () => {
     expect(eventsLine([note({ status: "failed", title: "`task_a244bbb653b0`" })])).toBe("A task failed.")
   })
 
+  it("a box notification reads its own title", () => {
+    expect(eventsLine([note({ taskId: null, title: "Resized sunny-otter: small → medium" })])).toBe("Resized sunny-otter: small to medium.")
+    expect(eventsLine([note({ taskId: null, status: "failed", title: "Snapshot for box-yard failed" })])).toBe("Snapshot for box-yard failed.")
+  })
+
   it("a Coordinator reply is summarised without ids, URLs or SHAs", () => {
     const line = spokenSummary(
       "[Voice: speak task titles](/tasks/task_a244bbb653b0) (task_a244bbb653b0) finished: PR #217 (https://github.com/webdevcody/box-yard/pull/217), head a1b2c3d.",

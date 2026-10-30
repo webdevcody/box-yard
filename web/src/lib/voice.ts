@@ -257,7 +257,13 @@ export function eventsLine(items: readonly AppNotification[]): string | null {
   if (items.length === 1) {
     const n = items[0]!
     const ev = voiceEvent(n)
-    return ev ? capWords(SINGLE[ev](spokenTitle(n.title) ?? "", n)) : null
+    if (!ev) return null
+    // A box notification ("Resized sunny-otter: small → medium") is its own sentence, not a task's.
+    if (!n.taskId) {
+      const what = spokenText(n.title)
+      return what ? capWords(`${what}.`) : null
+    }
+    return capWords(SINGLE[ev](spokenTitle(n.title) ?? "", n))
   }
   const counts = ORDER.map((ev) => [ev, items.filter((n) => voiceEvent(n) === ev).length] as const).filter(([, k]) => k > 0)
   const line = counts.map(([ev, k]) => COUNT[ev](k)).join(", ")

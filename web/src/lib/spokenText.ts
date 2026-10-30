@@ -53,6 +53,7 @@ export function spokenText(md: string): string {
   t = t.replace(/\b(PRs?|pull requests?|issues?)\s*(#\d+(?:(?:\s*,\s*|\s+(?:and|or|&)\s+)#\d+)*)/gi, (_m, word: string, refs: string) => `${word} ${refs.replace(/#/g, "")}`)
   t = t.replace(/(^|[\s(])[\w.-]+\/[\w.-]+#(\d+)\b/g, "$1number $2")
   t = t.replace(/(^|[\s(])#(\d+)\b/g, "$1number $2")
+  t = t.replace(/\s*(?:→|->)\s*/g, " to ") // small → medium
   t = t.replace(/\b([A-Za-z]+(?:_[A-Za-z]+)+)\b/g, (m) => m.replace(/_/g, " ")) // snake_case → words
   t = t.replace(/\(\s*[,.;:'"]?\s*\)/g, " ") // brackets left empty by removals
   t = t.replace(/(["'])\s*\1/g, " ") // quotes left empty by removals
