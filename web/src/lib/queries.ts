@@ -1011,6 +1011,39 @@ export function useSendTaskMessage(taskId: string) {
   })
 }
 
+/**
+ * Send a task-chat message to the task's project's Captain instead of its agent (TaskManager.forwardToCaptain). Shows
+ * at once as a pending "→ Captain" line; the server's task.message replaces it (stream.ts matches tmp- by content).
+ */
+export function useForwardToCaptain(taskId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { content: string; attachments?: Attachment[] }) =>
+      api<TaskMessage>(`/api/tasks/${taskId}/captain`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
+    onMutate: async ({ content, attachments }) => {
+      const undo = snapshot<TaskMessage[]>(qc, keys.taskMessages(taskId))
+      const now = Date.now()
+      const meta = { kind: "to_captain", pending: true, ...(attachments?.length ? { attachments } : {}) }
+      const line: TaskMessage = { id: `tmp-${now}`, taskId, role: "event", content: content.trim(), meta, createdAt: now }
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => (list ? [...list, line] : list))
+      return { undo, tmp: line.id }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      playSendSound("failed")
+      fail("Couldn't send it to the Captain")(err)
+    },
+    onSuccess: (msg, _v, ctx) => {
+      playSendSound()
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => {
+        if (!list) return list
+        const rest = list.filter((m) => m.id !== ctx?.tmp)
+        return rest.some((m) => m.id === msg.id) ? rest : [...rest, msg]
+      })
+    },
+  })
+}
+
 function useTaskAction(action: "stop" | "close" | "retry", optimistic: (t: Task) => Partial<Task>, label: string) {
   const qc = useQueryClient()
   return useMutation({
@@ -1048,16 +1081,28 @@ export const useStopTask = () =>
 export const useCloseTask = () => useTaskAction("close", () => ({ status: "done" as TaskStatus, question: null }), "close the task")
 export const useRetryTask = () => useTaskAction("retry", () => ({ status: "queued" as TaskStatus, error: null }), "retry the task")
 
-/** Inbox card "Mark done": the same close as the task view's, sent after a short undo window. */
-export function useMarkDoneFromInbox() {
+/**
+ * "Mark done" for one task or several (the Cards view's selection, "Mark all idle as done"): the same close as the task
+ * view's and close_task's, each sent after a short undo window. One toast, whose Undo takes them all back.
+ */
+export function useMarkTasksDone() {
   const { mutateAsync } = useCloseTask()
   return useCallback(
-    (task: Task) => {
-      if (!deferClose(task.id, () => mutateAsync(task.id))) return
-      toast.info("Marked done", task.title, { action: { label: "Undo", onClick: () => undoClose(task.id) }, duration: UNDO_MS })
+    (tasks: readonly Pick<Task, "id" | "title">[]) => {
+      const marked = tasks.filter((t) => deferClose(t.id, () => mutateAsync(t.id)))
+      if (!marked.length) return
+      const undo = () => marked.forEach((t) => undoClose(t.id))
+      const body = marked.length === 1 ? marked[0]!.title : "Messaging one picks it back up."
+      toast.info(marked.length === 1 ? "Marked done" : `Marked ${marked.length} tasks done`, body, { action: { label: "Undo", onClick: undo }, duration: UNDO_MS })
     },
     [mutateAsync],
   )
+}
+
+/** Inbox card "Mark done": the same close as the task view's, sent after a short undo window. */
+export function useMarkDoneFromInbox() {
+  const mark = useMarkTasksDone()
+  return useCallback((task: Task) => mark([task]), [mark])
 }
 
 export function useDeleteTask() {

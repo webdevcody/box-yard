@@ -11,8 +11,11 @@ import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorVi
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
+import { undoClose } from "../web/src/lib/inbox.js"
+import { stopSelecting } from "../web/src/lib/cardSelection.js"
+import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { COORDINATOR_CHAT, applyThreadEvent, closeThread, forgetThread, openThread, openThreadId, threadKeys } from "../web/src/lib/threads.js"
-import type { ChatMessage, Project, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
+import type { ChatMessage, Project, SettingsInfo, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -191,7 +194,8 @@ describe("Coordinator cards", () => {
     expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("1 new")
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
     const pill = host.querySelector('[data-testid="new-cards-pill"]')!
-    expect(pill.textContent).toContain("1 new in")
+    expect(pill.textContent).toContain("1 new")
+    expect(pill.querySelector('[data-testid="new-cards-target"]')!.textContent).toBe("Coordinator cards")
     // The card got news without moving.
     expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
 
@@ -692,5 +696,240 @@ describe("A card in the side panel", () => {
     const box = panel()!.querySelector("textarea")!
     expect(document.activeElement).toBe(box)
     expect(box.placeholder).toBe("Reply (reopens the task)…")
+  })
+})
+
+describe("Mark done in the cards", () => {
+  // Resting since a turn 5 hours ago: past the 3 hour "Idle after".
+  const OLD = task("task_old00001", MAP.id, "Map 3 PR #401: East Town", "idle")
+  const oldNotice = { ...notice(OLD, "💬 **Map 3 PR #401: East Town** says: shot it"), createdAt: Date.now() - 5 * 3600_000 }
+  let posts: string[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push(url)
+      return new Promise(() => {})
+    })
+    qc.setQueryData(keys.tasks, [...TASKS, OLD])
+    qc.setQueryData(keys.chat, [oldNotice, ...CHAT])
+  })
+  afterEach(() => {
+    // The undo window and the selection outlive a test: take them back.
+    act(() => {
+      for (const t of [...TASKS, OLD]) undoClose(t.id)
+      stopSelecting()
+      for (const t of currentToasts()) dismiss(t.id)
+    })
+  })
+
+  const settings = (s: Partial<SettingsInfo["settings"]>) => qc.setQueryData(keys.agentSettings, { settings: s } as unknown as SettingsInfo)
+  const live = () => cards().map((c) => c.dataset.card)
+  const fold = (id: "done" | "idle") => host.querySelector(`[data-testid="cards-${id}"]`) as HTMLElement | null
+  const menuItem = (label: string) => [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === label) as HTMLElement | undefined
+  const toastTitles = () => currentToasts().map((t) => t.title)
+  const undo = () => act(() => currentToasts().at(-1)!.action!.onClick())
+
+  it("folds a resting card with no news for the Idle after hours into \"N idle\", next to \"N done today\"", () => {
+    render()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(fold("idle")!.textContent).toContain("1 idle")
+    expect(fold("idle")!.title).toContain("3h")
+    click(fold("idle")!)
+    expect(card(OLD.id).textContent).toContain("Idle")
+  })
+
+  it("leaves it up with Idle after at 0, and folds at the hours set", async () => {
+    act(() => settings({ cardsIdleHours: 0 }))
+    render()
+    expect(fold("idle")).toBeNull()
+    expect(live()).toContain(OLD.id)
+    await act(async () => {
+      settings({ cardsIdleHours: 6 })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(live()).toContain(OLD.id)
+    await act(async () => {
+      settings({ cardsIdleHours: 4 })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(live()).not.toContain(OLD.id)
+  })
+
+  it("marks a card done from its ⋯, which folds it into done, with an Undo toast", () => {
+    render()
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Mark done", "Select", "Show in timeline"])
+    click(menuItem("Mark done")!)
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(fold("done")!.textContent).toContain("2 done today")
+    expect(toastTitles()).toEqual(["Marked done"])
+    // Sent once the undo window is over, not before.
+    expect(posts).toEqual([])
+    undo()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+  })
+
+  it("marks a task waiting on Cody done from the open card's footer; a batch's ⋯ has no Mark done while its tasks run", () => {
+    render()
+    click(head(LOGIN.id))
+    click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
+    expect(toastTitles()).toEqual(["Marked done"])
+    // Open, it stays where it is (it folds once closed), and says it's done.
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
+    click(card(`batch:${B}`).querySelector('[data-testid="chat-card-more"]')!)
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Show in timeline"])
+  })
+
+  it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-clear-idle"]')!)
+    const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
+    expect(pop.textContent).toContain("Mark 2 tasks done?")
+    expect([...pop.querySelectorAll("li")].map((li) => li.textContent)).toEqual([`${OLD.title}Idle`, `${CARDS.title}PR ready`])
+    const boxes = [...pop.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[]
+    click(boxes[0]!)
+    const confirm = host.querySelector('[data-testid="cards-clear-idle-confirm"]') as HTMLElement
+    expect(confirm.textContent).toContain("Mark 1 done")
+    click(confirm)
+    expect(host.querySelector('[data-testid="cards-clear-idle-popover"]')).toBeNull()
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(fold("idle")!.textContent).toContain("1 idle")
+    expect(toastTitles()).toEqual(["Marked done"])
+  })
+
+  it("keeps to the project bar's filter", () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="cards-clear-idle"]')!)
+    const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
+    expect(pop.textContent).toContain("Mark 1 task done?")
+    expect(pop.textContent).toContain(OLD.title)
+  })
+
+  it("selects cards and marks the picked ones done; the ones it can't close can't be picked; Esc cancels", () => {
+    const head = (key: string) => card(key).querySelector('[role="button"], [role="checkbox"]') as HTMLElement
+    render()
+    click(host.querySelector('[data-testid="cards-select"]')!)
+    const count = () => host.querySelector('[data-testid="cards-select-count"]')!.textContent
+    expect(count()).toBe("Pick cards to mark done")
+    expect(head(LOGIN.id).getAttribute("role")).toBe("checkbox")
+    expect(head(LOGIN.id).getAttribute("aria-disabled")).toBe("true")
+    click(head(LOGIN.id))
+    expect(head(LOGIN.id).getAttribute("aria-checked")).toBe("false")
+    click(head(CARDS.id))
+    expect(head(CARDS.id).getAttribute("aria-checked")).toBe("true")
+    expect(card(CARDS.id).dataset.open).toBeUndefined()
+    expect(count()).toBe("1 task selected")
+    const bar = host.querySelector('[data-testid="cards-select-bar"]')!
+    click(button(bar, "Select all"))
+    expect(count()).toBe("2 tasks selected")
+    act(() => void document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
+    expect(head(CARDS.id).getAttribute("role")).toBe("button")
+
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
+    click(menuItem("Select")!)
+    expect(count()).toBe("1 task selected")
+    click(host.querySelector('[data-testid="cards-select-done"]')!)
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(toastTitles()).toEqual(["Marked done"])
+    undo()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+  })
+})
+
+describe("Finding your way in the cards", () => {
+  /** Where each card sits on screen: the rest are laid out nowhere (happy-dom). */
+  const place = (rects: Record<string, { top: number; bottom: number }>) =>
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const r = rects[this.id.replace(/^card-/, "")] ?? { top: 0, bottom: 0 }
+      return { ...r, left: 0, right: 100, width: 100, height: r.bottom - r.top, x: 0, y: r.top, toJSON() {} } as DOMRect
+    })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+  const pill = () => host.querySelector('[data-testid="new-cards-pill"]') as HTMLElement | null
+  const target = () => pill()!.querySelector('[data-testid="new-cards-target"]')!.textContent
+
+  it("the pill names the card it goes to and points the way, then goes on to the next, round to the first", async () => {
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+    place({ [LOGIN.id]: { top: -400, bottom: -300 }, [`batch:${B}`]: { top: 2000, bottom: 2100 } })
+    render()
+    await setChat([...CHAT, notice(LOGIN, "💬 **Fix login** says: the old page"), notice(HOLLOW, "💬 **Map 3 PR #406: The Hollow cave** says: lit"), notice(DAM, "💬 **Map 3 PR #409: Dam powerhouse** says: started")])
+    expect(pill()!.textContent).toContain("3 new")
+    expect(target()).toBe("Fix login")
+    expect(pill()!.dataset.direction).toBe("up")
+    expect(pill()!.querySelector('[data-testid="new-cards-more"]')!.textContent).toBe("+1")
+
+    click(pill()!)
+    await act(async () => await new Promise((r) => requestAnimationFrame(() => r(null))))
+    // It's there: ringed, and focused for the keyboard and screen readers.
+    expect(document.activeElement).toBe(card(LOGIN.id))
+    expect(card(LOGIN.id).classList.contains("card-flash")).toBe(true)
+    expect(target()).toBe("Map 3 PR")
+    expect(pill()!.dataset.direction).toBe("down")
+
+    click(pill()!)
+    expect(target()).toBe("Fix login")
+  })
+
+  it("says a card on screen is here", async () => {
+    place({ [CARDS.id]: { top: 100, bottom: 200 } })
+    render()
+    await setChat([...CHAT, notice(CARDS, "💬 **Coordinator cards** says: screenshots are up")])
+    expect(pill()!.dataset.direction).toBe("here")
+    expect(pill()!.textContent).toContain("on screen")
+  })
+
+  it("pulses the stripe of a card at work, and a batch's running and queued tasks in its strip", () => {
+    render()
+    const batch = card(`batch:${B}`)
+    expect(batch.classList.contains("stripe-pulse")).toBe(true)
+    expect(card(CARDS.id).classList.contains("stripe-pulse")).toBe(false)
+    expect(card(LOGIN.id).classList.contains("stripe-pulse")).toBe(false)
+    // Done, working, queued.
+    expect([...batch.querySelectorAll("i[title]")].map((i) => i.classList.contains("work-pulse"))).toEqual([false, true, true])
+  })
+
+  it("keeps the Coordinator card's header in reach and folds its history back with Show less", () => {
+    render()
+    const head = host.querySelector('[data-testid="coordinator-card-head"]')!
+    expect(head.className).toContain("sticky")
+    expect(coordinator().textContent).toContain("1 earlier")
+    expect(host.querySelector('[data-testid="coordinator-fold"]')).toBeNull()
+    click(coordinator().querySelector('[data-testid="card-earlier"]')!)
+    expect(coordinator().textContent).toContain("Fix login and build the cards")
+    click(host.querySelector('[data-testid="coordinator-fold"]')!)
+    expect(coordinator().textContent).not.toContain("Fix login and build the cards")
+    expect(coordinator().textContent).toContain("1 earlier")
+    expect(host.querySelector('[data-testid="coordinator-fold"]')).toBeNull()
+  })
+
+  it("Tasks only hides the Coordinator card, remembers it, and sending to the Coordinator shows it again", async () => {
+    render()
+    const toggle = () => host.querySelector('[data-testid="tasks-only"]') as HTMLElement
+    click(toggle())
+    expect(toggle().getAttribute("aria-pressed")).toBe("true")
+    expect(coordinator()).toBeNull()
+    expect(localStorage.getItem("boxyard:cards-tasks-only")).toBe("1")
+    click(host.querySelector('[data-testid="coordinator-hidden"]')!)
+    expect(coordinator()).not.toBeNull()
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+
+    click(toggle())
+    const textarea = host.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, "What's next?")
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void textarea.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(coordinator()).not.toBeNull()
+    // Only in the Cards view.
+    click(viewButton("Timeline"))
+    expect(toggle()).toBeNull()
   })
 })

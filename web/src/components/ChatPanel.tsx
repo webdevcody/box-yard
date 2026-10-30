@@ -26,7 +26,7 @@ import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
 import { chatProvenance, filterByProject, filterByTasks, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { CardPanel, CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
-import { setCoordinatorView, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
+import { setCoordinatorView, setTasksOnly, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
 import { COORDINATOR_CHAT, useOpenCard } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -101,6 +101,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       if (!content && !attachments.length) return
       const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+      // Its answer lands in the Coordinator card: "Tasks only" shows it again.
+      setTasksOnly(false)
       scroller.current?.scrollToEnd()
       markTryFirstDone()
       return sending
@@ -289,14 +291,15 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             <SelectionToTask source={selectionSource} onPrompt={submit}>
               <StickyScroll
                 handle={scroller}
-                count={cards ? cards.live.length + cards.done.length + cards.coordinator.length : list.length}
+                count={cards ? cards.live.length + cards.idle.length + cards.done.length + cards.coordinator.length : list.length}
                 resetKey={view}
                 restoreKey={cardsOn ? "chat:cards" : "chat"}
                 hidden={cards ? 0 : tail.hidden}
                 onLoadEarlier={cards ? undefined : tail.loadEarlier}
                 onTrim={cards ? undefined : tail.trim}
                 overlay={cards && <NewCardsPill cards={cards.live} />}
-                className={zen ? "zen-column py-6" : "px-4 py-4"}
+                // --chat-pad: its top padding, which a card's sticky header pulls up over (CoordinatorCards).
+                className={zen ? "zen-column py-6 [--chat-pad:1.5rem]" : "px-4 py-4 [--chat-pad:1rem]"}
                 contentClassName="space-y-3"
               >
                 {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
@@ -324,7 +327,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
+                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.idle.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
                 {onlyTasks && <TimelineCardBanner card={only!} empty={!settled.length} />}
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>

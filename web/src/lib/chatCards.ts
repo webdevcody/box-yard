@@ -2,8 +2,10 @@
 // the cards' order, a batch's one card, and the Coordinator card for the rest. Pure, so it is unit tested.
 //
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
-// - A reply the Coordinator wrote on its own after reading updates (the "from:" line, lib/chatUpdates.ts) goes to the
-//   cards of the tasks those updates are about. A reply to Cody stays with his message, in the Coordinator card.
+// - A reply the Coordinator wrote on its own (after reading updates, the "from:" line in lib/chatUpdates.ts) goes to the
+//   cards of the tasks it names: a link, an id or a bold title. One turn often reads several projects' updates, so
+//   what it read doesn't say which card the reply is about; a reply naming no task stays in the Coordinator card.
+//   A reply to Cody stays with his message, in the Coordinator card.
 // - What Cody sends to a task from its card stays in it (a sent notice). Cody's questions to the Coordinator from a card
 //   aren't in the chat at all: they're the card's side thread (CardThread.tsx).
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
@@ -118,7 +120,6 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   /** When the chat first named each task (and in what order, for names in the same millisecond), and the message that started it. */
   const named = new Map<string, { at: number; seq: number; origin: ChatMessage | null }>()
   const started = new Set<string>()
-  const items = new Map<string, UpdateItem>()
   /** The newest user message since the last reply: a reply after one answers it. */
   let asked: ChatMessage | null = null
 
@@ -132,22 +133,9 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     if (known.length) placed.push({ ...entry, tasks: known })
   }
   const update = (item: UpdateItem) => {
-    items.set(item.id, item)
     const ms = itemMessages(item)
     for (const m of ms) name(m, null)
     place({ type: "update", id: item.id, item, at: Math.max(...ms.map((m) => m.createdAt)) }, itemTasks(item, index))
-  }
-  /** The tasks of the updates a reply read. */
-  const readTasks = (sources: readonly UpdateSource[] | null) => {
-    const out = new Set<string>()
-    for (const s of sources ?? []) {
-      if (s.taskId) out.add(s.taskId)
-      else {
-        const item = items.get(s.id)
-        if (item) for (const t of itemTasks(item, index)) out.add(t)
-      }
-    }
-    return [...out]
   }
 
   for (const r of rows) {
@@ -168,7 +156,7 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
         continue
       }
       // A reply about tasks that are all gone stays in the Coordinator card rather than vanishing.
-      const about = m.role === "assistant" && !asked ? readTasks(r.sources).filter((t) => tasks.has(t)) : NO_TASKS
+      const about = m.role === "assistant" && !asked ? messageRefs(m, index).tasks.filter((t) => tasks.has(t)) : NO_TASKS
       if (about.length) placed.push({ ...entry, tasks: about })
       else coordinator.push({ ...entry, tasks: NO_TASKS })
       if (m.role === "assistant" || m.role === "error") asked = null
@@ -259,14 +247,28 @@ export function stableCards(prev: CardsModel | null, next: CardsModel): CardsMod
   }
 }
 
-/** Statuses that keep a card up however long the chat has been quiet about it: work going on, or waiting on Cody. */
-const OPEN: ReadonlySet<BadgeStatus> = new Set<TaskStatus>(["queued", "starting", "working", "needs_input", "waiting", "pr_ready"])
+/** Statuses that keep a card in the list however long it's been quiet: work going on, or waiting on Cody or other agents. */
+const ACTIVE: ReadonlySet<BadgeStatus> = new Set<TaskStatus>(["queued", "starting", "working", "needs_input", "waiting"])
+/** ...and a PR open for review keeps it up past CARD_WINDOW_MS, though it goes idle like any resting card. */
+const OPEN: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>([...ACTIVE, "pr_ready"])
 const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged"])
+
+/** Statuses Mark done may close in bulk: the turn is over and nothing waits on Cody (not running, queued or asking). */
+export const CLEARABLE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["idle", "pr_ready", "failed"])
+
+export interface CardsArrangement {
+  live: ChatCard[]
+  /** Resting cards quiet for `idleMs` or more: "N idle". */
+  idle: ChatCard[]
+  /** Finished in the last CARD_WINDOW_MS: "N done today". */
+  done: ChatCard[]
+}
 
 /**
  * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
- * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top. `project` keeps one project's.
- * `stay` keeps a card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
+ * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top, and with `idleMs` set, resting
+ * ones (nothing running, queued or waiting) quiet that long into "N idle". `project` keeps one project's. `stay` keeps a
+ * card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
  */
 export function arrangeCards(
   cards: readonly ChatCard[],
@@ -275,19 +277,22 @@ export function arrangeCards(
   now: number,
   project: string | null,
   stay: (card: ChatCard) => boolean = () => false,
-): { live: ChatCard[]; done: ChatCard[] } {
+  idleMs = 0,
+): CardsArrangement {
   const live: ChatCard[] = []
+  const idle: ChatCard[] = []
   const done: ChatCard[] = []
   for (const c of cards) {
     if (project && projectOf(c.taskIds[0]!) !== project) continue
     const statuses = c.taskIds.map(statusOf).filter((s): s is BadgeStatus => s !== undefined)
     if (!statuses.length) continue
-    if (statuses.some((s) => OPEN.has(s)) || stay(c)) live.push(c)
-    else if (c.last < now - CARD_WINDOW_MS) continue
+    if (stay(c) || statuses.some((s) => ACTIVE.has(s))) live.push(c)
+    else if (c.last < now - CARD_WINDOW_MS && !statuses.some((s) => OPEN.has(s))) continue
     else if (statuses.every((s) => FINISHED.has(s))) done.push(c)
+    else if (idleMs > 0 && c.last < now - idleMs) idle.push(c)
     else live.push(c)
   }
-  return { live, done }
+  return { live, idle, done }
 }
 
 /** The entries that came in after `since`: a card's "N new". */

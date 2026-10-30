@@ -138,7 +138,8 @@ describe("PR states are checked before they're reported", () => {
     const one = await captain<{ prState: string; prCheckedAt: string }>("get_task", { task: done })
     expect(one).toMatchObject({ prState: "merged", prCheckedAt: expect.any(String) })
     const list = await captain<{ id: string; prState: string; status: string }[]>("list_tasks", {})
-    expect(list.find((t) => t.id === idle)).toMatchObject({ prState: "merged", status: "idle" })
+    // Resting with its PR merged: Settings › Done when its PR merges (on by default) moves it to done.
+    expect(list.find((t) => t.id === idle)).toMatchObject({ prState: "merged", status: "done" })
     expect(s.gh.requests).toBe(2)
   })
 

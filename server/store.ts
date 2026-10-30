@@ -700,6 +700,8 @@ const suggestionFromRow = (r: SuggestionRow): NoteSuggestion => ({
 
 /** Queued inputs in send order. */
 const INPUT_ORDER = "ORDER BY created_at ASC, rowid ASC"
+/** A Coordinator chat notice that wakes it: all but a Captain's FYI reply (server/captainWake.ts). */
+const WAKES = "json_extract(meta_json, '$.fyi') IS NOT 1"
 /** How long a cancelled queued input is kept, so Undo can bring it back. */
 export const CANCELLED_INPUT_KEEP_MS = 10 * 60_000
 
@@ -2238,25 +2240,36 @@ export class Store {
 
   /** When the oldest notice the orchestrator hasn't been told about was written, or null when there is none. */
   oldestUnseenNoticeAt(): number | null {
-    const r = this.db.prepare("SELECT MIN(created_at) AS at FROM chat_messages WHERE seen_by_orchestrator = 0").get() as { at: number | null }
+    const r = this.db.prepare(`SELECT MIN(created_at) AS at FROM chat_messages WHERE seen_by_orchestrator = 0 AND ${WAKES}`).get() as { at: number | null }
     return r.at
   }
 
-  /** Notices the orchestrator has not been told about yet; marks them seen. */
-  takeUnseenNotices(): string[] {
+  /** Notices the orchestrator has not been told about yet; marks them seen. FYI Captain replies end with `fyiNote`. */
+  takeUnseenNotices(fyiNote = ""): string[] {
     return this.db.transaction(() => {
       const rows = this.db
-        .prepare("SELECT content FROM chat_messages WHERE seen_by_orchestrator = 0 ORDER BY created_at ASC")
-        .all() as { content: string }[]
+        .prepare(`SELECT content, NOT (${WAKES}) AS fyi FROM chat_messages WHERE seen_by_orchestrator = 0 ORDER BY created_at ASC`)
+        .all() as { content: string; fyi: number }[]
       this.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE seen_by_orchestrator = 0").run()
-      return rows.map((r) => r.content)
+      return rows.map((r) => (r.fyi && fyiNote ? `${r.content} ${fyiNote}` : r.content))
     })()
   }
 
-  /** Task ids of notices the orchestrator hasn't seen (null for notices not about a task). */
+  /** The projects whose Captains the Coordinator messaged in one turn (captain message meta.coordinatorTurn), around `at`. */
+  coordinatorTurnProjects(turn: string, at: number): string[] {
+    const day = 24 * 60 * 60_000
+    const rows = this.db
+      .prepare(
+        "SELECT DISTINCT project_id FROM captain_messages WHERE role = 'user' AND created_at BETWEEN ? AND ? AND json_extract(meta_json, '$.coordinatorTurn') = ?",
+      )
+      .all(at - day, at + day, turn) as { project_id: string }[]
+    return rows.map((r) => r.project_id)
+  }
+
+  /** Task ids of notices the orchestrator hasn't seen and should wake for (null for notices not about a task). */
   unseenNoticeTasks(): (string | null)[] {
     const rows = this.db
-      .prepare("SELECT json_extract(meta_json, '$.taskId') AS task_id FROM chat_messages WHERE seen_by_orchestrator = 0")
+      .prepare(`SELECT json_extract(meta_json, '$.taskId') AS task_id FROM chat_messages WHERE seen_by_orchestrator = 0 AND ${WAKES}`)
       .all() as { task_id: string | null }[]
     return rows.map((r) => r.task_id)
   }

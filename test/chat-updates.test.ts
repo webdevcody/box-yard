@@ -113,6 +113,23 @@ describe("which updates a reply covers", () => {
     const rows = coordinatorRows([captain("c", "x"), msg("e", "error", "The orchestrator hit an error"), user("u"), reply("r")])
     expect(shape(rows).at(-1)).toBe("m:r")
   })
+
+  describe("turns stamped with when they started (meta.turn)", () => {
+    const at = (m: ChatMessage, turn: number) => ({ ...m, meta: { ...m.meta, turn } })
+
+    it("a silent turn's updates aren't credited to the next turn's reply, and that reply covers its own", () => {
+      // Turn 1 handles a hook with a tool call and says "(no update)" (never stored). Turn 2 reads the Captain's report.
+      const rows = coordinatorRows([hook("h"), at(tool("t1"), 1), captain("c", "Merged"), at(tool("t2"), 2), at(reply("r"), 2)])
+      expect(shape(rows).at(-1)).toBe("m:r<-c")
+      // Unstamped (rows from before the stamp), the reply still gets the silent turn's updates.
+      expect(shape(coordinatorRows([hook("h"), tool("t1"), captain("c", "Merged"), tool("t2"), reply("r")])).at(-1)).toBe("m:r<-h")
+    })
+
+    it("a turn that replies, then calls tools and replies again, reads once: what came in mid-turn waits", () => {
+      const rows = coordinatorRows([captain("c1", "x"), at(reply("r1"), 1), captain("c2", "y"), at(tool("t"), 1), at(reply("r2"), 1), at(reply("r3"), 2)])
+      expect(shape(rows).filter((s) => s.startsWith("m:"))).toEqual(["m:r1<-c1", "m:t", "m:r2", "m:r3<-c2"])
+    })
+  })
 })
 
 describe("chip text", () => {

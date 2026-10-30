@@ -554,6 +554,9 @@ export function createBoxYard(
   // An agent's message_captain goes to its own project's Captain; the Captain's turn tells a still-waiting agent it's done.
   tasks.onCaptainMessage = (projectId, input) => captains.fromAgent(projectId, input)
   captains.onAgentMessagesHandled = (_projectId, messages, reply) => tasks.captainHandledAgentMessages(messages, reply)
+  // Cody's message from a task's chat goes to that task's own project's Captain, and its reply back to the task's chat.
+  tasks.onForwardToCaptain = (projectId, content, attachments, viaTask) => captains.send(projectId, content, { attachments, source: "cody", meta: { viaTask } })
+  captains.onForwardsHandled = (projectId, messages, reply) => tasks.captainAnsweredForwards(projectId, messages, reply)
   captains.claudeLogin = (projectId) => identities.ownClaude(projectId)
   // Coordinator sees: status only (docs/identities.md): its summaries, recaps and hook messages leave those projects' content out,
   // and their Captains are told to answer it with state, not content.
@@ -594,15 +597,19 @@ export function createBoxYard(
     const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
     if (ids.length) retro.settle(projectId, ids, ok)
   }
-  // A Captain's automatic report, or its reply to a send_to_captain: a notice that wakes the Coordinator, like a task's.
+  // A Captain's automatic report, or its reply to a send_to_captain: a notice on the Coordinator chat. It wakes the
+  // Coordinator like a task's, unless it's only for Cody's information (captainWake.ts): then the Coordinator reads it
+  // with its next turn's updates.
+  captains.coordinatorTurn = () => orchestrator.turnKey
   captains.onReport = (projectId, content, report) => {
     const project = store.getProject(projectId)
     const who = `Captain${project ? ` for ${project.name}` : ""}`
+    const fyi = report.fyi ? { fyi: true } : {}
     const msg = report.replyTo
-      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo })
-      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true })
+      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo, ...fyi })
+      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true, ...fyi })
     hub.broadcast({ type: "chat.message", message: msg })
-    orchestrator.nudge()
+    if (!report.fyi) orchestrator.nudge()
   }
   store.onNotification = (notification) => hub.broadcast({ type: "notification", notification })
   const auth = new Auth(c.password, store)
@@ -637,6 +644,8 @@ export function createBoxYard(
     notes.checkAllBudgets()
     // Turning the notes retro on picks up what finished while it was off.
     retro.catchUp()
+    // Turning auto-done on moves the resting tasks whose PR merged while it was off.
+    tasks.doneMergedResting()
     return info
   }
   const saveRunpodSettings = (patch: unknown) => {
@@ -1088,6 +1097,13 @@ export function createBoxYard(
     const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
     if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
     res.json(task)
+  })
+  // Task management from the task's chat, for its project's Captain instead of the busy agent: the Captain gets the
+  // task's queue with it, and the reply shows in the task's chat (TaskManager.forwardToCaptain).
+  api.post("/tasks/:id/captain", (req, res) => {
+    const body = parse(schemas.message, req.body)
+    if (!store.getTaskRow(req.params.id!)) return void res.status(404).json({ error: "Task not found" })
+    res.status(201).json(tasks.forwardToCaptain(req.params.id!, body.content, withAttachments(body.content, body.attachments)))
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
   api.get("/tasks/:id/queue", (req, res) => {
@@ -1563,6 +1579,7 @@ export function createBoxYard(
     applyPoolChange()
     notes.checkAllBudgets()
     retro.catchUp()
+    tasks.doneMergedResting()
     res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {

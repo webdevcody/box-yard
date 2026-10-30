@@ -36,13 +36,13 @@ import { MAX_NOTE_CHARS } from "./notes.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { cloudSpend, localDay, raiseToday, startOfLocalDay, usd } from "./cloudLimit.js"
 import { userMessageLabel } from "../shared/sender.js"
-import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS } from "../shared/captain.js"
+import { AGENT_CAPTAIN_LIMIT, AGENT_CAPTAIN_WAIT_MAX_SECONDS, AGENT_CAPTAIN_WINDOW_MS, forwardedFromTask, type ForwardedFromTask } from "../shared/captain.js"
 import type { AgentCaptainMessage } from "./captains.js"
 import { formatTokens } from "./usage.js"
 import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
-import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { AUTO_DONE_FROM, PrTracker, prNumber, restingStatus, type PrChange } from "./prs.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
@@ -649,6 +649,8 @@ export class TaskManager {
   onNotice: ((content: string, meta: Record<string, unknown> | null, opts: NoticeOptions) => boolean | void) | null = null
   /** Hands an agent's message_captain to its project's Captain (CaptainManager.fromAgent); null when there are no Captains. */
   onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
+  /** Cody's message from a task's chat to its project's Captain (app.ts: CaptainManager.send, source "cody"). */
+  onForwardToCaptain: ((projectId: string, content: string, attachments: StoredUpload[], viaTask: ForwardedFromTask) => CaptainMessage) | null = null
   /**
    * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
    * `key` says whether the task's turns would have a key for `cli` (turnCredentials, codexCredentials); undefined: the global one.
@@ -705,6 +707,7 @@ export class TaskManager {
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
+      autoDone: () => this.settings.get().autoDoneOnMerge,
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
@@ -761,6 +764,7 @@ export class TaskManager {
     }
     this.timers.push(setInterval(() => void this.poll(), this.c.pollMs))
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
+    this.doneMergedResting()
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
@@ -1022,6 +1026,45 @@ export class TaskManager {
     this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     return msg
+  }
+
+  /**
+   * Cody's message from a task's chat for its project's Captain instead of the task's agent: task management
+   * (split, reprioritise, move, "what's queued") that a busy agent would only read much later and couldn't act on.
+   * The Captain gets the task and its queued messages (ids and text); the thread gets a "sent to the Captain" line
+   * (an event, so a recap never hands it to the agent), and the Captain's reply follows (captainAnsweredForwards).
+   */
+  forwardToCaptain(taskId: string, content: string, attachments: StoredUpload[] = []) {
+    const row = this.requireRow(taskId)
+    if (!this.onForwardToCaptain) throw new BadRequestError("This Box Yard has no Captains.")
+    const queue = this.listQueue(taskId).map((q) => ({ id: q.id, sender: q.sender, text: q.text.slice(0, 2000) }))
+    const sent = this.onForwardToCaptain(row.project_id, content, attachments, { taskId, taskTitle: row.title, queue })
+    const meta = {
+      kind: "to_captain",
+      captainMessageId: sent.id,
+      captainProjectId: row.project_id,
+      captainName: this.store.getProject(row.project_id)?.name ?? null,
+      queued: queue.length,
+      ...(attachments.length ? { attachments: publicFiles(attachments) } : {}),
+    }
+    const msg = this.store.addTaskMessage(taskId, "event", content.trim(), meta)
+    this.hub.broadcast({ type: "task.message", message: msg })
+    return msg
+  }
+
+  /** A Captain turn read Cody's forwards (forwardToCaptain): its reply goes in each of those tasks' threads, once per task. */
+  captainAnsweredForwards(projectId: string, messages: CaptainMessage[], reply: string) {
+    const name = this.store.getProject(projectId)?.name ?? null
+    const byTask = new Map<string, string[]>()
+    for (const m of messages) {
+      const via = forwardedFromTask(m.meta)
+      if (via && this.store.getTaskRow(via.taskId)) byTask.set(via.taskId, [...(byTask.get(via.taskId) ?? []), m.id])
+    }
+    for (const [taskId, ids] of byTask) {
+      const text = reply.trim() || "The Captain read it and had nothing to add."
+      const msg = this.store.addTaskMessage(taskId, "event", text, { kind: "captain_answer", captainMessageIds: ids, captainProjectId: projectId, captainName: name })
+      this.hub.broadcast({ type: "task.message", message: msg })
+    }
   }
 
   /** sendInput that also says which queued message it made (the MCP tools hand it back for cancel/edit). */
@@ -1338,6 +1381,28 @@ export class TaskManager {
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
     return this.store.getTask(row.id)!
+  }
+
+  /**
+   * Settings' autoDoneOnMerge: resting tasks (pr_ready or idle, no turn running) whose PR already merged move to done,
+   * as the PR tracker does for a merge it sees. Catches merges seen while the setting was off; runs at start and on
+   * every settings save. Returns how many moved.
+   */
+  doneMergedResting(): number {
+    if (!this.settings.get().autoDoneOnMerge) return 0
+    let moved = 0
+    for (const t of this.store.listTasks({ status: [...AUTO_DONE_FROM] })) {
+      if (t.prState !== "merged") continue
+      const row = this.store.getTaskRow(t.id)
+      if (!row || restingStatus(row, "merged", true) !== "done") continue
+      // Not new activity: an old task stays where "recent" lists had it.
+      this.store.updateTask(row.id, { status: "done" }, { quiet: true, touch: false })
+      this.addEvent(row.id, `Moved to done: its pull request #${prNumber(row.pr_url) ?? "?"} is merged (Settings › Done when its PR merges).`)
+      this.emitTask(row.id)
+      moved++
+    }
+    if (moved) this.publishDirectory()
+    return moved
   }
 
   /**
@@ -6212,7 +6277,8 @@ export class TaskManager {
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
-    else if (pr === "merged") status = "done"
+    // Settings' autoDoneOnMerge off: the task rests idle until it's marked done.
+    else if (pr === "merged" && this.settings.get().autoDoneOnMerge) status = "done"
     else if (openPr) status = "pr_ready"
     else status = "idle"
 
