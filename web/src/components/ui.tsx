@@ -8,6 +8,8 @@ import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
 import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { clickImage, imageTarget, openLightbox } from "../lib/lightbox"
+import { openPreview } from "../lib/preview"
 import { api } from "../lib/api"
 import { keys } from "../lib/queries"
 import { copyText } from "../lib/clipboard"
@@ -322,6 +324,33 @@ const MARKDOWN_COMPONENTS: Components = {
     </AppLink>
   ),
   pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
+  img: ({ src, alt, title }) => <ChatImage src={typeof src === "string" ? src : ""} alt={alt} title={title} />,
+}
+
+const OPEN_IMAGE = { preview: (src: string) => openPreview({ url: src }), lightbox: openLightbox }
+
+/**
+ * An image in a chat or a transcript: a click opens it in the lightbox, or in the file preview when Box Yard
+ * hosts it (lib/lightbox.ts). An image inside a link stays the link's.
+ */
+function ChatImage({ src, alt, title }: { src: string; alt?: string; title?: string }) {
+  const opens = imageTarget(src) !== null
+  return (
+    <img
+      src={src}
+      alt={alt ?? ""}
+      title={title}
+      loading="lazy"
+      decoding="async"
+      data-lightbox={opens || undefined}
+      className={opens ? "cursor-zoom-in" : undefined}
+      onClick={(e) => {
+        if (!clickImage(e.nativeEvent, { src, alt }, OPEN_IMAGE)) return
+        // Inside a clickable card (a notice), open the image and not the card.
+        e.stopPropagation()
+      }}
+    />
+  )
 }
 
 const isRawUrl = (text: string, href: string) => text === href || text.replace(/\/$/, "") === href.replace(/\/$/, "")
