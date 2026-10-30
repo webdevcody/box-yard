@@ -8,8 +8,28 @@ import { config as baseConfig, type Config } from "../server/config.js"
 export const FAKE_CLAUDE = `${process.execPath} ${path.resolve("scripts/fake-claude.mjs")}`
 export const FAKE_CODEX = `${process.execPath} ${path.resolve("scripts/fake-codex.mjs")}`
 
+/** Every folder tmpDir made in this test file; test/setup.ts removes them once the file's tests are done. */
+const made: string[] = []
+
 export function tmpDir(prefix = "box-yard-test-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  made.push(dir)
+  return dir
+}
+
+/**
+ * Remove the folders this file's tmpDir() calls made, and only those: $TMPDIR is shared with other test runs (and,
+ * on a box, other agents), so nothing is ever removed by pattern. A turn still winding down may write into one
+ * meanwhile, hence the retries; a folder that still won't go is left for the next run of the OS's own cleanup.
+ */
+export function removeTmpDirs() {
+  for (const dir of made.splice(0)) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+    } catch {
+      // Left behind; never worth failing a test run for.
+    }
+  }
 }
 
 export function freePort(): Promise<number> {
@@ -61,6 +81,10 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     memoryMaxUsedPercent: 0,
     memoryMinFreeMb: 0,
     loadMaxPerCpu: 0,
+    // The cleanup of this computer's task folders stays out of tests that don't test it (test/own-cleanup.e2e.test.ts).
+    localFoldersKept: 0,
+    localBuildCleanup: false,
+    localDiskMinFreeGb: 0,
     ...overrides,
   }
 }

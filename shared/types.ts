@@ -831,6 +831,23 @@ export interface Settings {
    * queue on their own, apart from box slots and Max tasks running at once.
    */
   localAgents: number
+  /**
+   * Task folders kept on this computer (the local runner), and on each SSH machine, before the oldest finished ones
+   * leave: only a resting folder whose work is all pushed, archived first (or done with a merged PR). 0 = no limit.
+   */
+  localFoldersKept: number
+  /**
+   * On this computer and SSH machines: remove a resting task's git-ignored dependency and build output (node_modules,
+   * dist, build…) once its work is pushed: a done task's at once, another resting one's after localBuildCleanupIdleHours.
+   */
+  localBuildCleanup: boolean
+  /** ...a resting task that isn't done: after this many idle hours. */
+  localBuildCleanupIdleHours: number
+  /**
+   * Low-disk cleanup on this computer and SSH machines: below this much free disk (GB) where the task folders live, free
+   * build output and then the oldest finished folders until it's back above. 0 = off.
+   */
+  localDiskMinFreeGb: number
   /** Rates used to estimate Upstash Box infrastructure costs. */
   costRates: CostRates
   /** Optional cost guardrail. When exceeded, Box Yard holds queued agent turns. */

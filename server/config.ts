@@ -112,6 +112,14 @@ export const config = {
   maxAgents: int("BOX_MAX_AGENTS", 0),
   /** Local runner: most agents of "This computer" projects running at once on this machine (their own queue, apart from box slots). */
   localAgents: int("BOXYARD_LOCAL_AGENTS", 2),
+  /** This computer and SSH machines: task folders kept before the oldest finished, pushed ones leave. 0 = no limit. */
+  localFoldersKept: int("BOXYARD_LOCAL_FOLDERS_KEPT", 10),
+  /** This computer and SSH machines: remove a pushed, resting task's git-ignored build output (done: at once). */
+  localBuildCleanup: (env.BOXYARD_LOCAL_BUILD_CLEANUP ?? "1") !== "0",
+  /** ...a resting task that isn't done: after this many idle hours. */
+  localBuildCleanupIdleHours: int("BOXYARD_LOCAL_BUILD_CLEANUP_IDLE_HOURS", 6),
+  /** This computer and SSH machines: clean up when the task folders' disk has less than this many GB free. 0 = off. */
+  localDiskMinFreeGb: int("BOXYARD_LOCAL_DISK_MIN_FREE_GB", 30),
   /** Claude turns that may run at the same time inside one box. */
   slotsPerBox: int("BOX_SLOTS", sizeDefaults.slotsPerBox),
   /** Task folders kept in one box before old, finished ones are evicted. */
