@@ -89,7 +89,9 @@ export class FolderTransport implements MachineTransport {
 
   run(m: Machine, opts: SshRunOptions): Promise<SshRunResult> {
     const home = this.home(m)
-    fs.mkdirSync(home, { recursive: true })
+    // Not when the folder it lives in is gone (a test removed Box Yard's data folder after stopping it): the late
+    // call fails like an unreachable machine instead of making the folder again.
+    if (fs.existsSync(path.dirname(this.dir))) fs.mkdirSync(home, { recursive: true })
     return new Promise((resolve) => {
       // No login shell to ask: what's on this process's PATH is what the "machine" has.
       const child = spawn("bash", ["-c", opts.remote ?? REMOTE_SCRIPT.slice("bash -c ".length + 1, -1)], { cwd: home, env: { ...this.env(), HOME: home, SHELL: "" }, detached: true })

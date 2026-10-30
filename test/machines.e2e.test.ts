@@ -124,6 +124,12 @@ const until = (r: Running, id: string, ok: (t: Task) => boolean, what: string) =
     throw new Error(`${err.message}: ${JSON.stringify({ status: t.status, turns: t.turnCount, boxId: t.boxId, error: t.error, waitReason: t.waitReason, events, log }, null, 1)}`)
   })
 const done = (r: Running, id: string, turns = 1) => until(r, id, (t) => t.status === "done" && t.turnCount >= turns && !t.pendingCount && !t.currentTurnId, `to finish turn ${turns}`)
+/** Its turn-end archive is done, so nothing is still writing on the machine when the test ends and cleans up. */
+const archived = (r: Running, id: string) =>
+  waitFor(
+    () => Boolean(r.yard.store.getTaskRow(id)?.last_archived_at) && !(r.yard.tasks as unknown as { archiving: Set<string> }).archiving.has(id),
+    `task ${id}'s archive`,
+  )
 const history = (r: Running, boxId: string) => r.yard.tasks.history.list({ boxId }).map((e) => `${e.type} by ${e.actor}`).reverse()
 
 describe("SSH machines (mock mode: machines are folders)", () => {
@@ -201,6 +207,7 @@ describe("SSH machines (mock mode: machines are folders)", () => {
     await done(r, urgent.id)
     await done(r, normal.id)
     expect(getTask(r, normal.id).boxId).toBe(box)
+    for (const t of [busy, urgent, normal]) await archived(r, t.id)
   })
 
   it("lets the Coordinator add and label machines and place tasks by label; \"local\" stays this computer until Cody points it at a label", { timeout: 200_000 }, async () => {
@@ -281,6 +288,7 @@ describe("SSH machines (mock mode: machines are folders)", () => {
     await done(r, claude.id)
     expect(getTask(r, claude.id).boxId).toBe(machineBoxId(machine.id))
     expect(getTask(r, t.id)).toMatchObject({ status: "queued", boxId: null })
+    await archived(r, claude.id)
   })
 })
 
