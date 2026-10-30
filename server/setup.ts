@@ -14,6 +14,7 @@ import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { authorFallbacks } from "./gitAuthor.js"
+import { DAYTONA_API } from "./daytona/api.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import type { GpuProvider } from "../shared/gpu.js"
@@ -274,6 +275,7 @@ export class Setup {
     if (key === "codexApiKey") return this.checkCodex({ kind: "api_key", key: value })
     if (key === "runpodApiKey") return this.checkRunPod(value)
     if (key === "vastApiKey") return this.checkVast(value)
+    if (key === "daytonaApiKey") return this.checkDaytona(value)
     return this.checkGitHub(value)
   }
 
@@ -323,6 +325,18 @@ export class Setup {
       if (typeof v === "number" && Number.isFinite(v)) credit = v
     } catch {}
     return credit === null ? "Works: Vast.ai accepted the key." : `Works: Vast.ai accepted the key ($${credit.toFixed(2)} credit).`
+  }
+
+  /**
+   * List this key's sandboxes with a label none has: free, sandbox-scoped (the permission Box Yard needs), and it
+   * never makes anything.
+   */
+  private async checkDaytona(apiKey: string): Promise<string> {
+    const labels = encodeURIComponent(JSON.stringify({ "boxyard-check": "1" }))
+    const res = await this.request(this.d.fetch, `${DAYTONA_API}/sandbox?labels=${labels}`, { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "X-Daytona-Source": "box-yard" } }, "Daytona")
+    const body = await res.text().catch(() => "")
+    if (!res.ok) throw new Error(`Daytona ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
+    return "Works: Daytona accepted the key."
   }
 
   /** GET /v1/models: free, and it fails the same way a real call would with a bad key. */

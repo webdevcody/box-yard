@@ -292,6 +292,26 @@ describe("POST /api/setup/test/:key", () => {
     expect(calls).toEqual(["https://console.vast.ai/api/v0/users/current/", "https://console.vast.ai/api/v0/users/current/"])
   })
 
+  it("Daytona: lists sandboxes with a label none has (sandbox-scoped, makes nothing)", async () => {
+    const DAYTONA = "dtn_secret_daytona_key_0123456789abcdef"
+    const calls: { url: string; method: string }[] = []
+    const fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url: String(url), method: init?.method ?? "GET" })
+      if (new Headers(init?.headers).get("authorization") === `Bearer ${DAYTONA}`) return new Response("[]", { status: 200 })
+      return new Response('{"statusCode":401,"message":"Invalid API key"}', { status: 401, statusText: "Unauthorized" })
+    }) as typeof globalThis.fetch
+    const { json } = await boot(firstRun({ port: await freePort() }), { setup: { fetch } })
+    expect(await test(json, "daytonaApiKey", DAYTONA)).toMatchObject({ ok: true, message: "Works: Daytona accepted the key." })
+    const bad = await test(json, "daytonaApiKey", "dtn_wrong_wrong_wrong_wrong_wrong")
+    expect(bad.ok).toBe(false)
+    expect(bad.message).toMatch(/^Daytona rejected the key \(HTTP 401\)/)
+    expect(calls).toHaveLength(2)
+    for (const c of calls) {
+      expect(c.method).toBe("GET")
+      expect(c.url).toMatch(/^https:\/\/app\.daytona\.io\/api\/sandbox\?labels=/)
+    }
+  })
+
   it("Claude subscription token: one tiny `claude` call logged in with only that token", async () => {
     const { json } = await boot(firstRun({ port: await freePort() }))
     expect(await test(json, "claudeOauthToken", OAUTH)).toMatchObject({ ok: true, message: "Works: Claude answered using this token." })
