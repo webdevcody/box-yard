@@ -3,7 +3,7 @@
 import type { SettingSource } from "./types.js"
 import type { Runner } from "./runner.js"
 
-export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "githubToken", "runpodApiKey", "vastApiKey"] as const
+export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "githubToken", "runpodApiKey", "vastApiKey", "daytonaApiKey"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
 /**
@@ -217,6 +217,13 @@ export const CREDENTIAL_INFO: Record<
     placeholder: "64 hex characters",
     help: "Optional: lets projects run on Vast.ai GPU instances (Settings › Vast.ai GPU).",
     link: { href: "https://cloud.vast.ai/manage-keys/", label: "Create one in Vast.ai's Keys page" },
+  },
+  daytonaApiKey: {
+    label: "Daytona API key",
+    env: "DAYTONA_API_KEY",
+    placeholder: "dtn_…",
+    help: "Optional: lets projects run on Daytona GPU or CPU sandboxes (Settings › Daytona).",
+    link: { href: "https://app.daytona.io/dashboard/keys", label: "Create one in Daytona's API Keys page" },
   },
 }
 

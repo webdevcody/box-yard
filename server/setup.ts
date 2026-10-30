@@ -122,7 +122,7 @@ export class Setup {
    * login). Mock mode needs none. Never a reason to run it somewhere else instead. `claudeKey` says whether the task's
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
    * whether Settings › Credentials has one. "gpu" needs the key of `gpuCloud` (the project's GPU cloud), or of
-   * either cloud when there's no project to ask.
+   * any cloud when there's no project to ask.
    */
   async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider): Promise<string | null> {
     const { c, credentials } = this.d
@@ -138,8 +138,10 @@ export class Setup {
     if (runner === "gpu") {
       const runpod = creds.runpodApiKey.state === "set"
       const vast = creds.vastApiKey.state === "set"
+      const daytona = creds.daytonaApiKey.state === "set"
       if (gpuCloud === "vast") return vast ? null : "Vast.ai GPU isn't set up: add a Vast.ai API key in Settings › Credentials"
-      if (gpuCloud === "runpod" || !vast) return runpod ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
+      if (gpuCloud === "daytona") return daytona ? null : "Daytona isn't set up: add a Daytona API key in Settings › Daytona"
+      if (gpuCloud === "runpod" || (!vast && !daytona)) return runpod ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
       return null
     }
     if (runner === "box") {

@@ -7,6 +7,8 @@ import { runpodSettingsPatch, type RunPodSettingsStore } from "./runpod/settings
 import { DEFAULT_RUNPOD_SETTINGS, type RunPodSettings } from "../shared/runpod.js"
 import { vastSettingsPatch, type VastSettingsStore } from "./vast/settings.js"
 import { DEFAULT_VAST_SETTINGS, type VastSettings } from "../shared/vast.js"
+import { daytonaSettingsPatch, type DaytonaSettingsStore } from "./daytona/settings.js"
+import { DEFAULT_DAYTONA_SETTINGS, type DaytonaSettings } from "../shared/daytona.js"
 import { dockerSettingsPatch, type DockerSettingsStore } from "./docker/settings.js"
 import { DEFAULT_DOCKER_SETTINGS, type DockerSettings } from "../shared/docker.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
@@ -15,7 +17,7 @@ import { TTS_DEFAULTS, TTS_KEY_ENV, type CloudProvider } from "../shared/tts.js"
 import type { Settings } from "../shared/types.js"
 import { withOwner } from "../shared/owner.js"
 
-export const SETTINGS_GROUPS = ["settings", "runpod", "vast", "docker", "voice", "runner", "credentials", "server"] as const
+export const SETTINGS_GROUPS = ["settings", "runpod", "vast", "daytona", "docker", "voice", "runner", "credentials", "server"] as const
 export type SettingsGroup = (typeof SETTINGS_GROUPS)[number]
 
 /** A server value only an env var sets (Settings › About); changing it means editing .env and restarting. */
@@ -30,6 +32,7 @@ export interface SettingsSavers {
   settings(patch: Partial<Settings>): unknown
   runpod(patch: Partial<RunPodSettings>): unknown
   vast(patch: Partial<VastSettings>): unknown
+  daytona(patch: Partial<DaytonaSettings>): unknown
   docker(patch: Partial<DockerSettings>): unknown
   voice(patch: z.infer<typeof ttsPatch>): unknown
   runner(runner: Runner): unknown
@@ -40,6 +43,7 @@ export interface SettingsToolDeps {
   tts: TtsSettingsStore
   runpod: RunPodSettingsStore
   vast: VastSettingsStore
+  daytona: DaytonaSettingsStore
   docker: DockerSettingsStore
   /** The setup choice of where new projects run, or null before one was made. */
   runner: () => Runner | null
@@ -163,6 +167,12 @@ export class SettingsTools {
       const def = DEFAULT_VAST_SETTINGS[k]
       out.set(`vast.${k}`, { key: `vast.${k}`, group: "vast", schema: vastSettingsPatch.shape[k], value, default: def, source: same(value, def) ? "default" : "ui" })
     }
+    const dt = this.d.daytona.get()
+    for (const k of Object.keys(DEFAULT_DAYTONA_SETTINGS) as (keyof DaytonaSettings)[]) {
+      const value = dt[k]
+      const def = DEFAULT_DAYTONA_SETTINGS[k]
+      out.set(`daytona.${k}`, { key: `daytona.${k}`, group: "daytona", schema: daytonaSettingsPatch.shape[k], value, default: def, source: same(value, def) ? "default" : "ui" })
+    }
     const dk = this.d.docker.get()
     for (const k of Object.keys(DEFAULT_DOCKER_SETTINGS) as (keyof DockerSettings)[]) {
       const value = dk[k]
@@ -267,7 +277,7 @@ export class SettingsTools {
     for (const [k, v] of Object.entries(patch)) assign(k, v)
 
     // A partial object (e.g. { budget: { dailyUsd: 5 } }) keeps the fields it leaves out.
-    const groups = { settings: {} as Record<string, unknown>, runpod: {} as Record<string, unknown>, vast: {} as Record<string, unknown>, docker: {} as Record<string, unknown>, voice: {} as Record<string, Record<string, unknown>>, runner: null as Runner | null }
+    const groups = { settings: {} as Record<string, unknown>, runpod: {} as Record<string, unknown>, vast: {} as Record<string, unknown>, daytona: {} as Record<string, unknown>, docker: {} as Record<string, unknown>, voice: {} as Record<string, Record<string, unknown>>, runner: null as Runner | null }
     for (const [key, raw] of next) {
       const e = entries.get(key)!
       const value = deepMerge(e.value, raw)
@@ -280,6 +290,7 @@ export class SettingsTools {
       if (e.group === "settings") groups.settings[key] = parsed.data
       else if (e.group === "runpod") groups.runpod[key.slice("runpod.".length)] = parsed.data
       else if (e.group === "vast") groups.vast[key.slice("vast.".length)] = parsed.data
+      else if (e.group === "daytona") groups.daytona[key.slice("daytona.".length)] = parsed.data
       else if (e.group === "docker") groups.docker[key.slice("docker.".length)] = parsed.data
       else if (e.group === "voice") {
         const [, sub, field] = key.split(".")
@@ -293,6 +304,7 @@ export class SettingsTools {
         ["settings", settingsPatch, groups.settings],
         ["runpod", runpodSettingsPatch, groups.runpod],
         ["vast", vastSettingsPatch, groups.vast],
+        ["daytona", daytonaSettingsPatch, groups.daytona],
         ["docker", dockerSettingsPatch, groups.docker],
         ["voice", ttsPatch, groups.voice],
       ] as const) {
@@ -309,6 +321,7 @@ export class SettingsTools {
     if (Object.keys(groups.settings).length) this.d.save.settings(groups.settings as Partial<Settings>)
     if (Object.keys(groups.runpod).length) await this.d.save.runpod(groups.runpod as Partial<RunPodSettings>)
     if (Object.keys(groups.vast).length) await this.d.save.vast(groups.vast as Partial<VastSettings>)
+    if (Object.keys(groups.daytona).length) await this.d.save.daytona(groups.daytona as Partial<DaytonaSettings>)
     if (Object.keys(groups.docker).length) await this.d.save.docker(groups.docker as Partial<DockerSettings>)
     if (Object.keys(groups.voice).length) this.d.save.voice(groups.voice as z.infer<typeof ttsPatch>)
     if (groups.runner) await this.d.save.runner(groups.runner)

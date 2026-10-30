@@ -51,6 +51,7 @@ import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
 import { VastService } from "./vast/service.js"
+import { DaytonaService } from "./daytona/service.js"
 import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
 import { assignChecked, detectFor, importDetected, importInput, runningTask, testRepos } from "./identity/setup.js"
@@ -367,6 +368,10 @@ export function createBoxYard(
     vast?: GpuRunner
     /** Stands in for fetch in Vast.ai API calls (tests: a mocked Vast.ai, never the real one). */
     vastFetch?: typeof globalThis.fetch
+    /** Stands in for Daytona's whole runner (tests): `daytona-*` boxes route to its provider, and placement asks it. */
+    daytona?: GpuRunner
+    /** Stands in for fetch in Daytona API calls (tests: a mocked Daytona, never the real one). */
+    daytonaFetch?: typeof globalThis.fetch
     /** Stands in for the Docker runner's placement (tests): `docker-*` boxes route to its provider, and placement asks it. */
     docker?: DockerRunner
     /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
@@ -452,6 +457,15 @@ export function createBoxYard(
     runpodImage: () => runpod.store.get().image,
     fetch: opts.vastFetch,
   })
+  // Daytona sandboxes, the third cloud behind "Runs on: GPU", with or without a GPU (docs/daytona.md). Idle until a
+  // Daytona key is set.
+  const daytonaService = new DaytonaService({
+    store,
+    credentials: settings.credentials,
+    install,
+    runpodImage: () => runpod.store.get().image,
+    fetch: opts.daytonaFetch,
+  })
   // Docker containers on this computer, for projects that run on "Docker container" (docs/docker.md). Docker is only
   // asked when one is needed; in mock mode the containers are folders.
   const dockerService = new DockerService({
@@ -474,6 +488,7 @@ export function createBoxYard(
   // Every box provider gets the local runner, the GPU pods, the Docker containers and the SSH machines beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
   const vast = opts.vast ?? vastService
+  const daytona = opts.daytona ?? daytonaService
   const docker = opts.docker ?? dockerService
   // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
   // as this process last saw them (no API or Docker call).
@@ -484,10 +499,11 @@ export function createBoxYard(
       return name ? { container: name } : null
     }
     if (!isGpuBox(boxId)) return null
-    const pod = (gpuBoxProvider(boxId) === "vast" ? vast : gpu).provider.cached(boxId)
+    const cloud = gpuBoxProvider(boxId)
+    const pod = (cloud === "vast" ? vast : cloud === "daytona" ? daytona : gpu).provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider, machines.provider)
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider, machines.provider, daytona.provider)
   const setup = new Setup({
     c,
     store,
@@ -508,12 +524,14 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, vast, docker, machines, identities })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, vast, daytona, docker, machines, identities })
   tasks.runnerProblem = (runner, key, cli, gpuCloud) => setup.runnerProblem(runner, key, cli, gpuCloud)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   vastService.onPodEvent = (e) => tasks.gpuPodEvent(e)
   vastService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
+  daytonaService.onPodEvent = (e) => tasks.gpuPodEvent(e)
+  daytonaService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
@@ -660,6 +678,10 @@ export function createBoxYard(
     vastService.store.update(patch)
     applyPoolChange()
   }
+  const saveDaytonaSettings = (patch: unknown) => {
+    daytonaService.store.update(patch)
+    applyPoolChange()
+  }
   const saveDockerSettings = (patch: unknown) => {
     dockerService.store.update(patch)
     applyPoolChange()
@@ -683,6 +705,7 @@ export function createBoxYard(
     tts: ttsSettings,
     runpod: runpod.store,
     vast: vastService.store,
+    daytona: daytonaService.store,
     docker: dockerService.store,
     runner: () => setup.runnerChoice(),
     credentials: () => setup.status().credentials,
@@ -693,7 +716,7 @@ export function createBoxYard(
       boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else Upstash once an Upstash key is saved in Settings › Credentials" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
-    save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },
+    save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, daytona: saveDaytonaSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },
   })
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
@@ -1299,6 +1322,23 @@ export function createBoxYard(
     const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
     await vastService.keepWarm(String(req.params.boxId), minutes)
     res.json(await vastStatus())
+  })
+
+  // ---- Daytona (Settings › Daytona): settings and sandboxes. No secrets go out. A sandbox is deleted with
+  // DELETE /boxes/daytona-<projectId>[-<n>], which archives its workspaces first.
+  const daytonaStatus = () =>
+    daytonaService.status({ name: (id) => store.getProjectName(id), running: (boxId) => store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length })
+  api.get("/daytona", async (_req, res) => {
+    res.json(await daytonaStatus())
+  })
+  api.put("/daytona/settings", async (req, res) => {
+    saveDaytonaSettings(req.body)
+    res.json(await daytonaStatus())
+  })
+  api.post("/daytona/sandboxes/:boxId/keep-warm", async (req, res) => {
+    const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
+    await daytonaService.keepWarm(String(req.params.boxId), minutes)
+    res.json(await daytonaStatus())
   })
 
   // ---- Docker (Settings › Docker): settings, containers and the image build. No secrets go out. Deleting a container

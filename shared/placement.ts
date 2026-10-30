@@ -81,14 +81,20 @@ export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", b
 /** "Upstash" for Upstash boxes, "Local box" for mock mode's folder boxes. */
 const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider) : PLACE_NAME.box)
 
-/** "RunPod", or "Vast.ai" for a Vast.ai instance's box. */
-const gpuPlaceName = (p: Place) => (gpuBoxProvider(p.boxId) === "vast" ? GPU_PROVIDER_LABEL.vast : PLACE_NAME.gpu)
+/** "RunPod", or "Vast.ai" for a Vast.ai instance's box, "Daytona" for a Daytona sandbox's. */
+const gpuPlaceName = (p: Place) => {
+  const cloud = gpuBoxProvider(p.boxId)
+  return cloud && cloud !== "runpod" ? GPU_PROVIDER_LABEL[cloud] : PLACE_NAME.gpu
+}
 
 /** RunPod pod ids are 14 characters; the first 6 tell pods apart. */
 export const shortPodId = (id: string) => (id.length > 8 ? id.slice(0, 6) : id)
 
-/** "pod 3x9k2a", or "pod #2" before this server has seen the pod. */
-const podName = (p: Place) => (p.podId ? `pod ${shortPodId(p.podId)}` : `pod #${gpuBoxIndex(p.boxId)}`)
+/** "pod 3x9k2a" ("sandbox 3x9k2a" on Daytona), or "pod #2" before this server has seen the pod. */
+const podName = (p: Place) => {
+  const noun = gpuBoxProvider(p.boxId) === "daytona" ? "sandbox" : "pod"
+  return p.podId ? `${noun} ${shortPodId(p.podId)}` : `${noun} #${gpuBoxIndex(p.boxId)}`
+}
 
 const join = (parts: (string | null | undefined)[]) => parts.filter(Boolean).join(" · ")
 

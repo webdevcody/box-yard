@@ -80,6 +80,7 @@ describe("GET /api/setup", () => {
       githubToken: { state: "unset", source: null },
       runpodApiKey: { state: "unset", source: null },
       vastApiKey: { state: "unset", source: null },
+      daytonaApiKey: { state: "unset", source: null },
     })
     expect(body.boxes).toEqual({ provider: "local", required: true })
     expect(body.claude).toEqual({ required: true, state: "unset", using: null })

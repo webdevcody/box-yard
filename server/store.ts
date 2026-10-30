@@ -1671,10 +1671,10 @@ export class Store {
     return rows.map((r) => r.box_id)
   }
 
-  /** GPU boxes (`runpod-…`, `vastai-…`) with a turn on them: pods and instances that are up or starting. */
+  /** GPU boxes (`runpod-…`, `vastai-…`, `daytona-…`) with a turn on them: pods, instances and sandboxes that are up or starting. */
   gpuBoxesInUse(): string[] {
     const rows = this.db
-      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE (box_id LIKE 'runpod-%' OR box_id LIKE 'vastai-%') AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE (box_id LIKE 'runpod-%' OR box_id LIKE 'vastai-%' OR box_id LIKE 'daytona-%') AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
       .all() as { box_id: string }[]
     return rows.map((r) => r.box_id)
   }
@@ -2771,6 +2771,12 @@ export class Store {
       )
       .get(taskId) as ClaudeUsageTotals
     return totals(row)
+  }
+
+  /** When the box's latest usage interval ended (ms since epoch), or null when it has none. */
+  lastBoxUsageEnd(boxId: string): number | null {
+    const r = this.db.prepare("SELECT MAX(ended_at) AS e FROM box_usage_intervals WHERE box_id = ?").get(boxId) as { e: number | null } | undefined
+    return r?.e ?? null
   }
 
   recordBoxUsageInterval(input: {

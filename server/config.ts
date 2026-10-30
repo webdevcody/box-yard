@@ -162,6 +162,8 @@ export const config = {
   runpodApiKey: env.RUNPOD_API_KEY ?? "",
   /** Vast.ai GPU instances (Settings › Vast.ai GPU, docs/vast.md). Optional. */
   vastApiKey: env.VAST_API_KEY ?? "",
+  /** Daytona sandboxes (Settings › Daytona, docs/daytona.md). Optional. */
+  daytonaApiKey: env.DAYTONA_API_KEY ?? "",
   /** The docker CLI for Docker projects (docs/docker.md); empty: found on PATH or where Docker Desktop puts it. */
   dockerBin: env.DOCKER_BIN?.trim() ?? "",
   /**
