@@ -55,7 +55,7 @@ describe("chatCards", () => {
     expect(m.cards.map((c) => c.key)).toEqual([LOGIN.id])
     expect(ids(m.cards[0]!.entries)).toEqual([started.id, pr.id])
     expect(m.cards[0]!.entries.every((e) => e.type === "update" && e.tasks[0] === LOGIN.id)).toBe(true)
-    // Tool calls show only in the timeline.
+    // Tool calls aren't in any card.
     expect(ids(m.coordinator)).toEqual([ask.id, answer.id, ask2.id, answer2.id])
   })
 
@@ -156,7 +156,7 @@ describe("chatCards", () => {
     expect(ids(m.coordinator)).toEqual([report.id, warning.id, own.id])
   })
 
-  it("shows an update about a task that's gone only in the timeline", () => {
+  it("leaves out an update about a task that's gone", () => {
     const gone = notice(LOGIN, "✅ **Fix login** is done")
     const m = model([gone], known([CARDS]))
     expect(m.cards).toEqual([])

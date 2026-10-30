@@ -1029,7 +1029,7 @@ export class TaskManager {
 
   /**
    * Cody's message to a task from its card in the Coordinator chat (sendInput queued it): a line in the chat, so the
-   * card and the timeline show what was sent. Only Cody reads it: it's marked read for the Coordinator, and it doesn't
+   * card shows what was sent. Only Cody reads it: it's marked read for the Coordinator, and it doesn't
    * go to the Captain. A notice about the task, so a status-only project's line stays sealed like its other notices.
    */
   sentFromChat(taskId: string, content: string, attachments: StoredUpload[] = []) {

@@ -1461,7 +1461,7 @@ export const TasksOnlyToggle = memo(function TasksOnlyToggle() {
   const picked = useChatProjectFilter() !== null
   if (picked) return null
   return (
-    <div data-testid="view-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
+    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
       <button
         type="button"
         aria-pressed={tasksOnly}
