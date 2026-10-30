@@ -42,6 +42,9 @@ import type { Identities } from "./identity/identities.js"
 import { IdentityDetector } from "./identity/detect.js"
 import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
+import { redactValues } from "./redact.js"
+import { scopeLine, type Connectors } from "./connectors/connectors.js"
+import type { Connector } from "../shared/connectors.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
@@ -73,6 +76,8 @@ export interface McpDeps {
   identityDetector?: IdentityDetector
   /** Side threads' read-only tokens (server/sideThreads.ts). */
   threads?: { callerForToken(token: string): McpCaller | null }
+  /** Settings › Connectors (docs/connectors.md). Without it, list_connectors isn't offered. */
+  connectors?: Connectors
 }
 
 /**
@@ -2028,6 +2033,58 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           return ok({ changed: changes, next: "Applies from the next turn on; the pool already uses new limits." })
         }),
       ),
+    )
+  }
+
+  // ---------------------------------------------------------------- connectors (docs/connectors.md)
+  // External MCP servers some sessions get. Read-only here: only Settings adds, signs in, scopes or removes one, so no
+  // model can widen a connector's reach. The view has no value in it (a remote server shows its host only: some put a
+  // key in the path), and the whole result is also run through the connectors' own secret values.
+  const connectorStore = deps.connectors
+  if (connectorStore) {
+    const projectName = (id: string) => store.getProject(id)?.name ?? id
+    const connectorView = (c: Connector) => {
+      const yours = scopeId ? { captain: connectorStore.reaches(c, { kind: "captain", projectId: scopeId }), agents: RUNNERS.filter((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })) } : undefined
+      return {
+        name: c.name,
+        label: c.label,
+        tools: `mcp__${c.name}__*`,
+        kind: c.kind,
+        server: c.kind === "stdio" ? `command: ${(c.command ?? "").split("/").pop()}` : (() => {
+          try {
+            return new URL(c.url!).host
+          } catch {
+            return "?"
+          }
+        })(),
+        auth: c.auth,
+        enabled: c.enabled,
+        status: c.status,
+        ...(c.statusDetail ? { detail: c.statusDetail } : {}),
+        ...(c.oauth ? { signedIn: c.oauth.signedInAt !== null && c.status !== "needs_auth", renewsItself: c.oauth.refreshable, signInHost: c.oauth.signInHost } : {}),
+        secrets: c.secrets.map((x) => ({ name: x.name, fingerprint: x.fingerprint, ...(x.readable ? {} : { unreadable: true }) })),
+        lastTest: c.lastTest && { at: new Date(c.lastTest.at).toISOString(), ok: c.lastTest.ok, tools: c.lastTest.tools.slice(0, 60).map((t) => t.name), ...(c.lastTest.error ? { error: c.lastTest.error } : {}) },
+        ...(scopeId
+          ? { yours, otherProjects: c.scope.projects ? c.scope.projects.filter((id) => id !== scopeId).length : "every project" }
+          : { reaches: scopeLine(c.scope, projectName), ...(c.sealedSkipped.length ? { leftOut: `${c.sealedSkipped.map(projectName).join(", ")} (status only, and the Coordinator uses it)` } : {}) }),
+      }
+    }
+    server.registerTool(
+      "list_connectors",
+      {
+        description:
+          "External MCP connectors Cody set up in Settings › Connectors (Gmail, Notion, Linear, …): each one's name (its tools are mcp__<name>__*), server host or command, how it signs in, status (connected; needs_auth: Cody signs in again in Settings › Connectors; error, with the detail; untested), its last test's tools, and " +
+          (scopeId ? "whether you and your project's agents get it (yours). Only connectors that reach your project are listed. " : "who gets it. ") +
+          "Never a token or key: secrets show as fingerprints. You can't add, change or sign in a connector: tell Cody what to do in Settings › Connectors.",
+        inputSchema: {},
+      },
+      safe(async () => {
+        const list = connectorStore
+          .list()
+          .filter((c) => !scopeId || connectorStore.reaches(c, { kind: "captain", projectId: scopeId }) || RUNNERS.some((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })))
+        const text = JSON.stringify({ connectors: list.map(connectorView) })
+        return { content: [{ type: "text", text: redactValues(text, connectorStore.secretValues()) }] }
+      }),
     )
   }
 

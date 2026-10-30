@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
@@ -605,6 +606,8 @@ export type UiEvent =
   | { type: "docker.build"; build: DockerImageBuild }
   /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
   | { type: "identities"; identities: Identity[] }
+  /** Settings › Connectors changed: a connector, its status, or its secrets' fingerprints (never a value). */
+  | { type: "connectors"; connectors: Connector[] }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
