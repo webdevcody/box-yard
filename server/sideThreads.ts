@@ -11,6 +11,9 @@
 // Threads are for questions: they see the chat's tools (so the fork keeps the chat's prompt cache) but may only use
 // the read-only ones in THREAD_TOOLS. The CLI refuses the rest (dontAsk with an allowlist), and so does the MCP
 // server, for the thread's own read-only token.
+//
+// A chat on Codex (docs/codex.md) can't be forked at a message, so its threads always start the "summary" way, on
+// Codex, and only the MCP server's read-only token keeps them to the lookups.
 import { spawn, type ChildProcess } from "node:child_process"
 import { randomBytes, randomUUID } from "node:crypto"
 import fs from "node:fs"
@@ -24,9 +27,12 @@ import type { McpCaller } from "./mcp.js"
 import { listCompactions, readCompactionInfo, summaryBody } from "./compactions.js"
 import { resultUsageObject } from "./usage.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
+import { MISSING_SESSION, codexErrorText } from "./codex.js"
+import { codexChatLaunch, type ChatLaunch } from "./chatAgent.js"
+import type { AgentCli } from "../shared/agentCli.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
-import type { ChatMessage, SideThread, SideThreadMessage } from "../shared/types.js"
+import type { ChatMessage, Effort, SideThread, SideThreadMessage } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 10 * 60_000
 /** The most of a highlight or question a thread keeps. */
@@ -86,7 +92,10 @@ export interface ThreadHost {
   systemPrompt(): string
   /** Read rules for the chat's own folders (compaction logs, uploads). */
   readRules(): string[]
-  model(): string
+  /** The CLI the chat runs on now: a thread runs on it too. */
+  cli(): AgentCli
+  /** The chat's model on that CLI (null: Codex's own default). */
+  model(): string | null
   effort(): string
   compactionsDir: string
   /** The chat's MCP caller; the thread gets a read-only one like it. */
@@ -345,13 +354,15 @@ export class SideThreads {
 
     if (session.started) {
       const result = await this.run(id, r, host, question, ["--resume", session.sessionId], session.sessionId, true)
-      return this.finish(id, result)
+      // Its session is gone, or belongs to the CLI the chat ran on before: start over from the summary.
+      if (result.ok || !MISSING_SESSION.test(result.error) || this.stopped || !this.store.getSideThread(id)) return this.finish(id, result)
     }
 
     const upTo = this.store.chatUpTo(thread.projectId, thread.anchorId, 400) ?? []
     const main = host.session()
     const compactions = this.compactions(host.compactionsDir)
-    const fork = main.started ? forkPoint(upTo, main.id, compactions.at(-1)?.at ?? null) : null
+    // Codex can't fork a session at a message: a thread on a Codex chat always starts from the summary.
+    const fork = main.started && host.cli() === "claude" ? forkPoint(upTo, main.id, compactions.at(-1)?.at ?? null) : null
     const anchor = upTo.at(-1)
     if (fork) {
       const prompt = threadPrompt({ quote: thread.quote, question, anchorText: fork.atAnchor ? null : (anchor?.content ?? null), context: null, ownerName: owner })
@@ -394,16 +405,69 @@ export class SideThreads {
     }
   }
 
-  private mcpConfigFor(host: ThreadHost): string {
+  /** The chat's read-only MCP token, made on first use. */
+  private tokenFor(host: ThreadHost): string {
     const key = host.usage.projectId ?? "coordinator"
     let t = this.tokens.get(key)
     if (!t) {
       t = { token: `thr_${randomBytes(24).toString("hex")}`, caller: host.caller }
       this.tokens.set(key, t)
     }
+    return t.token
+  }
+
+  private mcpConfigFor(host: ThreadHost): string {
+    const key = host.usage.projectId ?? "coordinator"
     const file = path.join(this.dir, `${key}-mcp.json`)
-    fs.writeFileSync(file, JSON.stringify({ mcpServers: { boxyard: { type: "http", url: this.mcpUrl, headers: { Authorization: `Bearer ${t.token}` } } } }), { mode: 0o600 })
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: { boxyard: { type: "http", url: this.mcpUrl, headers: { Authorization: `Bearer ${this.tokenFor(host)}` } } } }), { mode: 0o600 })
     return file
+  }
+
+  /**
+   * How a thread's run starts: its chat's CLI. `sessionArgs` are Claude Code's (--resume, --fork-session…); on Codex
+   * the run resumes `sessionId` when `resumed`, else starts a new thread, which names its own session.
+   */
+  private launch(host: ThreadHost, sessionArgs: string[], sessionId: string, resumed: boolean): ChatLaunch {
+    if (host.cli() === "codex") {
+      return codexChatLaunch({
+        c: this.c,
+        credentials: this.settings.credentials,
+        mcp: { url: this.mcpUrl, token: this.tokenFor(host) },
+        resume: resumed ? sessionId : null,
+        model: host.model(),
+        effort: host.effort() as Effort,
+        instructions: host.systemPrompt(),
+      })
+    }
+    const allowed = [...[...THREAD_TOOLS].map((t) => `mcp__boxyard__${t}`), "WebSearch", "WebFetch", ...host.readRules()]
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--strict-mcp-config",
+      "--mcp-config",
+      this.mcpConfigFor(host),
+      // The chat's tools and system prompt, so the fork reuses its prompt cache; only the allowlist may run.
+      "--tools",
+      "Read,WebSearch,WebFetch",
+      "--allowedTools",
+      allowed.join(","),
+      "--permission-mode",
+      "dontAsk",
+      "--append-system-prompt",
+      host.systemPrompt(),
+      ...sessionArgs,
+      "--model",
+      host.model() ?? "",
+      "--effort",
+      host.effort(),
+    ]
+    const [bin, ...pre] = this.c.claudeBin.split(" ")
+    // Like its chat's own `claude`: the chat's Claude login, and never the key identities' secrets are encrypted with.
+    const env = serverClaudeEnv(host.claudeLogin(), this.settings.credentials.claudeEnv())
+    return { cli: "claude", bin: bin!, args: [...pre, ...args], env, translate: null, after() {} }
   }
 
   private run(
@@ -417,40 +481,14 @@ export class SideThreads {
     starts?: "fork" | "summary",
   ): Promise<RunResult> {
     return new Promise((resolve) => {
-      const allowed = [...[...THREAD_TOOLS].map((t) => `mcp__boxyard__${t}`), "WebSearch", "WebFetch", ...host.readRules()]
-      const args = [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--strict-mcp-config",
-        "--mcp-config",
-        this.mcpConfigFor(host),
-        // The chat's tools and system prompt, so the fork reuses its prompt cache; only the allowlist may run.
-        "--tools",
-        "Read,WebSearch,WebFetch",
-        "--allowedTools",
-        allowed.join(","),
-        "--permission-mode",
-        "dontAsk",
-        "--append-system-prompt",
-        host.systemPrompt(),
-        ...sessionArgs,
-        "--model",
-        host.model(),
-        "--effort",
-        host.effort(),
-      ]
-      const [bin, ...pre] = this.c.claudeBin.split(" ")
-      // Like its chat's own `claude`: the chat's Claude login, and never the key identities' secrets are encrypted with.
-      const env = serverClaudeEnv(host.claudeLogin(), this.settings.credentials.claudeEnv())
+      const launch = this.launch(host, sessionArgs, sessionId, resumed)
+      const cliName = launch.cli === "codex" ? `codex (${this.c.codexBin})` : `claude (${this.c.claudeBin})`
 
       let child: ChildProcess
       try {
-        child = spawn(bin!, [...pre, ...args], { cwd: host.cwd, env, stdio: ["pipe", "pipe", "pipe"] })
+        child = spawn(launch.bin, launch.args, { cwd: host.cwd, env: launch.env, stdio: ["pipe", "pipe", "pipe"] })
       } catch (err) {
-        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}`, noSession: true })
+        resolve({ ok: false, error: `Couldn't start ${launch.cli}: ${(err as Error).message}`, noSession: true })
         return
       }
       r.child = child
@@ -468,14 +506,23 @@ export class SideThreads {
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
       const alive = () => !this.stopped && this.runs.get(id) === r
 
+      let seenSession: string | null = null
       const onLine = (line: string) => {
-        if (!alive()) return
+        if (launch.translate) {
+          for (const m of launch.translate(line)) onMsg(m)
+          return
+        }
         let msg: any
         try {
           msg = JSON.parse(line)
         } catch {
           return
         }
+        onMsg(msg)
+      }
+      const onMsg = (msg: any) => {
+        if (!alive()) return
+        if (typeof msg.session_id === "string") seenSession = msg.session_id
         if (msg.type === "stream_event") {
           const ev = msg.event
           if (ev?.type === "content_block_delta" && ev.delta?.type === "text_delta") this.hub.broadcast({ type: "thread.delta", threadId: id, text: ev.delta.text })
@@ -483,7 +530,8 @@ export class SideThreads {
         }
         if (msg.type === "system" && msg.subtype === "init") {
           sawInit = true
-          if (starts) this.store.startSideThread(id, starts, sessionId)
+          // Codex names its own thread: that's the session the thread's next question resumes.
+          if (starts) this.store.startSideThread(id, starts, launch.cli === "codex" ? (seenSession ?? sessionId) : sessionId)
           return
         }
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
@@ -530,6 +578,7 @@ export class SideThreads {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         r.child = null
+        launch.after()
         const noSession = !sawInit
         if (!alive()) return resolve({ ok: false, error: "Stopped.", noSession })
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
@@ -537,8 +586,8 @@ export class SideThreads {
             source: host.usage.source,
             runKind: "thread",
             projectId: host.usage.projectId,
-            sessionId,
-            model: resultModel ?? host.model(),
+            sessionId: seenSession ?? sessionId,
+            model: resultModel ?? host.model() ?? "codex",
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,
@@ -547,9 +596,9 @@ export class SideThreads {
             resumed,
           })
         }
-        if (err) return resolve({ ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}`, noSession })
-        if (code === 0 && !resultError) return resolve({ ok: true, error: "", noSession })
-        resolve({ ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`), noSession })
+        if (err) return resolve({ ok: false, error: `Couldn't run ${cliName}: ${err.message}`, noSession })
+        if (code === 0 && !resultError && (sawResult || launch.cli === "claude")) return resolve({ ok: true, error: "", noSession })
+        resolve({ ok: false, error: resultError ?? ((launch.cli === "codex" ? codexErrorText(stderr) : stderr.trim()) || `${launch.cli} exited with code ${code}${sawResult ? "" : " before answering"}`), noSession })
       }
       child.on("error", (err) => finish(null, err))
       child.on("close", (code) => finish(code))

@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
-import type { CaptainMessage, ChatMessage, Project } from "../shared/types.js"
+import type { CaptainMessage, ChatMessage, Project, SideThread, SideThreadMessage } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // The Coordinator and the Captains on Codex (docs/codex.md), driven through scripts/fake-codex.mjs: Codex's flags
@@ -133,6 +133,38 @@ describe("the Coordinator on Codex", () => {
     await call(r, "POST", "/api/chat", { content: "status" })
     await waitFor(() => runs().length === 3 && !r.yard.orchestrator.busy, "the turn after")
     expect(runs()[2].resume).toBeNull()
+  })
+})
+
+describe("side threads on a Codex chat", () => {
+  it("start from the summary on Codex, stay read-only, and resume their own thread", async () => {
+    const r = await start()
+    r.yard.settings.update({ orchestratorCli: "codex" })
+    await call(r, "POST", "/api/projects", { name: "demo" })
+    await call(r, "POST", "/api/chat", { content: "status" })
+    await waitFor(async () => (await chat(r)).some((m) => m.role === "assistant") && !r.yard.orchestrator.busy, "the Coordinator's reply")
+    const reply = (await chat(r)).filter((m) => m.role === "assistant").at(-1)!
+    const answers = (id: string, n: number) =>
+      waitFor(async () => {
+        const list = await call<SideThreadMessage[]>(r, "GET", `/api/threads/${id}/messages`)
+        const done = list.filter((m) => m.role === "assistant" || m.role === "error")
+        const threads = await call<SideThread[]>(r, "GET", "/api/threads")
+        return done.length >= n && !threads.find((t) => t.id === id)?.busy ? done : null
+      }, `${n} side thread answers`)
+    const { thread } = await call<{ thread: SideThread }>(r, "POST", "/api/threads", { anchorId: reply.id, quote: "the yard", question: "Please try create_task" })
+    const [answer] = await answers(thread.id, 1)
+    // Codex can't fork at a message, and the thread's read-only token keeps it to lookups.
+    expect((await call<SideThread[]>(r, "GET", "/api/threads"))[0]!.context).toBe("summary")
+    expect(answer!.content).toContain("Side threads are read-only")
+    expect(r.yard.store.listTasks()).toHaveLength(0)
+    const threadRun = runs().at(-1)
+    expect(threadRun.resume).toBeNull()
+    expect(r.yard.store.sideThreadSession(thread.id)!.sessionId).toBe(threadRun.thread)
+
+    await call(r, "POST", `/api/threads/${thread.id}/messages`, { content: "Now try list_tasks" })
+    const [, lookup] = await answers(thread.id, 2)
+    expect(lookup!.content).toContain("list_tasks said: [")
+    expect(runs().at(-1).resume).toBe(threadRun.thread)
   })
 })
 
