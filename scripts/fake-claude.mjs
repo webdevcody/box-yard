@@ -469,7 +469,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  session.turns.push({ prompt, result, at: Date.now(), uuids, ...(session.thread ? { thread: true } : {}) })
+  session.turns.push({ prompt, result, at: Date.now(), uuids, model: flag("--model") ?? null, effort: flag("--effort") ?? null, ...(session.thread ? { thread: true } : {}) })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
     type: "result",

@@ -214,7 +214,7 @@ export function followupPrompt(
  * list_inbox, get_task and list_tasks check states older than 2 minutes with GitHub before they answer.
  */
 export const PR_FRESH_RULE =
-  "Never tell Cody a PR is waiting on him without a fresh state from Box Yard, and never from memory: get it from list_inbox, get_task or list_tasks in this same turn (they check GitHub first and show prCheckedAt), or from the block of named tasks that came with this turn's message (checked the same way); if a PR shows prUnverified or "unconfirmed", say its state is unconfirmed instead."
+  "Never tell Cody a PR is waiting on him without a fresh state from Box Yard, and never from memory: get it from list_inbox, get_task or list_tasks in this same turn (they check GitHub first and show prCheckedAt), or from the block of named tasks that came with this turn's message (checked the same way); if a PR shows prUnverified or is marked unconfirmed there, say its state is unconfirmed instead."
 
 /**
  * The line a resumed turn's prompt ends with when the task has a PR (TaskManager.launch): its state as the turn

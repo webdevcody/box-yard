@@ -186,11 +186,13 @@ export async function namedState(
   const open = new Map(projects.map((p) => [p.id, o.store.listTasks({ projectId: p.id }).filter(OPEN).sort((a, b) => b.updatedAt - a.updatedAt)]))
   const prIds = [...named, ...[...open.values()].flatMap((l) => l.slice(0, NAMED_PROJECT_TASKS_MAX))].filter((t) => t.prUrl && !isFinalPrState(t.prState)).map((t) => t.id)
   if (prIds.length && o.prs) {
-    try {
-      await o.prs.ensureFresh(prIds, { timeoutMs: NAMED_PR_TIMEOUT_MS })
-    } catch {
-      // The block says the state is unconfirmed.
-    }
+    // PrTracker stops waiting by itself; the race is a backstop. Either way, an unanswered PR shows as unconfirmed.
+    let timer: NodeJS.Timeout | undefined
+    await Promise.race([
+      o.prs.ensureFresh(prIds, { timeoutMs: NAMED_PR_TIMEOUT_MS }).catch(() => {}),
+      new Promise<void>((resolve) => (timer = setTimeout(resolve, NAMED_PR_TIMEOUT_MS + 250))),
+    ])
+    clearTimeout(timer)
   }
   // Read again: the GitHub check may have changed a PR's state.
   const fresh = (t: Task) => o.store.getTask(t.id) ?? t
