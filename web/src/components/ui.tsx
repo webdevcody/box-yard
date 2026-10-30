@@ -8,6 +8,7 @@ import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
 import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { TaskTile } from "./TaskIcon"
 import { clickImage, imageTarget, openLightbox } from "../lib/lightbox"
 import { openPreview } from "../lib/preview"
 import { api } from "../lib/api"
@@ -316,13 +317,21 @@ function GithubRefText({ text, inLink }: { text: string; inLink?: boolean }) {
   )
 }
 
+/** A link to a task page (`/tasks/task_…`, maybe with the origin): the task's id. */
+const TASK_HREF = /^(?:https?:\/\/[^/]+)?\/tasks\/(task_[A-Za-z0-9-]{6,40})\/?$/
+
 const MARKDOWN_COMPONENTS: Components = {
-  a: ({ href = "", title, children }) => (
-    <AppLink href={href} title={title}>
-      {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
-      {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
-    </AppLink>
-  ),
+  a: ({ href = "", title, children }) => {
+    const taskId = TASK_HREF.exec(href)?.[1]
+    return (
+      <AppLink href={href} title={title}>
+        {/* A task link leads with the task's tile, in its project's colour. */}
+        {taskId && <TaskTile id={taskId} bare className="mr-0.5 align-[-1px]" />}
+        {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
+        {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
+      </AppLink>
+    )
+  },
   pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
   img: ({ src, alt, title }) => <ChatImage src={typeof src === "string" ? src : ""} alt={alt} title={title} />,
 }

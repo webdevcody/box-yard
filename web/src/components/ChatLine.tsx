@@ -10,6 +10,7 @@ import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type Notice
 import { NOTICE_ICON } from "./noticeIcons"
 import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
+import { ProjectDot, TaskTile } from "./TaskIcon"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
@@ -156,6 +157,8 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
               {i > 0 && ", "}
               {t.ref ? (
                 <AppLink href={t.ref.href} className="text-zinc-400 hover:text-zinc-200 hover:underline">
+                  {t.ref.kind === "task" && <TaskTile id={t.ref.id} bare className="mr-0.5 align-[-2px]" />}
+                  {t.ref.kind === "project" && <ProjectDot projectId={t.ref.id} className="mr-1 align-[1px]" />}
                   {t.text.slice(0, 60)}
                 </AppLink>
               ) : (
@@ -374,11 +377,12 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
  * A chat message. Its root names the message (`data-chat-id`): a selection in it can start a side thread on it, and
  * the threads it has show as markers under it (SideThread.tsx; nothing outside a chat with threads).
  * `sources`: on a Coordinator reply, the updates it read (lib/chatUpdates.ts), named in a "from:" line under it.
+ * `next`: whether its suggested next steps show (the Coordinator chat shows only the newest reply's).
  */
-export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
+export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources, next = true }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next?: boolean }) {
   return (
     <div data-chat-id={m.id}>
-      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} />
+      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} next={next} />
       {m.role !== "tool" && <ThreadMarkers m={m} />}
     </div>
   )
@@ -396,7 +400,7 @@ function ReplyFooter({ m, sources }: { m: ChatMessage; sources?: UpdateSource[] 
   )
 }
 
-function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
+function ChatLineBody({ m, onFollowUp, sources, next }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next: boolean }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
@@ -469,7 +473,7 @@ function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: 
     <div id={`chat-${m.id}`} data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
       <ReplyFooter m={m} sources={sources} />
-      <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
+      {next && <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />}
       <MessageActions text={m.content} anchorId={m.id} reply />
     </div>
   )

@@ -46,6 +46,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
@@ -130,6 +131,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+    color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),
@@ -147,6 +150,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+    color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),

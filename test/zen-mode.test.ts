@@ -130,8 +130,10 @@ describe("Zen mode", () => {
     expect(chat()!.querySelector("[aria-label='Leave Zen mode']")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Zen mode']")).toBeNull()
     expect(chat()!.querySelector("header")!.textContent).toContain("Box Yard Coordinator")
-    // Every row pads in to the one centered column.
-    expect(chat()!.querySelectorAll(".zen-column").length).toBe(3)
+    // Every row pads in to the one centered column: the header, the project bar (a task is running), the thread
+    // and the composer.
+    expect(chat()!.querySelectorAll(".zen-column").length).toBe(4)
+    expect(chat()!.querySelector('[data-testid="project-bar"]')!.classList.contains("zen-column")).toBe(true)
   })
 
   it("puts the context reading and Compact in the header, left of the other controls, and nowhere else", async () => {

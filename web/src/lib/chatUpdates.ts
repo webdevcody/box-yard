@@ -37,6 +37,8 @@ export interface UpdateSource {
   /** "box-yard Captain", the task's title, or null for a notice about no task (the kind names it). */
   label: string | null
   kind: NoticeKind
+  /** The task it's about (its tile leads the name), or null for a Captain or a notice about no task. */
+  taskId: string | null
 }
 
 export type CoordinatorRow =
@@ -118,10 +120,17 @@ function readChip(m: ChatMessage): ChipView {
   }
 }
 
+/** The task an update is about: a task notice's (not a Captain's report), or the task whose files it is. */
+export function itemTask(item: UpdateItem): string | null {
+  if (item.type === "files") return item.group.taskId
+  const m = item.message
+  return m.meta?.captain !== true && typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+}
+
 function sourceOf(item: UpdateItem, rowId: string): UpdateSource {
-  if (item.type === "files") return { id: item.id, rowId, label: item.group.taskTitle, kind: "artifact" }
+  if (item.type === "files") return { id: item.id, rowId, label: item.group.taskTitle, kind: "artifact", taskId: item.group.taskId }
   const v = chipView(item.message)
-  return { id: item.id, rowId, label: v.source?.label ?? null, kind: v.kind }
+  return { id: item.id, rowId, label: v.source?.label ?? null, kind: v.kind, taskId: itemTask(item) }
 }
 
 /**
@@ -193,7 +202,18 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
 
 /** The distinct names in a reply's "from:" line, in order: "box-yard Captain", "Fix login", "Warning". */
 export function sourceLabels(sources: readonly UpdateSource[], kindLabel: (kind: NoticeKind) => string): string[] {
-  return [...new Set(sources.map((s) => s.label ?? kindLabel(s.kind)))]
+  return sourceNames(sources, kindLabel).map((n) => n.label)
+}
+
+/** sourceLabels, each with the task it names (for its tile), if any. */
+export function sourceNames(sources: readonly UpdateSource[], kindLabel: (kind: NoticeKind) => string): { label: string; taskId: string | null }[] {
+  const out = new Map<string, string | null>()
+  for (const s of sources) {
+    const label = s.label ?? kindLabel(s.kind)
+    if (!out.has(label)) out.set(label, s.taskId)
+    else if (!out.get(label) && s.taskId) out.set(label, s.taskId)
+  }
+  return [...out].map(([label, taskId]) => ({ label, taskId }))
 }
 
 /** The distinct sources a group's chip previews: "box-yard Captain, Fix login +2". */
@@ -203,7 +223,7 @@ export function groupPreview(items: readonly UpdateItem[], max = 2): string {
 }
 
 const sameList = <T>(a: readonly T[], b: readonly T[], eq: (x: T, y: T) => boolean = Object.is) => a.length === b.length && a.every((x, i) => eq(x, b[i]!))
-const sameSource = (a: UpdateSource, b: UpdateSource) => a.id === b.id && a.rowId === b.rowId && a.label === b.label && a.kind === b.kind
+const sameSource = (a: UpdateSource, b: UpdateSource) => a.id === b.id && a.rowId === b.rowId && a.label === b.label && a.kind === b.kind && a.taskId === b.taskId
 
 function sameRow(a: CoordinatorRow, b: CoordinatorRow): boolean {
   if (a.type !== b.type || a.id !== b.id || !sameList(rowMessages(a), rowMessages(b))) return false

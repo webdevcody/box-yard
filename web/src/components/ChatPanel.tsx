@@ -23,6 +23,9 @@ import { ChatRows, useCoordinatorRows } from "./UpdateChips"
 import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider } from "./SideThread"
+import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
+import { chatProvenance, filterByProject, recentProjects, type Provenance } from "../lib/chatProvenance"
+import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -38,6 +41,19 @@ const SUGGESTIONS = [
 ]
 
 const NO_MESSAGES: ChatMessage[] = []
+
+/** How far back a quiet project still gets a chip in the bar: the chat talked about it within this long. */
+const RECENT_MS = 24 * 60 * 60_000
+
+/** The projects the chat talked about lately; the same set until that changes, so the bar doesn't re-render. */
+function useRecentProjects(all: ChatMessage[], prov: Provenance): ReadonlySet<string> {
+  const prev = useRef<ReadonlySet<string>>(new Set())
+  return useMemo(() => {
+    const next = recentProjects(all, prov, Date.now() - RECENT_MS)
+    if (next.size === prev.current.size && [...next].every((p) => prev.current.has(p))) return prev.current
+    return (prev.current = next)
+  }, [all, prov])
+}
 
 /**
  * `onClose` adds a close button to the header; App passes it only while the panel is a drawer. `zen` lays the same
@@ -63,7 +79,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const box = useRef<HTMLTextAreaElement>(null)
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
-  const list = useRef<StickyScrollHandle>(null)
+  const scroller = useRef<StickyScrollHandle>(null)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
@@ -84,7 +100,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       if (!content && !attachments.length) return
       const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
-      list.current?.scrollToEnd()
+      scroller.current?.scrollToEnd()
       markTryFirstDone()
       return sending
     },
@@ -100,12 +116,21 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   )
 
   const messages = chat.data ?? NO_MESSAGES
-  const tail = useTail(messages, "chat")
-  // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
-  const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
+  const index = useEntityIndex()
   // Updates fold into chips over the whole thread, so the rendered tail's rows don't change as it grows or trims.
   const all = useMemo(() => splitQueued(messages).settled, [messages])
-  const rows = useCoordinatorRows(all)
+  const allRows = useCoordinatorRows(all)
+  // The project bar: which projects each message is about, and the one the chat shows only (lib/chatProvenance.ts).
+  const projectFilter = useChatProjectFilter()
+  const prov = useMemo(() => chatProvenance(all, index, allRows), [all, index, allRows])
+  const recent = useRecentProjects(all, prov)
+  const list = useMemo(() => (projectFilter ? (filterByProject(messages, prov, projectFilter) as ChatMessage[]) : messages), [messages, prov, projectFilter])
+  const filteredAll = useMemo(() => (projectFilter ? splitQueued(list).settled : NO_MESSAGES), [projectFilter, list])
+  const filteredRows = useCoordinatorRows(filteredAll)
+  const rows = projectFilter ? filteredRows : allRows
+  const tail = useTail(list, projectFilter ? `chat:${projectFilter}` : "chat")
+  // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
+  const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
   const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
@@ -118,17 +143,23 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
   // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
-  const index = useEntityIndex()
   useEffect(() => {
-    if (hidden) warmMarkdown(messages.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index, MENTIONS)
-  }, [messages, hidden, index])
+    if (hidden) warmMarkdown(list.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index, MENTIONS)
+  }, [list, hidden, index])
 
   // Links to a chat message (e.g. a schedule run) may point above the rendered part of the thread.
   const reveal = tail.reveal
   useEffect(() => {
     const onReveal = (e: Event) => {
       const id = (e as CustomEvent<string>).detail
-      if (!reveal(id)) return
+      if (!reveal(id)) {
+        // A message the project filter hides: show the whole chat, then go to it.
+        if (projectFilter && messages.some((m) => m.id === id)) {
+          setChatProjectFilter(null)
+          requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(REVEAL_CHAT_EVENT, { detail: id })))
+        }
+        return
+      }
       // Two frames: let the list settle (and stop following the bottom) before scrolling to the message.
       requestAnimationFrame(() =>
         requestAnimationFrame(() =>
@@ -138,7 +169,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     }
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
     return () => window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
-  }, [reveal])
+  }, [reveal, projectFilter, messages])
 
   return (
     <ThreadChatProvider value={COORDINATOR_CHAT}>
@@ -220,13 +251,14 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             />
           )}
           </div>
+          {!showSetup && <ProjectBar recent={recent} className={zen ? "zen-column" : "px-4"} />}
 
           {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
           {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
 
           <div className={showSetup ? "hidden" : "contents"}>
             <SelectionToTask source={selectionSource} onPrompt={submit}>
-              <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+              <StickyScroll handle={scroller} count={list.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
                 {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
                   <TryFirst
                     ready={!setup.needed}
@@ -252,6 +284,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
+                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={!settled.length} />}
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>
                   <ChatRows rows={shown} onFollowUp={followUp} />

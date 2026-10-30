@@ -901,6 +901,12 @@ export const MIGRATIONS: string[] = [
   CREATE INDEX turn_timings_project ON turn_timings(project_id, ended_at);
   CREATE INDEX turn_timings_task ON turn_timings(task_id, ended_at);
   `,
+  `
+  -- Project colours and task icons (shared/projectColors.ts, shared/taskIcons.ts): NULL picks one from the
+  -- project's name or the task's title.
+  ALTER TABLE projects ADD COLUMN color TEXT;
+  ALTER TABLE tasks ADD COLUMN icon TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

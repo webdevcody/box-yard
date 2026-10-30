@@ -10,7 +10,9 @@ import { PublishedCard } from "./PublishedNotices"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
 import { NOTICE_ICON } from "./noticeIcons"
-import { chipView, coordinatorRows, groupPreview, itemMessages, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
+import { TaskTile } from "./TaskIcon"
+import { useTaskTile } from "../lib/taskTiles"
+import { chipView, coordinatorRows, groupPreview, itemMessages, itemTask, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
 import { splitNotice } from "../lib/captainTranscript"
 import { stripTruncation } from "../lib/truncated"
 import { publishedLabel } from "../lib/publishedNotices"
@@ -55,15 +57,29 @@ export const UpdateChip = memo(
 
 const sameMessages = (a: ChatMessage[], b: ChatMessage[]) => a.length === b.length && a.every((m, i) => m === b[i])
 
+/** What happened, after the task's tile and name: the notice's icon, then "done", "opened a PR"… */
+function Verb({ icon: Icon, className, label, verb }: { icon: LucideIcon | null; className?: string; label?: string; verb: string }) {
+  if (!Icon && !verb) return null
+  return (
+    <span className="flex max-w-[45%] min-w-0 shrink-[0.5] items-center gap-1 text-zinc-400">
+      {Icon && <Icon className={cx("h-3 w-3 shrink-0", className)} aria-label={label} />}
+      {verb && <span className="min-w-0 truncate">{verb}</span>}
+    </span>
+  )
+}
+
 const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
   const [open, toggle] = useChipOpen(m.id)
   const v = chipView(m)
   const { icon, className, label } = v.captain ? { icon: Bot, className: "text-sky-400", label: "Captain" } : NOTICE_ICON[v.kind]
   const Icon = icon
+  // A task's update leads with its tile, and its kind's icon moves to the verb.
+  const taskId = v.captain ? null : typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+  const tile = useTaskTile(taskId)
   return (
     <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="update-chip" data-open={open || undefined} className={MESSAGE_BLOCK}>
       <ChipLine open={open} onToggle={toggle} title={[v.source?.label, v.verb, v.preview].filter(Boolean).join(" ")}>
-        <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />
+        {tile ? <TaskTile id={taskId} /> : <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />}
         {v.source &&
           (v.source.href ? (
             <AppLink href={v.source.href} className={SOURCE_LINK}>
@@ -72,7 +88,7 @@ const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
           ) : (
             <span className="min-w-0 max-w-[55%] shrink truncate font-medium text-zinc-300">{v.source.label}</span>
           ))}
-        {v.verb && <span className="max-w-[45%] min-w-0 shrink-[0.5] truncate text-zinc-400">{v.verb}</span>}
+        {tile ? <Verb icon={Icon} className={className} label={label} verb={v.verb} /> : v.verb && <span className="max-w-[45%] min-w-0 shrink-[0.5] truncate text-zinc-400">{v.verb}</span>}
         {/* Open, the text is right below: no preview. */}
         {v.preview && !open && (
           <span data-testid="update-chip-preview" className={cx("min-w-0 flex-1 truncate", v.source ? "text-zinc-600" : "text-zinc-400")}>
@@ -123,10 +139,11 @@ const FilesChip = memo(function FilesChip({ item }: { item: Extract<UpdateItem, 
   const [open, toggle] = useChipOpen(item.id)
   const g = item.group
   const { icon: Icon, className, label } = NOTICE_ICON.artifact
+  const tile = useTaskTile(g.taskId)
   return (
     <div id={`chat-${item.id}`} data-testid="update-chip" data-open={open || undefined}>
       <ChipLine open={open} onToggle={toggle} title={`${g.taskTitle} ${publishedLabel(g.files.length)}`}>
-        <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />
+        {tile ? <TaskTile id={g.taskId} /> : <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />}
         {g.taskId ? (
           <AppLink href={`/tasks/${g.taskId}`} className={SOURCE_LINK}>
             {g.taskTitle}
@@ -134,7 +151,10 @@ const FilesChip = memo(function FilesChip({ item }: { item: Extract<UpdateItem, 
         ) : (
           <span className="min-w-0 max-w-[55%] shrink truncate font-medium text-zinc-300">{g.taskTitle}</span>
         )}
-        <span className="shrink-0 text-zinc-400">{publishedLabel(g.files.length)}</span>
+        <span className="flex shrink-0 items-center gap-1 text-zinc-400">
+          {tile && <Icon className={cx("h-3 w-3 shrink-0", className)} aria-label={label} />}
+          {publishedLabel(g.files.length)}
+        </span>
         <span className="min-w-0 flex-1 truncate text-zinc-600">· {g.files.map((f) => f.title).join(", ")}</span>
       </ChipLine>
       {open && (
@@ -150,9 +170,15 @@ const FilesChip = memo(function FilesChip({ item }: { item: Extract<UpdateItem, 
 export const UpdateGroup = memo(function UpdateGroup({ id, items }: { id: string; items: UpdateItem[] }) {
   const ids = useMemo(() => items.map((i) => i.id), [items])
   const [open, toggle] = useGroupOpen(id, ids)
+  // Each task's tile; a Captain's report or a notice about no task, its kind's icon.
   const kinds = useMemo(() => {
-    const seen = new Map<string, { icon: LucideIcon; className: string }>()
+    const seen = new Map<string, { icon: LucideIcon; className: string } | { taskId: string }>()
     for (const item of items) {
+      const taskId = itemTask(item)
+      if (taskId) {
+        if (!seen.has(taskId)) seen.set(taskId, { taskId })
+        continue
+      }
       const captain = item.type === "notice" && chipView(item.message).captain
       const kind = item.type === "files" ? "artifact" : chipView(item.message).kind
       const key = captain ? "captain" : kind
@@ -166,9 +192,7 @@ export const UpdateGroup = memo(function UpdateGroup({ id, items }: { id: string
     <div id={`chat-${id}`} data-testid="update-group" data-count={count} data-open={open || undefined}>
       <button type="button" aria-expanded={open} onClick={toggle} title={open ? undefined : preview} className={cx(CHIP_ROW, "w-full")}>
         <span className="flex shrink-0 gap-0.5">
-          {kinds.map(([key, { icon: Icon, className }]) => (
-            <Icon key={key} className={cx("h-3.5 w-3.5", className)} aria-hidden />
-          ))}
+          {kinds.map(([key, k]) => ("taskId" in k ? <TaskTile key={key} id={k.taskId} /> : <k.icon key={key} className={cx("h-3.5 w-3.5", k.className)} aria-hidden />))}
         </span>
         <span className="shrink-0 font-medium text-zinc-300">{count} updates</span>
         {preview && <span className="min-w-0 flex-1 truncate text-zinc-600">· {preview}</span>}
@@ -191,15 +215,24 @@ export function useCoordinatorRows(messages: ChatMessage[]): CoordinatorRow[] {
   return useMemo(() => (prev.current = stableRows(prev.current, coordinatorRows(messages))), [messages])
 }
 
-/** The thread: updates as chips (one "N updates" chip for a run of them), questions and failures as cards. */
+/**
+ * The thread: updates as chips (one "N updates" chip for a run of them), questions and failures as cards. Only the
+ * newest reply offers its next steps: older ones were for a moment that has passed.
+ */
 export const ChatRows = memo(function ChatRows({ rows, onFollowUp }: { rows: CoordinatorRow[]; onFollowUp: (message: string) => void }) {
+  const newest = useMemo(() => {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i]!
+      if (r.type === "message" && r.message.role === "assistant") return r.id
+    }
+  }, [rows])
   return rows.map((r) =>
     r.type === "updates" ? (
       <UpdateGroup key={r.id} id={r.id} items={r.items} />
     ) : r.type === "update" ? (
       <UpdateChip key={r.id} item={r.item} />
     ) : (
-      <ChatLine key={r.id} m={r.message} sources={r.sources} onFollowUp={onFollowUp} />
+      <ChatLine key={r.id} m={r.message} sources={r.sources} onFollowUp={onFollowUp} next={r.id === newest} />
     ),
   )
 })
