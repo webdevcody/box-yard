@@ -457,7 +457,7 @@ function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: 
       <Markdown>{m.content}</Markdown>
       {sources && <ReplySources sources={sources} />}
       <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
-      <MessageActions text={m.content} anchorId={m.id} />
+      <MessageActions text={m.content} anchorId={m.id} reply />
     </div>
   )
 }
