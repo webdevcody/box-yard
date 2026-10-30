@@ -10,7 +10,7 @@ import { hours, money } from "../lib/usage"
 import { cleanupLine, diskMeter, rootMeter } from "../lib/diskCleanup"
 import { memoryMeter, memoryShort } from "../lib/memoryMeter"
 import { formatBytes, measuredAgo } from "../../../shared/disk"
-import { Button, Empty, ExternalMark, NewTabLink, PrChip, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
+import { Button, Empty, ExternalMark, NewTabLink, PrChip, PriorityPill, STATUS, StatusBadge, cx, timeAgo, LineIcon, waitIconOf } from "./ui"
 import { Modal } from "./Modal"
 import { menuItem, menuItemBase, usePopover } from "./TaskHeader"
 import { BoxActionDialog, type BoxAction as ConfirmAction } from "./BoxActionDialog"
@@ -23,6 +23,7 @@ import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 import { WaitReason } from "./WaitReason"
 import { CloudMeter } from "./CloudMeter"
+import { byQueueOrder } from "../../../shared/priority"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -80,7 +81,8 @@ export function BoxesView() {
   const projectName = (id: string) => projects.data?.find((p) => p.id === id)?.name ?? id
   const tasksOn = (boxId: string) => all.filter((t) => t.boxId === boxId)
   const running = all.filter((t) => t.boxId && RUNNING.includes(t.status)).length
-  const queued = all.filter((t) => t.status === "queued").sort((a, b) => a.updatedAt - b.updatedAt)
+  // In the order the scheduler pulls them: high priority first, then first in, first out.
+  const queued = all.filter((t) => t.status === "queued").sort(byQueueOrder)
   const shown = filterBoxes(list, filter)
   const selected = list.find((b) => b.id === hash) ?? null
   const liveBoxIds = useMemo(() => new Set(list.map((b) => b.id)), [list])
@@ -864,6 +866,7 @@ function TaskRow({ task, projectName, muted, note }: { task: Task; projectName: 
         )}
       </div>
       <PrChip task={task} variant="link" className="hidden text-xs sm:inline-flex" />
+      <PriorityPill task={task} />
       <StatusBadge status={badgeStatus(task)} />
       <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600 transition group-hover:translate-x-0.5 group-hover:text-zinc-300" />
     </Link>
