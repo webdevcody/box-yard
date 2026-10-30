@@ -35,7 +35,6 @@ export interface RunPodProviderDeps {
   install: () => string
   /** Box Yard's runpod/ folder: init.sh, watchdog.sh and bootstrap.sh are uploaded from it to every pod. */
   scriptsDir: string
-  git: { name: string; email: string }
   /** A pod was started or terminated (box history). */
   onEvent?: (e: { boxId: string; kind: "started" | "terminated"; pod: RunPodPod; detail: string }) => void
   /** Progress while a pod starts, for the task's wait reason. */
@@ -433,8 +432,6 @@ export class RunPodProvider extends SshBoxProvider implements BoxProvider {
       t,
       [
         "bash /opt/boxyard/init.sh",
-        `git config --global user.name ${q(this.d.git.name)}`,
-        `git config --global user.email ${q(this.d.git.email)}`,
         "node --version && claude --version",
       ].join(" && "),
       { direct: true, timeoutMs: 120_000 },

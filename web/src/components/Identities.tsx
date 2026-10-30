@@ -4,7 +4,8 @@
 import { useState, type ReactNode } from "react"
 import { Check, Fingerprint, KeyRound, Laptop, Pencil, Play, Plus, ScanSearch, Trash2, Undo2, X } from "lucide-react"
 import { ApiError } from "../lib/api"
-import { identityApi, useDetectIdentities, useIdentities, useProjects, useTestIdentity } from "../lib/queries"
+import { identityApi, useDetectIdentities, useIdentities, useProjects, useSetup, useTestIdentity } from "../lib/queries"
+import { AuthorFallbackNotice } from "./Setup"
 import { useDraft } from "../lib/settingsDraft"
 import { IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityClaudeKind, type IdentityColor, type IdentityDetection, type IdentityInput, type IdentityProposal } from "../../../shared/identities"
 import { RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
@@ -124,6 +125,7 @@ const named = (name: string, err: unknown) => new Error(`${name}: ${err instance
 export function IdentitiesPanel({ fid }: { fid: (k: string) => string }) {
   const identities = useIdentities()
   const projects = useProjects()
+  const setup = useSetup()
   const [news, setNews] = useDraft<NewIdentity[]>("identities-new", "identities", NO_NEW, async (list) => {
     for (const n of list) {
       const name = n.edit.name?.trim() ?? ""
@@ -152,6 +154,7 @@ export function IdentitiesPanel({ fid }: { fid: (k: string) => string }) {
 
   return (
     <Panel section="identities">
+      <AuthorFallbackNotice status={setup.data} />
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" onClick={add} data-testid="identity-add">
           <Plus className="h-3.5 w-3.5" /> Add identity
@@ -360,7 +363,7 @@ function IdentityForm({ fid, identity: i, edit, onEdit }: { fid: (k: string) => 
       <FormField id={fid("owners")} label="Owners" hint="GitHub users and orgs whose repos it's for, so Import and the Coordinator know which projects it fits.">
         <input id={fid("owners")} className={inputClass} value={edit.owners ?? i?.owners.join(", ") ?? ""} onChange={(e) => set("owners", e.target.value)} placeholder="acme-corp, octo-acme" spellCheck={false} />
       </FormField>
-      <FormField id={fid("author")} label="Git author" hint="The name and email its commits get. Use one of the account's verified emails, or GitHub won't link the commits to it. Blank: Settings' GIT_USER_NAME and GIT_USER_EMAIL.">
+      <FormField id={fid("author")} label="Git author" hint="The name and email its commits get. Use one of the account's verified emails, or GitHub won't link the commits to it. Blank: Settings › Credentials › Git author, else (Default identity on this computer) your git config, else the GitHub account behind its token.">
         <div className="grid gap-2 @min-[30rem]:grid-cols-2">
           <input id={fid("author")} className={inputClass} value={author?.name ?? ""} onChange={(e) => set("author", { name: e.target.value, email: author?.email ?? "" })} placeholder="Ada Lovelace" aria-label="Author name" />
           <input className={inputClass} type="email" value={author?.email ?? ""} onChange={(e) => set("author", { name: author?.name ?? "", email: e.target.value })} placeholder="ada@acme.dev" aria-label="Author email" spellCheck={false} />

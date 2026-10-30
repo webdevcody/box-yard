@@ -13,6 +13,7 @@ import { codexExecArgs, CodexStream, isRefreshOf, seedCodexAuth } from "./codex.
 import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
+import { authorFallbacks } from "./gitAuthor.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import type { GpuProvider } from "../shared/gpu.js"
@@ -205,6 +206,11 @@ export class Setup {
       upstash: { available: mock || c.boxProvider === "local" || set("upstashBoxApiKey") },
       local,
       restart,
+      authorFallbacks: authorFallbacks(this.d.store).flatMap((r) => {
+        const project = this.d.store.getProject(r.projectId)
+        if (!project) return []
+        return [{ ...r, project: project.name, task: this.d.store.getTaskRow(r.taskId)?.title ?? r.taskId }]
+      }),
     }
   }
 

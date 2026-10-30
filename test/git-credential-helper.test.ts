@@ -62,7 +62,7 @@ describe("Box Yard's GitHub credential helper (F1)", () => {
     const helper = { helper: GITHUB_HELPER, only: true }
     const thin = thinRestoreScript("/t", { root: "/r", mirror: "/r/m.git", url: "https://github.com/a/b.git", partial: false, git: "git" }, { ...helper, userName: "t", userEmail: "t@t" })
     expect(thin).toContain(setHelperScript(GITHUB_HELPER, true))
-    const first = gitRestoreScript({ dir: "/t", taskId: "t", baseBranch: "main", gitUserName: "t", gitUserEmail: "t@t", clone: { script: "true", ...helper }, git: gitWithHelper(GITHUB_HELPER, true), env: "true" })
+    const first = gitRestoreScript({ dir: "/t", taskId: "t", baseBranch: "main", clone: { script: "true", ...helper }, git: gitWithHelper(GITHUB_HELPER, true), env: "true" })
     expect(first).toContain(setHelperScript(GITHUB_HELPER, true, "git -C work"))
   })
 })

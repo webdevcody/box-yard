@@ -48,7 +48,6 @@ export interface DockerProviderDeps {
   settings: () => DockerSettings
   /** This install's id (TaskManager.installLabel without "by-"): containers and volumes carry it, and Box Yard only touches those. */
   install: () => string
-  git: { name: string; email: string }
   /** Box Yard created or started a container (box history). Stops and deletes are TaskManager's own. */
   onEvent?: (e: { boxId: string; kind: "created" | "started"; detail: string }) => void
   /** Progress while a container starts (an image build), for the task's log. */
@@ -259,7 +258,6 @@ export class DockerProvider implements BoxProvider {
       input: [
         `missing=""; for t in ${tools.map(q).join(" ")}; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done`,
         `if [ -n "$missing" ]; then echo "missing:$missing"; exit 3; fi`,
-        `git config --global user.name ${q(this.d.git.name)} && git config --global user.email ${q(this.d.git.email)}`,
       ].join("\n"),
     })
     const check = { exitCode: r.code, stdout: r.stdout.toString("utf8"), stderr: r.stderr }

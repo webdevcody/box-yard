@@ -274,8 +274,6 @@ export interface GitRestoreOptions {
   taskId: string
   /** The project's base branch, hydrated in the mirror along with the task's branch. */
   baseBranch: string
-  gitUserName: string
-  gitUserEmail: string
   /** Clones work/ when the archive has no .git (a git-first archive). Null: no mirror (no repo). `only`: see setHelperScript. */
   clone: { script: string; helper: string; only?: boolean } | null
   /** `git` with the credential helper, and the env exports that reach GitHub. */
@@ -327,7 +325,6 @@ export function gitRestoreScript(o: GitRestoreOptions): string {
       : `  byno "the archive has no repo and the project has none to clone"`,
     `fi`,
     `cd work`,
-    `git config user.name ${q(o.gitUserName)}; git config user.email ${q(o.gitUserEmail)}`,
     `[ -f ../${GIT_PACK} ] && { git index-pack --stdin < ../${GIT_PACK} >/dev/null 2>"$byt/err" || byno "git.pack is damaged: $(byerr)"; }`,
     // Does the repo have this commit and its tree? Asked of a scratch repo that borrows work/'s objects: it has
     // no promisor remote, so a missing commit isn't lazily fetched (with its whole history, in a partial clone).

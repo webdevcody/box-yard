@@ -396,7 +396,6 @@ export function createBoxYard(
     credentials: settings.credentials,
     dataDir: c.dataDir,
     install,
-    git: { name: c.gitUserName, email: c.gitUserEmail },
   })
   // Vast.ai GPU instances, the other cloud behind "Runs on: GPU" (docs/vast.md). Idle until a Vast.ai key is set.
   const vastService = new VastService({
@@ -404,7 +403,6 @@ export function createBoxYard(
     credentials: settings.credentials,
     dataDir: c.dataDir,
     install,
-    git: { name: c.gitUserName, email: c.gitUserEmail },
     runpodImage: () => runpod.store.get().image,
     fetch: opts.vastFetch,
   })
@@ -415,7 +413,6 @@ export function createBoxYard(
     credentials: settings.credentials,
     secrets: secretValues,
     install,
-    git: { name: c.gitUserName, email: c.gitUserEmail },
     bin: c.dockerBin || null,
     mock: c.mock && !opts.realDocker ? { dir: path.join(c.dataDir, "docker-boxes"), claudeBin: c.claudeBin } : null,
     claudeBin: opts.realDocker?.claudeBin,

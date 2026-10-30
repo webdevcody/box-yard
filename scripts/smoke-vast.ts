@@ -35,7 +35,6 @@ const p = new VastProvider({
   install: () => "smoketest",
   bootstrapDir: runpodDir(),
   scriptsDir: vastDir(),
-  git: { name: "Box Yard", email: "boxyard@example.com" },
   onEvent: (e) => console.log(`  · ${e.kind}: ${e.detail}`),
   onProgress: (_box, m) => console.log(`  · ${m}`),
 })

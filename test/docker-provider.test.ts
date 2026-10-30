@@ -49,7 +49,6 @@ function provider(settings: Partial<DockerSettings> = {}) {
     images: { ensure: async () => "boxyard-agent:bx-test" },
     settings: () => ({ ...DEFAULT_DOCKER_SETTINGS, ...settings }),
     install: () => INSTALL,
-    git: { name: "Box Yard", email: "boxyard@example.com" },
     onEvent: (e) => events.push(e),
   })
   return { p, events }

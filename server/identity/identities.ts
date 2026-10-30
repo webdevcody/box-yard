@@ -523,7 +523,12 @@ export class Identities {
       if (check === "verified") lines.push(`Author ${who}: verified on ${login?.login ?? "the account"}.`)
       else if (check === "unverified") lines.push(`Warning: author email ${identity.author.email} isn't one of ${login?.login ?? "the account"}'s verified emails, so GitHub won't link its commits to the account.`)
       else lines.push(`Author ${who}: not checked (the token can't read the account's emails: that needs the user:email scope).`)
-    } else lines.push(identity.isDefault ? "Author: Settings' (GIT_USER_NAME / GIT_USER_EMAIL), else each repo's." : "Author: none of its own, so Settings' (GIT_USER_NAME / GIT_USER_EMAIL).")
+    } else
+      lines.push(
+        identity.isDefault
+          ? "Author: none of its own, so Settings › Credentials › Git author (GIT_USER_NAME / GIT_USER_EMAIL), else this computer's git config (on this computer), else the GitHub account behind the token."
+          : "Author: none of its own, so Settings › Credentials › Git author (GIT_USER_NAME / GIT_USER_EMAIL), else the GitHub account behind its token.",
+      )
     const s = identity.signing
     if (s) {
       if (s.kind === "file" && !s.readable) bad(`Signing key ${s.fingerprint} can't be opened with this server's secret key (it changed): save it again.`)
