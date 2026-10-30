@@ -418,13 +418,19 @@ describe("A card in the side panel", () => {
   beforeEach(() => {
     posts = []
     vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
-      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      if (init?.method === "POST") posts.push({ url, body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {} })
       return new Promise(() => {})
     })
   })
 
   const panel = () => host.querySelector('[data-testid="side-thread"]') as HTMLElement | null
   const expand = (key: string) => card(key).querySelector('[data-testid="chat-card-panel"]') as HTMLElement
+  /** Opens the panel's ⋯ and reads its items. */
+  const menu = (p: HTMLElement) => {
+    if (!document.querySelector('[role="menu"]')) click(p.querySelector('button[aria-label="More card actions"]')!)
+    return [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)
+  }
+  const menuItem = (label: string) => [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === label) as HTMLElement
 
   it("⤢ opens it beside the chat as Tasks › its title, with its header, its history and a box at the bottom; its card is outlined", () => {
     render()
@@ -445,10 +451,12 @@ describe("A card in the side panel", () => {
     const box = p.querySelector('[data-testid="card-composer"]') as HTMLElement
     expect(box.dataset.to).toBe("task")
     expect(box.previousElementSibling!.contains(p.querySelector('[data-testid="card-panel-divider"]'))).toBe(true)
-    // ✓ Mark done, ⋯ and the task page.
-    expect(p.querySelector('[data-testid="card-panel-done"]')).not.toBeNull()
+    // The thread panel's header: ✓ Mark done, ⋯, Maximize and ×.
+    expect(p.querySelector('[data-testid="card-panel-done"]')!.getAttribute("aria-label")).toBe("Mark done")
     expect(p.querySelector('button[aria-label="More card actions"]')).not.toBeNull()
-    expect(p.querySelector(`a[href="/tasks/${LOGIN.id}"]`)!.textContent).toBe("Open the task page")
+    expect(p.querySelector('[data-testid="card-panel-expand"]')!.getAttribute("aria-label")).toBe("Expand over the chat")
+    expect(p.querySelector('header button[aria-label="Close"]')).not.toBeNull()
+    expect(p.querySelector("header a")).toBeNull()
 
     expect(card(LOGIN.id).dataset.inPanel).toBe("true")
     expect(expand(LOGIN.id).getAttribute("aria-pressed")).toBe("true")
@@ -527,14 +535,82 @@ describe("A card in the side panel", () => {
     expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
     expect((p.querySelector('[data-testid="card-composer"]') as HTMLElement).dataset.to).toBe("coordinator")
     expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
-    expect(p.querySelector('header a[href^="/tasks/"]')).toBeNull()
+    expect(menu(p)).toEqual(["Show in timeline", "Show its card"])
   })
 
-  it("offers no Mark done for a task that's done", () => {
+  it("has the thread panel's ⋯: Show in timeline, Open the task page and Show its card", () => {
+    render()
+    click(expand(LOGIN.id))
+    expect(menu(panel()!)).toEqual(["Show in timeline", "Open the task page", "Show its card"])
+  })
+
+  it("stops its task's agent from ⋯ while it works", async () => {
+    render()
+    await act(async () => {
+      qc.setQueryData(keys.tasks, TASKS.map((t) => (t.id === LOGIN.id ? { ...t, status: "working" as const } : t)))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    click(expand(LOGIN.id))
+    const items = menu(panel()!)
+    expect(items).toEqual(["Show in timeline", "Open the task page", "Stop answering", "Show its card"])
+    click(menuItem("Stop answering"))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts.map((x) => x.url)).toEqual([`/api/tasks/${LOGIN.id}/stop`])
+  })
+
+  it("Show its card goes back to the Cards view, opens the card and scrolls to it", async () => {
+    const scrolled: string[] = []
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
+      if (this.id.startsWith("card-")) scrolled.push(this.id)
+    })
+    render()
+    click(expand(CARDS.id))
+    click(viewButton("Timeline"))
+    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    menu(panel()!)
+    click(menuItem("Show its card"))
+    await act(async () => await new Promise((r) => setTimeout(r, 50)))
+    expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
+    expect(card(CARDS.id).dataset.open).toBe("true")
+    expect(scrolled).toEqual([`card-${CARDS.id}`])
+    // Beside the chat, it stays open.
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    vi.restoreAllMocks()
+  })
+
+  it("expands over the chat and back, as a thread does", () => {
+    render()
+    click(expand(LOGIN.id))
+    const max = () => panel()!.querySelector('[data-testid="card-panel-expand"]') as HTMLElement
+    click(max())
+    expect(panel()!.dataset.expanded).toBe("true")
+    expect(max().getAttribute("aria-label")).toBe("Back beside the chat")
+    expect(max().getAttribute("aria-pressed")).toBe("true")
+    click(max())
+    expect(panel()!.dataset.expanded).toBeUndefined()
+  })
+
+  it("turns ✓ into Reopen once done: in the undo window it undoes Mark done, after it goes to the box", () => {
+    render()
+    click(expand(LOGIN.id))
+    const done = () => panel()!.querySelector('[data-testid="card-panel-done"]') as HTMLElement
+    click(done())
+    expect(done().getAttribute("aria-label")).toBe("Reopen")
+    expect(done().getAttribute("aria-pressed")).toBe("true")
+    click(done())
+    expect(done().getAttribute("aria-label")).toBe("Mark done")
+    expect(posts).toEqual([])
+  })
+
+  it("offers Reopen for a task that's done, which goes to its box", () => {
     render()
     click(host.querySelector('[data-testid="cards-done"]')!)
     click(expand(DOCS.id))
-    expect(panel()!.querySelector('[data-testid="card-panel-done"]')).toBeNull()
-    expect(panel()!.querySelector(`a[href="/tasks/${DOCS.id}"]`)).not.toBeNull()
+    const done = panel()!.querySelector('[data-testid="card-panel-done"]') as HTMLElement
+    expect(done.getAttribute("aria-label")).toBe("Reopen")
+    click(done)
+    const box = panel()!.querySelector("textarea")!
+    expect(document.activeElement).toBe(box)
+    expect(box.placeholder).toBe("Reply (reopens the task)…")
   })
 })

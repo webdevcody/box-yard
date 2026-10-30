@@ -17,18 +17,21 @@ import {
   ChevronUp,
   CircleCheck,
   CornerDownRight,
-  Expand,
   LayoutGrid,
   Layers,
+  Link2,
   List,
   Maximize2,
+  Minimize2,
   MoreHorizontal,
   Send,
-  Shrink,
+  Square,
+  Undo2,
   X,
   type LucideIcon,
 } from "lucide-react"
-import { useBadgeStatuses, useChatBusy, useMarkDoneFromInbox, useTasksIn } from "../lib/queries"
+import { useBadgeStatuses, useChatBusy, useMarkDoneFromInbox, useStopTask, useTasksIn } from "../lib/queries"
+import { undoClose, usePendingCloses } from "../lib/inbox"
 import { useEntityIndex } from "../lib/entities"
 import { useTaskTile, useTiles } from "../lib/taskTiles"
 import { badgeStatus, type BadgeStatus } from "../lib/prState"
@@ -42,7 +45,7 @@ import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInT
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
-import { COORDINATOR_CHAT, openCard, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
+import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
 import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
@@ -616,8 +619,9 @@ const PANEL_BOX = cx(COMPOSER_FOOTER, "px-3")
 type CardPanelOwn = { layout: CardsLayout | null; asked: readonly ChatMessage[]; onFollowUp: (text: string) => void }
 
 /**
- * A card in the side panel (⤢), the panel reply threads open in: "Tasks › [tile] title" with ✓ (Mark done), ⋯, ⤢ (the
- * task page) and ×, then its header, its whole history under a divider, and its box at the bottom.
+ * A card in the side panel (⤢), the panel reply threads open in, with their header: "Tasks › [tile] title", ✓ (Mark
+ * done, or Reopen once done), ⋯, Maximize ↔ Minimize and ×. Then its header, its whole history under a divider, and its
+ * box at the bottom.
  */
 export const CardPanel = memo(function CardPanel({ chat, open, headerClassName, layout, asked, onFollowUp }: CardPanelProps & CardPanelOwn) {
   const card = layout?.all.find((c) => c.key === open.card) ?? null
@@ -653,6 +657,8 @@ function CardPanelView({
   const more = useRef<HTMLButtonElement>(null)
   const [menu, setMenu] = useState(false)
   const markDone = useMarkDoneFromInbox()
+  const stop = useStopTask()
+  const closing = usePendingCloses()
   const [, navigate] = useLocation()
   const unread = newSince(card.entries, useSeenAt(card.key))
   // In the panel, its news is in front of Cody.
@@ -662,10 +668,24 @@ function CardPanelView({
   // Focus moves in with it, so Esc closes it.
   useEffect(() => pane.current?.focus({ preventScroll: true }), [])
   const page = task ? `/tasks/${task.id}` : null
+  // Done, or marked done and still in its undo window.
+  const done = task ? task.status === "done" || closing.has(task.id) : false
+  // A closed task reopens with a message (closing archived its workspace), so Reopen goes to the box.
+  const reopen = () => {
+    if (task && !undoClose(task.id)) pane.current?.querySelector("textarea")?.focus()
+  }
+  const showItsCard = () => {
+    showCard(card.key)
+    // A sheet covers the chat: get out of the way of the card.
+    if (open.expanded) return toggleExpanded(chat)
+    const aside = pane.current?.closest("aside")
+    if (aside && getComputedStyle(aside).position === "absolute") closeThread(chat)
+  }
   const items: MenuItem[] = [
     { icon: List, label: "Show in timeline", run: () => showInTimeline({ key: card.key, taskIds: card.taskIds }) },
-    ...(page ? [{ icon: Maximize2, label: "Open the task page", run: () => void (openInZenPanel(page) || navigate(page)) }] : []),
-    { icon: open.expanded ? Shrink : Expand, label: open.expanded ? "Back beside the chat" : "Expand over the chat", run: () => toggleExpanded(chat) },
+    ...(page ? [{ icon: Link2, label: "Open the task page", run: () => void (openInZenPanel(page) || navigate(page)) }] : []),
+    ...(task && isRunning(task) ? [{ icon: Square, label: "Stop answering", run: () => stop.mutate(task.id) }] : []),
+    { icon: LayoutGrid, label: "Show its card", run: showItsCard },
   ]
   // Over the whole chat, it reads in a column.
   const wide = open.expanded && "mx-auto w-full max-w-3xl"
@@ -681,27 +701,37 @@ function CardPanelView({
         title={
           <span style={projectColorStyle(first?.color)} title={title} className="flex min-w-0 items-center gap-1.5">
             <CardIcon card={card} />
-            <span data-testid="card-panel-title" className="min-w-0 truncate text-zinc-300">
+            <span data-testid="card-panel-title" className="min-w-0 truncate text-zinc-400">
               {title}
             </span>
           </span>
         }
       >
-        {task && task.status !== "done" && (
-          <button type="button" data-testid="card-panel-done" onClick={() => markDone(task)} aria-label="Mark done" title="Mark done" className={PANEL_ICON}>
-            <CircleCheck className="h-4 w-4" />
-          </button>
-        )}
+        {task &&
+          (done ? (
+            <button type="button" data-testid="card-panel-done" onClick={reopen} aria-pressed aria-label="Reopen" title="Done. Reopen it: write to it below" className={PANEL_ICON}>
+              <Undo2 className="h-4 w-4" />
+            </button>
+          ) : (
+            <button type="button" data-testid="card-panel-done" onClick={() => markDone(task)} aria-pressed={false} aria-label="Mark done" title="Mark done" className={PANEL_ICON}>
+              <CircleCheck className="h-4 w-4" />
+            </button>
+          ))}
         <button ref={more} type="button" onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} aria-label="More card actions" title="More" className={PANEL_ICON}>
           <MoreHorizontal className="h-4 w-4" />
         </button>
         {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
-        {page && (
-          <AppLink href={page} title="Open the task page" className={cx(PANEL_ICON, PANEL_WIDE)}>
-            <Maximize2 className="h-3.5 w-3.5" aria-hidden />
-            <span className="sr-only">Open the task page</span>
-          </AppLink>
-        )}
+        <button
+          type="button"
+          data-testid="card-panel-expand"
+          onClick={() => toggleExpanded(chat)}
+          aria-pressed={Boolean(open.expanded)}
+          aria-label={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          title={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          className={cx(PANEL_ICON, PANEL_WIDE)}
+        >
+          {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+        </button>
       </PanelHeader>
       <StickyScroll count={card.entries.length + asked.length} resetKey={card.key} className={cx("px-3 py-3", wide)} contentClassName="space-y-2.5">
         <div data-testid="card-panel-head" style={projectColorStyle(first?.color)} className="rounded-[10px] border border-l-[3px] border-zinc-800/80 border-l-(--pc) bg-zinc-900/40 py-2 pr-2.5 pl-3">
