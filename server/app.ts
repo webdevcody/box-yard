@@ -488,6 +488,9 @@ export function createBoxYard(
   // An agent's message_captain goes to its own project's Captain; the Captain's turn tells a still-waiting agent it's done.
   tasks.onCaptainMessage = (projectId, input) => captains.fromAgent(projectId, input)
   captains.onAgentMessagesHandled = (_projectId, messages, reply) => tasks.captainHandledAgentMessages(messages, reply)
+  // Cody's message from a task's chat goes to that task's own project's Captain, and its reply back to the task's chat.
+  tasks.onForwardToCaptain = (projectId, content, attachments, viaTask) => captains.send(projectId, content, { attachments, source: "cody", meta: { viaTask } })
+  captains.onForwardsHandled = (projectId, messages, reply) => tasks.captainAnsweredForwards(projectId, messages, reply)
   captains.claudeLogin = (projectId) => identities.ownClaude(projectId)
   // Coordinator sees: status only (docs/identities.md): its summaries, recaps and hook messages leave those projects' content out,
   // and their Captains are told to answer it with state, not content.
@@ -1028,6 +1031,13 @@ export function createBoxYard(
     const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
     if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
     res.json(task)
+  })
+  // Task management from the task's chat, for its project's Captain instead of the busy agent: the Captain gets the
+  // task's queue with it, and the reply shows in the task's chat (TaskManager.forwardToCaptain).
+  api.post("/tasks/:id/captain", (req, res) => {
+    const body = parse(schemas.message, req.body)
+    if (!store.getTaskRow(req.params.id!)) return void res.status(404).json({ error: "Task not found" })
+    res.status(201).json(tasks.forwardToCaptain(req.params.id!, body.content, withAttachments(body.content, body.attachments)))
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
   api.get("/tasks/:id/queue", (req, res) => {

@@ -26,9 +26,10 @@ export const captainHref = (projectId: string) => `/projects/${encodeURIComponen
 
 /**
  * The title button and its menu. `current` is the chat it sits in: COORDINATOR_CHAT or a project id. `onLeave` runs
- * when another chat is picked (the Coordinator's drawer closes, so the Captain it opened is in view).
+ * when another chat is picked (the Coordinator's drawer closes, so the Captain it opened is in view). `onPick` can
+ * take a pick itself and return true: the Coordinator chat talking to a project's Captain goes back to the Coordinator.
  */
-export function ChatSwitcher({ current, onLeave, children }: { current: string; onLeave?: () => void; children: ReactNode }) {
+export function ChatSwitcher({ current, onLeave, onPick, children }: { current: string; onLeave?: () => void; onPick?: (chat: string) => boolean; children: ReactNode }) {
   const panel = useRef<HTMLDivElement>(null)
   const { open, setOpen, root, trigger } = usePopover(panel)
   const menuId = useId()
@@ -52,7 +53,7 @@ export function ChatSwitcher({ current, onLeave, children }: { current: string; 
         <span className="min-w-0 truncate">{children}</span>
         <ChevronDown className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden />
       </button>
-      {open && <SwitcherMenu id={menuId} panel={panel} trigger={trigger} current={current} onLeave={onLeave} onClose={() => setOpen(false)} />}
+      {open && <SwitcherMenu id={menuId} panel={panel} trigger={trigger} current={current} onLeave={onLeave} onPick={onPick} onClose={() => setOpen(false)} />}
     </div>
   )
 }
@@ -71,6 +72,7 @@ function SwitcherMenu({
   trigger,
   current,
   onLeave,
+  onPick,
   onClose,
 }: {
   id: string
@@ -78,6 +80,7 @@ function SwitcherMenu({
   trigger: RefObject<HTMLButtonElement | null>
   current: string
   onLeave?: () => void
+  onPick?: (chat: string) => boolean
   onClose: () => void
 }) {
   const [, navigate] = useLocation()
@@ -118,7 +121,7 @@ function SwitcherMenu({
 
   const pick = (chat: string) => {
     onClose()
-    if (chat !== current) {
+    if (chat !== current && !onPick?.(chat)) {
       onLeave?.()
       if (chat === COORDINATOR_CHAT) {
         // From Zen's side panel, back to the chat beside (or under) it; elsewhere the drawer opens if it isn't docked.

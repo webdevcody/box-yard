@@ -84,6 +84,8 @@ describe("project bar", () => {
   })
 
   it("a chip shows only its project's part of the chat; the chip again or Show all brings it all back", () => {
+    // The Timeline: the Cards view shows the Coordinator's own card only under All (coordinator-cards-ui.test.ts).
+    setCoordinatorView("timeline")
     render(createElement(ChatPanel))
     expect(text()).toContain("Started Level 7 terrain")
     expect(text()).toContain("is asking you something")

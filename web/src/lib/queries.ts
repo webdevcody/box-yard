@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
-import { api, clientId } from "./api"
+import { ApiError, api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
@@ -340,10 +340,11 @@ export const useSettings = () =>
   })
 export const useOrchestratorState = () =>
   useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
-export const useCaptainState = (projectId: string) =>
-  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity })
-export const useCaptainMessages = (projectId: string) =>
-  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`) })
+/** `enabled` false: no project yet (the Coordinator chat's bottom panel with "All" picked). */
+export const useCaptainState = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity, enabled: o.enabled })
+export const useCaptainMessages = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`), enabled: o.enabled })
 export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
@@ -928,7 +929,11 @@ export function useCreateTask() {
   })
 }
 
-export function useSendTaskMessage(taskId: string) {
+/** The server refused it (not "can't reach the server"): a card's reply then goes to the Coordinator (CardComposer). */
+export const refused = (err: unknown) => err instanceof ApiError && err.status >= 400
+
+/** `quiet`: errors it says nothing about, because the caller handles them (a card's reroute). */
+export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Error) => boolean } = {}) {
   const qc = useQueryClient()
   return useMutation({
     /** `inChat`: sent from the task's card in the Coordinator chat, which then shows it (TaskManager.sentFromChat). */
@@ -950,6 +955,7 @@ export function useSendTaskMessage(taskId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      if (quiet?.(err)) return
       playSendSound("failed")
       fail("Couldn't send the message")(err)
     },
@@ -957,6 +963,39 @@ export function useSendTaskMessage(taskId: string) {
       playSendSound()
       qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
       void qc.invalidateQueries({ queryKey: keys.taskQueue(taskId) })
+    },
+  })
+}
+
+/**
+ * Send a task-chat message to the task's project's Captain instead of its agent (TaskManager.forwardToCaptain). Shows
+ * at once as a pending "→ Captain" line; the server's task.message replaces it (stream.ts matches tmp- by content).
+ */
+export function useForwardToCaptain(taskId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { content: string; attachments?: Attachment[] }) =>
+      api<TaskMessage>(`/api/tasks/${taskId}/captain`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
+    onMutate: async ({ content, attachments }) => {
+      const undo = snapshot<TaskMessage[]>(qc, keys.taskMessages(taskId))
+      const now = Date.now()
+      const meta = { kind: "to_captain", pending: true, ...(attachments?.length ? { attachments } : {}) }
+      const line: TaskMessage = { id: `tmp-${now}`, taskId, role: "event", content: content.trim(), meta, createdAt: now }
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => (list ? [...list, line] : list))
+      return { undo, tmp: line.id }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      playSendSound("failed")
+      fail("Couldn't send it to the Captain")(err)
+    },
+    onSuccess: (msg, _v, ctx) => {
+      playSendSound()
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => {
+        if (!list) return list
+        const rest = list.filter((m) => m.id !== ctx?.tmp)
+        return rest.some((m) => m.id === msg.id) ? rest : [...rest, msg]
+      })
     },
   })
 }

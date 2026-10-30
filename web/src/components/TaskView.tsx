@@ -15,7 +15,7 @@ import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
 import { AppLink, Empty, InRepo, LineIcon, LinkedText, Markdown, TimeAgo, cx, useRepoScope, warmMarkdown, WaitIcon } from "./ui"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
-import { COMPOSER_FOOTER, Composer } from "./Composer"
+import { CaptainAnswerLine, TaskComposer, ToCaptainLine } from "./CaptainForward"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { TaskHeader, useStoredFlag } from "./TaskHeader"
 import { PublishedFile } from "./TaskFiles"
@@ -66,6 +66,7 @@ function TaskPage({ id }: { id: string }) {
     },
     [send.mutateAsync],
   )
+  const scrollToEnd = useCallback(() => thread.current?.scrollToEnd(), [])
   const sendFollowUp = useCallback((content: string) => submit(content, []), [submit])
   const startFromSelection = useCallback(
     (content: string) => sendChat.mutate({ id: newClientId("chat"), content, attachments: [] }),
@@ -123,19 +124,7 @@ function TaskPage({ id }: { id: string }) {
         onFollowUp={sendFollowUp}
       />
 
-      <Composer
-        className={cx(COMPOSER_FOOTER, "mt-3")}
-        onSubmit={submit}
-        panelRef={panel}
-        historyKey={`task:${id}`}
-        placeholder={
-          task.status === "needs_input"
-            ? "Answer the agent…"
-            : running
-              ? "Message is delivered when the current turn ends…"
-              : "Send feedback or a follow-up (resumes the same session)…"
-        }
-      />
+      <TaskComposer task={task} project={project} panelRef={panel} onSubmit={submit} onForwarded={scrollToEnd} />
     </div>
   )
 }
@@ -281,6 +270,8 @@ export const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFo
     default: {
       const url = typeof m.meta?.url === "string" ? m.meta.url : null
       const timing = timingOf(m.meta)
+      if (m.meta?.kind === "to_captain") return <ToCaptainLine m={m} />
+      if (m.meta?.kind === "captain_answer") return <CaptainAnswerLine m={m} />
       if (m.meta?.kind === "hook")
         return (
           <div className={cx("flex items-start gap-1.5 pl-1 text-xs leading-relaxed", m.meta.status === "fired" ? "text-teal-300/90" : "text-amber-200/80")} data-testid="hook-event">

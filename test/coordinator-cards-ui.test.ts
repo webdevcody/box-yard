@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 // The Coordinator chat as cards: a card per task (a batch's one card), the Coordinator card with Cody's thread, opening
 // a card, "Show in timeline" and back, Cards ⇄ Timeline, "N new" with the ↓ pill, "N done today" and the project bar.
+// A card's box replies to its task (the Coordinator only when the task refuses it); with a project picked, the panel
+// talks to its Captain, whose card takes the Coordinator card's place; either card folds to its header.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement } from "react"
 import { createRoot, type Root } from "react-dom/client"
@@ -14,8 +16,9 @@ import { keys } from "../web/src/lib/queries.js"
 import { undoClose } from "../web/src/lib/inbox.js"
 import { stopSelecting } from "../web/src/lib/cardSelection.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
-import { COORDINATOR_CHAT, applyThreadEvent, closeThread, forgetThread, openThread, openThreadId, threadKeys } from "../web/src/lib/threads.js"
-import type { ChatMessage, Project, SettingsInfo, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
+import { COORDINATOR_CHAT, closeThread, forgetThread, openThread, openThreadId } from "../web/src/lib/threads.js"
+import { contextLabel } from "../web/src/components/ContextMeter.js"
+import type { CaptainMessage, CaptainState, ChatMessage, Project, SettingsInfo, Task, TaskStatus } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -223,14 +226,41 @@ describe("Coordinator cards", () => {
     expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
   })
 
-  it("keeps one project's cards and Coordinator thread when the bar filters", () => {
+  it("keeps one project's cards when the bar filters, with its Captain's card in the Coordinator card's place", () => {
     render()
     act(() => setChatProjectFilter(MAP.id))
     expect(cards().map((c) => c.dataset.card)).toEqual([`batch:${B}`])
     expect(host.querySelector('[data-testid="cards-done"]')).toBeNull()
-    const thread = coordinator().textContent ?? ""
-    expect(thread).toContain("Shoot every Map 3 area")
-    expect(thread).not.toContain("Fix login and build the cards")
+    expect(coordinator()).toBeNull()
+    expect(host.querySelector('[data-testid="captain-card"]')!.getAttribute("aria-label")).toBe("Map 3 Captain")
+    // "All": the Coordinator card again.
+    click(button(host.querySelector('[data-testid="project-bar"]')!, "All"))
+    expect(coordinator().textContent).toContain("Shoot every Map 3 area")
+    expect(host.querySelector('[data-testid="captain-card"]')).toBeNull()
+  })
+
+  it("folds the Coordinator card to its header and its newest line, and remembers it", async () => {
+    render()
+    const fold = () => coordinator().querySelector('[data-testid="bottom-card-fold"]') as HTMLElement
+    expect(fold().getAttribute("aria-expanded")).toBe("true")
+    expect(coordinator().querySelector('[data-testid="bottom-card-sub"]')!.textContent).toBe("What you type below lands here. Each task it starts gets a card above.")
+    click(fold())
+    expect(fold().getAttribute("aria-expanded")).toBe("false")
+    expect(coordinator().textContent).not.toContain("Shoot every Map 3 area")
+    expect(coordinator().querySelector('[data-testid="bottom-card-sub"]')!.textContent).toBe("Coordinator: 3 tasks started.")
+    // A reply on its way shows as dots by the title.
+    act(() => qc.setQueryData(keys.chatBusy, true))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(coordinator().querySelector('[aria-label="Working"]')).not.toBeNull()
+    // This browser remembers it.
+    act(() => root.unmount())
+    root = createRoot(host)
+    render()
+    expect(coordinator().textContent).not.toContain("Shoot every Map 3 area")
+    // A click on the header (not its buttons) unfolds it.
+    click(coordinator().querySelector('[data-testid="bottom-card-head"]')!)
+    expect(coordinator().textContent).toContain("Shoot every Map 3 area")
+    expect(localStorage.getItem("boxyard:bottom-card-folded")).toBeNull()
   })
 
   it("unfolds what's done", () => {
@@ -267,19 +297,14 @@ describe("Reply in a card", () => {
     for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
   }
   const sent = (t: Task, text: string) => msg("notice", `✉️ **${t.title}** got a message from Cody: ${text}`, { taskId: t.id, projectId: t.projectId, sent: true })
-  const threadEvent = (ev: UiEvent) =>
-    act(async () => {
-      applyThreadEvent(qc, ev)
-      await new Promise((r) => setTimeout(r, 0))
-    })
-
   it("sends to the task by default, and shows the message and the agent's answer in the card and the timeline", async () => {
     render()
     click(head(LOGIN.id))
     const box = composer(card(LOGIN.id))
-    expect(box.dataset.to).toBe("task")
     expect(box.querySelector("textarea")!.placeholder).toBe("Answer the agent…")
-    expect(button(box, "This task").getAttribute("aria-pressed")).toBe("true")
+    // No Coordinator target to pick: the box is the task's.
+    expect(box.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("To this task")
+    expect(box.querySelectorAll("button[aria-pressed]")).toHaveLength(0)
     await send(card(LOGIN.id), "The new one")
     expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
 
@@ -312,79 +337,45 @@ describe("Reply in a card", () => {
     expect(card(LOGIN.id).dataset.open).toBe("true")
   })
 
-  it("asks the Coordinator in the card's own side thread, which the main chat never sees, and shows the answer there", async () => {
-    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [])
+  it("sends to the Coordinator, with the task's id and why, only when the task refuses it, and says so in the card", async () => {
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      if (url === `/api/tasks/${CARDS.id}/messages`) return Promise.resolve(new Response(JSON.stringify({ error: "Its runner is gone." }), { status: 409 }))
+      if (url === "/api/chat") {
+        const { id, content } = JSON.parse(String(init!.body)) as { id: string; content: string }
+        return Promise.resolve(new Response(JSON.stringify({ id, role: "user", content, meta: null, createdAt: Date.now() }), { status: 201 }))
+      }
+      return new Promise(() => {})
+    })
     render()
+    act(() => setChatProjectFilter(YARD.id))
     click(head(CARDS.id))
-    expect(composer(card(CARDS.id)).querySelector("textarea")!.placeholder).toBe("Reply to this task…")
-    click(button(composer(card(CARDS.id)), "Coordinator"))
-    const box = composer(card(CARDS.id))
-    expect(box.dataset.to).toBe("coordinator")
-    expect(box.querySelector("textarea")!.placeholder).toBe("Ask the Coordinator about this…")
-    expect(box.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("A side thread with the Coordinator about this task: it answers, it doesn't act")
     await send(card(CARDS.id), "Is it blocking anything?")
-    expect(posts).toHaveLength(1)
-    expect(posts[0]!.url).toBe("/api/threads")
-    expect(posts[0]!.body).toMatchObject({ kind: "task", anchorId: CARDS.id, question: "Is it blocking anything?", projectId: null })
-
-    // It shows in the card at once; the main chat doesn't get it.
-    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
-    expect(body.querySelector('[data-testid="card-thread-question"]')!.textContent).toBe("to the CoordinatorIs it blocking anything?")
-    expect(coordinator().textContent).not.toContain("Is it blocking anything?")
-    expect(qc.getQueryData(keys.chat)).toEqual(CHAT)
-    expect(body.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
-
-    // Its answer streams in, then lands as the thread's message.
-    const id = String(posts[0]!.body.id)
-    const thread = qc.getQueryData<SideThread[]>(threadKeys.list(COORDINATOR_CHAT))!.find((t) => t.id === id)!
-    await threadEvent({ type: "thread.delta", threadId: id, text: "Not yet" })
-    expect(body.querySelector('[data-testid="card-thread-streaming"]')!.textContent).toContain("Not yet")
-    await threadEvent({ type: "thread.message", message: { id: "thm_answer", threadId: id, role: "assistant", content: "No: **nothing** waits on it.", meta: null, createdAt: Date.now() } })
-    await threadEvent({ type: "thread", thread: { ...thread, busy: false, context: "fork", replies: 2, updatedAt: Date.now() } })
-    const answer = body.querySelector('[data-testid="card-thread-answer"]')!
-    expect(answer.textContent).toContain("Coordinator· side thread")
-    expect(answer.textContent).toContain("No: nothing waits on it.")
-    expect(body.querySelector('[data-testid="card-working"]')).toBeNull()
-    expect(body.querySelector('[data-testid="card-thread-streaming"]')).toBeNull()
-    expect(coordinator().textContent).not.toContain("waits on it")
-
-    // The choice holds when the card closes and opens again; closed, its latest line is the answer.
-    click(head(CARDS.id))
-    expect(card(CARDS.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Coordinator: No: nothing waits on it.")
-    click(head(CARDS.id))
-    expect(composer(card(CARDS.id)).dataset.to).toBe("coordinator")
-    // A second question goes to the same thread.
-    await send(card(CARDS.id), "And the docs?")
-    expect(posts[1]!.body).toMatchObject({ kind: "task", anchorId: CARDS.id, question: "And the docs?" })
-    const again = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
-    expect([...again.querySelectorAll('[data-testid="card-thread-question"]')].map((q) => q.textContent)).toEqual([
-      "to the CoordinatorIs it blocking anything?",
-      "to the CoordinatorAnd the docs?",
-    ])
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts.map((p) => p.url)).toEqual([`/api/tasks/${CARDS.id}/messages`, "/api/chat"])
+    expect(posts[1]!.body.content).toBe(
+      `↪️ Rerouted from my reply to the task "Coordinator cards" (${CARDS.id}), which couldn't take it: Its runner is gone. Please work out where it should go.\n\nIs it blocking anything?`,
+    )
+    const note = card(CARDS.id).querySelector('[data-testid="card-rerouted"]')!
+    expect(note.textContent).toBe("This task couldn't take it (Its runner is gone.), so it went to the Coordinator. Show")
+    // Behind the project filter, Show goes to the Coordinator card, where it landed.
+    click(button(note, "Show"))
+    expect(coordinator().textContent).toContain("Is it blocking anything?")
+    expect((card(CARDS.id).querySelector('[data-testid="card-composer"] textarea') as HTMLTextAreaElement).value).toBe("")
   })
 
-  it("says a closed card has an answer from the Coordinator, and opening it reads it; the Timeline doesn't show it", async () => {
-    const at = Date.now()
-    const thread: SideThread = { id: "thr_cards0001", projectId: null, anchorId: CARDS.id, kind: "task", quote: CARDS.title, context: "fork", busy: false, replies: 2, unread: true, resolvedAt: null, createdAt: at - 2000, updatedAt: at }
-    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
-    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
-      { id: "thm_q", threadId: thread.id, role: "user", content: "Can it wait?", meta: null, createdAt: at - 2000 },
-      { id: "thm_a", threadId: thread.id, role: "assistant", content: "Yes, till Monday.", meta: null, createdAt: at },
-    ])
+  it("doesn't reroute when the server can't be reached: the text goes back in the box", async () => {
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return Promise.reject(new TypeError("Failed to fetch"))
+    })
     render()
-    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("1 new")
-    expect(card(CARDS.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Coordinator: Yes, till Monday.")
     click(head(CARDS.id))
+    await send(card(CARDS.id), "Still there?")
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
-    expect(posts).toEqual([{ url: `/api/threads/${thread.id}/seen`, body: {} }])
-    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
-    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
-    // In time order among the card's updates: after the pull request.
-    const order = [...body.querySelectorAll('[data-testid="update-chip"], [data-testid="card-thread-question"], [data-testid="card-thread-answer"]')]
-    expect(order.map((e) => (e as HTMLElement).dataset.testid)).toEqual(["update-chip", "card-thread-question", "card-thread-answer"])
-    click(viewButton("Timeline"))
-    expect(host.textContent).not.toContain("Can it wait?")
-    expect(host.textContent).not.toContain("till Monday")
+    expect(posts.map((p) => p.url)).toEqual([`/api/tasks/${CARDS.id}/messages`])
+    expect(card(CARDS.id).querySelector('[data-testid="card-rerouted"]')).toBeNull()
+    expect((card(CARDS.id).querySelector('[data-testid="card-composer"] textarea') as HTMLTextAreaElement).value).toBe("Still there?")
   })
 
   it("keeps a card that's open where it is when its task finishes; closed, it folds at the next update", async () => {
@@ -427,7 +418,7 @@ describe("Reply in a card", () => {
     vi.restoreAllMocks()
   })
 
-  it("gives each of a batch's tasks its own box, and the batch one for the Coordinator about all of them", async () => {
+  it("gives each of a batch's tasks its own box, and the batch none of its own", async () => {
     render()
     click(head(`batch:${B}`))
     const batch = card(`batch:${B}`)
@@ -439,17 +430,9 @@ describe("Reply in a card", () => {
     expect(rows[2]!.querySelector('[data-testid="card-working"]')).toBeNull()
     await send(rows[2]!, "Shoot it at dusk")
     expect(posts).toEqual([{ url: `/api/tasks/${DAM.id}/messages`, body: { content: "Shoot it at dusk", attachments: [], inChat: true } }])
-
-    const own = [...batch.querySelectorAll('[data-testid="card-composer"]')].at(-1) as HTMLElement
-    expect(own.closest('[data-testid="batch-task"]')).toBeNull()
-    expect(own.dataset.to).toBe("coordinator")
-    await send(own, "How far along is the batch?")
-    expect(posts[1]).toMatchObject({ url: "/api/threads", body: { kind: "task", anchorId: `batch:${B}`, question: "How far along is the batch?" } })
-    expect(own.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("A side thread with the Coordinator: it answers, it doesn't act")
-    // The batch's question shows under its tasks; the tasks' own threads are theirs.
-    const question = batch.querySelector('[data-testid="card-thread-question"]')!
-    expect(question.textContent).toContain("How far along is the batch?")
-    expect(question.closest('[data-testid="batch-task"]')).toBeNull()
+    const boxes = [...batch.querySelectorAll('[data-testid="card-composer"]')]
+    expect(boxes).toHaveLength(2)
+    expect(boxes.every((b) => b.closest('[data-testid="batch-task"]'))).toBe(true)
   })
 })
 
@@ -489,7 +472,6 @@ describe("A card in the side panel", () => {
     expect(p.textContent).toContain("Which page, the old one or the new one?")
     // Its box is the panel's footer, after the history.
     const box = p.querySelector('[data-testid="card-composer"]') as HTMLElement
-    expect(box.dataset.to).toBe("task")
     expect(box.previousElementSibling!.contains(p.querySelector('[data-testid="card-panel-divider"]'))).toBe(true)
     // The thread panel's header: ✓ Mark done, ⋯, Maximize and ×.
     expect(p.querySelector('[data-testid="card-panel-done"]')!.getAttribute("aria-label")).toBe("Mark done")
@@ -565,7 +547,7 @@ describe("A card in the side panel", () => {
     expect(panel()!.textContent).toContain("opened PR #9")
   })
 
-  it("shows a batch with its tasks' rows and a box to the Coordinator, and no Mark done or task page", () => {
+  it("shows a batch with its tasks' rows, and no box of its own, Mark done or task page", () => {
     render()
     click(expand(`batch:${B}`))
     const p = panel()!
@@ -573,7 +555,7 @@ describe("A card in the side panel", () => {
     expect(p.querySelectorAll('[data-testid="batch-task"]')).toHaveLength(3)
     // Its updates are under its rows, so no "No updates yet".
     expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
-    expect((p.querySelector('[data-testid="card-composer"]') as HTMLElement).dataset.to).toBe("coordinator")
+    expect(p.querySelector('[data-testid="card-composer"]')).toBeNull()
     expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
     expect(menu(p)).toEqual(["Show in timeline", "Show its card"])
   })
@@ -596,50 +578,6 @@ describe("A card in the side panel", () => {
     click(menuItem("Stop answering"))
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
     expect(posts.map((x) => x.url)).toEqual([`/api/tasks/${LOGIN.id}/stop`])
-  })
-
-  it("shows its side thread with the Coordinator among its history, and ⋯ Stop answering stops the Coordinator's answer", async () => {
-    const at = Date.now()
-    const thread: SideThread = { id: "thr_cards0001", projectId: null, anchorId: CARDS.id, kind: "task", quote: CARDS.title, context: "fork", busy: true, replies: 3, unread: true, resolvedAt: null, createdAt: at - 3000, updatedAt: at }
-    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
-    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
-      { id: "thm_q", threadId: thread.id, role: "user", content: "Can it wait?", meta: null, createdAt: at - 3000 },
-      { id: "thm_a", threadId: thread.id, role: "assistant", content: "Yes, till Monday.", meta: null, createdAt: at - 2000 },
-      { id: "thm_q2", threadId: thread.id, role: "user", content: "And the docs?", meta: null, createdAt: at - 1000 },
-    ])
-    render()
-    click(expand(CARDS.id))
-    await act(async () => await new Promise((r) => setTimeout(r, 0)))
-    const p = panel()!
-    // Its lines come after its history's pull request, in time order, and the Coordinator is still answering.
-    const order = [...p.querySelectorAll('[data-testid="update-chip"], [data-testid="card-thread-question"], [data-testid="card-thread-answer"]')]
-    expect(order.map((e) => (e as HTMLElement).dataset.testid)).toEqual(["update-chip", "card-thread-question", "card-thread-answer", "card-thread-question"])
-    expect(p.querySelector('[data-testid="card-thread-answer"]')!.textContent).toContain("Yes, till Monday.")
-    expect(p.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
-    // Shown, its answers are read.
-    expect(posts).toEqual([{ url: `/api/threads/${thread.id}/seen`, body: {} }])
-    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
-    // Its task isn't running: Stop answering stops the Coordinator's answer only.
-    expect(menu(p)).toEqual(["Show in timeline", "Open the task page", "Stop answering", "Show its card"])
-    click(menuItem("Stop answering"))
-    await act(async () => await new Promise((r) => setTimeout(r, 0)))
-    expect(posts.map((x) => x.url)).toEqual([`/api/threads/${thread.id}/seen`, `/api/threads/${thread.id}/stop`])
-  })
-
-  it("has no count over a batch's divider when all it has of its own is its side thread", async () => {
-    const at = Date.now()
-    const thread: SideThread = { id: "thr_batch0001", projectId: null, anchorId: `batch:${B}`, kind: "task", quote: "Map 3 PR", context: "fork", busy: false, replies: 2, unread: false, resolvedAt: null, createdAt: at - 2000, updatedAt: at }
-    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
-    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
-      { id: "thm_q", threadId: thread.id, role: "user", content: "How far along is it?", meta: null, createdAt: at - 2000 },
-      { id: "thm_a", threadId: thread.id, role: "assistant", content: "One of three is done.", meta: null, createdAt: at },
-    ])
-    render()
-    click(expand(`batch:${B}`))
-    const p = panel()!
-    expect(p.querySelector('[data-testid="card-panel-divider"]')!.textContent).toBe("")
-    expect(p.querySelector('[data-testid="card-thread-answer"]')!.textContent).toContain("One of three is done.")
-    expect(p.querySelector('[data-testid="card-thread-answer"]')!.closest('[data-testid="batch-task"]')).toBeNull()
   })
 
   it("Show its card goes back to the Cards view, opens the card and scrolls to it", async () => {
@@ -696,6 +634,146 @@ describe("A card in the side panel", () => {
     const box = panel()!.querySelector("textarea")!
     expect(document.activeElement).toBe(box)
     expect(box.placeholder).toBe("Reply (reopens the task)…")
+  })
+})
+
+describe("The bottom panel with a project picked", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  const captainState = (projectId: string, extra: Partial<CaptainState> = {}): CaptainState => ({
+    projectId,
+    busy: false,
+    usage: { tokens: 50_000, window: 200_000, updatedAt: 1 },
+    compacting: false,
+    compactQueued: false,
+    lastCompaction: null,
+    compactionsDir: "",
+    error: null,
+    ...extra,
+  })
+  const line = (id: string, role: CaptainMessage["role"], content: string, meta: Record<string, unknown> | null = null): CaptainMessage => ({
+    id,
+    projectId: MAP.id,
+    role,
+    content,
+    meta,
+    createdAt: Date.now() - 60_000 + Number(id.slice(-2)) * 1000,
+  })
+  const CAPTAIN: CaptainMessage[] = [
+    line("cap_m01", "user", "Which areas are left?", { source: "cody" }),
+    line("cap_m02", "assistant", "Two: the cave and the dam."),
+    line("cap_m03", "notice", "✅ **Map 3 PR #399: Dam Hamlet camp** is done: shot it", { taskId: CAMP.id }),
+    line("cap_m04", "user", "How's the cave?", { source: "cody" }),
+    line("cap_m05", "tool", "list_tasks"),
+    line("cap_m06", "assistant", "Lit and **halfway** there.", { nextSteps: ["Shoot the dam next"] }),
+  ]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+    qc.setQueryData(keys.captainMessages(MAP.id), CAPTAIN)
+    qc.setQueryData(keys.captain(MAP.id), captainState(MAP.id))
+    qc.setQueryData(keys.orchestrator, { ...captainState(""), usage: { tokens: 10_000, window: 1_000_000, updatedAt: 1 } })
+    qc.setQueryData(keys.agentSettings, { settings: { orchestratorAutoCompact: { enabled: false } } })
+  })
+
+  const textarea = () => host.querySelector('[data-testid="chat-panel"] > div > form textarea, form textarea[placeholder$="Captain…"], form textarea[placeholder="Ask the Coordinator…"]') as HTMLTextAreaElement
+  const captainCard = () => host.querySelector('[data-testid="captain-card"]') as HTMLElement | null
+  const send = async (text: string) => {
+    const box = textarea()
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(box, text)
+      box.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void box.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+  }
+
+  it("talks to the project's Captain: the header names it with its context, and the box sends to it", async () => {
+    render()
+    expect(host.querySelector('[data-testid="chat-title"]')!.textContent).toBe("Coordinator")
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+    act(() => setChatProjectFilter(MAP.id))
+    expect(host.querySelector('[data-testid="chat-title"]')!.textContent).toBe("Map 3 Captain")
+    expect(host.querySelector('[data-testid="context-menu-button"]')!.getAttribute("title")).toBe(`Context ${contextLabel(50_000, 200_000)}`)
+    expect(textarea().placeholder).toBe("Message the Map 3 Captain…")
+    expect(host.querySelector('[data-testid="composer-to"]')!.textContent).toBe("To the Map 3 Captain")
+    // No Coordinator card to hide.
+    expect(host.querySelector('[data-testid="tasks-only"]')).toBeNull()
+    await send("Shoot the dam at dusk")
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.url).toBe(`/api/projects/${MAP.id}/captain/messages`)
+    expect(posts[0]!.body).toMatchObject({ content: "Shoot the dam at dusk", attachments: [] })
+    // It shows in the Captain's card at once; the Coordinator's chat never gets it.
+    expect(captainCard()!.textContent).toContain("Shoot the dam at dusk")
+    expect(qc.getQueryData(keys.chat)).toEqual(CHAT)
+
+    // "All": the Coordinator again.
+    act(() => setChatProjectFilter(null))
+    expect(host.querySelector('[data-testid="chat-title"]')!.textContent).toBe("Coordinator")
+    expect(host.querySelector('[data-testid="context-menu-button"]')!.getAttribute("title")).toBe(`Context ${contextLabel(10_000, 1_000_000)}`)
+    expect(host.querySelector('[data-testid="composer-to"]')).toBeNull()
+    expect(host.querySelector('[data-testid="tasks-only"]')).not.toBeNull()
+    await send("What's left?")
+    expect(posts[1]!.url).toBe("/api/chat")
+  })
+
+  it("shows the Captain's conversation in its card, not task notices or tool calls, and its next steps go to it", async () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    const c = captainCard()!
+    expect(c.querySelector('[data-testid="bottom-card-sub"]')!.textContent).toBe("What you type below goes to the Map 3 Captain. The Coordinator doesn't see it.")
+    // The newest three, then "1 earlier".
+    expect(c.textContent).toContain("How's the cave?")
+    expect(c.textContent).toContain("Lit and halfway there.")
+    expect(c.textContent).toContain("Two: the cave and the dam.")
+    expect(c.textContent).not.toContain("Which areas are left?")
+    expect(c.textContent).not.toContain("Dam Hamlet camp")
+    expect(c.textContent).not.toContain("list_tasks")
+    click(c.querySelector('[data-testid="captain-card-earlier"]')!)
+    expect(c.textContent).toContain("Which areas are left?")
+    expect(c.querySelector(`a[href="/projects/${MAP.id}?tab=captain"]`)).not.toBeNull()
+    click(button(c, "Shoot the dam next"))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts).toEqual([{ url: `/api/projects/${MAP.id}/captain/messages`, body: expect.objectContaining({ content: "Shoot the dam next" }) }])
+  })
+
+  it("keeps the Captain's card under the project's part of the Timeline", () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    click(viewButton("Timeline"))
+    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    expect(captainCard()!.textContent).toContain("Lit and halfway there.")
+    expect(coordinator()).toBeNull()
+  })
+
+  it("folds like the Coordinator card, with its newest line and dots while it works", async () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    click(captainCard()!.querySelector('[data-testid="bottom-card-fold"]')!)
+    expect(captainCard()!.textContent).not.toContain("How's the cave?")
+    expect(captainCard()!.querySelector('[data-testid="bottom-card-sub"]')!.textContent).toBe("Captain: Lit and halfway there.")
+    await act(async () => {
+      qc.setQueryData(keys.captain(MAP.id), captainState(MAP.id, { busy: true }))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(captainCard()!.querySelector('[aria-label="Working"]')).not.toBeNull()
+    // One setting for both: the Coordinator card is folded too.
+    act(() => setChatProjectFilter(null))
+    expect(coordinator().querySelector('[data-testid="bottom-card-fold"]')!.getAttribute("aria-expanded")).toBe("false")
+  })
+
+  it("goes back to the Coordinator from the chat switcher", () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="chat-switcher"]')!)
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')] as HTMLElement[]
+    expect(items.find((i) => i.getAttribute("aria-checked") === "true")!.textContent).toContain("Map 3")
+    click(items.find((i) => i.textContent?.includes("Coordinator"))!)
+    expect(host.querySelector('[data-testid="chat-title"]')!.textContent).toBe("Coordinator")
+    expect(host.querySelector('[data-testid="project-bar"] button[aria-pressed="true"]')!.textContent).toContain("All")
   })
 })
 
@@ -895,7 +973,7 @@ describe("Finding your way in the cards", () => {
 
   it("keeps the Coordinator card's header in reach and folds its history back with Show less", () => {
     render()
-    const head = host.querySelector('[data-testid="coordinator-card-head"]')!
+    const head = coordinator().querySelector('[data-testid="bottom-card-head"]')!
     expect(head.className).toContain("sticky")
     expect(coordinator().textContent).toContain("1 earlier")
     expect(host.querySelector('[data-testid="coordinator-fold"]')).toBeNull()
