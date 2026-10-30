@@ -193,7 +193,7 @@ describe("Test connection's probe", () => {
     expect(t.tools.codex.found).toBe(false)
   })
 
-  it("says what's missing or old, and notes codex (detected, not used) and a claude that isn't logged in", () => {
+  it("says what's missing or old, notes a claude that isn't logged in, and detects codex without a note", () => {
     const t = testFromProbe({
       first: parseProbe("BOXYARD_PROBE\nworkdir_error=can't make ~/boxyard\nmissing=base64\ndisk=1000 2000\n"),
       tools: parseProbe('BOXYARD_PROBE\npath_node=/usr/bin/node\nversion_node=v16.20.0\npath_claude=/usr/bin/claude\nclaude_auth="loggedIn":false\npath_codex=/usr/bin/codex\nversion_codex=codex-cli 0.40.0\n'),
@@ -207,9 +207,10 @@ describe("Test connection's probe", () => {
     expect(t.problems.join("\n")).toMatch(/base64 isn't installed/)
     expect(t.claudeLogin).toBe(false)
     expect(t.notes.join("\n")).toMatch(/claude isn't logged in/)
-    expect(t.notes.join("\n")).toMatch(/codex is installed \(codex-cli 0.40.0\).*isn't used/)
+    // Detected only (the card says "not used"): Codex tasks don't run on SSH machines yet.
+    expect(t.notes.join("\n")).not.toMatch(/codex/)
     expect(t.notes.join("\n")).toMatch(/under 2 GB free/)
-    expect(t.tools.codex).toMatchObject({ found: true })
+    expect(t.tools.codex).toMatchObject({ found: true, version: "codex-cli 0.40.0" })
     expect(testFromProbe({ first, tools: tools("").set("path_claude", []), pathDirs: [], latencyMs: 1, at: 1 }).problems.join()).toMatch(/claude \(Claude Code\) isn't installed/)
   })
 

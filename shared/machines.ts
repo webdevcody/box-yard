@@ -75,7 +75,7 @@ export interface MachineTest {
   secretsDir: string | null
   /** Problems that stop tasks from running there (no node, no git, …); empty when it's ready. */
   problems: string[]
-  /** Worth knowing but not blocking (claude not logged in while Box Yard forwards a key, codex missing). */
+  /** Worth knowing but not blocking (claude not logged in while Box Yard forwards a key, under 2 GB free). */
   notes: string[]
 }
 
