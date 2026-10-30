@@ -1,7 +1,7 @@
 // The Coordinator chat's update chips (web/src/lib/chatUpdates.ts): which notices fold into chips and groups, and
 // which updates a Coordinator reply covers.
 import { describe, expect, it } from "vitest"
-import { chipView, coordinatorRows, groupPreview, noticeText, readByCoordinator, rowsFrom, sourceLabels, stableRows, type CoordinatorRow } from "../web/src/lib/chatUpdates.js"
+import { chipView, coordinatorRows, noticeText, readByCoordinator, sourceLabels, stableRows, type CoordinatorRow } from "../web/src/lib/chatUpdates.js"
 import type { ChatMessage } from "../shared/types.js"
 
 let t = 0
@@ -60,7 +60,6 @@ describe("grouping updates", () => {
     expect(shape(rows)).toEqual(["g:p1,d"])
     const group = rows[0] as Extract<CoordinatorRow, { type: "updates" }>
     expect(group.items[0]!.type).toBe("files")
-    expect(groupPreview(group.items)).toBe("Zen mode, Fix login")
   })
 
   it("keeps the order: every message appears once, where it was", () => {
@@ -162,11 +161,5 @@ describe("stable rows", () => {
     expect(shape(next)).toEqual(["u:c1", "m:r1<-c1", "g:d1,d2"])
     const again = stableRows(next, coordinatorRows([...base, d2, user("u")]))
     expect(again.slice(0, 3).every((r, i) => r === next[i])).toBe(true)
-  })
-
-  it("rowsFrom starts at the row holding the first rendered message", () => {
-    const rows = coordinatorRows([done("a"), done("b"), reply("r"), done("c")])
-    expect(shape(rowsFrom(rows, "b"))).toEqual(["g:a,b", "m:r", "u:c"])
-    expect(shape(rowsFrom(rows, "r"))).toEqual(["m:r", "u:c"])
   })
 })

@@ -2,14 +2,14 @@
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
 // its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
 // latest line. Open, it shows where it came from, its newest entries, a box that replies to its task (CardComposer.tsx),
-// and the way to its timeline and its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
+// and the way to its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
 // instead, with its whole history. With a project picked in the bar, that project's Captain card (BottomCard.tsx)
 // takes the Coordinator card's place.
 // A create_tasks batch is one card whose tasks open in place. Finished cards fold into "N done today" at the top, and
 // resting ones quiet for Settings' cardsIdleHours into "N idle" next to it; a card with news says "N new" until
 // opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
 // over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
-// Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
+// "Tasks only" is the chat header's TasksOnlyToggle (lib/coordinatorView.ts).
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import {
@@ -28,7 +28,6 @@ import {
   LayoutGrid,
   Layers,
   Link2,
-  List,
   Maximize2,
   Minimize2,
   MoreHorizontal,
@@ -53,18 +52,8 @@ import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
 import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
-import {
-  clearFocusCard,
-  revealInTimeline,
-  setCoordinatorView,
-  setTasksOnly,
-  showCard,
-  showInTimeline,
-  useCoordinatorView,
-  useFocusCard,
-  useTasksOnly,
-  type TimelineCard,
-} from "../lib/coordinatorView"
+import { clearFocusCard, clearShownMessage, setTasksOnly, showCard, showMessage, useFocusCard, useShownMessage, useTasksOnly } from "../lib/coordinatorView"
+import { revealChatMessage } from "../lib/reveal"
 import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../lib/cardJump"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
@@ -110,6 +99,8 @@ export interface CardsLayout {
   /** Finished in the last day (or marked done, still in the undo window): "N done today". */
   done: readonly ChatCard[]
   coordinator: readonly CardEntry[]
+  /** The Coordinator card's entries whatever the project bar's pick: a link to a message finds it here. */
+  allCoordinator: readonly CardEntry[]
   /** The newest Coordinator reply: only it offers its next steps, in whichever card holds it. */
   newest: string | null
 }
@@ -119,7 +110,7 @@ const sameList = <T,>(a: readonly T[], b: readonly T[]) => a.length === b.length
 const cardOpenKey = (key: string) => `card:${key}`
 
 /**
- * The cards for the settled chat's rows (useCoordinatorRows), or null while `on` is false (the Timeline shows). Every
+ * The cards for the settled chat's rows (useCoordinatorRows), or null while `on` is false (an empty chat). Every
  * list that didn't change keeps its object, so the cards view re-renders only for a card with news or a status change.
  */
 export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: boolean, project: string | null): CardsLayout | null {
@@ -158,7 +149,16 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
       : cards.coordinator
     const p = last.current
     const all = cards.cards
-    if (p && sameList(p.all, all) && sameList(p.live, live) && sameList(p.idle, idle) && sameList(p.done, done) && sameList(p.coordinator, coordinator) && p.newest === newest)
+    if (
+      p &&
+      sameList(p.all, all) &&
+      sameList(p.live, live) &&
+      sameList(p.idle, idle) &&
+      sameList(p.done, done) &&
+      sameList(p.coordinator, coordinator) &&
+      sameList(p.allCoordinator, cards.coordinator) &&
+      p.newest === newest
+    )
       return p
     return (last.current = {
       all: p && sameList(p.all, all) ? p.all : all,
@@ -166,6 +166,7 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
       idle: p && sameList(p.idle, idle) ? p.idle : idle,
       done: p && sameList(p.done, done) ? p.done : done,
       coordinator: p && sameList(p.coordinator, coordinator) ? p.coordinator : coordinator,
+      allCoordinator: p && sameList(p.allCoordinator, cards.coordinator) ? p.allCoordinator : cards.coordinator,
       newest,
     })
   }, [cards, statuses, closing, idleHours, minute, tiles, project, prov, newest])
@@ -259,7 +260,7 @@ export const CardsView = memo(function CardsView({
     const back = live.find((c) => was.has(c.key) && isOpen(cardOpenKey(c.key)))
     if (back) scrollToCard(back.key, false)
   }, [live, idle, done])
-  // Select mode ends with the cards (the Timeline, another chat) and on Esc.
+  // Select mode ends with the cards (another chat) and on Esc.
   useEffect(() => stopSelecting, [])
   const tasksOnly = useTasksOnly()
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
@@ -859,8 +860,8 @@ function CardSession({
       {card.origin && (
         <button
           type="button"
-          onClick={() => revealInTimeline(card.origin!.id)}
-          title="Show it in the timeline"
+          onClick={() => revealChatMessage(card.origin!.id)}
+          title="Show it in the Coordinator card"
           data-testid="chat-card-origin"
           className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-9"
         >
@@ -995,7 +996,6 @@ function CardPanelView({
     if (aside && getComputedStyle(aside).position === "absolute") closeThread(chat)
   }
   const items: MenuItem[] = [
-    { icon: List, label: "Show in timeline", run: () => showInTimeline({ key: card.key, taskIds: card.taskIds }) },
     ...(page ? [{ icon: Link2, label: "Open the task page", run: () => void (openInZenPanel(page) || navigate(page)) }] : []),
     // Its agent's turn.
     ...(task && isRunning(task) ? [{ icon: Square, label: "Stop answering", run: () => stop.mutate(task.id) }] : []),
@@ -1161,6 +1161,20 @@ function CardEntries({
   const shown = entries.length > limit ? entries.slice(-limit) : entries
   const hidden = entries.length - shown.length
   const answers = useMemo(() => answersOf(entries), [entries])
+  // A link to one of its entries (lib/coordinatorView.ts showMessage): page back to it, then scroll to it in the cards.
+  const wanted = useShownMessage()
+  const at = wanted ? entries.findIndex((e) => e.id === wanted) : -1
+  const need = at < 0 ? 0 : entries.length - at
+  useEffect(() => {
+    if (!wanted || !need) return
+    if (need > limit) return setLimit(need)
+    requestAnimationFrame(() => {
+      const el = findInCards(wanted)
+      if (!el) return
+      clearShownMessage(wanted)
+      el.scrollIntoView?.({ block: "center", behavior: "smooth" })
+    })
+  }, [wanted, need, limit, setLimit])
   return (
     <>
       {hidden > 0 && (
@@ -1180,6 +1194,45 @@ function CardEntries({
       )}
     </>
   )
+}
+
+/** A message in the cards list (not the side panel): its root, or an update chip's. */
+export function findInCards(id: string): Element | null {
+  const q = CSS.escape(id)
+  return document.querySelector(`[data-testid="chat-cards"] [data-chat-id="${q}"], [data-testid="chat-cards"] [id="chat-${q}"]`)
+}
+
+/** How long a link waits for its card to show the message before giving up. */
+const SHOW_MESSAGE_MS = 3000
+
+/**
+ * A link to a chat message (a schedule run's "View in chat", a card's "From your message", a reply's "from:" line): go
+ * to it in the cards. One on screen scrolls into view. Else the card that holds it opens (unfolding "done today" or
+ * "idle", or dropping the project filter it's behind), pages back to it and scrolls there. False when no card holds it
+ * (a tool call, an update about a deleted task).
+ */
+export function revealInCards(layout: CardsLayout | null, id: string): boolean {
+  const there = findInCards(id)
+  if (there) {
+    requestAnimationFrame(() => there.scrollIntoView?.({ block: "center", behavior: "smooth" }))
+    return true
+  }
+  if (!layout) return false
+  const card = layout.all.find((c) => c.entries.some((e) => e.id === id))
+  const entry = card?.entries.find((e) => e.id === id)
+  if (card && entry) {
+    showMessage(id)
+    // A batch's task keeps its own entries in its row: open that.
+    showCard(card.batchId && entry.tasks.length === 1 ? entry.tasks[0]! : card.key)
+  } else if (layout.allCoordinator.some((e) => e.id === id)) {
+    showMessage(id)
+    // The Coordinator card shows only under "All", unfolded, and without "Tasks only".
+    setChatProjectFilter(null)
+    setTasksOnly(false)
+    bottomCardFolded.set(false)
+  } else return false
+  setTimeout(() => clearShownMessage(id), SHOW_MESSAGE_MS)
+  return true
 }
 
 /** Turn ends: "finished its turn" and "is done". A question or a failure is a full card anyway. */
@@ -1395,79 +1448,32 @@ function PillTarget({ card, where }: { card: ChatCard; where: string }) {
   )
 }
 
-const VIEWS: { id: "cards" | "timeline"; label: string; title: string; icon: LucideIcon }[] = [
-  { id: "cards", label: "Cards", title: "Cards: one per task", icon: LayoutGrid },
-  { id: "timeline", label: "Timeline", title: "Timeline: everything in order", icon: List },
-]
-
-const VIEW_BUTTON =
+const TOGGLE_BUTTON =
   "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
 
 /**
- * Cards ⇄ Timeline, in the chat's header, and in the Cards view "Tasks only", which hides the Coordinator card under
- * them (lib/coordinatorView.ts; this browser remembers both). Icons only in a narrow header.
+ * "Tasks only", in the chat's header: hides the Coordinator card under the cards (lib/coordinatorView.ts; this browser
+ * remembers it). Its icon only in a narrow header. With a project picked there's no Coordinator card to hide (its
+ * Captain's card is in its place), so it's gone.
  */
-export const ViewToggle = memo(function ViewToggle() {
-  const view = useCoordinatorView()
+export const TasksOnlyToggle = memo(function TasksOnlyToggle() {
   const tasksOnly = useTasksOnly()
-  // With a project picked there's no Coordinator card to hide: its Captain's card is in its place.
   const picked = useChatProjectFilter() !== null
+  if (picked) return null
   return (
-    <div role="group" aria-label="View" data-testid="view-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
-      {VIEWS.map((v) => (
-        <button
-          key={v.id}
-          type="button"
-          aria-pressed={view === v.id}
-          aria-label={v.label}
-          title={v.title}
-          onClick={() => setCoordinatorView(v.id)}
-          className={cx(VIEW_BUTTON, view === v.id ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}
-        >
-          <v.icon className="h-3 w-3 shrink-0" aria-hidden />
-          <span className="@max-[27rem]:hidden">{v.label}</span>
-        </button>
-      ))}
-      {view === "cards" && !picked && (
-        <>
-          <span aria-hidden className="mx-0.5 h-4 w-px bg-zinc-800" />
-          <button
-            type="button"
-            aria-pressed={tasksOnly}
-            aria-label="Tasks only"
-            title={tasksOnly ? "Tasks only: the Coordinator card is hidden. Click to show it" : "Tasks only: hide the Coordinator card under the task cards"}
-            onClick={() => setTasksOnly(!tasksOnly)}
-            data-testid="tasks-only"
-            className={cx(VIEW_BUTTON, tasksOnly ? "bg-zinc-800 text-yard-300" : "text-zinc-500 hover:text-zinc-200")}
-          >
-            <PanelBottomClose className="h-3 w-3 shrink-0" aria-hidden />
-            <span className="@max-[34rem]:hidden">Tasks only</span>
-          </button>
-        </>
-      )}
+    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
+      <button
+        type="button"
+        aria-pressed={tasksOnly}
+        aria-label="Tasks only"
+        title={tasksOnly ? "Tasks only: the Coordinator card is hidden. Click to show it" : "Tasks only: hide the Coordinator card under the task cards"}
+        onClick={() => setTasksOnly(!tasksOnly)}
+        data-testid="tasks-only"
+        className={cx(TOGGLE_BUTTON, tasksOnly ? "bg-zinc-800 text-yard-300" : "text-zinc-500 hover:text-zinc-200")}
+      >
+        <PanelBottomClose className="h-3 w-3 shrink-0" aria-hidden />
+        <span className="@max-[34rem]:hidden">Tasks only</span>
+      </button>
     </div>
   )
 })
-
-/** Above the Timeline of one card's tasks: what it shows, the whole Timeline, and the way back to the card. */
-export function TimelineCardBanner({ card, empty }: { card: TimelineCard; empty: boolean }) {
-  const tiles = useTiles().tasks
-  const titles = card.taskIds.map((id) => tiles.get(id)?.title ?? id)
-  const name = titles.length > 1 ? (batchTitle(titles) ?? `${titles.length} tasks`) : titles[0]
-  return (
-    <div data-testid="timeline-card-banner" className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-dashed border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-400">
-      {titles.length > 1 ? <Layers className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <TaskTile id={card.taskIds[0]} />}
-      <span className="min-w-0 flex-1 truncate">{empty ? `Nothing about ${name} in the chat yet` : `Only ${name} in the timeline`}</span>
-      <span className="flex shrink-0 items-center gap-1">
-        <button type="button" onClick={() => showInTimeline(null)} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-          <X className="h-3 w-3" aria-hidden />
-          Full timeline
-        </button>
-        <button type="button" onClick={() => showCard(card.key)} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-          <LayoutGrid className="h-3 w-3" aria-hidden />
-          Back to its card
-        </button>
-      </span>
-    </div>
-  )
-}

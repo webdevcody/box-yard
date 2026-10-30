@@ -1,22 +1,21 @@
 // The Coordinator chat's updates as one-line chips (rows from lib/chatUpdates.ts): "box-yard Captain replied · …",
-// "✓ Fix login done · …". A click opens the whole notice in place, under the chip; back-to-back updates fold into one
-// "N updates" chip that opens to their list. Open state is per session (lib/chipState.ts) and per chip, so a toggle
-// re-renders only that chip.
+// "✓ Fix login done · …", in the cards (CoordinatorCards.tsx). A click opens the whole notice in place, under the
+// chip. Open state is per session (lib/chipState.ts) and per chip, so a toggle re-renders only that chip.
 import { memo, useMemo, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Bot, ChevronRight, type LucideIcon } from "lucide-react"
 import { AppLink, InRepo, LinkedText, Markdown, cx } from "./ui"
-import { ChatLine, FullReplyLink, NoticeProject } from "./ChatLine"
+import { FullReplyLink, NoticeProject } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
 import { NOTICE_ICON } from "./noticeIcons"
 import { TaskTile } from "./TaskIcon"
 import { useTaskTile } from "../lib/taskTiles"
-import { chipView, coordinatorRows, groupPreview, itemMessages, itemTask, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
+import { chipView, coordinatorRows, itemMessages, stableRows, type CoordinatorRow, type UpdateItem } from "../lib/chatUpdates"
 import { splitNotice } from "../lib/captainTranscript"
 import { stripTruncation } from "../lib/truncated"
 import { publishedLabel } from "../lib/publishedNotices"
-import { useChipOpen, useGroupOpen } from "../lib/chipState"
+import { useChipOpen } from "../lib/chipState"
 import type { ChatMessage } from "../../../shared/types"
 
 /** The chip's line: taller under a finger, so a phone can hit it. */
@@ -171,73 +170,8 @@ const FilesChip = memo(function FilesChip({ item, own }: { item: Extract<UpdateI
   )
 })
 
-/** Back-to-back updates as one "3 updates" chip, with their icons and sources as a preview; open, each is a chip. */
-export const UpdateGroup = memo(function UpdateGroup({ id, items }: { id: string; items: UpdateItem[] }) {
-  const ids = useMemo(() => items.map((i) => i.id), [items])
-  const [open, toggle] = useGroupOpen(id, ids)
-  // Each task's tile; a Captain's report or a notice about no task, its kind's icon.
-  const kinds = useMemo(() => {
-    const seen = new Map<string, { icon: LucideIcon; className: string } | { taskId: string }>()
-    for (const item of items) {
-      const taskId = itemTask(item)
-      if (taskId) {
-        if (!seen.has(taskId)) seen.set(taskId, { taskId })
-        continue
-      }
-      const captain = item.type === "notice" && chipView(item.message).captain
-      const kind = item.type === "files" ? "artifact" : chipView(item.message).kind
-      const key = captain ? "captain" : kind
-      if (!seen.has(key)) seen.set(key, captain ? { icon: Bot, className: "text-sky-400" } : NOTICE_ICON[kind])
-    }
-    return [...seen.entries()].slice(0, 4)
-  }, [items])
-  const preview = useMemo(() => groupPreview(items), [items])
-  const count = items.length
-  return (
-    <div id={`chat-${id}`} data-testid="update-group" data-count={count} data-open={open || undefined}>
-      <button type="button" aria-expanded={open} onClick={toggle} title={open ? undefined : preview} className={cx(CHIP_ROW, "w-full")}>
-        <span className="flex shrink-0 gap-0.5">
-          {kinds.map(([key, k]) => ("taskId" in k ? <TaskTile key={key} id={k.taskId} /> : <k.icon key={key} className={cx("h-3.5 w-3.5", k.className)} aria-hidden />))}
-        </span>
-        <span className="shrink-0 font-medium text-zinc-300">{count} updates</span>
-        {preview && <span className="min-w-0 flex-1 truncate text-zinc-600">· {preview}</span>}
-        <Chevron open={open} />
-      </button>
-      {open && (
-        <div data-testid="update-group-items" className={cx(CHIP_BODY, "space-y-0.5 pl-1")}>
-          {items.map((item) => (
-            <UpdateChip key={item.id} item={item} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-})
-
 /** coordinatorRows, with every row that didn't change kept as the same object, so its memo'd component skips. */
 export function useCoordinatorRows(messages: ChatMessage[]): CoordinatorRow[] {
   const prev = useRef<CoordinatorRow[]>([])
   return useMemo(() => (prev.current = stableRows(prev.current, coordinatorRows(messages))), [messages])
 }
-
-/**
- * The thread: updates as chips (one "N updates" chip for a run of them), questions and failures as cards. Only the
- * newest reply offers its next steps: older ones were for a moment that has passed.
- */
-export const ChatRows = memo(function ChatRows({ rows, onFollowUp }: { rows: CoordinatorRow[]; onFollowUp: (message: string) => void }) {
-  const newest = useMemo(() => {
-    for (let i = rows.length - 1; i >= 0; i--) {
-      const r = rows[i]!
-      if (r.type === "message" && r.message.role === "assistant") return r.id
-    }
-  }, [rows])
-  return rows.map((r) =>
-    r.type === "updates" ? (
-      <UpdateGroup key={r.id} id={r.id} items={r.items} />
-    ) : r.type === "update" ? (
-      <UpdateChip key={r.id} item={r.item} />
-    ) : (
-      <ChatLine key={r.id} m={r.message} sources={r.sources} onFollowUp={onFollowUp} next={r.id === newest} />
-    ),
-  )
-})

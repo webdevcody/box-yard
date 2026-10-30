@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The Coordinator chat as cards: a card per task (a batch's one card), the Coordinator card with Cody's thread, opening
-// a card, its ✓, the Timeline of one card and back, Cards ⇄ Timeline, "N new" with the ↓ pill, "N done today" and the project bar.
+// a card, its ✓, links to a message going to its card, "N new" with the ↓ pill, "N done today" and the project bar.
 // A card's box replies to its task (the Coordinator only when the task refuses it); with a project picked, the panel
 // talks to its Captain, whose card takes the Coordinator card's place; either card folds to its header.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -9,7 +9,6 @@ import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ChatPanel } from "../web/src/components/ChatPanel.js"
 import { setChatProjectFilter } from "../web/src/lib/projectBar.js"
-import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorView.js"
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
@@ -18,6 +17,7 @@ import { stopSelecting } from "../web/src/lib/cardSelection.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { COORDINATOR_CHAT, closeThread, forgetThread, openThread, openThreadId } from "../web/src/lib/threads.js"
 import { contextLabel } from "../web/src/components/ContextMeter.js"
+import { revealChatMessage } from "../web/src/lib/reveal.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project, SettingsInfo, Task, TaskStatus } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -93,7 +93,6 @@ afterEach(() => {
       forgetThread(COORDINATOR_CHAT, open)
     })
   act(() => setChatProjectFilter(null))
-  act(() => setCoordinatorView("cards"))
   act(() => root.unmount())
   host.remove()
   vi.unstubAllGlobals()
@@ -111,13 +110,15 @@ const cards = () => [...host.querySelectorAll('[data-testid="chat-card"]')] as H
 const card = (key: string) => host.querySelector(`[data-testid="chat-card"][data-card="${key}"]`) as HTMLElement
 const head = (key: string) => card(key).querySelector('[role="button"]') as HTMLElement
 const coordinator = () => host.querySelector('[data-testid="coordinator-card"]') as HTMLElement
-const viewButton = (label: string) => host.querySelector(`[data-testid="view-toggle"] button[aria-label="${label}"]`) as HTMLElement
+/** Wait for the frames a link to a message takes to page back and scroll. */
+const frames = () => act(async () => await new Promise((r) => setTimeout(r, 50)))
 const button = (scope: Element, text: string) => [...scope.querySelectorAll("button")].find((b) => b.textContent?.includes(text)) as HTMLElement
 
 describe("Coordinator cards", () => {
   it("shows a card per task, a batch as one card, finished ones folded, and Cody's thread in the Coordinator card", () => {
     render()
-    expect(viewButton("Cards").getAttribute("aria-pressed")).toBe("true")
+    // Cards are the only view: no Cards ⇄ Timeline toggle.
+    expect(host.querySelector('button[aria-label="Timeline"], button[aria-label="Cards"]')).toBeNull()
     // In the order the chat first named them; a status change or new update never moves one.
     expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
     expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("1 done today")
@@ -134,7 +135,7 @@ describe("Coordinator cards", () => {
     expect(batch.textContent).toContain("1 working")
     expect(batch.querySelector('[data-testid="chat-card-latest"]')!.textContent).toContain("#406: The Hollow cave")
 
-    // Cody's messages and the replies to them, newest three; tool calls are the Timeline's.
+    // Cody's messages and the replies to them, newest three; tool calls aren't shown.
     const thread = coordinator().textContent ?? ""
     expect(thread).toContain("Shoot every Map 3 area")
     expect(thread).toContain("3 tasks started.")
@@ -145,12 +146,17 @@ describe("Coordinator cards", () => {
     expect(host.querySelector('[data-testid="new-cards-pill"]')).toBeNull()
   })
 
-  it("opens a card to where it came from, its updates, and its timeline; and back to the card from there", () => {
+  it("opens a card to where it came from and its updates; where it came from goes to that message in the Coordinator card", async () => {
+    const scrolled: string[] = []
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
+      scrolled.push(this.dataset.chatId ?? this.id)
+    })
     render()
     click(head(LOGIN.id))
     const body = card(LOGIN.id).querySelector('[data-testid="chat-card-body"]')!
-    expect(body.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Fix login and build the cards")
-    // Its question, as the timeline shows it.
+    const origin = body.querySelector('[data-testid="chat-card-origin"]')!
+    expect(origin.textContent).toContain("Fix login and build the cards")
+    // Its question.
     expect(body.textContent).toContain("Which page, the old one or the new one?")
     expect([...body.querySelectorAll(`a[href="/tasks/${LOGIN.id}"]`)].some((a) => a.textContent === "Task page")).toBe(true)
     // In its own card a task's update leads with what happened, not the task's name.
@@ -160,25 +166,49 @@ describe("Coordinator cards", () => {
     expect(chip.textContent).toContain("opened PR #9")
     expect(chip.textContent).not.toContain("Coordinator cards")
 
-    // An open card has no "Show in timeline" (the side panel's ⋯ keeps it).
-    expect(body.querySelector('[data-testid="chat-card-timeline"]')).toBeNull()
-    act(() => showInTimeline({ key: LOGIN.id, taskIds: [LOGIN.id] }))
-    expect(viewButton("Timeline").getAttribute("aria-pressed")).toBe("true")
-    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
-    const banner = host.querySelector('[data-testid="timeline-card-banner"]')!
-    expect(banner.textContent).toContain("Only Fix login in the timeline")
-    const text = host.querySelector('[data-testid="chat-panel"]')!.textContent!
-    expect(text).toContain("Fix login and build the cards")
-    expect(text).not.toContain("Shoot every Map 3 area")
+    // The message is behind the Coordinator card's "1 earlier": it pages back to it and scrolls there.
+    expect(coordinator().textContent).not.toContain("Fix login and build the cards")
+    click(origin)
+    await frames()
+    expect(coordinator().textContent).toContain("Fix login and build the cards")
+    expect(coordinator().textContent).not.toContain("1 earlier")
+    expect(scrolled).toContain(CHAT[0]!.id)
+    vi.restoreAllMocks()
+  })
 
-    click(button(banner, "Full timeline"))
-    expect(host.querySelector('[data-testid="timeline-card-banner"]')).toBeNull()
-    expect(host.querySelector('[data-testid="chat-panel"]')!.textContent).toContain("Shoot every Map 3 area")
+  it("takes a link to a message to its card: unfolds the Coordinator card, shows it again under Tasks only and leaves a project", async () => {
+    const scrolled: string[] = []
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
+      scrolled.push(this.dataset.chatId ?? this.id)
+    })
+    render()
+    click(coordinator().querySelector('[data-testid="bottom-card-fold"]')!)
+    expect(coordinator().textContent).not.toContain("Shoot every Map 3 area")
+    click(host.querySelector('[data-testid="tasks-only"]')!)
+    act(() => setChatProjectFilter(MAP.id))
+    expect(coordinator()).toBeNull()
+    // A schedule run's "View in chat", say.
+    act(() => revealChatMessage(CHAT[0]!.id))
+    await frames()
+    expect(host.querySelector('[data-testid="tasks-only"]')!.getAttribute("aria-pressed")).toBe("false")
+    expect(coordinator().textContent).toContain("Shoot every Map 3 area")
+    expect(coordinator().textContent).toContain("Fix login and build the cards")
+    expect(scrolled).toContain(CHAT[0]!.id)
 
-    act(() => showInTimeline({ key: LOGIN.id, taskIds: [LOGIN.id] }))
-    click(button(host.querySelector('[data-testid="timeline-card-banner"]')!, "Back to its card"))
-    expect(viewButton("Cards").getAttribute("aria-pressed")).toBe("true")
-    expect(card(LOGIN.id).dataset.open).toBe("true")
+    // An update in a closed card: the card opens and goes there.
+    scrolled.length = 0
+    const update = CHAT.find((m) => m.role === "notice" && m.meta?.taskId === CARDS.id)!
+    expect(card(CARDS.id).dataset.open).toBeUndefined()
+    act(() => revealChatMessage(update.id))
+    await frames()
+    expect(card(CARDS.id).dataset.open).toBe("true")
+    expect(scrolled).toContain(update.id)
+    // A tool call isn't in any card: nothing happens.
+    scrolled.length = 0
+    act(() => revealChatMessage(CHAT[1]!.id))
+    await frames()
+    expect(scrolled).toEqual([])
+    vi.restoreAllMocks()
   })
 
   it("opens a batch into its tasks, each with its own updates, and where and how long the running ones have run", () => {
@@ -214,18 +244,15 @@ describe("Coordinator cards", () => {
     expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
   })
 
-  it("switches to the Timeline and back, and remembers it", () => {
+  it("lands on the cards in a browser that remembered the Timeline, and forgets it", async () => {
+    localStorage.setItem("boxyard:coordinator-timeline", "1")
+    vi.resetModules()
+    await import("../web/src/lib/coordinatorView.js")
+    expect(localStorage.getItem("boxyard:coordinator-timeline")).toBeNull()
+    localStorage.setItem("boxyard:coordinator-timeline", "1")
     render()
-    click(viewButton("Timeline"))
-    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
-    expect(host.querySelectorAll('[data-testid="update-chip"], [data-testid="update-group"]').length).toBeGreaterThan(0)
-    expect(localStorage.getItem("boxyard:coordinator-timeline")).toBe("1")
-    act(() => root.unmount())
-    root = createRoot(host)
-    render()
-    expect(viewButton("Timeline").getAttribute("aria-pressed")).toBe("true")
-    click(viewButton("Cards"))
     expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
   })
 
   it("keeps one project's cards when the bar filters, with its Captain's card in the Coordinator card's place", () => {
@@ -299,7 +326,7 @@ describe("Reply in a card", () => {
     for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
   }
   const sent = (t: Task, text: string) => msg("notice", `✉️ **${t.title}** got a message from Cody: ${text}`, { taskId: t.id, projectId: t.projectId, sent: true })
-  it("sends to the task by default, and shows the message and the agent's answer in the card and the timeline", async () => {
+  it("sends to the task by default, and shows the message and the agent's answer in the card", async () => {
     render()
     click(head(LOGIN.id))
     const box = composer(card(LOGIN.id))
@@ -328,15 +355,6 @@ describe("Reply in a card", () => {
     // Closed, the card's latest line is the answer.
     click(head(LOGIN.id))
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toContain("Switched to the new page.")
-
-    // The Timeline says which task it went to, and goes back to its card.
-    click(viewButton("Timeline"))
-    const line = host.querySelector('[data-testid="sent-message"]')!
-    expect(line.querySelector('[data-testid="sent-from"]')!.textContent).toBe("toFix login·Open card ›")
-    click(button(line, "Open card"))
-    expect(viewButton("Cards").getAttribute("aria-pressed")).toBe("true")
-    await act(async () => await new Promise((r) => requestAnimationFrame(r)))
-    expect(card(LOGIN.id).dataset.open).toBe("true")
   })
 
   it("sends to the Coordinator, with the task's id and why, only when the task refuses it, and says so in the card", async () => {
@@ -538,13 +556,11 @@ describe("A card in the side panel", () => {
     expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
   })
 
-  it("opens from an open card's footer, and stays open in the Timeline", () => {
+  it("opens from an open card's footer", () => {
     render()
     click(head(CARDS.id))
     click(button(card(CARDS.id), "Open in panel"))
     expect(panel()!.dataset.card).toBe(CARDS.id)
-    click(viewButton("Timeline"))
-    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
     expect(panel()!.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Coordinator cards")
     expect(panel()!.textContent).toContain("opened PR #9")
   })
@@ -559,13 +575,13 @@ describe("A card in the side panel", () => {
     expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
     expect(p.querySelector('[data-testid="card-composer"]')).toBeNull()
     expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
-    expect(menu(p)).toEqual(["Show in timeline", "Show its card"])
+    expect(menu(p)).toEqual(["Show its card"])
   })
 
-  it("has the thread panel's ⋯: Show in timeline, Open the task page and Show its card", () => {
+  it("has the thread panel's ⋯: Open the task page and Show its card", () => {
     render()
     click(expand(LOGIN.id))
-    expect(menu(panel()!)).toEqual(["Show in timeline", "Open the task page", "Show its card"])
+    expect(menu(panel()!)).toEqual(["Open the task page", "Show its card"])
   })
 
   it("stops its task's agent from ⋯ while it works", async () => {
@@ -576,25 +592,23 @@ describe("A card in the side panel", () => {
     })
     click(expand(LOGIN.id))
     const items = menu(panel()!)
-    expect(items).toEqual(["Show in timeline", "Open the task page", "Stop answering", "Show its card"])
+    expect(items).toEqual(["Open the task page", "Stop answering", "Show its card"])
     click(menuItem("Stop answering"))
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
     expect(posts.map((x) => x.url)).toEqual([`/api/tasks/${LOGIN.id}/stop`])
   })
 
-  it("Show its card goes back to the Cards view, opens the card and scrolls to it", async () => {
+  it("Show its card opens the card and scrolls to it", async () => {
     const scrolled: string[] = []
     vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
       if (this.id.startsWith("card-")) scrolled.push(this.id)
     })
     render()
     click(expand(CARDS.id))
-    click(viewButton("Timeline"))
-    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    expect(card(CARDS.id).dataset.open).toBeUndefined()
     menu(panel()!)
     click(menuItem("Show its card"))
     await act(async () => await new Promise((r) => setTimeout(r, 50)))
-    expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
     expect(card(CARDS.id).dataset.open).toBe("true")
     expect(scrolled).toEqual([`card-${CARDS.id}`])
     // Beside the chat, it stays open.
@@ -740,15 +754,6 @@ describe("The bottom panel with a project picked", () => {
     click(button(c, "Shoot the dam next"))
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
     expect(posts).toEqual([{ url: `/api/projects/${MAP.id}/captain/messages`, body: expect.objectContaining({ content: "Shoot the dam next" }) }])
-  })
-
-  it("keeps the Captain's card under the project's part of the Timeline", () => {
-    render()
-    act(() => setChatProjectFilter(MAP.id))
-    click(viewButton("Timeline"))
-    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
-    expect(captainCard()!.textContent).toContain("Lit and halfway there.")
-    expect(coordinator()).toBeNull()
   })
 
   it("folds like the Coordinator card, with its newest line and dots while it works", async () => {
@@ -1012,8 +1017,8 @@ describe("Finding your way in the cards", () => {
     act(() => void textarea.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
     expect(coordinator()).not.toBeNull()
-    // Only in the Cards view.
-    click(viewButton("Timeline"))
+    // With a project picked there's no Coordinator card to hide.
+    act(() => setChatProjectFilter(MAP.id))
     expect(toggle()).toBeNull()
   })
 })
