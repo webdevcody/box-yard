@@ -30,7 +30,7 @@ export function MachinesPanel({ fid }: { fid: (k: string) => string }) {
               <div className="min-w-0 flex-1 basis-64">
                 <h4 className="text-sm font-medium text-zinc-200">Your machines</h4>
                 <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-                  Each needs SSH from this computer with a key, node 18+, git and Claude Code, and a claude login there (or a Claude key Box Yard forwards). The <NewTabLink href={GUIDE}>setup guide</NewTabLink> walks
+                  Each needs SSH from this computer with a key, node 18+, git, and Claude Code or Codex with a login there (or one Box Yard forwards). The <NewTabLink href={GUIDE}>setup guide</NewTabLink> walks
                   through an old laptop. Box Yard keeps only a reference to the key, never the key.
                 </p>
               </div>
