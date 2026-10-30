@@ -173,7 +173,7 @@ A Codex task (a project's Agent set to Codex, or `agent: "codex"`, [docs/codex.m
 - **Its login.** First match wins:
   - the project's own `CODEX_API_KEY`, for one turn in `task.json`;
   - Box Yard's ChatGPT login, on Linux machines only (see [Security](#security));
-  - Settings' OpenAI API key for Codex, for one turn in `task.json` (on a Mac, also when Box Yard has the ChatGPT login);
+  - Settings' OpenAI API key for Codex, for one turn in `task.json` (also in place of the ChatGPT login on a machine without `/dev/shm`, such as a Mac);
   - the machine's own `codex login` (`~/.codex`).
 
   A machine with none of these isn't picked. The task waits and says what to do.
