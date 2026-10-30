@@ -874,6 +874,33 @@ export const MIGRATIONS: string[] = [
     PRIMARY KEY (connector_id, name)
   );
   `,
+  `
+  -- Per-turn timings (shared/turnTimings.ts): where each Coordinator, Captain and task run's time went, stage by
+  -- stage, read off the CLI's stream-json plus server-side timestamps. 30 days kept. stages_json holds the reading's
+  -- durations and token counts; steps_json each model step and tool call ([{k,name,at,ms}]).
+  CREATE TABLE turn_timings (
+    id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    project_id TEXT,
+    task_id TEXT,
+    session_id TEXT,
+    model TEXT,
+    effort TEXT,
+    trigger TEXT,
+    resumed INTEGER NOT NULL DEFAULT 0,
+    ok INTEGER NOT NULL DEFAULT 1,
+    requested_at INTEGER,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER NOT NULL,
+    total_ms INTEGER NOT NULL,
+    stages_json TEXT NOT NULL DEFAULT '{}',
+    steps_json TEXT NOT NULL DEFAULT '[]'
+  );
+  CREATE INDEX turn_timings_ended ON turn_timings(ended_at);
+  CREATE INDEX turn_timings_project ON turn_timings(project_id, ended_at);
+  CREATE INDEX turn_timings_task ON turn_timings(task_id, ended_at);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
