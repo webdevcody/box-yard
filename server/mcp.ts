@@ -44,6 +44,8 @@ import { IdentityDetector } from "./identity/detect.js"
 import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
+import { PROJECT_COLORS, type ProjectColor } from "../shared/projectColors.js"
+import { TASK_ICONS, type TaskIconName } from "../shared/taskIcons.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
@@ -173,6 +175,10 @@ const runsOnSchema = z
     'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod (billed per hour; needs a RunPod key), "docker" = the project\'s own isolated Docker container on this computer (needs Docker running and a Claude key). Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", and "docker" for "in a container" or "isolated". If the runner can\'t run (e.g. claude missing or signed out on this computer, or Docker stopped), the call fails with the reason; it never falls back to the other runner.',
   )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
+const iconSchema = z
+  .enum(TASK_ICONS)
+  .optional()
+  .describe("The task's icon in the Coordinator chat, drawn in its project's colour. Omit it to pick one from the title.")
 
 /**
  * The tools the Coordinator and project Captains use to run Box Yard.
@@ -746,7 +752,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description: scopeId
         ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget, or its colour in the chat and sidebar (color).",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -774,6 +780,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               .nullable()
               .optional()
               .describe("This project's notes token budget; null goes back to the one in Settings."),
+            color: z
+              .enum(PROJECT_COLORS)
+              .nullable()
+              .optional()
+              .describe("Its colour in the Coordinator chat (task icons, the project bar, cards) and the sidebar. null goes back to the one picked from its name."),
           },
     },
     safe(
@@ -788,6 +799,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           remove_env?: string[]
           notes_max?: number | null
           notes_max_tokens?: number | null
+          color?: ProjectColor | null
         } & BoxSettingsArgs,
       ) => {
         if (!a.project && !scopeId) return fail("Name the project to update.")
@@ -807,6 +819,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 ...box,
                 notesMaxCount: a.notes_max,
                 notesMaxTokens: a.notes_max_tokens,
+                color: a.color,
               },
         )
         hub.broadcast({ type: "project", project: p })
@@ -1091,10 +1104,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema,
         attachments: attachmentsSchema,
         runs_on: runsOnSchema,
+        icon: iconSchema,
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; icon?: TaskIconName; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
       await tasks.requireRunner(a.runs_on, projectId, a.env)
@@ -1110,6 +1124,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingReason: a.routing_reason ?? null,
         source: inputSource,
         runsOn: a.runs_on ?? null,
+        icon: a.icon ?? null,
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -1122,6 +1137,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
     env: envSchema,
     runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer), over the shared runs_on and the project\'s "Runs on"'),
+    icon: iconSchema,
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -1234,6 +1250,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             routingReason: item.routing_reason ?? a.routing_reason ?? null,
             source: inputSource,
             runsOn: item.runs_on ?? a.runs_on ?? null,
+            icon: item.icon ?? null,
           }
         })
         const created = tasks.createTasks(inputs)

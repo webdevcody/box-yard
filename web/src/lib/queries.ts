@@ -15,6 +15,7 @@ import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, Setu
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
+import type { ProjectColor } from "../../../shared/projectColors"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
@@ -623,6 +624,7 @@ export function useCreateProject() {
           docker: { image: null, dockerfile: null },
           identityId: DEFAULT_IDENTITY_ID,
           snapshot: null,
+          color: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -665,6 +667,8 @@ export function useUpdateProject() {
       /** Both fields: the optimistic update replaces the project's whole `docker`. */
       docker?: ProjectDocker
       identityId?: string
+      /** null goes back to the colour from its name. */
+      color?: ProjectColor | null
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {

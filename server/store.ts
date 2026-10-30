@@ -7,6 +7,8 @@ import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { isProjectColor, type ProjectColor } from "../shared/projectColors.js"
+import { isTaskIcon, type TaskIconName } from "../shared/taskIcons.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -196,6 +198,8 @@ export interface TaskRow {
   pr_labels_json: string | null
   merge_request_json: string | null
   push_state_json: string | null
+  /** Its icon (shared/taskIcons.ts); null picks one from its title. */
+  icon?: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -324,6 +328,8 @@ const AGENTS_PER_BOX = "COALESCE(agents_per_box, CASE WHEN heavy_tasks IN ('one-
 interface ProjectRow {
   id: string
   name: string
+  /** Its colour (shared/projectColors.ts); null picks one from its name. */
+  color?: string | null
   description: string
   repo: string | null
   base_branch: string
@@ -806,6 +812,7 @@ export class Store {
       gpuMachine: gpuMachineOf(row),
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       identityId: row.identity_id || DEFAULT_IDENTITY_ID,
+      color: isProjectColor(row.color) ? row.color : null,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -901,6 +908,7 @@ export class Store {
     identityId?: string
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
+    color?: ProjectColor | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -927,6 +935,7 @@ export class Store {
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
+    if (input.color) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(input.color, id)
     return this.getProject(id)!
   }
 
@@ -975,6 +984,8 @@ export class Store {
       notesMaxTokens?: number | null
       /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
       identityId?: string
+      /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+      color?: ProjectColor | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -1003,6 +1014,7 @@ export class Store {
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
+    if (patch.color !== undefined) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(patch.color, id)
     return this.getProject(id)!
   }
 
@@ -1233,6 +1245,7 @@ export class Store {
       placement: this.taskPlacement(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
+      icon: isTaskIcon(row.icon) ? row.icon : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -1344,6 +1357,8 @@ export class Store {
     startedBy?: string | null
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
+    /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
+    icon?: TaskIconName | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1372,7 +1387,13 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
+    if (input.icon) this.setTaskIcon(id, input.icon)
     return this.getTask(id)!
+  }
+
+  /** A task's icon (shared/taskIcons.ts); null goes back to the one from its title. */
+  setTaskIcon(id: string, icon: TaskIconName | null) {
+    this.db.prepare("UPDATE tasks SET icon = ? WHERE id = ?").run(icon, id)
   }
 
   startTaskTurn(input: {

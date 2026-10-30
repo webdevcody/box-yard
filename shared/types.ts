@@ -10,6 +10,8 @@ import type { Runner } from "./runner.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
+import type { ProjectColor } from "./projectColors.js"
+import type { TaskIconName } from "./taskIcons.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -91,6 +93,8 @@ export interface Project {
   identityId: string
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
+  /** Its colour in the Coordinator chat and the sidebar (shared/projectColors.ts); null: one from its name. */
+  color: ProjectColor | null
   createdAt: number
   updatedAt: number
 }
@@ -233,6 +237,8 @@ export interface Task {
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
   pushState?: PushState | null
+  /** The icon it was given (shared/taskIcons.ts: create_task's `icon`); null: one from its title (taskIcon()). */
+  icon?: TaskIconName | null
   createdAt: number
   updatedAt: number
 }

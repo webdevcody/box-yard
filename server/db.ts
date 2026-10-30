@@ -838,6 +838,12 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE side_threads ADD COLUMN seen_at INTEGER;
   CREATE INDEX side_threads_anchor ON side_threads(anchor_id, kind);
   `,
+  `
+  -- Project colours and task icons (shared/projectColors.ts, shared/taskIcons.ts): NULL picks one from the
+  -- project's name or the task's title.
+  ALTER TABLE projects ADD COLUMN color TEXT;
+  ALTER TABLE tasks ADD COLUMN icon TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

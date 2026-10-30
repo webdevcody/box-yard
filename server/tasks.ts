@@ -54,6 +54,7 @@ import { atRisk, deleteCheckScript, deleteVerdict, parseDeleteCheck, refusalLine
 import { GITHUB_HELPER, GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, gitWithHelper, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, setHelperScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
+import type { TaskIconName } from "../shared/taskIcons.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
@@ -303,6 +304,8 @@ export interface NewTask {
   source?: InputSource
   /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
   runsOn?: Runner | null
+  /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
+  icon?: TaskIconName | null
 }
 
 /**
