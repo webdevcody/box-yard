@@ -1,8 +1,9 @@
 // The chat switcher: the "Coordinator" title in its header, and "Captain" in a Captain's (the project's Captain tab,
 // Zen's side panel), opens a menu of every chat: the Coordinator first, then each project's Captain in sidebar order.
 // Picking one opens it with its composer focused (lib/chatSwitch.ts). The Coordinator's header keeps a pick in its own
-// chat instead: the project goes on its project bar and the chat shows only that project, its Captain in the box. A menu with radio items: the current chat is
-// checked, ↑/↓/Home/End move, Enter or Space picks, Esc closes (back to the title), and so does Tab or a click outside.
+// chat instead: the project goes on its project bar and the chat shows only that project, its Captain in the box.
+// A menu with radio items: the current chat is checked, ↑/↓/Home/End move, Enter or Space picks, Esc closes (back to
+// the title), and so does Tab or a click outside.
 //
 // A filter field heads the menu: typing (there, or on an item) narrows it to the matching chats, best first, with the
 // best one highlighted; ↑/↓ move the highlight and Enter picks it. In the Coordinator's header, P opens the menu with
