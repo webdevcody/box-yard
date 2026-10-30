@@ -14,6 +14,7 @@ import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
 import { ReplySources } from "./ReplySources"
+import { TurnTimingChip, timingOf } from "./TurnTimingChip"
 import type { UpdateSource } from "../lib/chatUpdates"
 import type { ChatMessage } from "../../../shared/types"
 
@@ -377,6 +378,18 @@ export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources }: { m: 
   )
 })
 
+/** Under a reply: the updates it read ("from: …") and its turn's time. */
+function ReplyFooter({ m, sources }: { m: ChatMessage; sources?: UpdateSource[] | null }) {
+  const timing = timingOf(m.meta)
+  if (!timing) return sources ? <ReplySources sources={sources} /> : null
+  return (
+    <div className="mt-1 flex min-w-0 items-center gap-3">
+      {sources && <ReplySources sources={sources} />}
+      <TurnTimingChip id={timing.id} ms={timing.ms} className={sources ? "mt-1" : undefined} />
+    </div>
+  )
+}
+
 function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
@@ -449,7 +462,7 @@ function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: 
   return (
     <div id={`chat-${m.id}`} data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
-      {sources && <ReplySources sources={sources} />}
+      <ReplyFooter m={m} sources={sources} />
       <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
       <MessageActions text={m.content} anchorId={m.id} />
     </div>

@@ -31,6 +31,7 @@ import type { Attachment, TaskMessage } from "../../../shared/types"
 import { userMessageLabel } from "../../../shared/sender"
 import { useOwnerName } from "../lib/queries"
 import { WaitFixButton, WaitReason } from "./WaitReason"
+import { TurnTimingChip, timingOf } from "./TurnTimingChip"
 
 export function TaskView({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
@@ -265,6 +266,7 @@ export const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFo
       )
     default: {
       const url = typeof m.meta?.url === "string" ? m.meta.url : null
+      const timing = timingOf(m.meta)
       if (m.meta?.kind === "hook")
         return (
           <div className={cx("flex items-start gap-1.5 pl-1 text-xs leading-relaxed", m.meta.status === "fired" ? "text-teal-300/90" : "text-amber-200/80")} data-testid="hook-event">
@@ -285,6 +287,7 @@ export const Line = memo(function Line({ m, onFollowUp }: { m: TaskMessage; onFo
             m.content
           )}
           {time}
+          {timing && <TurnTimingChip id={timing.id} ms={timing.ms} className="ml-2 align-middle" />}
         </div>
       )
     }
