@@ -9,14 +9,18 @@
 // opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
 // over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
 // Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowUp,
   Bot,
   ChevronRight,
   ChevronUp,
+  ChevronsDownUp,
+  EyeOff,
+  LocateFixed,
   CircleCheck,
   ListChecks,
   CornerDownRight,
@@ -27,6 +31,7 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  PanelBottomClose,
   Send,
   Square,
   SquareCheck,
@@ -47,7 +52,19 @@ import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
 import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
-import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
+import {
+  clearFocusCard,
+  revealInTimeline,
+  setCoordinatorView,
+  setTasksOnly,
+  showCard,
+  showInTimeline,
+  useCoordinatorView,
+  useFocusCard,
+  useTasksOnly,
+  type TimelineCard,
+} from "../lib/coordinatorView"
+import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../lib/cardJump"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
@@ -168,16 +185,26 @@ function useMinute(on: boolean): number {
 /** The newest card or Coordinator entry: the cards first show with everything up to it seen. */
 const newestAt = (layout: CardsLayout) => Math.max(0, ...[...layout.live, ...layout.idle, ...layout.done].map((c) => c.last), ...layout.coordinator.map((e) => e.at))
 
-/** Opens a card and scrolls to it, flashing it so the eye finds it. */
+const FLASH_MS = 1800
+const flashes = new WeakMap<HTMLElement, ReturnType<typeof setTimeout>>()
+
+/**
+ * Opens a card and scrolls to it, ringing it in its project's colour so the eye finds it (styles.css .card-flash), and
+ * moves focus there for the keyboard and screen readers.
+ */
 function scrollToCard(key: string, open = true) {
   if (open) setOpen([cardOpenKey(key)], true)
   requestAnimationFrame(() => {
     const el = document.getElementById(`card-${key}`)
     if (!el) return
     el.scrollIntoView?.({ block: "nearest", behavior: "smooth" })
+    el.focus({ preventScroll: true })
     el.classList.remove("card-flash")
     void el.offsetWidth
     el.classList.add("card-flash")
+    // Without motion the ring is still: take it off when the fade would have ended.
+    clearTimeout(flashes.get(el))
+    flashes.set(el, setTimeout(() => el.classList.remove("card-flash"), FLASH_MS))
   })
 }
 
@@ -232,6 +259,7 @@ export const CardsView = memo(function CardsView({
   }, [live, idle, done])
   // Select mode ends with the cards (the Timeline, another chat) and on Esc.
   useEffect(() => stopSelecting, [])
+  const tasksOnly = useTasksOnly()
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <div data-testid="chat-cards" className="@container space-y-2">
@@ -239,9 +267,13 @@ export const CardsView = memo(function CardsView({
       {live.map((c) => (
         <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />
       ))}
-      <CoordinatorCard entries={coordinator} next={newest} onFollowUp={onFollowUp} active={active}>
-        {children}
-      </CoordinatorCard>
+      {tasksOnly ? (
+        <CoordinatorHidden />
+      ) : (
+        <CoordinatorCard entries={coordinator} next={newest} onFollowUp={onFollowUp} active={active}>
+          {children}
+        </CoordinatorCard>
+      )}
     </div>
   )
 })
@@ -502,6 +534,8 @@ function useCardMarkDone(card: ChatCard, tasks: readonly Task[]): { label: strin
 }
 
 const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged"])
+/** At work: its card's stripe pulses (styles.css .stripe-pulse). */
+const AT_WORK: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["working", "starting", "queued"])
 
 /** What a card's header says: its title (a batch's is what its tasks' titles share), its tasks and their statuses. */
 function useCardHead(card: ChatCard) {
@@ -577,6 +611,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const { first, tasks, batch, title, statuses } = head
   const asks = statuses.includes("needs_input")
   const finished = statuses.length > 0 && statuses.every((s) => FINISHED.has(s))
+  const atWork = statuses.some((s) => AT_WORK.has(s))
   const markDone = useCardMarkDone(card, tasks)
   const selecting = useSelecting()
   const picked = usePicked(card.key)
@@ -606,12 +641,15 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
       data-card={card.key}
       data-open={open || undefined}
       data-in-panel={inPanel || undefined}
+      data-at-work={atWork || undefined}
       aria-label={title}
+      tabIndex={-1}
       style={projectColorStyle(first?.color)}
       className={cx(
         CARD,
         "border-l-(--pc)",
-        "group/card",
+        "group/card outline-none focus-visible:ring-2 focus-visible:ring-(--pc)/60",
+        atWork && "stripe-pulse",
         asks && "border-amber-500/40 border-l-(--pc) bg-amber-500/[0.04]",
         finished && "opacity-75",
         // The card the side panel shows.
@@ -746,7 +784,7 @@ function BatchBar({ ids, statuses }: { ids: readonly string[]; statuses: readonl
   return (
     <div aria-hidden className={cx(UNDER_TITLE, "mt-1.5 flex flex-wrap gap-[3px]")}>
       {ids.map((id, i) => (
-        <i key={id} title={`${tiles.get(id)?.title ?? id}: ${statuses[i] ? statusStyle(statuses[i]).label : ""}`} className={cx("h-1.5 w-3.5 rounded-[3px]", statuses[i] ? statusStyle(statuses[i]).dot.replace("animate-pulse", "") : "bg-zinc-700")} />
+        <i key={id} title={`${tiles.get(id)?.title ?? id}: ${statuses[i] ? statusStyle(statuses[i]).label : ""}`} className={cx("h-1.5 w-3.5 rounded-[3px]", statuses[i] ? statusStyle(statuses[i]).dot.replace("animate-pulse", "") : "bg-zinc-700", statuses[i] && AT_WORK.has(statuses[i]) && "work-pulse")} />
       ))}
     </div>
   )
@@ -1182,6 +1220,7 @@ function CardEntries({
   own,
   next,
   onFollowUp,
+  paging,
 }: {
   entries: readonly CardEntry[]
   thread?: readonly SideThreadMessage[]
@@ -1189,8 +1228,11 @@ function CardEntries({
   own: boolean
   next: string | null
   onFollowUp: (text: string) => void
+  /** Held by the caller (the Coordinator card folds its history back from its header); else its own. */
+  paging?: [number, (n: number) => void]
 }) {
-  const [limit, setLimit] = useState(show)
+  const local = useState(show)
+  const [limit, setLimit] = paging ?? local
   const rows = useMemo(() => rowsOf(entries, thread), [entries, thread])
   const shown = rows.length > limit ? rows.slice(-limit) : rows
   const hidden = rows.length - shown.length
@@ -1198,7 +1240,7 @@ function CardEntries({
   return (
     <>
       {hidden > 0 && (
-        <button type="button" onClick={() => setLimit((n) => n + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier">
+        <button type="button" onClick={() => setLimit(limit + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier" title={`Show ${Math.min(hidden, EARLIER_STEP)} more`}>
           <ChevronUp className="h-3 w-3" aria-hidden />
           {hidden} earlier
         </button>
@@ -1269,9 +1311,18 @@ const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
 
 /** Cody's own thread, pinned under the cards: Cody's messages and the answers that aren't about one task. */
 function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entries: readonly CardEntry[]; next: string | null; onFollowUp: (text: string) => void; active: boolean; children?: ReactNode }) {
+  // Its newest few; "N earlier" pages back, and "Show less" in its header (pinned while its history scrolls by) folds it again.
+  const paging = useState(COORDINATOR_SHOW)
+  const [limit, setLimit] = paging
+  const unfolded = limit > COORDINATOR_SHOW && entries.length > COORDINATOR_SHOW
+  const card = useRef<HTMLElement>(null)
+  const fold = () => {
+    setLimit(COORDINATOR_SHOW)
+    requestAnimationFrame(() => card.current?.scrollIntoView?.({ block: "nearest" }))
+  }
   return (
-    <section id="card-coordinator" data-testid="coordinator-card" aria-label="Coordinator" className={cx(CARD, "border-l-yard-500 bg-zinc-900/25")}>
-      <div className="flex items-start gap-2 py-2 pr-2 pl-3">
+    <section ref={card} id="card-coordinator" data-testid="coordinator-card" aria-label="Coordinator" className={cx(CARD, "border-l-yard-500 bg-zinc-900/25")}>
+      <div data-testid="coordinator-card-head" className="sticky top-0 z-10 flex items-start gap-2 rounded-t-[10px] bg-zinc-950/95 py-2 pr-2 pl-3 backdrop-blur">
         <span aria-hidden className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-md bg-yard-400/15 text-yard-400">
           <Bot className="h-[13px] w-[13px]" />
         </span>
@@ -1281,10 +1332,16 @@ function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entr
           </div>
           <div className="text-[11.5px] text-zinc-500">What you type below lands here. Each task it starts gets a card above.</div>
         </div>
+        {unfolded && (
+          <button type="button" onClick={fold} data-testid="coordinator-fold" title={`Fold its history back to the newest ${COORDINATOR_SHOW}`} className={cx(FOOT, "shrink-0")}>
+            <ChevronsDownUp className="h-3.5 w-3.5" aria-hidden />
+            <span className="@max-[24rem]:hidden">Show less</span>
+          </button>
+        )}
       </div>
       {(entries.length > 0 || active) && (
         <div className="space-y-3 border-t border-zinc-800/70 px-3 py-2.5">
-          <CardEntries entries={entries} show={COORDINATOR_SHOW} own={false} next={next} onFollowUp={onFollowUp} />
+          <CardEntries entries={entries} show={COORDINATOR_SHOW} own={false} next={next} onFollowUp={onFollowUp} paging={paging} />
           {children}
         </div>
       )}
@@ -1292,42 +1349,136 @@ function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entr
   )
 }
 
-/** "↓ 3 new in [tiles]": the cards with news. Each click goes to the next of them. */
+/** In place of the Coordinator card while "Tasks only" hides it: what's hidden, and the way back. */
+function CoordinatorHidden() {
+  return (
+    <button type="button" onClick={() => setTasksOnly(false)} data-testid="coordinator-hidden" className={cx(FOLD, "w-full")}>
+      <EyeOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1 truncate">Coordinator card hidden (Tasks only)</span>
+      <span className="shrink-0 text-zinc-500">show</span>
+    </button>
+  )
+}
+
+/** What the pill covers at the bottom of the chat: a card under it is still below. */
+const PILL_INSET = 48
+
+/**
+ * Which way the card `key` is from what's on screen in its scroller (lib/cardJump.ts), kept up to date as the chat
+ * scrolls, resizes or the cards move.
+ */
+function useJumpDirection(key: string | null, cards: readonly ChatCard[]): JumpDirection {
+  const [dir, setDir] = useState<JumpDirection>("down")
+  useLayoutEffect(() => {
+    if (!key) return
+    let frame = 0
+    const measure = () => {
+      frame = 0
+      const el = document.getElementById(`card-${key}`)
+      if (!el) return
+      const box = scrollParent(el)
+      const view = box ? box.getBoundingClientRect() : { top: 0, bottom: window.innerHeight }
+      setDir(jumpDirection(el.getBoundingClientRect(), view, PILL_INSET))
+    }
+    const later = () => {
+      if (!frame) frame = requestAnimationFrame(measure)
+    }
+    measure()
+    // Capture: the chat's scroller doesn't bubble its scroll.
+    document.addEventListener("scroll", later, { capture: true, passive: true })
+    window.addEventListener("resize", later)
+    return () => {
+      cancelAnimationFrame(frame)
+      document.removeEventListener("scroll", later, { capture: true })
+      window.removeEventListener("resize", later)
+    }
+  }, [key, cards])
+  return dir
+}
+
+const ARROW: Record<JumpDirection, { icon: LucideIcon; where: string }> = {
+  up: { icon: ArrowUp, where: "above" },
+  down: { icon: ArrowDown, where: "below" },
+  here: { icon: LocateFixed, where: "on screen" },
+}
+
+/**
+ * "↑ 6 new · [tile] Fix login +2": the cards with news. It names the card a click goes to, and its arrow says which way
+ * that is from what's on screen; each click goes on to the next one down, round to the top again.
+ */
 export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: readonly ChatCard[] }) {
   const seen = useSeen()
   const fresh = useMemo(() => cards.flatMap((c) => {
     const n = newSince(c.entries, seenAt(c.key, seen))
     return n ? [{ card: c, n }] : []
   }), [cards, seen])
-  const step = useRef(0)
-  if (!fresh.length) return null
+  const [last, setLast] = useState<string | null>(null)
+  const order = useMemo(() => cards.map((c) => c.key), [cards])
+  const key = nextJump(order, fresh.map((f) => f.card.key), last)
+  const dir = useJumpDirection(key, cards)
+  const target = key ? fresh.find((f) => f.card.key === key)!.card : null
+  if (!target) return null
   const total = fresh.reduce((sum, f) => sum + f.n, 0)
-  const go = () => scrollToCard(fresh[step.current++ % fresh.length]!.card.key, false)
+  const { icon: Arrow, where } = ARROW[dir]
+  const more = fresh.length - 1
+  const go = () => {
+    scrollToCard(target.key, false)
+    setLast(target.key)
+  }
   return (
     <button
       type="button"
       onClick={go}
       data-testid="new-cards-pill"
-      title="Go to the next card with news"
+      data-direction={dir}
+      data-target={target.key}
+      title={more ? `Go to this card (${where}); click again for the next of ${fresh.length} cards with news` : `Go to this card (${where})`}
       className="flex min-w-0 items-center gap-1.5 rounded-full border border-yard-400/50 bg-[#1c1708] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-yard-300 shadow-lg hover:bg-[#2a220b] pointer-coarse:py-2.5"
     >
-      <ArrowDown className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      {total} new in
-      <span className="flex min-w-0 gap-0.5 overflow-hidden">
-        {fresh.map((f) => (f.card.batchId ? <Layers key={f.card.key} className="h-4 w-4 shrink-0 text-zinc-300" aria-hidden /> : <TaskTile key={f.card.key} id={f.card.taskIds[0]} />))}
+      <Arrow className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="shrink-0">{total} new</span>
+      <span aria-hidden className="text-yard-400/60">
+        ·
       </span>
+      <PillTarget card={target} where={where} />
+      {more > 0 && (
+        <span data-testid="new-cards-more" className="shrink-0 rounded-full bg-yard-400/15 px-1.5 text-[11px] text-yard-300">
+          +{more}
+        </span>
+      )}
     </button>
   )
 })
+
+/** The card the pill goes to: its icon and title, cut short. */
+function PillTarget({ card, where }: { card: ChatCard; where: string }) {
+  const { first, title } = useCardHead(card)
+  return (
+    <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(first?.color)}>
+      <CardIcon card={card} />
+      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100">
+        {title}
+      </span>
+      <span className="sr-only">, {where}</span>
+    </span>
+  )
+}
 
 const VIEWS: { id: "cards" | "timeline"; label: string; title: string; icon: LucideIcon }[] = [
   { id: "cards", label: "Cards", title: "Cards: one per task", icon: LayoutGrid },
   { id: "timeline", label: "Timeline", title: "Timeline: everything in order", icon: List },
 ]
 
-/** Cards ⇄ Timeline, in the chat's header. Icons only in a narrow header. */
+const VIEW_BUTTON =
+  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
+
+/**
+ * Cards ⇄ Timeline, in the chat's header, and in the Cards view "Tasks only", which hides the Coordinator card under
+ * them (lib/coordinatorView.ts; this browser remembers both). Icons only in a narrow header.
+ */
 export const ViewToggle = memo(function ViewToggle() {
   const view = useCoordinatorView()
+  const tasksOnly = useTasksOnly()
   return (
     <div role="group" aria-label="View" data-testid="view-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
       {VIEWS.map((v) => (
@@ -1338,15 +1489,29 @@ export const ViewToggle = memo(function ViewToggle() {
           aria-label={v.label}
           title={v.title}
           onClick={() => setCoordinatorView(v.id)}
-          className={cx(
-            "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5",
-            view === v.id ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200",
-          )}
+          className={cx(VIEW_BUTTON, view === v.id ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}
         >
           <v.icon className="h-3 w-3 shrink-0" aria-hidden />
           <span className="@max-[27rem]:hidden">{v.label}</span>
         </button>
       ))}
+      {view === "cards" && (
+        <>
+          <span aria-hidden className="mx-0.5 h-4 w-px bg-zinc-800" />
+          <button
+            type="button"
+            aria-pressed={tasksOnly}
+            aria-label="Tasks only"
+            title={tasksOnly ? "Tasks only: the Coordinator card is hidden. Click to show it" : "Tasks only: hide the Coordinator card under the task cards"}
+            onClick={() => setTasksOnly(!tasksOnly)}
+            data-testid="tasks-only"
+            className={cx(VIEW_BUTTON, tasksOnly ? "bg-zinc-800 text-yard-300" : "text-zinc-500 hover:text-zinc-200")}
+          >
+            <PanelBottomClose className="h-3 w-3 shrink-0" aria-hidden />
+            <span className="@max-[34rem]:hidden">Tasks only</span>
+          </button>
+        </>
+      )}
     </div>
   )
 })

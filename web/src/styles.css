@@ -188,16 +188,55 @@ body.resizing iframe {
 }
 
 /* A Coordinator card that "↓ N new" or "Back to its card" just went to (components/CoordinatorCards.tsx). */
+/* A card the chat just took Cody to: a ring in its project's colour (--pc), fading out. Still, it shows and goes. */
 @keyframes card-flash {
-  0% {
-    box-shadow: 0 0 0 2px rgb(251 191 36 / 0.6);
+  0%,
+  35% {
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--pc, rgb(251 191 36)) 85%, transparent);
   }
   100% {
-    box-shadow: 0 0 0 2px rgb(251 191 36 / 0);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--pc, rgb(251 191 36)) 0%, transparent);
   }
 }
 .card-flash {
-  animation: card-flash 1.4s ease-out;
+  animation: card-flash 1.8s ease-out;
+}
+
+/* A card whose task is at work (working, starting or queued): its project stripe breathes; resting, it's still. */
+@keyframes stripe-pulse {
+  0%,
+  100% {
+    border-left-color: var(--pc);
+  }
+  50% {
+    border-left-color: color-mix(in oklab, var(--pc) 30%, transparent);
+  }
+}
+.stripe-pulse {
+  animation: stripe-pulse 1.8s ease-in-out infinite;
+}
+/* The same for a compact row's stripe or dot (a batch's status strip). */
+@keyframes work-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.work-pulse {
+  animation: work-pulse 1.8s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stripe-pulse,
+  .work-pulse {
+    animation: none;
+  }
+  .card-flash {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--pc, rgb(251 191 36)) 85%, transparent);
+  }
 }
 
 /* Passages that have a side thread (lib/threadHighlight.ts), tinted in place; the open thread's is stronger. */
