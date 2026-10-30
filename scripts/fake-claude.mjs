@@ -14,6 +14,8 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
+// A quick question whose prompt carries the state of what it names ("[What this message names …]", server/handoff.ts)
+// is answered from that block with no tool call, as the prompt tells a model to.
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
 //   [fyi]                                     (a Captain marks its reply to the Coordinator FYI: no wake needed)
 //   [decide]                                  (a Captain's reply ends with a decision for Cody)
@@ -258,13 +260,22 @@ async function sideThread(mcp, prompt) {
   return lines.join("\n")
 }
 
+const NAMED_BLOCK = /^\[(?:What|Tasks) this message names[^\n]*\]\n((?:(?:- |  |Projects it names).*(?:\n|$))*)/m
+
 async function orchestrator(mcp, prompt) {
   if (prompt.includes("📝 **Notes retro**")) return notesRetro(mcp, prompt)
   if (prompt.includes("[Box Yard side thread]") || session.thread) {
     session.thread = true
     return sideThread(mcp, prompt)
   }
-  const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
+  // The state of what the message names (server/handoff.ts): a model answers a quick question from it, without a lookup.
+  const named = prompt.match(NAMED_BLOCK)
+  const text = prompt
+    .replace(NAMED_BLOCK, "")
+    .split("\n")
+    .filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]"))
+    .join("\n")
+    .trim()
   const lines = []
   let m
   if ((m = text.match(/create project\s+"?([\w .-]+?)"?(?:\s+repo\s+(\S+))?\s*$/im))) {
@@ -300,7 +311,9 @@ async function orchestrator(mcp, prompt) {
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
   }
-  if (!lines.length || /status|what.*(up|going)/i.test(text)) {
+  if (!lines.length && named) {
+    lines.push(`Here's what you asked about:\n${named[1].trim()}`)
+  } else if (!lines.length || /status|what.*(up|going)/i.test(text)) {
     const r = await useTool(mcp, "list_tasks", {})
     let tasks = []
     try {
@@ -481,7 +494,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  session.turns.push({ prompt, result, at: Date.now(), uuids, ...(session.thread ? { thread: true } : {}) })
+  session.turns.push({ prompt, result, at: Date.now(), uuids, model: flag("--model") ?? null, effort: flag("--effort") ?? null, ...(session.thread ? { thread: true } : {}) })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
     type: "result",

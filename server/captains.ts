@@ -10,6 +10,7 @@ import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.j
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
 import { updatesBlock } from "./noticeBatch.js"
+import { NAMED_TASKS_HEADING, namedState, type PrLookup } from "./handoff.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
@@ -190,6 +191,8 @@ export class CaptainManager {
   statusOnly: ((projectId: string) => boolean) | null = null
   /** The Coordinator turn running now (Orchestrator.turnKey): messages it sends carry it, so a fan-out is known by it. */
   coordinatorTurn: (() => string | null) | null = null
+  /** GitHub's PR states for the named-tasks block in front of a message (app.ts: TaskManager.prs). */
+  prs: PrLookup | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -220,6 +223,7 @@ export class CaptainManager {
         (messages, reply) => this.onAgentMessagesHandled?.(project.id, messages, reply),
         () => this.claudeLogin?.(project.id) ?? null,
         () => this.statusOnly?.(project.id) ?? false,
+        () => this.prs,
       )
       this.captains.set(project.id, captain)
     }
@@ -449,6 +453,7 @@ class Captain {
     private readonly claudeLogin: () => Record<string, string> | null = () => null,
     /** Its identity shows the Coordinator status only, so its replies to the Coordinator report state, not content. */
     private readonly statusOnly: () => boolean = () => false,
+    private readonly prs: () => PrLookup | null = () => null,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.handshakes = mcp.handshakes ?? null
@@ -737,7 +742,13 @@ class Captain {
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
-    const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
+    const named = await namedState(
+      answering.map((m) => m.content).join("\n\n"),
+      { tasks: this.store.listTasks({ projectId: this.project.id }) },
+      { store: this.store, prs: this.prs() },
+      NAMED_TASKS_HEADING,
+    )
+    const prompt = [updatesBlock("Project updates since your last turn", notices), named, messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
     const sources = new Set(answering.map(captainSourceOf))
