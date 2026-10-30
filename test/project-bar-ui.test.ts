@@ -141,13 +141,15 @@ describe("project bar", () => {
 
 describe("centring the picked chip", () => {
   it("centredScrollLeft puts the chip in the bar's middle, clamped to what the bar can scroll", () => {
-    // Bar 300 wide at x=20; chip 100 wide, 400 into the content, bar scrolled 0.
-    expect(centredScrollLeft({ left: 20 }, { left: 420, width: 100 }, 0, 300, 1200)).toBe(300)
+    // Bar 300 wide at x=20 (middle 170); chip 100 wide, 400 into the content, bar scrolled 0.
+    expect(centredScrollLeft({ left: 20, width: 300 }, { left: 420, width: 100 }, 0, 300, 1200)).toBe(300)
     // Already scrolled 250: the same chip is now at x=170 on screen.
-    expect(centredScrollLeft({ left: 20 }, { left: 170, width: 100 }, 250, 300, 1200)).toBe(300)
+    expect(centredScrollLeft({ left: 20, width: 300 }, { left: 170, width: 100 }, 250, 300, 1200)).toBe(300)
+    // Zen's column: a 10px gutter on each edge, so the scroll area (clientWidth 280) shares the box's middle.
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 400, width: 100 }, 0, 280, 1200)).toBe(300)
     // Near the start: can't go below 0. Near the end: can't pass scrollWidth - clientWidth.
-    expect(centredScrollLeft({ left: 0 }, { left: 10, width: 60 }, 0, 300, 1200)).toBe(0)
-    expect(centredScrollLeft({ left: 0 }, { left: 1150, width: 50 }, 0, 300, 1200)).toBe(900)
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 10, width: 60 }, 0, 300, 1200)).toBe(0)
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 1150, width: 50 }, 0, 300, 1200)).toBe(900)
   })
 
   describe("in the bar", () => {
@@ -171,8 +173,7 @@ describe("centring the picked chip", () => {
           const b = this.closest<HTMLElement>('[data-testid="project-bar"]')
           if (!b) return { left: 0, width: 0, top: 0, height: 0, right: 0, bottom: 0 }
           if (this === b) return { left: 0, width: 300, top: 0, height: 36, right: 300, bottom: 36 }
-          const i = [...b.children].indexOf(this)
-          const left = i * 150 - b.scrollLeft
+          const left = [...b.children].indexOf(this) * 150 - b.scrollLeft
           return { left, width: 120, top: 0, height: 28, right: left + 120, bottom: 28 }
         },
       })
