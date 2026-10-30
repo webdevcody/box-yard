@@ -832,6 +832,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
         for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
         await tasks.projectDeleted(p.id)
+        deps.connectors?.projectDeleted(p.id)
         store.deleteProject(p.id)
         hub.broadcast({ type: "project.deleted", projectId: p.id })
         return ok(`Deleted project ${p.name}.`)

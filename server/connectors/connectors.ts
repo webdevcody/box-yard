@@ -469,6 +469,18 @@ export class Connectors {
     return this.require(id)
   }
 
+  /** A deleted project leaves every connector's chosen projects. */
+  projectDeleted(projectId: string) {
+    let changed = false
+    for (const r of this.d.db.prepare("SELECT * FROM connectors").all() as ConnectorRow[]) {
+      const scope = this.scopeOf(r)
+      if (!scope.projects?.includes(projectId)) continue
+      this.d.db.prepare("UPDATE connectors SET scope_json = ? WHERE id = ?").run(JSON.stringify({ ...scope, projects: scope.projects.filter((p) => p !== projectId) }), r.id)
+      changed = true
+    }
+    if (changed) this.changed()
+  }
+
   delete(id: string) {
     this.require(id)
     for (const s of this.secretRows(id)) this.retire(s)
