@@ -508,23 +508,21 @@ export function SettingsDialog({
                   />
                   {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
                 </label>
-                <input
-                  className={cx(inputClass, "disabled:opacity-50")}
-                  list="boxyard-models"
-                  disabled={!s.orchestratorRelay.enabled}
-                  aria-label="Relay turn model"
+                <ModelPicker
                   value={s.orchestratorRelay.model}
-                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, model: e.target.value })}
-                />
-                <Select
-                  className="w-full"
+                  onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, model: v })}
                   disabled={!s.orchestratorRelay.enabled}
-                  aria-label="Relay turn effort"
+                  ariaLabel="Relay turn model"
+                  testId="orchestrator-relay-model"
+                />
+                <EffortPicker
                   value={s.orchestratorRelay.effort}
-                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: e.target.value as Settings["orchestratorEffort"] })}
-                >
-                  <EffortOptions />
-                </Select>
+                  onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: v as Settings["orchestratorEffort"] })}
+                  model={s.orchestratorRelay.model}
+                  disabled={!s.orchestratorRelay.enabled}
+                  ariaLabel="Relay turn effort"
+                  testId="orchestrator-relay-effort"
+                />
               </div>
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>

@@ -24,6 +24,8 @@ export function ModelPicker({
   defaultLabel,
   className,
   testId,
+  disabled,
+  ariaLabel,
 }: {
   id?: string
   value: string
@@ -31,6 +33,8 @@ export function ModelPicker({
   defaultLabel?: string
   className?: string
   testId?: string
+  disabled?: boolean
+  ariaLabel?: string
 }) {
   const models = useModels()
   const listed = value === "" ? defaultLabel !== undefined : models.some((m) => m.id === value)
@@ -44,6 +48,8 @@ export function ModelPicker({
         className="w-full"
         value={custom ? CUSTOM : value}
         title={note ?? undefined}
+        disabled={disabled}
+        aria-label={ariaLabel}
         data-testid={testId}
         onChange={(e) => {
           if (e.target.value === CUSTOM) return setCustomOpen(true)
@@ -68,7 +74,8 @@ export function ModelPicker({
       </Select>
       {custom && (
         <input
-          className={cx(inputClass, "font-mono")}
+          className={cx(inputClass, "font-mono disabled:opacity-50")}
+          disabled={disabled}
           value={value}
           onChange={(e) => onChange(e.target.value.trim())}
           placeholder="claude-opus-5-5, opus[1m]…"
@@ -84,7 +91,7 @@ export function ModelPicker({
 }
 
 /**
- * An effort choice for `model`. Levels the model doesn't take are greyed out (still shown, and still selectable when
+ * An effort choice for `model` (no warning while `disabled`: that choice doesn't run). Levels the model doesn't take are greyed out (still shown, and still selectable when
  * already saved), and a warning says what the CLI runs instead. `lead` adds options before the levels (e.g. "Let the
  * Coordinator decide"); `effective` is the level that runs when one of those is picked, for the warning.
  */
@@ -97,6 +104,8 @@ export function EffortPicker({
   effective,
   className,
   testId,
+  disabled,
+  ariaLabel,
 }: {
   id?: string
   value: string
@@ -106,13 +115,15 @@ export function EffortPicker({
   effective?: string
   className?: string
   testId?: string
+  disabled?: boolean
+  ariaLabel?: string
 }) {
   const models = useModels()
   const m = findModel(models, model)
   const check = checkEffort(models, model, effective ?? value)
   return (
     <div className={cx("space-y-1.5", className)}>
-      <Select id={id} className="w-full" value={value} onChange={(e) => onChange(e.target.value)} data-testid={testId}>
+      <Select id={id} className="w-full" value={value} disabled={disabled} aria-label={ariaLabel} onChange={(e) => onChange(e.target.value)} data-testid={testId}>
         {lead}
         {EFFORTS.map((x) => {
           const takes = !m || m.efforts.includes(x)
@@ -124,7 +135,7 @@ export function EffortPicker({
           )
         })}
       </Select>
-      {!check.ok && (
+      {!check.ok && !disabled && (
         <p className="flex items-start gap-1.5 text-xs leading-relaxed text-amber-300/90" role="status" data-testid={testId && `${testId}-warning`}>
           <LineIcon icon={AlertTriangle} className="h-3.5 w-3.5" />
           <span className="min-w-0">{check.message}</span>

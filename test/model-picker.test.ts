@@ -16,22 +16,22 @@ let root: Root
 let host: HTMLElement
 const seen: { model: string; effort: string }[] = []
 
-function Pickers({ model: m0, effort: e0 }: { model: string; effort: string }) {
+function Pickers({ model: m0, effort: e0, disabled }: { model: string; effort: string; disabled?: boolean }) {
   const [model, setModel] = useState(m0)
   const [effort, setEffort] = useState(e0)
   seen.push({ model, effort })
   return createElement(
     "div",
     null,
-    createElement(ModelPicker, { value: model, onChange: setModel, testId: "model" }),
-    createElement(EffortPicker, { value: effort, onChange: setEffort, model, testId: "effort" }),
+    createElement(ModelPicker, { value: model, onChange: setModel, testId: "model", disabled }),
+    createElement(EffortPicker, { value: effort, onChange: setEffort, model, testId: "effort", disabled }),
   )
 }
 
-function render(model: string, effort: string, catalog?: ModelCatalog) {
+function render(model: string, effort: string, catalog?: ModelCatalog, disabled?: boolean) {
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   if (catalog) qc.setQueryData(keys.models, catalog)
-  act(() => root.render(createElement(QueryClientProvider, { client: qc }, createElement(Pickers, { model, effort }))))
+  act(() => root.render(createElement(QueryClientProvider, { client: qc }, createElement(Pickers, { model, effort, disabled }))))
 }
 
 const $ = <T extends Element>(sel: string) => host.querySelector<T>(sel)
@@ -120,5 +120,17 @@ describe("EffortPicker", () => {
     pick("[data-testid=model]", "claude-haiku-4-5")
     expect(effortOptions().every((o) => o.includes("(not on Haiku 4.5)"))).toBe(true)
     expect($("[data-testid=effort-warning]")!.textContent).toBe("Haiku 4.5 takes no effort level, so the CLI sends none.")
+  })
+
+  it("is greyed out with no warning while its setting is off (Settings › Coordinator › Relay turns)", () => {
+    render("claude-opus-4-6", "xhigh", undefined, true)
+    expect(last()).toEqual({ model: "claude-opus-4-6", effort: "xhigh" })
+    expect($<HTMLSelectElement>("[data-testid=model]")!.disabled).toBe(true)
+    expect($<HTMLSelectElement>("[data-testid=effort]")!.disabled).toBe(true)
+    expect($("[data-testid=effort-warning]")).toBeNull()
+    act(() => root.unmount())
+    root = createRoot(host)
+    render("my-gateway/claude-x", "high", undefined, true)
+    expect($<HTMLInputElement>("[data-testid=model-custom]")!.disabled).toBe(true)
   })
 })
