@@ -1,7 +1,7 @@
 // Pure helpers for Settings › Machines and the Boxes page's machines: the add/edit form, and how a machine's state
 // and last connection test read.
 import { formatBytes } from "../../../shared/disk"
-import { DEFAULT_MACHINE_DIR, normalizeLabels, type Machine, type MachineState, type MachineTest, type MachineTool } from "../../../shared/machines"
+import { DEFAULT_MACHINE_DIR, normalizeLabels, type Machine, type MachineState, type MachineStatus, type MachineTest, type MachineTool } from "../../../shared/machines"
 import type { MachineForm } from "./queries"
 
 export const MACHINE_STATE: Record<MachineState, { label: string; chip: string; dot: string; title: string }> = {
@@ -86,6 +86,9 @@ export function machinePatch(d: MachineDraft, saved: Machine): Partial<MachineFo
 }
 
 /** "user@host" or "user@host:2222". */
+/** Its last test or connection failed on a changed host key (sshError in server/machines/ssh.ts): Forget host key is the way out. */
+export const hostKeyChanged = (m: Pick<MachineStatus, "problem" | "lastTest">) => /host key changed/.test(`${m.problem ?? ""}\n${m.lastTest?.error ?? ""}`)
+
 export const machineAddress = (m: Pick<Machine, "user" | "host" | "port">) => `${m.user}@${m.host}${m.port === 22 ? "" : `:${m.port}`}`
 
 /** "Ubuntu 24.04 · 4 CPUs · 7.6 GB RAM · 112 GB free" from a passed test. */

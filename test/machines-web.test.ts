@@ -1,7 +1,8 @@
 // Settings › Machines' form and how a machine's last test reads (web/src/lib/machines.ts).
 import { describe, expect, it } from "vitest"
-import { draftOf, EMPTY_MACHINE, hardwareLine, machineAddress, machineInput, machinePatch, toolList } from "../web/src/lib/machines"
+import { draftOf, EMPTY_MACHINE, hardwareLine, hostKeyChanged, machineAddress, machineInput, machinePatch, toolList } from "../web/src/lib/machines"
 import { failedTest, parseProbe, testFromProbe } from "../server/machines/probe"
+import { sshError } from "../server/machines/ssh"
 import type { Machine } from "../shared/machines"
 
 const saved: Machine = {
@@ -65,5 +66,13 @@ describe("a machine's last test", () => {
       { name: "codex", text: "0.40.0 (not used)", ok: null },
     ])
     expect(toolList(failedTest("x", 1)).map((t) => t.text)).toEqual(["missing", "missing", "missing", "not installed"])
+  })
+
+  it("offers Forget host key only when ssh refused a changed host key", () => {
+    const changed = sshError("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.")
+    expect(hostKeyChanged({ problem: null, lastTest: failedTest(`Can't connect: ${changed}`, 1) })).toBe(true)
+    expect(hostKeyChanged({ problem: `Box Yard can't reach it (${changed})`, lastTest: null })).toBe(true)
+    expect(hostKeyChanged({ problem: null, lastTest: failedTest(`Can't connect: ${sshError("Connection refused")}`, 1) })).toBe(false)
+    expect(hostKeyChanged({ problem: null, lastTest: null })).toBe(false)
   })
 })

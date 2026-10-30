@@ -99,7 +99,7 @@ These steps are for Ubuntu or Debian; [macOS](#macos-machines) differs only a li
   - `agent`: any key in the SSH agent.
   - `agent:SHA256:…`: one key in the agent. Box Yard keeps its public half in `<data>/machines/<id>.pub` to tell ssh which key to use.
   - `default`: ssh's own defaults and `~/.ssh/config`.
-- **Host keys.** Box Yard trusts a machine's host key the first time it connects, and keeps it in a known_hosts file of its own per machine (`<data>/machines/known_hosts-<id>`). A changed key stops every connection until you press **Forget host key** in Settings › Machines.
+- **Host keys.** Box Yard trusts a machine's host key the first time it connects, and keeps it in a known_hosts file of its own per machine (`<data>/machines/known_hosts-<id>`). A changed key stops every connection. The machine's card in Settings › Machines then offers **Forget host key…**: press it only if you reinstalled the machine or changed its SSH server.
 - **ssh itself.** Box Yard runs the system `ssh` with:
   - a bare environment, so none of Box Yard's secrets can ride along;
   - `BatchMode=yes`, so it never prompts for a password;

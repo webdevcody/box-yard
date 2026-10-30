@@ -1,13 +1,13 @@
 // Settings › Machines: Cody's SSH machines (docs/machines.md). Add, Edit, Test and Remove act at once; "Local means"
 // is a draft until the dialog's Save. The Boxes page shows the same machines with the tasks on them (MachineCard).
 import { useState, type ReactNode } from "react"
-import { CheckCircle2, CircleDashed, Pencil, Plus, RefreshCw, Trash2, XCircle } from "lucide-react"
+import { CheckCircle2, CircleDashed, KeyRound, Pencil, Plus, RefreshCw, Trash2, XCircle } from "lucide-react"
 import { ApiError } from "../lib/api"
 import { confirmDialog } from "../lib/confirm"
 import { machineApi, useMachineAction, useMachines } from "../lib/queries"
 import { useDraft } from "../lib/settingsDraft"
 import { toast } from "../lib/toast"
-import { EMPTY_MACHINE, MACHINE_STATE, draftOf, hardwareLine, machineAddress, machineInput, machinePatch, toolList, type MachineDraft } from "../lib/machines"
+import { EMPTY_MACHINE, MACHINE_STATE, draftOf, hardwareLine, hostKeyChanged, machineAddress, machineInput, machinePatch, toolList, type MachineDraft } from "../lib/machines"
 import { KEY_REF_HELP, MACHINE_LIMITS, machineMatches, type MachineStatus, type MachinesStatus } from "../../../shared/machines"
 import { Modal } from "./Modal"
 import { Panel, Row } from "./SettingsDialog"
@@ -88,10 +88,20 @@ function LocalMeansRow({ fid, status }: { fid: (k: string) => string; status: Ma
   )
 }
 
-/** One machine: its state, address, labels, last test and tasks running at once, with Test, Edit and Remove. */
+/** One machine: its state, address, labels, last test and tasks running at once, with Test, Edit and Remove (and Forget host key when it changed). */
 export function MachineCard({ machine: m, onEdit, children }: { machine: MachineStatus; onEdit?: () => void; children?: ReactNode }) {
   const test = useMachineAction<string>(`Couldn't test ${m.name}`, (id) => machineApi.test(id))
+  const forget = useMachineAction<string>(`Couldn't forget ${m.name}'s host key`, (id) => machineApi.forgetHostKey(id))
   const st = MACHINE_STATE[m.state]
+  const forgetHostKey = async () => {
+    const ok = await confirmDialog({
+      title: `Forget ${m.name}'s host key?`,
+      body: `Do this only if you reinstalled ${m.name} or changed its SSH server: a changed key can also mean another computer is answering at ${m.host}. Box Yard trusts the key it sees next and tests the connection again.`,
+      confirmLabel: "Forget and test",
+      danger: true,
+    })
+    if (ok) forget.mutate(m.id)
+  }
   const remove = async () => {
     const ok = await confirmDialog({
       title: `Remove ${m.name}?`,
@@ -147,6 +157,11 @@ export function MachineCard({ machine: m, onEdit, children }: { machine: Machine
           <Button size="sm" variant="subtle" loading={test.isPending} onClick={() => test.mutate(m.id)} data-testid="machine-test">
             {!test.isPending && <RefreshCw className="h-3 w-3" />} Test connection
           </Button>
+          {hostKeyChanged(m) && (
+            <Button size="sm" variant="ghost" loading={forget.isPending} onClick={() => void forgetHostKey()} data-testid="machine-forget-host-key">
+              {!forget.isPending && <KeyRound className="h-3 w-3" />} Forget host key…
+            </Button>
+          )}
           <Button size="sm" variant="ghost" onClick={onEdit}>
             <Pencil className="h-3 w-3" /> Edit…
           </Button>
