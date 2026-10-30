@@ -58,7 +58,7 @@ import type { TaskIconName } from "../shared/taskIcons.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
-import { isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
+import { isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, normalizeLabel, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { GLOBAL_CREDENTIALS, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type TurnEnv } from "./turnCredentials.js"
@@ -345,6 +345,8 @@ export interface NewTask {
   source?: InputSource
   /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
   runsOn?: Runner | null
+  /** With runsOn "ssh": the SSH machines it runs on, by label or machine name; null: any machine. */
+  machineLabel?: string | null
   /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
   icon?: TaskIconName | null
 }
@@ -870,12 +872,14 @@ export class TaskManager {
    * nothing would be lost (toLocal / fromLocal), else it stays where it is and its log says why. Check with
    * requireRunner first.
    */
-  setRunsOn(taskId: string, runner: Runner) {
+  setRunsOn(taskId: string, runner: Runner, machineLabel: string | null = null) {
     const row = this.requireRow(taskId)
-    if (row.runs_on === runner) return
+    const label = runner === "ssh" ? normalizeLabel(machineLabel) : null
+    if (row.runs_on === runner && (row.machine_label ?? null) === label) return
     this.requireIdentityRunner(row.project_id, runner)
-    this.store.updateTask(row.id, { runsOn: runner })
-    this.addEvent(row.id, `Runs on ${RUNNER_PHRASE[runner]} from its next turn on (this task only, over its project's "Runs on").`)
+    this.store.updateTask(row.id, { runsOn: runner, machineLabel: label })
+    const where = runner === "ssh" ? labelPhrase(label) : RUNNER_PHRASE[runner]
+    this.addEvent(row.id, `Runs on ${where} from its next turn on (this task only, over its project's "Runs on").`)
     this.emitTask(row.id)
   }
 
@@ -907,6 +911,7 @@ export class TaskManager {
           routingRule: route.routingRule,
           routingReason: route.routingReason,
           runsOn: input.runsOn ?? null,
+          machineLabel: input.runsOn === "ssh" ? (input.machineLabel ?? null) : null,
           branch: projects[i]!.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
         })
         const files = input.attachments ?? []

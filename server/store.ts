@@ -6,6 +6,7 @@ import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
+import { normalizeLabel } from "../shared/machines.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { isProjectColor, type ProjectColor } from "../shared/projectColors.js"
 import { isTaskIcon, type TaskIconName } from "../shared/taskIcons.js"
@@ -1065,7 +1066,7 @@ export class Store {
     }
     const ssh = this.projectRunner(id) === "ssh"
     if (!ssh) this.db.prepare("UPDATE projects SET machine_label = NULL WHERE id = ?").run(id)
-    else if (machineLabel !== undefined) this.db.prepare("UPDATE projects SET machine_label = ? WHERE id = ?").run(machineLabel || null, id)
+    else if (machineLabel !== undefined) this.db.prepare("UPDATE projects SET machine_label = ? WHERE id = ?").run(normalizeLabel(machineLabel), id)
   }
 
   /**
@@ -1426,7 +1427,7 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
-    if (input.runsOn === "ssh" && input.machineLabel) this.db.prepare("UPDATE tasks SET machine_label = ? WHERE id = ?").run(input.machineLabel, id)
+    if (input.runsOn === "ssh" && normalizeLabel(input.machineLabel)) this.db.prepare("UPDATE tasks SET machine_label = ? WHERE id = ?").run(normalizeLabel(input.machineLabel), id)
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     return this.getTask(id)!
