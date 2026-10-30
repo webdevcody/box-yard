@@ -32,6 +32,7 @@ import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds, type StatusOn
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
+import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -95,6 +96,13 @@ interface RunResult {
 }
 type RunKind = "turn" | "summary" | "compact" | "context"
 
+/** What asked for a run, for its timing row (shared/turnTimings.ts). */
+interface RunAsk {
+  trigger?: string | null
+  /** The oldest message or update it answers. */
+  requestedAt?: number | null
+}
+
 /** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
 export function attachmentNote(files: unknown, ownerName?: string): string {
   if (!Array.isArray(files) || !files.length) return ""
@@ -136,9 +144,10 @@ export class Orchestrator {
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    mcp: { url: string; token: string },
+    mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
   ) {
+    this.handshakes = mcp.handshakes ?? null
     this.workdir = path.join(c.dataDir, "orchestrator")
     this.compactionsDir = compactionsDir(c.dataDir)
     fs.mkdirSync(this.compactionsDir, { recursive: true })
@@ -149,6 +158,8 @@ export class Orchestrator {
   }
 
   private readonly mcpConfig: string
+  /** The MCP handshakes /mcp saw, to split a run's start-up into process start and MCP connect. */
+  private readonly handshakes: McpHandshakes | null
 
   /**
    * Projects whose identity lets the Coordinator see their status only (app.ts wires Identities in). Its summaries,
@@ -538,7 +549,7 @@ export class Orchestrator {
     ]
       .filter(Boolean)
       .join("\n\n")
-    const result = await this.runPrompt(prompt)
+    const result = await this.runPrompt(prompt, { trigger: "schedule", requestedAt: queued.dueAt })
     this.finishScheduledRun(queued.id, result.ok ? undefined : result.error.slice(0, 500))
   }
 
@@ -565,6 +576,7 @@ export class Orchestrator {
   /** A turn with only task updates in it: report them and keep Cody's work moving. */
   private async autoTurn() {
     if (this.autoTurns >= MAX_AUTO_TURNS) return
+    const requestedAt = this.store.oldestUnseenNoticeAt()
     const notices = this.store.takeUnseenNotices()
     if (!notices.length) return
     this.autoTurns++
@@ -578,6 +590,7 @@ export class Orchestrator {
           this.owner(),
         ),
       ].join("\n\n"),
+      { trigger: "updates", requestedAt },
     )
   }
 
@@ -599,7 +612,11 @@ export class Orchestrator {
     ]
       .filter(Boolean)
       .join("\n\n")
-    await this.runPrompt(prompt)
+    const ask = {
+      trigger: answering.every((m) => m.meta?.source === "hook") ? "hook" : "cody",
+      requestedAt: Math.min(...answering.map((m) => m.createdAt)),
+    }
+    await this.runPrompt(prompt, ask)
   }
 
   /** A one-glance view of the yard, so the orchestrator never works from stale memory. */
@@ -611,12 +628,12 @@ export class Orchestrator {
     return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
   }
 
-  private async runPrompt(body: string): Promise<{ ok: boolean; error: string }> {
+  private async runPrompt(body: string, ask: RunAsk = {}): Promise<{ ok: boolean; error: string }> {
     const recapFile = this.store.getKv(RECAP_KEY)
     const compacted = recapFile ? this.recap(recapFile) : null
     const prompt = [compacted, this.yardNow(), body].filter(Boolean).join("\n\n")
     const s = this.session()
-    let result = await this.run(prompt, s.id, s.started)
+    let result = await this.run(prompt, s.id, s.started, "turn", ask)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
       // Session file is gone (new machine, wiped data). Start over with the last summary and a recap.
       const fresh = randomUUID()
@@ -628,7 +645,7 @@ export class Orchestrator {
         .join("\n")
       const last = compacted ? null : this.latestSummary()
       const saved = last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false, "turn", ask)
     }
     if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
     if (!result.ok) {
@@ -637,6 +654,40 @@ export class Orchestrator {
     }
     this.checkAutoCompact()
     return result
+  }
+
+  /**
+   * The run's timings into turn_timings (shared/turnTimings.ts), and their id on the turn's reply, where the chat's
+   * timing chip opens them. Instrumentation only: it never fails the run.
+   */
+  private recordTiming(
+    clock: TurnClock,
+    r: { kind: RunKind; sessionId: string; model: string | null; effort: string; resume: boolean; ask: RunAsk; ok: boolean; reply: ChatMessage | null },
+  ) {
+    try {
+      const reading = clock.finish(r.ok)
+      const id = `tim_${randomUUID().slice(0, 12)}`
+      this.store.recordTurnTiming(
+        turnTiming(reading, {
+          id,
+          role: "coordinator",
+          kind: r.kind,
+          sessionId: r.sessionId,
+          model: r.model ?? this.settings.get().orchestratorModel,
+          effort: r.effort,
+          trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+          resumed: r.resume,
+          requestedAt: r.ask.requestedAt ?? null,
+          handshake: this.handshakes?.since("coordinator", reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+        }),
+      )
+      if (r.kind === "turn" && r.reply) {
+        const updated = this.store.setChatTiming(r.reply.id, id)
+        if (updated) this.hub.broadcast({ type: "chat.message", message: updated })
+      }
+    } catch (err) {
+      console.error("[orchestrator] couldn't record the turn's timings:", err)
+    }
   }
 
   /** Arguments for the claude CLI, by kind of run. Settings are read here, so changes apply from the next run. */
@@ -682,13 +733,15 @@ export class Orchestrator {
     return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", ask: RunAsk = {}): Promise<RunResult> {
     return new Promise((resolve) => {
       this.writeMcpConfig()
       const args = this.claudeArgs(kind, sessionId, resume)
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
       const env = serverClaudeEnv(null, this.settings.credentials.claudeEnv())
+      const effort = this.settings.get().orchestratorEffort
+      const clock = new TurnClock()
 
       let child: ChildProcess
       try {
@@ -727,6 +780,7 @@ export class Orchestrator {
           return
         }
         if (typeof msg.session_id === "string") seenSession = msg.session_id
+        clock.line(msg)
         if (msg.type === "stream_event") {
           if (quiet) return
           const ev = msg.event
@@ -831,6 +885,7 @@ export class Orchestrator {
             resumed: resume,
           })
         }
+        if (kind !== "context") this.recordTiming(clock, { kind, sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
         // Lets the client speak a one-line summary of the reply (lib/speech.ts).
         if (!quiet) this.hub.broadcast({ type: "chat.turn", startedAt, replyId: reply?.id ?? null })
         const base = { text: said, raw, sessionId: seenSession }

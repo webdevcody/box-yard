@@ -19,6 +19,7 @@ import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js
 import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
+import { McpHandshakes } from "./turnTimings.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -401,8 +402,10 @@ export function createBoxYard(
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
   const mcpUrl = `${selfUrl(c.host, c.port)}/mcp`
-  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
-  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
+  // The MCP handshakes /mcp sees, so a Coordinator or Captain run's timings split its start-up (server/turnTimings.ts).
+  const handshakes = new McpHandshakes()
+  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken, handshakes }, settings)
+  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken, handshakes }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   const threads = new SideThreads(c, store, hub, settings, mcpUrl, (projectId) => (projectId ? captains.threadHost(projectId) : orchestrator.threadHost()))
   tasks.onNotice = (content, meta, opts) => {
@@ -535,6 +538,7 @@ export function createBoxYard(
     mcpHandler(
       { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads },
       mcpToken,
+      handshakes,
     ),
   )
 

@@ -40,6 +40,7 @@ import {
 } from "./compactions.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
+import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -52,6 +53,13 @@ export const STATUS_ONLY_CAPTAIN = "Status only: you get this Captain's replies 
 const MAX_THRESHOLD_SHARE = 0.95
 
 type RunKind = "turn" | "summary" | "compact" | "context"
+/** What asked for a run, for its timing row (shared/turnTimings.ts). */
+interface RunAsk {
+  trigger?: string | null
+  requestedAt?: number | null
+}
+/** Which sender a turn counts as started by when it answers several: the highest-ranked. */
+const TRIGGER_RANK: CaptainSource[] = ["cody", "coordinator", "agent", "schedule", "hook"]
 interface RunResult {
   ok: boolean
   error: string
@@ -176,7 +184,7 @@ export class CaptainManager {
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    private readonly mcp: { url: string; token: string },
+    private readonly mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
   ) {}
 
@@ -185,7 +193,7 @@ export class CaptainManager {
     if (!project) throw new BadRequestError(`No project ${projectId}`)
     let captain = this.captains.get(project.id)
     if (!captain) {
-      const mcp = { url: this.mcp.url, token: this.tokenFor(project.id) }
+      const mcp = { url: this.mcp.url, token: this.tokenFor(project.id), handshakes: this.mcp.handshakes }
       captain = new Captain(
         this.c,
         this.store,
@@ -401,13 +409,14 @@ class Captain {
   private readonly workdir: string
   private readonly mcpConfigPath: string
   private readonly mcpConfig: string
+  private readonly handshakes: McpHandshakes | null
   readonly compactionsDir: string
 
   constructor(
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    mcp: { url: string; token: string },
+    mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
     private readonly project: Project,
     private readonly report: (content: string, report?: CaptainReport) => void,
@@ -420,6 +429,7 @@ class Captain {
     private readonly statusOnly: () => boolean = () => false,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
+    this.handshakes = mcp.handshakes ?? null
     this.workdir = path.join(c.dataDir, "captains", project.id)
     this.compactionsDir = captainCompactionsDir(c.dataDir, project.id)
     fs.mkdirSync(this.workdir, { recursive: true })
@@ -708,7 +718,9 @@ class Captain {
     const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
-    const result = await this.runPrompt(prompt)
+    const sources = new Set(answering.map(captainSourceOf))
+    const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)) }
+    const result = await this.runPrompt(prompt, false, ask)
     this.handled(entries, result.ok)
     this.replyUpward(answering, result)
     const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
@@ -781,6 +793,7 @@ class Captain {
         ),
       ].join("\n\n"),
       true,
+      { trigger: "updates", requestedAt: Math.min(...entries.map((n) => n.createdAt)) },
     )
     this.handled(entries, result.ok)
     if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
@@ -833,12 +846,12 @@ class Captain {
     return { text: lines.join("\n"), hash }
   }
 
-  private async runPrompt(body: string, auto = false): Promise<{ ok: boolean; error: string; text: string }> {
+  private async runPrompt(body: string, auto = false, ask: RunAsk = {}): Promise<{ ok: boolean; error: string; text: string }> {
     let now = this.projectNow()
     const recapFile = this.store.getKv(recapKey(this.project.id))
     const compacted = recapFile ? this.recap(recapFile) : null
     const s = this.session()
-    let result = await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started)
+    let result = await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started, "turn", ask)
     if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
       const fresh = randomUUID()
       this.store.setKv(sessionKey(this.project.id), fresh)
@@ -852,7 +865,7 @@ class Captain {
         .join("\n")
       const last = lastCompaction(this.compactionsDir)
       const saved = compacted ?? (last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null)
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false, "turn", ask)
     }
     if (result.ok) this.store.setKv(notesSeenKey(this.project.id), now.notesHash)
     if (result.ok && recapFile) this.store.setKv(recapKey(this.project.id), null)
@@ -1012,10 +1025,12 @@ class Captain {
     return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn"): Promise<RunResult> {
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", ask: RunAsk = {}): Promise<RunResult> {
     return new Promise((resolve) => {
       this.writeMcpConfig()
       const args = this.claudeArgs(kind, sessionId, resume)
+      const effort = this.settings.get().captainEffort
+      const clock = new TurnClock()
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       // Its project identity's own Claude login, else env vars or Settings › Credentials, read on every run so a
       // saved token works without a restart.
@@ -1044,6 +1059,8 @@ class Captain {
       const startedAt = Date.now()
       const quiet = kind !== "turn"
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
+      /** The turn's last reply, where the chat's timing chip goes. */
+      let reply: CaptainMessage | null = null
 
       const onLine = (line: string) => {
         // stop() closed the database; the run's last lines have nowhere to go.
@@ -1055,6 +1072,7 @@ class Captain {
           return
         }
         if (typeof msg.session_id === "string") seenSession = msg.session_id
+        clock.line(msg)
         if (msg.type === "system" && msg.subtype === "init") {
           if (kind === "turn") this.store.setKv(startedKey(this.project.id), "1")
           return
@@ -1078,6 +1096,7 @@ class Captain {
             const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId) }
             const m = this.store.addCaptainMessage(this.project.id, "assistant", text, Object.keys(meta).length ? meta : null)
             this.hub.broadcast({ type: "captain.message", message: m })
+            reply = m
           }
           for (const b of msg.message.content) {
             if (b.type !== "tool_use") continue
@@ -1135,6 +1154,7 @@ class Captain {
             resumed: resume,
           })
         }
+        if (kind !== "context") this.recordTiming(clock, { kind, sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
         const base = { text: said, raw, sessionId: seenSession }
         if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
         if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })
@@ -1145,5 +1165,37 @@ class Captain {
       child.stdin!.on("error", () => {})
       child.stdin!.end(prompt)
     })
+  }
+
+  /** The run's timings into turn_timings, and their id on the turn's reply (see Orchestrator.recordTiming). */
+  private recordTiming(
+    clock: TurnClock,
+    r: { kind: RunKind; sessionId: string; model: string | null; effort: string; resume: boolean; ask: RunAsk; ok: boolean; reply: CaptainMessage | null },
+  ) {
+    try {
+      const reading = clock.finish(r.ok)
+      const id = `tim_${randomUUID().slice(0, 12)}`
+      this.store.recordTurnTiming(
+        turnTiming(reading, {
+          id,
+          role: "captain",
+          kind: r.kind,
+          projectId: this.project.id,
+          sessionId: r.sessionId,
+          model: r.model ?? this.settings.get().captainModel,
+          effort: r.effort,
+          trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+          resumed: r.resume,
+          requestedAt: r.ask.requestedAt ?? null,
+          handshake: this.handshakes?.since(`captain:${this.project.id}`, reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+        }),
+      )
+      if (r.kind === "turn" && r.reply) {
+        const updated = this.store.setCaptainMessageTiming(r.reply.id, id)
+        if (updated) this.hub.broadcast({ type: "captain.message", message: updated })
+      }
+    } catch (err) {
+      console.error(`[captain ${this.project.id}] couldn't record the turn's timings:`, err)
+    }
   }
 }

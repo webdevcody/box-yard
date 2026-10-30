@@ -44,6 +44,7 @@ import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, te
 import { redact } from "./credentials.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
+import type { McpHandshakes } from "./turnTimings.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -2839,9 +2840,13 @@ function callerFor(deps: McpDeps, token: string, auth: string | undefined): McpC
   return projectId ? { kind: "captain", projectId } : null
 }
 
-/** Stateless Streamable HTTP endpoint: a fresh server per request. */
-export function mcpHandler(deps: McpDeps, token: string) {
+/**
+ * Stateless Streamable HTTP endpoint: a fresh server per request. `handshakes` hears each Coordinator and Captain
+ * request's JSON-RPC methods and times, for their turns' start-up timings.
+ */
+export function mcpHandler(deps: McpDeps, token: string, handshakes?: McpHandshakes) {
   return async (req: Request, res: Response) => {
+    const at = Date.now()
     const caller = callerFor(deps, token, req.headers.authorization)
     if (!caller) {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized" }, id: null })
@@ -2850,6 +2855,13 @@ export function mcpHandler(deps: McpDeps, token: string) {
     if (req.method !== "POST") {
       res.status(405).set("Allow", "POST").end()
       return
+    }
+    // Side threads (readOnly callers) run beside the chat's turns: their handshakes aren't the turn's.
+    const key = caller.readOnly ? null : caller.kind === "coordinator" ? "coordinator" : `captain:${caller.projectId}`
+    if (handshakes && key) {
+      const body = req.body as unknown
+      const methods = (Array.isArray(body) ? body : [body]).map((m) => (m && typeof m === "object" ? String((m as { method?: unknown }).method ?? "") : ""))
+      if (methods.some((m) => m === "initialize" || m === "server/discover" || m === "tools/list")) res.on("finish", () => handshakes.saw(key, methods, at, Date.now()))
     }
     const server = buildMcpServer(deps, caller)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
