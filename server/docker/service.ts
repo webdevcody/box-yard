@@ -31,7 +31,6 @@ export class DockerService implements DockerRunner {
       secrets?: () => string[]
       /** The install id (TaskManager.installLabel without "by-"). */
       install: () => string
-      git: { name: string; email: string }
       /** DOCKER_BIN, or a fake docker CLI in tests. */
       bin?: string | null
       /** Mock mode: containers are folders here, and agents run this claude. */
@@ -59,7 +58,6 @@ export class DockerService implements DockerRunner {
         images: this.images,
         settings: () => this.store.get(),
         install: d.install,
-        git: d.git,
         onEvent: (e) => this.onEvent?.(e),
         onProgress: (boxId, message) => this.onProgress?.(boxId, message),
         claudeBin: d.claudeBin,

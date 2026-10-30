@@ -43,7 +43,6 @@ export class VastService implements GpuRunner {
       credentials: CredentialStore
       dataDir: string
       install: () => string
-      git: { name: string; email: string }
       /** Settings › RunPod GPU › Image: instances use the same built image unless Settings › Vast.ai GPU names one. */
       runpodImage: () => string | null
       fetch?: typeof fetch
@@ -60,7 +59,6 @@ export class VastService implements GpuRunner {
       install: d.install,
       bootstrapDir: runpodDir(),
       scriptsDir: vastDir(),
-      git: d.git,
       onEvent: (e) => this.onPodEvent?.(e),
       onProgress: (boxId, message) => this.onProgress?.(boxId, message),
       projectCap: (projectId) => d.store.projectGpuCap(projectId),

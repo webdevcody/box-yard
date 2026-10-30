@@ -759,6 +759,12 @@ export interface BudgetSettings {
 export interface Settings {
   /** What Box Yard calls its human in prompts and labels (default "Cody"). */
   ownerName: string
+  /**
+   * Settings › Credentials › Git author: the author of turns whose identity names none, before this computer's git
+   * config and the GitHub account behind the token (server/gitAuthor.ts). "" = unset; GIT_USER_NAME / GIT_USER_EMAIL.
+   */
+  gitUserName: string
+  gitUserEmail: string
   /** A plain visit to / opens Zen (the Coordinator alone, full screen) unless Zen was left on purpose last time. */
   startInZen: boolean
   /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */

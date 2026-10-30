@@ -2281,7 +2281,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .object({ name: z.string(), email: z.string() })
       .nullable()
       .optional()
-      .describe("The git author its commits get, e.g. {name: \"Ada Lovelace\", email: \"ada@acme.dev\"}. Use one of the account's verified emails, or GitHub won't link the commits to it. null: Settings' GIT_USER_NAME / GIT_USER_EMAIL.")
+      .describe("The git author its commits get, e.g. {name: \"Ada Lovelace\", email: \"ada@acme.dev\"}. Use one of the account's verified emails, or GitHub won't link the commits to it. null: Settings › Credentials › Git author (GIT_USER_NAME / GIT_USER_EMAIL), else this computer's git config (Default identity, on this computer), else the GitHub account behind its token.")
     const fieldsInput = {
       color: z.enum(IDENTITY_COLORS).optional(),
       owners: z.array(z.string()).optional().describe('GitHub owners (users and orgs) whose repos it\'s for, e.g. ["acme-corp"].'),

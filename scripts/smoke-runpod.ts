@@ -29,7 +29,6 @@ const p = new RunPodProvider({
   settings: () => ({ ...DEFAULT_RUNPOD_SETTINGS, image: process.env.SMOKE_IMAGE || null, volumeGb: 10 }),
   install: () => "smoketest",
   scriptsDir: runpodDir(),
-  git: { name: "Box Yard", email: "boxyard@example.com" },
   onEvent: (e) => console.log(`  · ${e.kind}: ${e.detail}`),
   onProgress: (_box, m) => console.log(`  · ${m}`),
 })

@@ -34,7 +34,6 @@ export class RunPodService implements GpuRunner {
       dataDir: string
       /** The install id (TaskManager.installLabel without "by-"). */
       install: () => string
-      git: { name: string; email: string }
       fetch?: typeof fetch
     },
   ) {
@@ -47,7 +46,6 @@ export class RunPodService implements GpuRunner {
       settings: () => this.store.get(),
       install: d.install,
       scriptsDir: runpodDir(),
-      git: d.git,
       onEvent: (e) => this.onPodEvent?.({ boxId: e.boxId, kind: e.kind, detail: e.detail }),
       onProgress: (boxId, message) => this.onProgress?.(boxId, message),
       projectCap: (projectId) => d.store.projectGpuCap(projectId),

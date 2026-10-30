@@ -65,7 +65,6 @@ export interface VastProviderDeps {
   /** Box Yard's runpod/ folder (bootstrap.sh installs the tools on any Ubuntu image) and vast/ (init.sh, watchdog.sh). */
   bootstrapDir: string
   scriptsDir: string
-  git: { name: string; email: string }
   onEvent?: (e: { boxId: string; kind: "started" | "terminated"; detail: string }) => void
   onProgress?: (boxId: string, message: string) => void
   projectCap?: (projectId: string) => number | null
@@ -458,7 +457,7 @@ export class VastProvider extends SshBoxProvider implements BoxProvider {
     }
     const init = await this.d.ssh.run(
       t,
-      ["bash /opt/boxyard/init.sh", `git config --global user.name ${q(this.d.git.name)}`, `git config --global user.email ${q(this.d.git.email)}`, "node --version && claude --version"].join(" && "),
+      ["bash /opt/boxyard/init.sh", "node --version && claude --version"].join(" && "),
       { direct: true, timeoutMs: 120_000 },
     )
     if (init.exitCode !== 0) throw new Error(`Preparing Vast.ai instance ${st.pod.id} failed: ${(init.stdout.toString() + init.stderr).slice(-800)}`)

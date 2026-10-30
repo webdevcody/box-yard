@@ -62,7 +62,8 @@ import { GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, gpuBoxIdOn
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
+import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GIT_AUTHOR_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
+import { authorEnv, chooseAuthor, fallbackWarning, GithubAuthors, hostGitScript, parseHostGit, readHostGit, recordAuthorSource, type HostGit, type TurnAuthor } from "./gitAuthor.js"
 import { AGENT_CLI_LABEL, cliForModel, codexModel, isOpenAiModel, type AgentCli } from "../shared/agentCli.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
@@ -236,6 +237,8 @@ export interface TaskManagerDeps {
   uploads: Uploads
   /** Tests: a fake GitHub for the PR tracker, and the token it gets (even in mock mode). */
   github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
+  /** Tests: this computer's global git config as a Docker turn's author reads it (default: the server's own). */
+  hostGit?: () => Promise<HostGit | null>
   /** RunPod GPU pods (Runs on: GPU), when this install has the runner. */
   gpu?: GpuRunner | null
   /** Vast.ai GPU instances (Runs on: GPU, for projects on Vast.ai), when this install has the runner. */
@@ -599,6 +602,13 @@ export class TaskManager {
   private lastSnapshotRetryAt = 0
   /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive), and noteOnce keys. */
   private smallBoxNoted = new Set<string>()
+  /** The GitHub account behind each token, as a turn's author (null: mock mode with no fake GitHub). */
+  private readonly githubAuthors: GithubAuthors | null
+  private readonly hostGit: () => Promise<HostGit | null>
+  /** Tests: the token a fake GitHub gets when a turn has none of its own. */
+  private readonly githubTokenSeam: ((projectId: string) => string | null) | undefined
+  /** Tasks whose log already says their commits go out under the fallback author. */
+  private authorWarned = new Set<string>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
@@ -653,6 +663,10 @@ export class TaskManager {
     this.uploads = deps.uploads
     this.reader = new EventReader(deps.provider, deps.redis)
     this.sleep = new SleepWatch()
+    const githubFetch = deps.github?.fetch ?? (this.c.mock ? null : fetch)
+    this.githubAuthors = githubFetch ? new GithubAuthors(githubFetch) : null
+    this.hostGit = deps.hostGit ?? (() => readHostGit())
+    this.githubTokenSeam = deps.github?.token
     this.prs = new PrTracker({
       store: deps.store,
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
@@ -3267,6 +3281,46 @@ export class TaskManager {
     return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
   }
 
+  /**
+   * Who a turn's commits are by (server/gitAuthor.ts): the project's or identity's author, else Settings' Git author,
+   * else (on this computer, Default identity) this computer's own git config, else the GitHub account behind the
+   * turn's token, else the fallback author, which the task's log and Settings › Credentials / Identities warn about.
+   */
+  private async turnAuthor(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string): Promise<TurnAuthor> {
+    const taskEnv = this.store.taskEnv(row.id)
+    const own = { ...this.store.projectEnv(project.id), ...taskEnv }
+    const { env } = this.turnCredentials(project.id, taskEnv)
+    const isDefault = this.identities.idOf(project.id) === DEFAULT_IDENTITY_ID
+    const settings = this.settings.get()
+    const onComputer = isLocalRunnerBox(boxId) || isDockerBox(boxId)
+    const token = env.GITHUB_TOKEN || this.githubTokenSeam?.(project.id) || ""
+    const author = await chooseAuthor({
+      env,
+      identityAuthor: !GIT_AUTHOR_VARS.some((v) => own[v]),
+      settings: { name: settings.gitUserName, email: settings.gitUserEmail },
+      host: !onComputer
+        ? null
+        : !isDefault
+          ? { skipped: "its identity keeps off this computer's git config" }
+          : isLocalRunnerBox(boxId)
+            ? { mode: "native", read: async () => parseHostGit((await this.provider.exec(boxId, hostGitScript(`${dir}/work`))).stdout) }
+            : { mode: "env", read: this.hostGit },
+      github: !token
+        ? { skipped: "the turn has no GitHub token" }
+        : this.githubAuthors
+          ? () => this.githubAuthors!.author(token)
+          : { skipped: "mock mode doesn't ask GitHub whose token it is" },
+    })
+    recordAuthorSource(this.store, project.id, row.id, author)
+    if (author.source === "fallback") {
+      if (!this.authorWarned.has(row.id)) this.addEvent(row.id, fallbackWarning(author.skipped), { kind: "author" })
+      this.authorWarned.add(row.id)
+      console.warn(`[box-yard] ${row.id}: commits go out under the fallback author (${author.skipped.join("; ")})`)
+    } else this.authorWarned.delete(row.id)
+    if (author.note) this.noteOnce(row.id, `${row.id}:author-note`, author.note)
+    return author
+  }
+
   /** What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login. */
   codexCredentials(projectId: string, taskEnv: Record<string, string> = {}): CodexTurnLogin {
     return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, this.settings.credentials.codexLogin())
@@ -4858,7 +4912,8 @@ export class TaskManager {
         keyWaiting = true
         await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
       }
-      const taskJson = this.taskJson(row, project, boxId, signing)
+      const author = await this.turnAuthor(row, project, boxId, dir)
+      const taskJson = this.taskJson(row, project, boxId, signing, author)
       if (taskJson.agent === "codex") {
         await this.ensureCodex(boxId)
         // The ChatGPT login goes to the box for this turn; the runner keeps whichever copy is newer, and Box Yard reads
@@ -5208,10 +5263,11 @@ export class TaskManager {
     else console.warn(`[box-yard] couldn't reset the git credential on ${boxId}: ${errorTail(res?.stderr ?? "") || "no result"}`)
   }
 
-  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null) {
+  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null, author: TurnAuthor) {
     // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
     const creds = this.turnCredentials(project.id, this.store.taskEnv(row.id))
     const { env, claudeFrom } = creds
+    if (author.author) Object.assign(env, authorEnv(author.author))
     let { unsetEnv } = creds
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
@@ -5253,6 +5309,8 @@ export class TaskManager {
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),
+      // Where its commits' author came from (server/gitAuthor.ts); the author itself is in env.
+      authorSource: author.source,
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
       // How its commits are signed: never the private key, which comes as signing.key for one turn.
@@ -5434,8 +5492,6 @@ export class TaskManager {
         withMirrorLock(spec.mirror, [syncMirrorScript(spec), hydrateMirrorScript(spec, refs), `cd ${q(dir)}`, cloneTaskScript(spec)].join("\n")),
         `cd work`,
         setHelperScript(helper, only),
-        `git config user.name ${q(this.c.gitUserName)}`,
-        `git config user.email ${q(this.c.gitUserEmail)}`,
         // The clone has no checkout yet (so it never fetches the default branch's files for nothing).
         `(git checkout -q -f ${q(project.baseBranch)} 2>/dev/null || git checkout -q -f 2>/dev/null || true)`,
       )
@@ -5513,7 +5569,7 @@ export class TaskManager {
   private async restoreThinGit(boxId: string, dir: string, { spec, env, helper, only }: { spec: MirrorSpec; env: string; helper: string; only: boolean }) {
     const check = await this.provider.exec(boxId, `[ -d ${q(`${dir}/${THIN_DIR}`)} ] && echo thin`)
     if (!check.stdout.includes("thin")) return
-    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, only, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
+    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, only })}`)
     const mark = res.stdout.split("\n").find((l) => l.startsWith(THIN_MARK))?.slice(THIN_MARK.length)
     if (mark !== "ok") {
       const why = mark?.replace(/^fail /, "") || errorTail(res.stderr || res.stdout) || `exit ${res.exitCode}`
@@ -5551,8 +5607,6 @@ export class TaskManager {
       dir,
       taskId: row.id,
       baseBranch: project.baseBranch,
-      gitUserName: this.c.gitUserName,
-      gitUserEmail: this.c.gitUserEmail,
       clone,
       git: mirror?.spec.git ?? "git",
       env: mirror?.env ?? "true",

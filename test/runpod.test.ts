@@ -218,7 +218,6 @@ describe("RunPodProvider", () => {
       settings: () => ({ ...DEFAULT_RUNPOD_SETTINGS, ...o.settings }),
       install: () => "inst1",
       scriptsDir: runpodDir(),
-      git: { name: "Box Yard", email: "boxyard@example.com" },
       projectCap: o.projectCap,
     })
     return Object.assign(p, { calls: f.calls })

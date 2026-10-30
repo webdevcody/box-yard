@@ -33,14 +33,12 @@ export const BOX_GIT_CREDENTIAL_SCRIPT = [
  * Install Claude Code (unless a snapshot already has it) and set up git. No credential is baked into the box: tokens
  * and the git author come with each turn (task.json), so one box never acts as another project's account.
  */
-export function workerSetupScript(c: Pick<Config, "gitUserName" | "gitUserEmail">) {
+export function workerSetupScript() {
   return [
     "set -e",
     `mkdir -p ${ROOT}/.boxyard ${ROOT}/tasks`,
     "command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git >/dev/null)",
     "command -v claude >/dev/null || npm install -g @anthropic-ai/claude-code >/dev/null 2>&1",
-    `git config --global user.name ${q(c.gitUserName)}`,
-    `git config --global user.email ${q(c.gitUserEmail)}`,
     "git config --global init.defaultBranch main",
     BOX_GIT_CREDENTIAL_SCRIPT,
     "claude --version",
@@ -107,7 +105,7 @@ export class UpstashProvider implements BoxProvider {
     const box = from ? await Box.fromSnapshot(from, opts) : await Box.create(opts)
     this.boxes().set(box.id, box)
     try {
-      const setup = await this.exec(box.id, workerSetupScript(this.c))
+      const setup = await this.exec(box.id, workerSetupScript())
       if (setup.exitCode !== 0) throw new Error(`worker setup failed: ${(setup.stderr || setup.stdout).slice(-1500)}`)
     } catch (err) {
       await this.destroy(box.id).catch(() => {})

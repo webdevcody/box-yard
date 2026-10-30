@@ -125,7 +125,6 @@ function provider(o: { settings?: Partial<VastSettings>; cap?: number | null; ma
     install: () => "inst1",
     bootstrapDir: runpodDir(),
     scriptsDir: vastDir(),
-    git: { name: "Box Yard", email: "boxyard@example.com" },
     onEvent: (e) => events.push(e),
     onProgress: (_b, m) => progress.push(m),
     projectCap: () => o.cap ?? null,

@@ -161,8 +161,9 @@ export const config = {
    * passphrase. Empty: a random key in <data dir>/secret.key, made on first use.
    */
   secretKey: env.BOXYARD_SECRET_KEY ?? "",
-  gitUserName: env.GIT_USER_NAME ?? "Box Yard Agent",
-  gitUserEmail: env.GIT_USER_EMAIL ?? "box-yard@users.noreply.github.com",
+  /** The git author of turns whose identity names none (server/gitAuthor.ts); Settings › Credentials › Git author wins. */
+  gitUserName: env.GIT_USER_NAME?.trim() ?? "",
+  gitUserEmail: env.GIT_USER_EMAIL?.trim() ?? "",
 
   mock,
   /** Mock mode only: seed a heavy dataset (long chat, long task thread, many tasks) for UI performance testing. */
