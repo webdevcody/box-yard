@@ -829,6 +829,42 @@ export const MIGRATIONS: string[] = [
     VALUES ('idn_default', 'Default', 'slate', 1, CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
   ALTER TABLE projects ADD COLUMN identity_id TEXT NOT NULL DEFAULT 'idn_default';
   `,
+  // External MCP connectors (docs/connectors.md): the connector rows hold no secret; tokens, keys and secret env vars
+  // are in connector_secrets, encrypted with the secret key identities use (server/identity/secretBox.ts).
+  `
+  CREATE TABLE connectors (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    preset TEXT,
+    kind TEXT NOT NULL,
+    url TEXT,
+    command TEXT,
+    args_json TEXT NOT NULL DEFAULT '[]',
+    env_json TEXT NOT NULL DEFAULT '{}',
+    auth TEXT NOT NULL DEFAULT 'none',
+    header_name TEXT,
+    header_prefix TEXT,
+    token_env TEXT,
+    oauth_json TEXT,
+    scope_json TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'untested',
+    status_detail TEXT,
+    test_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE TABLE connector_secrets (
+    connector_id TEXT NOT NULL REFERENCES connectors(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    expires_at INTEGER,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (connector_id, name)
+  );
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
