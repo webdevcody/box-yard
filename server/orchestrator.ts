@@ -6,10 +6,10 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import { COORDINATOR_NAMED_HEADING, namedState, type PrLookup } from "./handoff.js"
+import { BATCH_THREAD_HEADING, COORDINATOR_NAMED_HEADING, namedState, TASK_THREAD_HEADING, tasksState, type PrLookup } from "./handoff.js"
 import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
-import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun } from "../shared/types.js"
+import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun, Task } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
@@ -483,6 +483,8 @@ export class Orchestrator {
       caller: { kind: "coordinator" },
       claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
+      taskState: (tasks) => tasksState(tasks, this.stateOptions(), tasks.length === 1 ? TASK_THREAD_HEADING : BATCH_THREAD_HEADING),
+      statusOnly: (projectId) => this.statusOnly(projectId),
     }
   }
 
@@ -629,12 +631,12 @@ export class Orchestrator {
   /** The tasks and projects Cody's message names, as they stand now (server/handoff.ts), so a quick question needs no lookup step. */
   private namedState(text: string): Promise<string | null> {
     const projects = this.store.listProjects()
-    return namedState(
-      text,
-      { tasks: this.store.listTasks(), projects },
-      { store: this.store, prs: this.prs, sealed: (t) => this.statusOnly(t.projectId), projectNames: new Map(projects.map((p) => [p.id, p.name])) },
-      COORDINATOR_NAMED_HEADING,
-    )
+    return namedState(text, { tasks: this.store.listTasks(), projects }, this.stateOptions(projects), COORDINATOR_NAMED_HEADING)
+  }
+
+  /** How the Coordinator is shown tasks' state: each with its project's name, a status-only project's sealed. */
+  private stateOptions(projects = this.store.listProjects()) {
+    return { store: this.store, prs: this.prs, sealed: (t: Task) => this.statusOnly(t.projectId), projectNames: new Map(projects.map((p) => [p.id, p.name])) }
   }
 
   /** The model and effort a run uses: Settings' relay pair for a relay-only turn when it's on, else the Coordinator's. */

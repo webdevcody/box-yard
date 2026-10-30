@@ -1,7 +1,7 @@
 // The Coordinator chat's update chips (web/src/lib/chatUpdates.ts): which notices fold into chips and groups, and
 // which updates a Coordinator reply covers.
 import { describe, expect, it } from "vitest"
-import { chipView, coordinatorRows, groupPreview, readByCoordinator, rowsFrom, sourceLabels, stableRows, type CoordinatorRow } from "../web/src/lib/chatUpdates.js"
+import { chipView, coordinatorRows, groupPreview, noticeText, readByCoordinator, rowsFrom, sourceLabels, stableRows, type CoordinatorRow } from "../web/src/lib/chatUpdates.js"
 import type { ChatMessage } from "../shared/types.js"
 
 let t = 0
@@ -44,6 +44,15 @@ describe("grouping updates", () => {
   it("questions, failures and merge requests stay cards and split the updates around them", () => {
     const rows = coordinatorRows([done("a"), done("b"), asks("q"), done("c"), failed("f"), merge("m"), warning("w")])
     expect(shape(rows)).toEqual(["g:a,b", "m:q", "u:c", "m:f", "m:m", "u:w"])
+  })
+
+  it("Cody's message to a task from its card is Cody's own line, never a chip, and the Coordinator doesn't read it", () => {
+    const sent = msg("s", "notice", "✉️ **Fix login** got a message from Cody: try the: new form\nand log in", { taskId: "task_s", sent: true })
+    const rows = coordinatorRows([done("a"), sent, done("b"), reply("r")])
+    expect(shape(rows)).toEqual(["u:a", "m:s", "u:b", "m:r"])
+    expect(readByCoordinator(sent)).toBe(false)
+    expect(noticeText(sent)).toEqual({ text: "try the: new form\nand log in", truncated: false })
+    expect(noticeText(done("d")).text).toBe("Fixed the redirect.")
   })
 
   it("a task's back-to-back published files are one update", () => {

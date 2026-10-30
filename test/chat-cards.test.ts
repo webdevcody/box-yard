@@ -138,6 +138,25 @@ describe("chatCards", () => {
     expect(batchesOf(known()).get(B)).toEqual([CAMP.id, HOLLOW.id, DAM.id])
     expect(batchesOf(known()).has(PAIR)).toBe(false)
   })
+
+  it("keeps what Cody sends to a task from its card in it, and the agent's answer", () => {
+    const ask = user("Fix login")
+    const call = tool("create_task", { project: "box-yard", title: "Fix login" }, { resultId: LOGIN.id })
+    const answer = reply("Started.")
+    // "This task": a sent notice, a message of its own (not a chip), in the task's card.
+    const sent = msg("notice", "✉️ **Fix login** got a message from Cody: use the new form", { taskId: LOGIN.id, projectId: YARD.id, sent: true })
+    const turn = notice(LOGIN, "💬 **Fix login** finished its turn: switched to the new form")
+    // Cody's questions to the Coordinator from a card are its side thread, not the chat: what's here is the main chat's.
+    const later = user("thanks")
+    const answer2 = reply("Any time.")
+    const rows = coordinatorRows([ask, call, answer, sent, turn, later, answer2])
+    expect(rows.find((r) => r.id === sent.id)?.type).toBe("message")
+    const m = chatCards(rows, index, known())
+    const card = cardOf(m.cards, LOGIN.id)
+    expect(ids(card.entries)).toEqual([sent.id, turn.id])
+    expect(card.entries.map((e) => e.type)).toEqual(["message", "update"])
+    expect(ids(m.coordinator)).toEqual([ask.id, answer.id, later.id, answer2.id])
+  })
 })
 
 describe("stableCards", () => {
@@ -163,8 +182,8 @@ describe("arrangeCards", () => {
   const card = (key: string, taskIds: string[], last: number): ChatCard => ({ key, taskIds, batchId: null, entries: [], first: 0, last, origin: null })
   const statuses: Record<string, BadgeStatus> = {}
   const projects: Record<string, string> = {}
-  const arrange = (cards: ChatCard[], filter: string | null = null) => {
-    const r = arrangeCards(cards, (id) => statuses[id], (id) => projects[id], now, filter)
+  const arrange = (cards: ChatCard[], filter: string | null = null, stay?: (c: ChatCard) => boolean) => {
+    const r = arrangeCards(cards, (id) => statuses[id], (id) => projects[id], now, filter, stay)
     return { live: r.live.map((c) => c.key), done: r.done.map((c) => c.key) }
   }
 
@@ -182,6 +201,13 @@ describe("arrangeCards", () => {
     expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: ["batch:x"], done: [] })
     statuses.k2 = "done"
     expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: [], done: ["batch:x"] })
+  })
+
+  it("keeps a card it's told to where it is, finished or quiet", () => {
+    Object.assign(statuses, { s1: "done", s2: "idle", s3: "done" })
+    const cards = [card("s1", ["s1"], now - 1), card("s2", ["s2"], now - CARD_WINDOW_MS - 1), card("s3", ["s3"], now - 1)]
+    expect(arrange(cards)).toEqual({ live: [], done: ["s1", "s3"] })
+    expect(arrange(cards, null, (c) => c.key !== "s3")).toEqual({ live: ["s1", "s2"], done: ["s3"] })
   })
 
   it("keeps one project's cards", () => {

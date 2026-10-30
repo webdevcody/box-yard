@@ -1,33 +1,38 @@
 // The Coordinator chat as cards: one per task, in the order the chat first named them, so new activity never moves
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
 // its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
-// latest line. Open, it shows where it came from, its newest entries, and the way to its timeline and its task page.
+// latest line. Open, it shows where it came from, its newest entries with its side thread's questions and answers among
+// them (CardThread.tsx), a box to reply in (CardComposer.tsx), and the way to its timeline and its task page.
 // A create_tasks batch is one card whose tasks open in place. Finished cards fold into "N done today" at the top,
 // and a card with news says "N new" until opened; the ↓ pill steps through them. What goes in which card is
 // lib/chatCards.ts; Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
-import { AlertTriangle, ArrowDown, Bot, ChevronRight, ChevronUp, CornerDownRight, LayoutGrid, Layers, List, X, type LucideIcon } from "lucide-react"
+import { AlertTriangle, ArrowDown, Bot, ChevronRight, ChevronUp, CornerDownRight, LayoutGrid, Layers, List, Send, X, type LucideIcon } from "lucide-react"
 import { useBadgeStatuses, useTasksIn } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTaskTile, useTiles } from "../lib/taskTiles"
 import { badgeStatus, type BadgeStatus } from "../lib/prState"
 import { arrangeCards, batchTaskName, batchTitle, chatCards, newSince, stableCards, type CardEntry, type CardsModel, type ChatCard } from "../lib/chatCards"
-import { chipView, itemMessages, type CoordinatorRow } from "../lib/chatUpdates"
+import { chipView, isSent, itemMessages, noticeText, type CoordinatorRow } from "../lib/chatUpdates"
 import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
-import { setOpen, useChipOpen } from "../lib/chipState"
+import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
+import { useCardThread, useCardThreadLog, useThreadMessages } from "../lib/threads"
 import type { Provenance } from "../lib/chatProvenance"
 import { NOTICE_ICON } from "./noticeIcons"
-import { ChatLine } from "./ChatLine"
+import { ChatLine, FullReplyLink } from "./ChatLine"
+import { BatchComposer, CardComposer, WorkingLine } from "./CardComposer"
+import { CardThreadLine, CardThreadLive } from "./CardThread"
+import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
-import { AppLink, Elapsed, LineIcon, MERGED_BADGE, PrChip, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
-import type { Task } from "../../../shared/types"
+import { AppLink, Elapsed, InRepo, LineIcon, MERGED_BADGE, Markdown, PrChip, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
+import type { ChatMessage, SideThread, SideThreadMessage, Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
 const CARD_SHOW = 4
@@ -77,7 +82,11 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
   const last = useRef<CardsLayout | null>(null)
   return useMemo(() => {
     if (!cards) return null
-    const { live, done } = arrangeCards(cards.cards, (id) => statuses?.[id], (id) => tiles.get(id)?.projectId, Date.now(), project)
+    // A card open in the list when its task finishes (Cody replied in it and is reading the answer) stays put: it
+    // folds into "done today" at a later update once Cody has closed it, not while it's being read.
+    const shown = last.current?.live
+    const stay = (c: ChatCard) => Boolean(shown?.some((s) => s.key === c.key)) && isOpen(cardOpenKey(c.key))
+    const { live, done } = arrangeCards(cards.cards, (id) => statuses?.[id], (id) => tiles.get(id)?.projectId, Date.now(), project, stay)
     // A project's Coordinator card: what's about no project, or about that one.
     const coordinator = project
       ? cards.coordinator.filter((e) => {
@@ -136,17 +145,29 @@ export const CardsView = memo(function CardsView({
   const project = useChatProjectFilter()
   useEffect(() => {
     if (!focus) return
-    const finished = done.some((c) => c.key === focus)
-    if (!finished && !live.some((c) => c.key === focus)) {
+    // A card's key, or a task's id (a message's "Open card"): a batch's task opens its row too.
+    const find = (cards: readonly ChatCard[]) => cards.find((c) => c.key === focus) ?? cards.find((c) => c.taskIds.includes(focus))
+    const finished = find(done)
+    const card = finished ?? find(live)
+    if (!card) {
       if (project) setChatProjectFilter(null)
       // Not a card any more (quiet for a day): nothing to go to.
       else clearFocusCard()
       return
     }
     if (finished) setOpen(["cards:done"], true)
+    if (card.batchId && card.key !== focus) setOpen([`kid:${focus}`], true)
     clearFocusCard()
-    scrollToCard(focus)
+    scrollToCard(card.key)
   }, [focus, live, done, project])
+  // An open card leaving "done today" for the list (Cody replied in it, so its task is back at work): go with it.
+  const folded = useRef<ReadonlySet<string>>(new Set())
+  useEffect(() => {
+    const was = folded.current
+    folded.current = new Set(done.map((c) => c.key))
+    const back = live.find((c) => was.has(c.key) && isOpen(cardOpenKey(c.key)))
+    if (back) scrollToCard(back.key, false)
+  }, [live, done])
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <div data-testid="chat-cards" className="space-y-2">
@@ -201,8 +222,10 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const statuses = useMemo(() => tasks.map(badgeStatus), [tasks])
   const asks = statuses.includes("needs_input")
   const finished = statuses.length > 0 && statuses.every((s) => FINISHED.has(s))
-  const unread = newSince(card.entries, useSeenAt(card.key))
-  // Open, its news is in front of Cody.
+  const thread = useCardThread(card.key)
+  // An answer in its side thread Cody hasn't seen is news too.
+  const unread = newSince(card.entries, useSeenAt(card.key)) + (thread?.unread ? 1 : 0)
+  // Open, its news is in front of Cody (the thread's answers are marked read by CardBody).
   useEffect(() => {
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
@@ -265,15 +288,19 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
           {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
           <TimeAgo ts={card.last} />
         </div>
-        {!open && <LatestLine card={card} batch={batch} />}
+        {!open && <LatestLine card={card} batch={batch} thread={thread} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
       </div>
-      {open && <CardBody card={card} batch={batch} tasks={tasks} next={next} onFollowUp={onFollowUp} />}
+      {open && <CardBody card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />}
     </section>
   )
 })
 
 const NO_TASKS: Task[] = []
+const NO_THREAD: readonly SideThreadMessage[] = []
+
+/** Its agent is on a turn now (not just queued for one). */
+const isWorking = (t: Task) => t.status === "working" || t.status === "starting"
 
 /** A running task's place and time ("💻 12m"), which Zen's running-tasks badge showed before the cards replaced it. */
 function Running({ task }: { task: Task }) {
@@ -320,14 +347,17 @@ function BatchBar({ ids, statuses }: { ids: readonly string[]; statuses: readonl
   )
 }
 
+type Line = { icon: LucideIcon; className: string; who: string; text: string }
+
 /** One line of what a card's newest entry says: its icon, then who, then the text. */
-function entryLine(e: CardEntry): { icon: LucideIcon; className: string; who: string; text: string } {
+function entryLine(e: CardEntry): Line {
   if (e.type === "update" && e.item.type === "files") {
     const g = e.item.group
     const { icon, className } = NOTICE_ICON.artifact
     return { icon, className, who: capitalise(publishedLabel(g.files.length)), text: g.files.map((f) => f.title).join(", ") }
   }
   const m = e.type === "message" ? e.message : itemMessages(e.item)[0]!
+  if (isSent(m)) return { icon: Send, className: "text-yard-400", who: "You", text: plainText(noticeText(m).text) }
   if (m.role === "assistant") return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, "")) }
   if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: plainText(m.content) }
   const v = chipView(m)
@@ -338,11 +368,30 @@ function entryLine(e: CardEntry): { icon: LucideIcon; className: string; who: st
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
-/** A closed card's newest entry, two lines at most. In a batch, the task it's about leads. */
-function LatestLine({ card, batch }: { card: ChatCard; batch: string | null }) {
+/** A line of a card's side thread, as its latest line. */
+function threadLine(m: SideThreadMessage): Line {
+  if (m.role === "user") return { icon: Send, className: "text-yard-400", who: "You asked the Coordinator", text: m.content }
+  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: m.content }
+  return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, "")) }
+}
+
+/** The newest question, answer or error of a thread (not a lookup). */
+function lastSaid(messages: readonly SideThreadMessage[] | undefined): SideThreadMessage | null {
+  for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) if (messages![i]!.role !== "tool") return messages![i]!
+  return null
+}
+
+/**
+ * A closed card's newest entry, two lines at most: its side thread's newest line when that came later. In a batch,
+ * the task it's about leads.
+ */
+function LatestLine({ card, batch, thread }: { card: ChatCard; batch: string | null; thread: SideThread | null }) {
   const e = card.entries[card.entries.length - 1]
-  const line = useMemo(() => (e ? entryLine(e) : null), [e])
-  const kid = card.batchId && e?.tasks.length === 1 ? e.tasks[0]! : null
+  const fromThread = thread !== null && thread.updatedAt > card.last
+  const said = lastSaid(useThreadMessages(thread?.id ?? "", fromThread).data)
+  const shown = fromThread ? said : null
+  const line = useMemo(() => (shown ? threadLine(shown) : e ? entryLine(e) : null), [shown, e])
+  const kid = !shown && card.batchId && e?.tasks.length === 1 ? e.tasks[0]! : null
   const kidTile = useTaskTile(kid)
   const who = line && kid && kidTile ? `${batchTaskName(kidTile.title, batch)}${line.who ? ` ${line.who.toLowerCase()}` : ""}` : line?.who
   return (
@@ -364,10 +413,28 @@ function LatestLine({ card, batch }: { card: ChatCard; batch: string | null }) {
 
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 
-/** An open card: where it came from, a batch's tasks, its newest entries, and the way to its timeline and page. */
-function CardBody({ card, batch, tasks, next, onFollowUp }: { card: ChatCard; batch: string | null; tasks: readonly Task[]; next: string | null; onFollowUp: (text: string) => void }) {
+/**
+ * An open card: where it came from, a batch's tasks, its newest entries, who's answering, the box to reply in, and the
+ * way to its timeline and page.
+ */
+function CardBody({
+  card,
+  batch,
+  title,
+  tasks,
+  next,
+  onFollowUp,
+}: {
+  card: ChatCard
+  batch: string | null
+  title: string
+  tasks: readonly Task[]
+  next: string | null
+  onFollowUp: (text: string) => void
+}) {
   // A batch's tasks keep their own entries under their rows; the card has what's about several, and replies.
   const own = useMemo(() => (card.batchId ? card.entries.filter((e) => e.type === "message" || e.tasks.length !== 1) : card.entries), [card])
+  const log = useCardThreadLog(card.key)
   const showInTimelineCard = useCallback(() => showInTimeline({ key: card.key, taskIds: card.taskIds }), [card.key, card.taskIds])
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
@@ -391,7 +458,10 @@ function CardBody({ card, batch, tasks, next, onFollowUp }: { card: ChatCard; ba
           ))}
         </div>
       )}
-      <CardEntries entries={own} show={CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
+      <CardEntries entries={own} thread={log.messages} show={CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
+      {log.thread && <CardThreadLive thread={log.thread} />}
+      {!card.batchId && tasks[0] && isWorking(tasks[0]) && <WorkingLine who={tasks[0].title} />}
+      {card.batchId ? <BatchComposer cardKey={card.key} title={title} /> : tasks[0] && <CardComposer task={tasks[0]} />}
       <div className="flex flex-wrap items-center gap-1 pt-0.5">
         <button type="button" onClick={showInTimelineCard} className={FOOT} data-testid="chat-card-timeline">
           <List className="h-3 w-3" aria-hidden />
@@ -446,23 +516,80 @@ const BatchTask = memo(function BatchTask({
         {status && <StatusBadge status={status} />}
         <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
       </button>
-      {open && (
-        <div className="space-y-1.5 px-2 pt-1 pb-2">
-          {own.length ? <CardEntries entries={own} show={CARD_SHOW} own next={next} onFollowUp={onFollowUp} /> : <div className="text-xs text-zinc-500">No updates yet.</div>}
-          <AppLink href={`/tasks/${id}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-            Task page
-          </AppLink>
-        </div>
-      )}
+      {open && <BatchTaskBody id={id} task={task} entries={own} name={batchTaskName(tile?.title ?? id, batch)} next={next} onFollowUp={onFollowUp} />}
     </div>
   )
 })
 
-/** The newest `show` entries, with "N earlier" for more. `own`: a task's card, whose chips needn't name it. */
-function CardEntries({ entries, show, own, next, onFollowUp }: { entries: readonly CardEntry[]; show: number; own: boolean; next: string | null; onFollowUp: (text: string) => void }) {
+/** An open batch task: its entries and its side thread's lines, who's answering, and its box. */
+function BatchTaskBody({
+  id,
+  task,
+  entries,
+  name,
+  next,
+  onFollowUp,
+}: {
+  id: string
+  task: Task | undefined
+  entries: readonly CardEntry[]
+  name: string
+  next: string | null
+  onFollowUp: (text: string) => void
+}) {
+  const log = useCardThreadLog(id)
+  return (
+    <div className="space-y-1.5 px-2 pt-1 pb-2">
+      {entries.length || log.messages.length ? (
+        <CardEntries entries={entries} thread={log.messages} show={CARD_SHOW} own next={next} onFollowUp={onFollowUp} />
+      ) : (
+        <div className="text-xs text-zinc-500">No updates yet.</div>
+      )}
+      {log.thread && <CardThreadLive thread={log.thread} />}
+      {task && isWorking(task) && <WorkingLine who={name} />}
+      {task && <CardComposer task={task} />}
+      <AppLink href={`/tasks/${id}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
+        Task page
+      </AppLink>
+    </div>
+  )
+}
+
+/** A card's entries and its side thread's lines, in the order they came. */
+type Row = { at: number; entry: CardEntry; line?: undefined } | { at: number; line: SideThreadMessage; entry?: undefined }
+
+function rowsOf(entries: readonly CardEntry[], thread: readonly SideThreadMessage[]): Row[] {
+  const rows: Row[] = entries.map((entry) => ({ at: entry.at, entry }))
+  if (!thread.length) return rows
+  // Stable: an entry and a line at the same time keep entries first.
+  return [...rows, ...thread.map((line) => ({ at: line.createdAt, line }))].sort((a, b) => a.at - b.at)
+}
+
+/**
+ * The newest `show` entries, with "N earlier" for more, and the card's side thread's lines among them. `own`: a task's
+ * card, whose chips needn't name it. The update that ends the turn Cody's message started shows as the agent's reply,
+ * not a chip: it answers Cody.
+ */
+function CardEntries({
+  entries,
+  thread = NO_THREAD,
+  show,
+  own,
+  next,
+  onFollowUp,
+}: {
+  entries: readonly CardEntry[]
+  thread?: readonly SideThreadMessage[]
+  show: number
+  own: boolean
+  next: string | null
+  onFollowUp: (text: string) => void
+}) {
   const [limit, setLimit] = useState(show)
-  const shown = entries.length > limit ? entries.slice(-limit) : entries
-  const hidden = entries.length - shown.length
+  const rows = useMemo(() => rowsOf(entries, thread), [entries, thread])
+  const shown = rows.length > limit ? rows.slice(-limit) : rows
+  const hidden = rows.length - shown.length
+  const answers = useMemo(() => answersOf(entries), [entries])
   return (
     <>
       {hidden > 0 && (
@@ -471,12 +598,69 @@ function CardEntries({ entries, show, own, next, onFollowUp }: { entries: readon
           {hidden} earlier
         </button>
       )}
-      {shown.map((e) =>
-        e.type === "update" ? <UpdateChip key={e.id} item={e.item} own={own} /> : <ChatLine key={e.id} m={e.message} sources={e.sources} next={e.id === next} onFollowUp={onFollowUp} />,
+      {shown.map(({ entry: e, line }) =>
+        line ? (
+          <CardThreadLine key={line.id} m={line} />
+        ) : e.type === "message" ? (
+          <ChatLine key={e.id} m={e.message} sources={e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
+        ) : answers.has(e.id) && e.item.type === "notice" ? (
+          <AgentReply key={e.id} m={e.item.message} />
+        ) : (
+          <UpdateChip key={e.id} item={e.item} own={own} />
+        ),
       )}
     </>
   )
 }
+
+/** Turn ends: "finished its turn" and "is done". A question or a failure is a full card anyway. */
+const TURN_ENDS: ReadonlySet<string> = new Set(["message", "done"])
+
+/** The updates that end the turn of a task Cody had just sent a message to from its card. */
+function answersOf(entries: readonly CardEntry[]): Set<string> {
+  const out = new Set<string>()
+  const waiting = new Set<string>()
+  for (const e of entries) {
+    if (e.type === "message") {
+      const t = e.message.meta?.taskId
+      if (isSent(e.message) && typeof t === "string") waiting.add(t)
+      continue
+    }
+    if (e.item.type !== "notice") continue
+    const t = e.item.message.meta?.taskId
+    if (typeof t === "string" && waiting.has(t) && TURN_ENDS.has(chipView(e.item.message).kind)) {
+      out.add(e.id)
+      waiting.delete(t)
+    }
+  }
+  return out
+}
+
+/** A task's agent answering Cody in its card: its tile and name, then its words from the turn's notice. */
+const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
+  const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+  const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
+  const tile = useTaskTile(taskId)
+  const { text, truncated } = useMemo(() => noticeText(m), [m])
+  const v = chipView(m)
+  const { icon: Icon, className, label } = NOTICE_ICON[v.kind]
+  return (
+    <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="agent-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
+      <div className="mb-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] text-zinc-500">
+        <TaskTile id={taskId} />
+        <span className="min-w-0 truncate font-medium text-zinc-300">{tile?.title ?? v.source?.label}</span>
+        <Icon className={cx("h-3 w-3 shrink-0", className)} aria-label={label} />
+        <span className="shrink-0">{v.verb}</span>
+        <TimeAgo ts={m.createdAt} />
+      </div>
+      <InRepo taskId={taskId} projectId={projectId}>
+        <Markdown>{text}</Markdown>
+        {truncated && taskId && <FullReplyLink taskId={taskId} />}
+      </InRepo>
+      <MessageActions text={text} anchorId={m.id} />
+    </div>
+  )
+})
 
 /** Cody's own thread, pinned under the cards: his messages and the answers that aren't about one task. */
 function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entries: readonly CardEntry[]; next: string | null; onFollowUp: (text: string) => void; active: boolean; children?: ReactNode }) {

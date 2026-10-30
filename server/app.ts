@@ -168,7 +168,13 @@ const schemas = {
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
   }),
-  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds, runsOn: z.enum(RUNNERS).optional() }),
+  message: z.object({
+    content: z.string().trim().max(50_000),
+    attachments: attachmentIds,
+    runsOn: z.enum(RUNNERS).optional(),
+    /** Sent from the task's card in the Coordinator chat: the chat gets a line saying so (TaskManager.sentFromChat). */
+    inChat: z.boolean().optional(),
+  }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
@@ -177,8 +183,8 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
-    kind: z.enum(["ask", "reply"]).optional(),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. "task": from a task card (anchorId: the task, or `batch:<id>`). */
+    kind: z.enum(["ask", "reply", "task"]).optional(),
     quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
@@ -976,7 +982,9 @@ export function createBoxYard(
     await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
-    res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
+    const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
+    if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
+    res.json(task)
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
   api.get("/tasks/:id/queue", (req, res) => {

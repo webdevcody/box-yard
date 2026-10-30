@@ -888,6 +888,21 @@ export class TaskManager {
     return this.send(taskId, content, source, attachments, route, hook).task
   }
 
+  /**
+   * Cody's message to a task from its card in the Coordinator chat (sendInput queued it): a line in the chat, so the
+   * card and the timeline show what was sent. Only Cody reads it: it's marked read for the Coordinator, and it doesn't
+   * go to the Captain. A notice about the task, so a status-only project's line stays sealed like its other notices.
+   */
+  sentFromChat(taskId: string, content: string, attachments: StoredUpload[] = []) {
+    const row = this.requireRow(taskId)
+    const text = content.trim() || (attachments.length === 1 ? "a file" : `${attachments.length} files`)
+    const meta = { taskId, projectId: row.project_id, sent: true, ...(attachments.length ? { attachments } : {}) }
+    const msg = this.store.addChat("notice", `✉️ **${row.title}** ${withOwner("got a message from Cody", this.owner())}: ${text}`, meta)
+    this.store.db.prepare("UPDATE chat_messages SET seen_by_orchestrator = 1 WHERE id = ?").run(msg.id)
+    this.hub.broadcast({ type: "chat.message", message: msg })
+    return msg
+  }
+
   /** sendInput that also says which queued message it made (the MCP tools hand it back for cancel/edit). */
   send(taskId: string, content: string, source: InputSource = "cody", attachments: StoredUpload[] = [], route?: Parameters<TaskManager["sendInput"]>[4], hook?: Parameters<TaskManager["sendInput"]>[5]): { task: Task; inputId: string } {
     const inputId = this.enqueue(this.requireRow(taskId), content, source, attachments, route, hook)

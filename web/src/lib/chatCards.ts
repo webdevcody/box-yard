@@ -4,6 +4,8 @@
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
 // - A reply the Coordinator wrote on its own after reading updates (the "from:" line, lib/chatUpdates.ts) goes to the
 //   cards of the tasks those updates are about. A reply to Cody stays with his message, in the Coordinator card.
+// - What Cody sends to a task from its card stays in it (a sent notice). Cody's questions to the Coordinator from a card
+//   aren't in the chat at all: they're the card's side thread (CardThread.tsx).
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
 //   Tool calls show only in the timeline.
 // - A card's place is where the chat first named its task, so new activity never moves it.
@@ -264,6 +266,7 @@ const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged
 /**
  * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
  * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top. `project` keeps one project's.
+ * `stay` keeps a card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
  */
 export function arrangeCards(
   cards: readonly ChatCard[],
@@ -271,6 +274,7 @@ export function arrangeCards(
   projectOf: (taskId: string) => string | undefined,
   now: number,
   project: string | null,
+  stay: (card: ChatCard) => boolean = () => false,
 ): { live: ChatCard[]; done: ChatCard[] } {
   const live: ChatCard[] = []
   const done: ChatCard[] = []
@@ -278,7 +282,7 @@ export function arrangeCards(
     if (project && projectOf(c.taskIds[0]!) !== project) continue
     const statuses = c.taskIds.map(statusOf).filter((s): s is BadgeStatus => s !== undefined)
     if (!statuses.length) continue
-    if (statuses.some((s) => OPEN.has(s))) live.push(c)
+    if (statuses.some((s) => OPEN.has(s)) || stay(c)) live.push(c)
     else if (c.last < now - CARD_WINDOW_MS) continue
     else if (statuses.every((s) => FINISHED.has(s))) done.push(c)
     else live.push(c)

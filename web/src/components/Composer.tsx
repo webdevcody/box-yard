@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ClipboardEvent, type RefObject, type Ref } from "react"
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ClipboardEvent, type ReactNode, type RefObject, type Ref } from "react"
 import { createPortal, flushSync } from "react-dom"
 import { AlertTriangle, FileText, Loader2, Maximize2, Minimize2, Paperclip, Send, X } from "lucide-react"
 import { uploadFile } from "../lib/api"
@@ -62,6 +62,7 @@ export function Composer({
   handleRef,
   historyKey,
   files: allowFiles = true,
+  tools,
 }: {
   onSubmit: (text: string, attachments: Attachment[]) => void | Promise<unknown>
   placeholder: string
@@ -74,6 +75,8 @@ export function Composer({
   historyKey?: string
   /** false: text only (a side thread): no attach button, and pasted or dropped files are left alone. */
   files?: boolean
+  /** More controls in the button row, after the mic: where a card's message goes (CardComposer). */
+  tools?: ReactNode
 }) {
   const [value, setValue] = useState("")
   // An older prompt shown as a gray ghost while browsing with Up/Down; the value stays empty until Enter takes it.
@@ -457,6 +460,7 @@ export function Composer({
             </Button>
           )}
           <MicButton machine={dictation} />
+          {tools}
           <div className="ml-auto flex items-center gap-1">
             {(overflowing || expanded) && (
               <Button
