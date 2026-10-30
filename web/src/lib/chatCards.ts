@@ -286,12 +286,16 @@ export function arrangeCards(
 /** The entries that came in after `since`: a card's "N new". */
 export const newSince = (entries: readonly CardEntry[], since: number) => entries.reduce((n, e) => (e.at > since ? n + 1 : n), 0)
 
+/** Words a batch title doesn't end on ("Level 7: the" → "Level 7"). */
+const DANGLING = new Set(["a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "with", "from", "by"])
+
 /** A batch's title: the words its tasks' titles start with ("Map 3 PR #399: …", "Map 3 PR #400: …" → "Map 3 PR"), or null. */
 export function batchTitle(titles: readonly string[]): string | null {
   if (titles.length < 2) return null
   const words = titles.map((t) => t.trim().split(/\s+/))
   const common: string[] = []
   for (let i = 0; words.every((w) => i < w.length - 1 && w[i] === words[0]![i]); i++) common.push(words[0]![i]!)
+  while (common.length && DANGLING.has(common.at(-1)!.toLowerCase())) common.pop()
   const title = common.join(" ").replace(/[\s:·—–#-]+$/, "")
   return /[\p{L}\p{N}]/u.test(title) ? title : null
 }

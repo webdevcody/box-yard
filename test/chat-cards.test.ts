@@ -201,6 +201,10 @@ describe("card helpers", () => {
     expect(batchTaskName(HOLLOW.title, "Map 3 PR")).toBe("#406: The Hollow cave")
     expect(batchTitle(["Research pricing", "Write a summary", "Draft a tweet"])).toBeNull()
     expect(batchTitle(["Fix: login", "Fix: logout"])).toBe("Fix")
+    // Not on a dangling "the".
+    expect(batchTitle(["Level 7: the Hollow cave", "Level 7: the dam"])).toBe("Level 7")
+    expect(batchTaskName("Level 7: the dam", "Level 7")).toBe("the dam")
+    expect(batchTitle(["The cave", "The dam"])).toBeNull()
     // Never a whole title.
     expect(batchTitle(["Ship it", "Ship it now"])).toBe("Ship")
     expect(batchTaskName("Draft a tweet", null)).toBe("Draft a tweet")
