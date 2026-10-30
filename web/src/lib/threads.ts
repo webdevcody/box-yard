@@ -197,13 +197,15 @@ export function applyThreadEvent(qc: QueryClient, ev: UiEvent): boolean {
 /**
  * A chat's open thread. `closing`: it's sliding away (the chat already takes the room back). `draft`: a reply thread
  * not started yet (Reply on a message with no replies): the panel shows the message and a composer, and the first
- * reply creates the thread with this id. `expanded`: the panel covers the whole chat.
+ * reply creates the thread with this id. `expanded`: the panel covers the whole chat. `card`: not a thread but a card of
+ * the Coordinator chat (CoordinatorCards.tsx), whose key this is: the same panel shows that task's session.
  */
 export interface OpenThread {
   id: string
   closing: boolean
   draft?: { anchorId: string; text: string }
   expanded?: boolean
+  card?: string
 }
 
 let open = new Map<ThreadChat, OpenThread>()
@@ -231,6 +233,14 @@ export function openReply(qc: QueryClient, chat: ThreadChat, anchorId: string, t
   if (cur?.draft?.anchorId === anchorId && !cur.closing) return
   set(chat, { id: newClientId("thr"), closing: false, draft: { anchorId, text }, expanded: cur?.expanded })
 }
+/** Show a card in the panel instead of a thread (one panel at a time); `id` is the card's, so it slides in anew. */
+export const openCard = (chat: ThreadChat, key: string) => set(chat, { id: `card:${key}`, closing: false, card: key, expanded: open.get(chat)?.expanded })
+/** ⤢ on a card: into the panel, or out of it when it's there already. */
+export const toggleCard = (chat: ThreadChat, key: string) => {
+  const cur = open.get(chat)
+  if (cur?.card === key && !cur.closing) closeThread(chat)
+  else openCard(chat, key)
+}
 /** The open thread covers the whole chat, or goes back beside it. */
 export const toggleExpanded = (chat: ThreadChat) => {
   const cur = open.get(chat)
@@ -250,6 +260,30 @@ export function useOpenThread(chat: ThreadChat): OpenThread | null {
     subscribe,
     () => open.get(chat) ?? null,
     () => null,
+  )
+}
+
+/** The key of the card the panel shows (not one sliding away), or null: its card in the list is outlined. */
+export function useOpenCard(chat: ThreadChat): string | null {
+  return useSyncExternalStore(
+    subscribe,
+    () => {
+      const cur = open.get(chat)
+      return (cur && !cur.closing && cur.card) || null
+    },
+    () => null,
+  )
+}
+
+/** Whether the panel shows this card: only the card going in or out re-renders. */
+export function useCardShown(chat: ThreadChat, key: string): boolean {
+  return useSyncExternalStore(
+    subscribe,
+    () => {
+      const cur = open.get(chat)
+      return Boolean(cur && !cur.closing && cur.card === key)
+    },
+    () => false,
   )
 }
 
