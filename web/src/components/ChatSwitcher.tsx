@@ -42,13 +42,13 @@ export function ChatSwitcher({ current, onLeave, children }: { current: string; 
         title="Switch to the Coordinator or a project's Captain"
         onClick={() => setOpen(!open)}
         className={cx(
-          "-mx-1 inline-flex min-w-0 items-center gap-1 rounded-md px-1 text-sm font-semibold text-zinc-100 hover:bg-zinc-800/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-expanded:bg-zinc-800/70",
+          "-mx-1 inline-flex min-w-0 items-center gap-0.5 rounded-md px-1 text-sm font-semibold text-zinc-100 hover:bg-zinc-800/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-expanded:bg-zinc-800/70",
           // A 44px target on touch screens without making the header any taller.
           "[@media(pointer:coarse)]:-my-[11px] [@media(pointer:coarse)]:min-h-11",
         )}
       >
         <span className="min-w-0 truncate">{children}</span>
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+        <ChevronDown className="h-3 w-3 shrink-0 text-zinc-500" aria-hidden />
       </button>
       {open && <SwitcherMenu id={menuId} panel={panel} trigger={trigger} current={current} onLeave={onLeave} onClose={() => setOpen(false)} />}
     </div>
@@ -100,12 +100,16 @@ function SwitcherMenu({
   )
   const style = usePlacement(trigger, panel, true, items.length, MENU_WIDTH)
 
-  // Open on the current chat, so ↑/↓ start from where Cody is.
+  // Open on the current chat, so ↑/↓ start from where Cody is: once placed, as a hidden menu can't take focus.
+  const placed = style.visibility !== "hidden"
+  const focused = useRef(false)
   useLayoutEffect(() => {
+    if (!placed || focused.current) return
+    focused.current = true
     const el = panel.current
     const at = el?.querySelector<HTMLElement>('[aria-checked="true"]') ?? el?.querySelector<HTMLElement>("[role=menuitemradio]")
     at?.focus({ preventScroll: true })
-  }, [panel])
+  }, [placed, panel])
 
   const pick = (chat: string) => {
     onClose()
