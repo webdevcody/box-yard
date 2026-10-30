@@ -22,6 +22,7 @@ import { agentCaptainLabel, captainSourceOf } from "../shared/captain.js"
 import { budgetLine, budgetNotes, noteLine, pruneAdvice, shortTokens } from "../shared/notes.js"
 import {
   SUMMARY_PROMPT,
+  afterCompactBlock,
   captainCompactionsDir,
   cleanSummary,
   compactCommand,
@@ -885,8 +886,9 @@ class Captain {
   private async runPrompt(body: string, auto = false, ask: RunAsk = {}): Promise<{ ok: boolean; error: string; text: string }> {
     let now = this.projectNow()
     const recapFile = this.store.getKv(recapKey(this.project.id))
-    const compacted = recapFile ? this.recap(recapFile) : null
     const s = this.session()
+    // A /compact keeps the session; Codex's compaction starts a new one, which gets the whole summary.
+    const compacted = recapFile ? this.recap(recapFile, { compacted: s.started }) : null
     // A session the other CLI started can't be resumed: start over the same way as when it's gone.
     const switched = s.started && (this.store.getKv(sessionCliKey(this.project.id)) ?? "claude") !== this.cli()
     let result: RunResult = switched
@@ -903,8 +905,8 @@ class Captain {
         .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
-      const last = lastCompaction(this.compactionsDir)
-      const saved = compacted ?? (last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null)
+      const last = recapFile ? { file: recapFile } : lastCompaction(this.compactionsDir)
+      const saved = last ? this.recap(last.file, { lead: "Your session was reset. This is the last summary you wrote" }) : null
       result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false, "turn", ask)
     }
     if (result.ok) this.store.setKv(notesSeenKey(this.project.id), now.notesHash)
@@ -964,15 +966,19 @@ class Captain {
     return summaryPrompt(captainSummaryPrompt(this.project, this.owner()), { previous, liveTasks })
   }
 
-  /** A saved summary as a prompt block, with the current state of the project's tasks it names. */
-  private recap(file: string, lead?: string): string | null {
+  /**
+   * A saved summary as a prompt block, with the current state of the project's tasks it names. Right after a
+   * /compact (`compacted`) only that state: the CLI's own summary carries the rest.
+   */
+  private recap(file: string, opts: { lead?: string; compacted?: boolean } = {}): string | null {
     let markdown: string
     try {
       markdown = readCompactionFile(file)
     } catch {
       return null
     }
-    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { projectId: this.project.id }), lead)
+    const live = liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { projectId: this.project.id })
+    return opts.compacted ? afterCompactBlock(file, markdown, live) : recapBlock(file, markdown, live, opts.lead)
   }
 
   private async doCompact() {

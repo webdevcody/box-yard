@@ -35,12 +35,13 @@ Each project with its repo (owner/name) and what it is for.
 Tasks and PRs, their state, and what is waiting on whom (with ids and links).
 
 ## Open threads and next steps
-Anything unresolved, promised or planned.
+What is still open and someone will act on: unresolved, promised or planned. At most 10 bullets, one line each. Leave out threads that are done, stale or were never decided: search_history still finds them.
 
 Only the most important things: no chit-chat, no transcript dumps, no step-by-step history.`
 
-/** Each carried-forward section of the previous summary is cut to this many characters. */
+/** Each carried-forward section of the previous summary is cut to this many characters (open threads to fewer). */
 const CARRY_MAX_CHARS = 6000
+const CARRY_THREADS_MAX_CHARS = 2000
 
 const isoSeconds = (at: number) => new Date(at).toISOString().replace(/\.\d+Z$/, "Z")
 
@@ -64,7 +65,7 @@ export function summaryBody(markdown: string): string {
     .trim()
 }
 
-const capped = (text: string) => (text.length > CARRY_MAX_CHARS ? `${text.slice(0, CARRY_MAX_CHARS).trimEnd()}\n- …(cut)` : text)
+const capped = (text: string, max = CARRY_MAX_CHARS) => (text.length > max ? `${text.slice(0, max).trimEnd()}\n- …(cut)` : text)
 
 export interface SummaryInput {
   /** The last summary: its decisions and open threads are carried forward. */
@@ -86,13 +87,13 @@ export function summaryPrompt(base: string, input: SummaryInput = {}): string {
   if (prev && (decisions || threads)) {
     parts.push(
       [
-        `Your previous summary (${isoSeconds(prev.at)}) recorded these. Carry each one forward into the same section unless it was replaced or withdrawn since (for a thread: resolved). Then add what's new.`,
+        `Your previous summary (${isoSeconds(prev.at)}) recorded these. Carry each decision forward into the same section unless it was replaced or withdrawn since. Carry a thread forward only while it is still open and someone will act on it: drop resolved, stale or undecided ones (search_history still finds them). Then add what's new.`,
         ``,
         `Decisions and preferences, previous summary:`,
         capped(decisions || "- none"),
         ``,
         `Open threads and next steps, previous summary:`,
-        capped(threads || "- none"),
+        capped(threads || "- none", CARRY_THREADS_MAX_CHARS),
       ].join("\n"),
     )
   }
@@ -108,26 +109,41 @@ export function summaryPrompt(base: string, input: SummaryInput = {}): string {
 }
 
 /**
- * What /compact is told. The summary Box Yard just saved is in the session as the last reply and comes back
- * after the compaction (recapBlock), so the CLI's own summary covers what that one leaves out.
+ * What /compact is told. Box Yard doesn't give its saved summary back after a /compact (afterCompactBlock adds only
+ * live task states), so the CLI's own summary carries it: one copy of the summary in the new context, not two.
  */
 const COMPACT_INSTRUCTIONS =
-  `Box Yard saved the summary in your last reply (from "## Decisions and preferences" on) and gives it back to you right after this compaction, with live task states. ` +
-  `Don't repeat what it says. Summarize what it leaves out: the latest exchanges and the work in progress right now, Cody's recent requests in their own words, ` +
-  `and the exact ids, paths, commands and errors needed to carry on. Keep it short.`
+  `Your last reply is the summary Box Yard saved (from "## Decisions and preferences" on). It isn't shown again after this compaction, so carry it into your summary, condensed: ` +
+  `the decisions and preferences in force, projects, ongoing work with ids and links, and open threads. Add what it leaves out: the latest exchanges and the work in progress right now, ` +
+  `Cody's recent requests in their own words, and the exact ids, paths, commands and errors needed to carry on. Keep it short: Box Yard adds live task states after it.`
 
 export const compactCommand = (ownerName?: string) => `/compact ${withOwner(COMPACT_INSTRUCTIONS, ownerName)}`
 
+const savedAt = (markdown: string) => /^timestamp: (.*)$/m.exec(markdown.slice(0, 600))?.[1]?.trim()
+const liveNow = (live: string[]) => (live.length ? [``, `Live now, tasks it names:`, ...live] : [])
+
 /**
- * Box Yard's saved summary, for the first prompt after a compaction (or a lost session): it replaces what
- * the CLI's /compact summary was told to leave out. `live` lists the current state of the tasks it names.
+ * Box Yard's saved summary in full, for the first prompt of a new session (a lost session, or Codex's compaction,
+ * which starts a new one). `live` lists the current state of the tasks it names.
  */
 export function recapBlock(file: string, markdown: string, live: string[], lead = "Your context was just compacted. This is the summary you wrote right before it"): string {
-  const at = /^timestamp: (.*)$/m.exec(markdown.slice(0, 600))?.[1]?.trim()
+  const at = savedAt(markdown)
   return [
     `[Box Yard: ${lead} (${at ? `${at}, ` : ""}saved as ${file}). Task states under "Live now" are current and beat the summary. For anything older, use search_history.]`,
     summaryBody(markdown),
-    ...(live.length ? [``, `Live now, tasks it names:`, ...live] : []),
+    ...liveNow(live),
+  ].join("\n")
+}
+
+/**
+ * The first prompt after a /compact: the CLI's summary already carries the saved one (COMPACT_INSTRUCTIONS), so only
+ * where it's saved and the current state of the tasks it names.
+ */
+export function afterCompactBlock(file: string, markdown: string, live: string[]): string {
+  const at = savedAt(markdown)
+  return [
+    `[Box Yard: Your context was just compacted. The summary above carries the one you saved right before it (${at ? `${at}, ` : ""}${file}).${live.length ? ` Task states under "Live now" are current and beat both.` : ""} For anything older, use search_history.]`,
+    ...liveNow(live),
   ].join("\n")
 }
 

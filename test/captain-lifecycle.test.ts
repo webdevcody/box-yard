@@ -169,13 +169,14 @@ describe("Captain compaction (#50)", () => {
       for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turn, flag))
       expect(pass).not.toContain("--allowedTools")
     }
-    expect(runs[ci]!.prompt).toMatch(/Don't repeat what it says/)
+    expect(runs[ci]!.prompt).toMatch(/so carry it into your summary/)
 
+    // The /compact summary carries Box Yard's: the next turn gets only where it's saved and the live task states.
     await say("what now?")
     const next = lines().filter((l) => l.args.includes("--mcp-config")).at(-1)!
-    expect(next.prompt).toMatch(/^\[Box Yard: Your context was just compacted\. This is the summary you wrote right before it/)
+    expect(next.prompt).toMatch(/^\[Box Yard: Your context was just compacted\. The summary above carries the one you saved right before it/)
     expect(next.prompt).toContain(s.lastCompaction!.file)
-    expect(next.prompt).toContain("## Decisions and preferences")
+    expect(next.prompt).not.toContain("## Decisions and preferences")
     expect(next.prompt).toContain(`Live now, tasks it names:\n- ${t.id} "Ship the widget" needs_input`)
     await say("and now?")
     expect(lines().filter((l) => l.args.includes("--mcp-config")).at(-1)!.prompt).toMatch(/^\[Project now: demo\]/)
