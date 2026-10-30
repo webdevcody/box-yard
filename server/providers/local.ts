@@ -248,7 +248,7 @@ export class LocalRunnerProvider extends LocalProvider {
     return { source: "estimated" }
   }
 
-  /** Nothing ever deletes this computer's folder: tasks remove their own (TaskManager.removeTaskDir). */
+  /** Nothing ever deletes this computer's folder: tasks remove their own (TaskManager.removeTaskDir, server/ownCleanup.ts). */
   override async destroy(): Promise<void> {}
 }
 

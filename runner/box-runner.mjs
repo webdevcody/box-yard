@@ -4,7 +4,8 @@
 //
 //   node box-runner.mjs turn  <taskDir>  run one headless Claude Code (or Codex) turn for a task
 //   node box-runner.mjs mcp   <taskDir>  stdio MCP server the agent uses to talk back
-//   node box-runner.mjs clean <taskDir>  delete regenerable dirs from a resting work/
+//   node box-runner.mjs clean <taskDir> [builds]  delete regenerable dirs from a resting work/ (builds: only
+//                                        dependency and build output, never scratch or captures)
 //   node box-runner.mjs deps  <taskDir> restore|save   the dependency cache step of a turn, on its own
 //
 // Every event goes into <taskDir>/events.jsonl, and also into an Upstash Redis
@@ -30,7 +31,7 @@ import path from "node:path"
 import { createHash, randomUUID } from "node:crypto"
 
 const RUNNER_VERSION = "2"
-const [, , mode, taskDirArg] = process.argv
+const [, , mode, taskDirArg, cleanWhat] = process.argv
 
 if (!mode || !taskDirArg) {
   console.error("usage: box-runner.mjs <turn|mcp|clean|deps> <taskDir>")
@@ -1728,6 +1729,11 @@ const CLEAN_IN_REPO = new Set([
   // Scratch space and perf/test captures (e.g. shots/perf/*.jsonl, Playwright reports, traces).
   "tmp", ".tmp", "shots", "perf", "traces", "playwright-report", "test-results",
 ])
+/**
+ * `clean <taskDir> builds`, for folders on Cody's own computers: only dependency and build output. Scratch dirs and
+ * captures (tmp, shots, perf, traces, reports) stay, since he may open them there.
+ */
+const CLEAN_BUILDS = new Set(["node_modules", ".next", ".turbo", ".cache", ".parcel-cache", ".vite", "dist", "build", "coverage", "target", ".venv", "__pycache__"])
 const CLEAN_OUTSIDE_REPO = new Set(["node_modules", "__pycache__"])
 const CLEAN_MAX_DEPTH = 6
 
@@ -1745,7 +1751,7 @@ async function cleanRepo(repo, removed) {
   for (const entry of out.split("\0")) {
     if (!entry.endsWith("/")) continue
     const rel = entry.slice(0, -1)
-    if (!CLEAN_IN_REPO.has(path.basename(rel))) continue
+    if (!(cleanWhat === "builds" ? CLEAN_BUILDS : CLEAN_IN_REPO).has(path.basename(rel))) continue
     // Belt and braces: re-check that git tracks nothing under it.
     const tracked = await gitOut(repo, ["ls-files", "-z", "--", rel])
     if (tracked !== "") continue

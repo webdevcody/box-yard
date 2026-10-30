@@ -50,6 +50,7 @@ import { isQuietRun, noopBlockers, type RunEvidence } from "../shared/quiet.js"
 import { memoryPressure, type BoxMemory, type MemoryPolicy } from "../shared/memory.js"
 import { cleanupSummary, dfCommand, diskLine, formatBytes, isOutOfSpace, parseDf, requiredFreeBytes, rootLow, type BoxCleanup, type CleanupStepKey, type DiskSpace } from "../shared/disk.js"
 import { BoxJanitor, DEPS_DIR, pushedCheck, pushedVerdict } from "./janitor.js"
+import { OWN_UPKEEP_MS, OwnCleanup } from "./ownCleanup.js"
 import { atRisk, deleteCheckScript, deleteVerdict, parseDeleteCheck, refusalLine, refusalsOf, type BoxDeleteResult, type WorkspaceGit } from "./boxDelete.js"
 import { GITHUB_HELPER, GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, gitWithHelper, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, setHelperScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
@@ -612,6 +613,9 @@ export class TaskManager {
   private cloudCache: { at: number; key: string; spend: CloudSpend } | null = null
   /** Frees disk on low boxes in graduated steps (server/janitor.ts). */
   readonly janitor: BoxJanitor
+  /** Cleans task folders on this computer and SSH machines, which the janitor never sees (server/ownCleanup.ts). */
+  readonly ownCleanup: OwnCleanup
+  private lastOwnUpkeepAt = 0
   /** Every box lifecycle event and who did it (server/boxHistory.ts); write it with recordBoxEvent. */
   readonly history: BoxHistory
   /** Who asked for the disk cleanup running on a box ("manual" runs: Cody's button or the Coordinator's tool). */
@@ -732,15 +736,7 @@ export class TaskManager {
       hub: this.hub,
       probe: (boxId) => this.probeDisk(boxId, 0),
       taskDir: (boxId, taskId) => this.taskDir(boxId, taskId),
-      installRunner: async (boxId) => {
-        const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
-        const source = this.runnerSource()
-        // Only when it changed: a full disk can't take the write, and cleanup has to work then.
-        const sum = createHash("sha256").update(source).digest("hex")
-        const current = await this.provider.exec(boxId, `sha256sum ${q(runnerPath)} 2>/dev/null | cut -c1-64`).catch(() => null)
-        if (current?.stdout.trim() !== sum) await this.provider.writeFile(boxId, runnerPath, source)
-        return runnerPath
-      },
+      installRunner: (boxId) => this.installCleanupRunner(boxId),
       hasFreshArchive: (row) => this.hasFreshArchive(row),
       archive: (taskId) => this.archiveFresh(taskId),
       archiveProblem: (taskId) => this.archiveProblem(taskId),
@@ -750,6 +746,37 @@ export class TaskManager {
       mirrorsToKeep: (boxId, owner) => this.mirrorsToKeep(boxId, owner),
       finished: (report) => this.cleanupFinished(report),
     })
+    this.ownCleanup = new OwnCleanup({
+      store: this.store,
+      provider: this.provider,
+      settings: () => {
+        const s = this.settings.get()
+        return { foldersKept: s.localFoldersKept, buildCleanup: s.localBuildCleanup, buildCleanupIdleHours: s.localBuildCleanupIdleHours, minFreeGb: s.localDiskMinFreeGb }
+      },
+      stopped: () => this.stopped,
+      probe: (boxId) => this.probeDisk(boxId, 0),
+      taskDir: (boxId, taskId) => this.taskDir(boxId, taskId),
+      installRunner: (boxId) => this.installCleanupRunner(boxId),
+      wantsTurn: (row) => this.wantsTurn(row),
+      occupied: (taskId) => this.archiving.has(taskId) || this.janitor.isBusy(taskId),
+      // A folder on this computer gets an archive only when it's about to leave (forMove), as here.
+      archive: (taskId) => this.archive(taskId, { forMove: true }),
+      hasFreshArchive: (row) => this.hasFreshArchive(row),
+      park: (taskId, boxId, note) => this.park(taskId, boxId, note),
+      dropPushed: (taskId, boxId) => this.dropPushed(taskId, boxId),
+      where: (boxId) => (isMachineBox(boxId) ? `SSH machine ${this.machineName(boxId)}` : "this computer"),
+    })
+  }
+
+  /** Put the current runner on a box for a cleanup's `clean` step; returns its path. */
+  private async installCleanupRunner(boxId: string): Promise<string> {
+    const runnerPath = `${this.provider.root(boxId)}/.boxyard/box-runner.mjs`
+    const source = this.runnerSource()
+    // Only when it changed: a full disk can't take the write, and cleanup has to work then.
+    const sum = createHash("sha256").update(source).digest("hex")
+    const current = await this.provider.exec(boxId, `sha256sum ${q(runnerPath)} 2>/dev/null | cut -c1-64`).catch(() => null)
+    if (current?.stdout.trim() !== sum) await this.provider.writeFile(boxId, runnerPath, source)
+    return runnerPath
   }
 
   get busMode() {
@@ -1390,7 +1417,7 @@ export class TaskManager {
     if (row.current_turn_id) await this.stopTask(taskId)
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
-    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder on this computer stays until the task is deleted." : "Closed. Its workspace was archived and its box slot freed.")
+    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder stays on this computer; once its work is pushed, its build output is freed and, past Settings › Task folders kept on this computer, the folder is archived and removed." : "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
@@ -1921,7 +1948,7 @@ export class TaskManager {
     const actor = opts.actor ?? { kind: "owner" }
     const owner = actor.kind === "owner"
     const stopAgents = owner && Boolean(opts.stopAgents)
-    if (isLocalRunnerBox(boxId)) throw new BadRequestError("That's this computer, not a box: local tasks keep their folders until each task is deleted.")
+    if (isLocalRunnerBox(boxId)) throw new BadRequestError("That's this computer, not a box: its task folders are cleaned by Settings › Boxes & limits › This computer (build output, Task folders kept, low-disk cleanup).")
     if (isMachineBox(boxId)) throw new BadRequestError(`That's SSH machine ${this.machineName(boxId)}, one of your own computers, not a box: Box Yard never deletes it. Remove it from Box Yard in Settings › Machines (remove_machine).`)
     const pod = isGpuBox(boxId)
     const container = isDockerBox(boxId)
@@ -3214,7 +3241,7 @@ export class TaskManager {
   /** Pick a box for a task's next turn, or null to wait. */
   private async place(row: TaskRow): Promise<string | null> {
     // A cleanup step is working in its folder right now.
-    if (this.janitor.isBusy(row.id)) return null
+    if (this.janitor.isBusy(row.id) || this.ownCleanup.isBusy(row.id)) return null
     const op = row.box_id ? this.boxOps.get(row.box_id) : undefined
     if (op) {
       // Its workspace is being archived off the box; it moves to another box once that's done.
@@ -6836,7 +6863,7 @@ export class TaskManager {
    * (server/archive.ts), so this works on a box whose work disk is full. A failure is kept for `archiveProblem`.
    * `closing`: the task is done, so its WIP ref is removed from origin once an archive has the work.
    * A task on this computer (the local runner) only pushes: its folder is already on this disk, so it gets an archive
-   * only `forMove`, when it's about to move to a box.
+   * only `forMove`, when its folder is about to leave (a move to a box, or the local cleanup parking it).
    */
   async archive(taskId: string, opts: { closing?: boolean; forMove?: boolean } = {}) {
     // One at a time per task. Wait rather than return: the one running may predate the work this call is for.
@@ -7083,7 +7110,7 @@ export class TaskManager {
     if (this.stopped) return
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
-    if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays until the task is deleted
+    if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays, for the local cleanup (server/ownCleanup.ts)
     if (this.c.archiveWorkspaces && !this.hasFreshArchive(row)) return // keep the folder if we have no current copy
     const boxId = row.box_id
     this.store.updateTask(taskId, { boxId: null, portBase: null, previews: [] })
@@ -7538,6 +7565,7 @@ export class TaskManager {
     }
     await this.sweepRootDisks(now)
     await this.routineUpkeep(now)
+    await this.ownComputersUpkeep(now)
     await this.sweepGpuPods(now)
     await this.sweepDocker(now)
     this.schedule()
@@ -7586,6 +7614,23 @@ export class TaskManager {
       runs.push(this.janitor.run(box.id, { reason: "routine", target: null, parkBelow: 0, steps, builds: idle.map((r) => r.id), light: true }))
     }
     await Promise.all(runs)
+  }
+
+  /**
+   * Task folders on this computer and on SSH machines, every OWN_UPKEEP_MS (server/ownCleanup.ts): Settings › Free a
+   * finished task's build output, Task folders kept and the low-disk floor. Only computers that hold task folders, and
+   * only SSH machines that work right now.
+   */
+  private async ownComputersUpkeep(now: number) {
+    if (now - this.lastOwnUpkeepAt < OWN_UPKEEP_MS) return
+    this.lastOwnUpkeepAt = now
+    const held = new Set(this.store.listTaskRows().flatMap((r) => (r.box_id && (isLocalRunnerBox(r.box_id) || isMachineBox(r.box_id)) ? [r.box_id] : [])))
+    const boxIds = [...held].filter((id) => {
+      if (isLocalRunnerBox(id)) return true
+      const m = this.machineOf(id)
+      return Boolean(m?.enabled && !this.machines!.problem(m))
+    })
+    await Promise.all(boxIds.map((id) => this.ownCleanup.upkeep(id, now)))
   }
 
   /**

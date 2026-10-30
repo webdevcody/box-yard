@@ -94,6 +94,11 @@ export const DEFAULT_SETTINGS: Settings = {
   slotsPerBox: SIZE_DEFAULTS.small.slotsPerBox,
   maxAgents: 0,
   localAgents: 2,
+  // A laptop's disk: a handful of folders, build output gone once a task is pushed and done, and room kept free.
+  localFoldersKept: 10,
+  localBuildCleanup: true,
+  localBuildCleanupIdleHours: 6,
+  localDiskMinFreeGb: 30,
   costRates: {
     boxActiveCpuHourlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].activeCpuHourlyUsd])) as Record<BoxSize, number>,
     boxKeepAliveMonthlyUsd: Object.fromEntries(BOX_SIZES.map((s) => [s, BOX_SIZE_SPECS[s].keepAliveMonthlyUsd])) as Record<BoxSize, number>,
@@ -144,6 +149,10 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
   slotsPerBox: "BOX_SLOTS",
   maxAgents: "BOX_MAX_AGENTS",
   localAgents: "BOXYARD_LOCAL_AGENTS",
+  localFoldersKept: "BOXYARD_LOCAL_FOLDERS_KEPT",
+  localBuildCleanup: "BOXYARD_LOCAL_BUILD_CLEANUP",
+  localBuildCleanupIdleHours: "BOXYARD_LOCAL_BUILD_CLEANUP_IDLE_HOURS",
+  localDiskMinFreeGb: "BOXYARD_LOCAL_DISK_MIN_FREE_GB",
   maxResidentPerBox: "BOX_MAX_RESIDENT",
   boxIdleDeleteMinutes: "BOX_IDLE_DELETE_MINUTES",
   workspaceRetentionDays: "BOXYARD_WORKSPACE_RETENTION_DAYS",
@@ -232,6 +241,10 @@ export const settingsPatch = z
     slotsPerBox: z.number().int().min(1).max(20),
     maxAgents: z.number().int().min(0).max(1000),
     localAgents: z.number().int().min(LOCAL_AGENTS_LIMITS.min).max(LOCAL_AGENTS_LIMITS.max),
+    localFoldersKept: z.number().int().min(0).max(1000),
+    localBuildCleanup: z.boolean(),
+    localBuildCleanupIdleHours: z.number().int().min(0).max(24 * 365),
+    localDiskMinFreeGb: z.number().int().min(0).max(100_000),
     costRates,
     budget,
     maxResidentPerBox: z.number().int().min(1).max(200),
@@ -280,6 +293,10 @@ export class SettingsStore {
       | "slotsPerBox"
       | "maxAgents"
       | "localAgents"
+      | "localFoldersKept"
+      | "localBuildCleanup"
+      | "localBuildCleanupIdleHours"
+      | "localDiskMinFreeGb"
       | "maxResidentPerBox"
       | "boxIdleDeleteMinutes"
       | "workspaceRetentionDays"
@@ -363,6 +380,10 @@ export class SettingsStore {
       slotsPerBox: slotsExplicit ? configSlots : sizeDefaults.slotsPerBox,
       maxAgents: this.c.maxAgents ?? DEFAULT_SETTINGS.maxAgents,
       localAgents: within(this.c.localAgents ?? DEFAULT_SETTINGS.localAgents, LOCAL_AGENTS_LIMITS),
+      localFoldersKept: this.c.localFoldersKept ?? DEFAULT_SETTINGS.localFoldersKept,
+      localBuildCleanup: this.c.localBuildCleanup ?? DEFAULT_SETTINGS.localBuildCleanup,
+      localBuildCleanupIdleHours: this.c.localBuildCleanupIdleHours ?? DEFAULT_SETTINGS.localBuildCleanupIdleHours,
+      localDiskMinFreeGb: this.c.localDiskMinFreeGb ?? DEFAULT_SETTINGS.localDiskMinFreeGb,
       maxResidentPerBox: residentsExplicit ? configResidents : sizeDefaults.maxResidentPerBox,
       boxIdleDeleteMinutes: this.c.boxIdleDeleteMinutes ?? DEFAULT_SETTINGS.boxIdleDeleteMinutes,
       workspaceRetentionDays: this.c.workspaceRetentionDays ?? DEFAULT_SETTINGS.workspaceRetentionDays,

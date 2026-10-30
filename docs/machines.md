@@ -90,6 +90,7 @@ These steps are for Ubuntu or Debian; [macOS](#macos-machines) differs only a li
 - **Previews.** A preview is at `http://<host>:<port>`, since the agent's server listens on 0.0.0.0. The laptop's firewall has to let your browser reach it.
 - **Archives.** As on boxes, the push at turn end (and the archive) keeps work safe. Removing a machine from Box Yard archives each task folder on it first, so its tasks pick up elsewhere.
 - **Janitor.** The janitor cleans only Box Yard's work folder on a machine (stale task folders), never its `/tmp` or caches, which belong to the machine.
+- **Cleanup.** A machine follows the same settings as this computer (Settings › Boxes & limits › This computer and SSH machines): a closed task's folder is archived and removed, a pushed resting task's build output (`node_modules`, `dist`, `build`…) goes after a few idle hours, at most *Task folders kept* folders stay, and below *Low-disk cleanup* GB free the oldest finished folders go first. A folder with anything uncommitted or unpushed is never touched. Only a machine that's enabled and answering is cleaned.
 - **Box history.** Adding and removing a machine is in Boxes › History (`box_history`) under `SSH · <name>`, with who did it and why.
 
 ## Security

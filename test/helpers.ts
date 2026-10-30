@@ -61,6 +61,10 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     memoryMaxUsedPercent: 0,
     memoryMinFreeMb: 0,
     loadMaxPerCpu: 0,
+    // The cleanup of this computer's task folders stays out of tests that don't test it (test/own-cleanup.e2e.test.ts).
+    localFoldersKept: 0,
+    localBuildCleanup: false,
+    localDiskMinFreeGb: 0,
     ...overrides,
   }
 }
