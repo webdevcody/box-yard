@@ -609,7 +609,7 @@ export function SettingsDialog({
                   min={CARDS_IDLE_HOURS.min}
                   max={CARDS_IDLE_HOURS.max}
                   step={0.5}
-                  className={cx(inputClass, "w-24")}
+                  className={inputClass}
                   value={s.cardsIdleHours ?? CARDS_IDLE_HOURS.default}
                   onChange={(e) => set("cardsIdleHours", Number(e.target.value))}
                   data-testid="cards-idle-hours"
