@@ -9,6 +9,7 @@ import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
+import type { MachinesStatus } from "./machines.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
 import type { ProjectColor } from "./projectColors.js"
@@ -629,6 +630,8 @@ export type UiEvent =
   | { type: "runpod.build"; build: RunPodImageBuild }
   /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
   | { type: "docker.build"; build: DockerImageBuild }
+  /** Settings › Machines changed: a machine, its last test, its state or tasks (never a key). */
+  | { type: "machines"; status: MachinesStatus }
   /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
   | { type: "identities"; identities: Identity[] }
   /** Settings › Connectors changed: a connector, its status, or its secrets' fingerprints (never a value). */

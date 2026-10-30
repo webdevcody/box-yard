@@ -37,6 +37,8 @@ export interface SetupDeps {
   localCheck?: () => Promise<LocalCheckResult>
   /** Why Docker containers can't start now (Docker missing or stopped), or null (DockerService.problem). */
   dockerProblem?: () => Promise<string | null>
+  /** Why tasks can't be sent to SSH machines at all (none is set up), or null. Which one a task takes is placement's. */
+  machinesProblem?: () => string | null
 }
 
 /** The setup choice of where agents run, in its own kv entry. */
@@ -116,6 +118,8 @@ export class Setup {
    */
   async runnerProblem(runner: Runner, claudeKey?: boolean): Promise<string | null> {
     const { c, credentials } = this.d
+    // SSH machines say for themselves whether they have a Claude login (placement waits for one with the reason).
+    if (runner === "ssh") return this.d.machinesProblem ? this.d.machinesProblem() : "SSH machines aren't available on this Box Yard"
     // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
     const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
     if (c.mock || docker) return docker

@@ -59,6 +59,8 @@ import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
+import { MachineService, type MachineServiceDeps } from "./machines/service.js"
+import { isMachineBox, machineOfBox } from "../shared/machines.js"
 import { ClaudeModels } from "./claudeModels.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { projectDockerPatch } from "./docker/settings.js"
@@ -291,6 +293,8 @@ export interface BoxYard {
   retro: NotesRetro
   /** Settings › Docker and the containers behind "Runs on: Docker container" (docs/docker.md). */
   docker: DockerService
+  /** Settings › Machines: Cody's SSH machines behind "Runs on: SSH machine" (docs/machines.md). */
+  machines: MachineService
   /** Settings › Identities: the GitHub account, author and Claude login each project's agents use (docs/identities.md). */
   identities: Identities
   /** Settings › Connectors: external MCP servers some sessions get (docs/connectors.md). */
@@ -312,6 +316,8 @@ export function createBoxYard(
     docker?: DockerRunner
     /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
     realDocker?: { claudeBin: string }
+    /** Tests: stand-ins for the SSH machines' transport (a fake ssh), this computer's ~/.ssh and SSH agent. */
+    machines?: Pick<MachineServiceDeps, "transport" | "keys" | "sshBin" | "mock">
     webDir?: string
     qstash?: QStash | null
     now?: () => number
@@ -395,12 +401,21 @@ export function createBoxYard(
     mock: c.mock && !opts.realDocker ? { dir: path.join(c.dataDir, "docker-boxes"), claudeBin: c.claudeBin } : null,
     claudeBin: opts.realDocker?.claudeBin,
   })
-  // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
+  // Cody's SSH machines, for tasks that run on "SSH machine" (docs/machines.md). In mock mode they're folders here.
+  const machines = new MachineService({
+    db,
+    store,
+    dataDir: c.dataDir,
+    mock: c.mock ? { dir: path.join(c.dataDir, "ssh-machines"), claudeBin: c.claudeBin } : null,
+    ...opts.machines,
+  })
+  // Every box provider gets the local runner, the GPU pods, the Docker containers and the SSH machines beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
   const docker = opts.docker ?? dockerService
   // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
   // as this process last saw them (no API or Docker call).
   store.placeExtra = (boxId) => {
+    if (isMachineBox(boxId)) return { machine: machines.get(machineOfBox(boxId))?.name ?? null }
     if (isDockerBox(boxId)) {
       const name = docker.provider.cached().find((x) => x.boxId === boxId)?.name
       return name ? { container: name } : null
@@ -409,7 +424,7 @@ export function createBoxYard(
     const pod = gpu?.provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider)
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, machines.provider)
   const setup = new Setup({
     c,
     store,
@@ -418,6 +433,7 @@ export function createBoxYard(
     provider: () => provider.name,
     githubFetch: opts.github?.fetch,
     dockerProblem: () => docker.problem(),
+    machinesProblem: () => (machines.list().length ? null : "no SSH machine is set up: add one in Settings › Machines (add_machine)"),
     ...opts.setup,
   })
   const ttsSettings = new TtsSettingsStore(store, c)
@@ -429,7 +445,7 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, machines, identities })
   tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
@@ -437,6 +453,17 @@ export function createBoxYard(
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   dockerService.images.onChange(() => hub.broadcast({ type: "docker.build", build: dockerService.images.status() }))
+  /** Settings › Machines and the Boxes page: every machine with its state and the tasks on it. */
+  const machinesStatus = () =>
+    machines.status((boxId) => {
+      const rows = store.listTaskRows({ boxId })
+      return { running: rows.filter((r) => r.current_turn_id).length, tasks: rows.length }
+    })
+  // A machine added, changed, tested or removed: the pages hear it, and waiting tasks look again.
+  machines.onChange(() => {
+    hub.broadcast({ type: "machines", status: machinesStatus() })
+    tasks.schedule()
+  })
   // Waiting tasks look again: a new token, Claude login or runner list can change where (and whether) they run.
   identities.onChange(() => {
     hub.broadcast({ type: "identities", identities: identities.list() })
@@ -1580,6 +1607,7 @@ export function createBoxYard(
     notes,
     retro,
     docker: dockerService,
+    machines,
     identities,
     connectors,
     async start() {
