@@ -804,7 +804,7 @@ class TurnClock {
       modelMs: steps.reduce((n, s) => (s.k === "model" ? n + s.ms : n), 0),
       toolMs: clockUnionMs(this.toolSpans),
       modelCalls: this.ids.size || steps.filter((s) => s.k === "model").length,
-      toolCalls: steps.filter((s) => s.k === "tool").length + this.dropped,
+      toolCalls: this.toolSpans.length,
       tailMs: this.resultAt === null ? null : Math.max(0, at - this.resultAt),
       wallMs: Math.max(0, at - this.startedAt),
       cliMs: clockNum(r?.duration_ms),
