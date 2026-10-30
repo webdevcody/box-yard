@@ -30,7 +30,7 @@ class FakeEventSource {
 const unset: CredentialStatus = { state: "unset", source: null }
 const saved: CredentialStatus = { state: "set", source: "saved" }
 function setup(creds: Partial<Record<CredentialKey, CredentialStatus>> = {}): SetupStatus {
-  const credentials = { upstashBoxApiKey: unset, claudeOauthToken: unset, anthropicApiKey: unset, githubToken: unset, ...creds }
+  const credentials = { upstashBoxApiKey: unset, claudeOauthToken: unset, anthropicApiKey: unset, codexAuthJson: unset, codexApiKey: unset, githubToken: unset, runpodApiKey: unset, ...creds }
   const boxes = credentials.upstashBoxApiKey.state === "set"
   const claude = credentials.claudeOauthToken.state === "set" || credentials.anthropicApiKey.state === "set"
   const missing = [...(boxes ? [] : ["Upstash Box API key"]), ...(claude ? [] : ["Claude sign-in"])]
@@ -41,6 +41,7 @@ function setup(creds: Partial<Record<CredentialKey, CredentialStatus>> = {}): Se
     credentials,
     boxes: { provider: boxes ? "upstash" : "local", required: true },
     claude: { required: true, state: claude ? "set" : "unset", using: credentials.anthropicApiKey.state === "set" ? "anthropicApiKey" : claude ? "claudeOauthToken" : null },
+    codex: { required: false, state: "unset", using: null },
     github: { state: credentials.githubToken.state },
     owner: { name: "Cody", source: "default" },
     // These tests follow the Upstash path; the "This computer" path has its own (local-onboarding-ui.test.ts).
@@ -287,7 +288,8 @@ describe("first-run setup", () => {
     act(() => byText("Finish setup", reminder)!.click())
     expect(location.search).toBe("?settings=credentials")
     const dialog = document.querySelector<HTMLElement>("[role=dialog]")!
-    expect(dialog.querySelectorAll("[data-credential]").length).toBe(4)
+    // Upstash, both Claude keys, GitHub, and the two Codex logins.
+    expect(dialog.querySelectorAll("[data-credential]").length).toBe(6)
   })
 
   it("mock mode and a configured yard never show setup", () => {

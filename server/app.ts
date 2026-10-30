@@ -7,7 +7,7 @@ import { z } from "zod"
 import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
-import { Store, BadRequestError, ConflictError, NotFoundError } from "./store.js"
+import { Store, BadRequestError, ConflictError, NotFoundError, taskAgentCli } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
@@ -45,6 +45,8 @@ import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../sh
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import { AGENT_CLIS } from "../shared/agentCli.js"
+import { hasOwnCodexLogin } from "./chatAgent.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
@@ -131,6 +133,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** The CLI its new tasks run on; null/omitted: Settings › Box agents. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
@@ -150,6 +154,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** null: back to Settings › Box agents. Its tasks keep the CLI they started on. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
@@ -167,6 +173,8 @@ const schemas = {
     attachments: attachmentIds,
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
+    /** Run on Claude Code or Codex over the project's Agent (Task.agentCli), for good. */
+    agentCli: z.enum(AGENT_CLIS).nullish(),
   }),
   message: z.object({
     content: z.string().trim().max(50_000),
@@ -430,7 +438,7 @@ export function createBoxYard(
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
-  tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
+  tasks.runnerProblem = (runner, key, cli) => setup.runnerProblem(runner, key, cli)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
@@ -518,11 +526,13 @@ export function createBoxYard(
   const publicUrl = () => c.publicUrl
 
   let claudeVersion: string | null | undefined
-  const checkClaude = () =>
+  let codexVersion: string | null | undefined
+  const versionOf = (cmd: string) =>
     new Promise<string | null>((resolve) => {
-      const [bin, ...pre] = c.claudeBin.split(" ")
+      const [bin, ...pre] = cmd.split(" ")
       execFile(bin!, [...pre, "--version"], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : stdout.trim()))
     })
+  const checkClaude = () => versionOf(c.claudeBin)
   // The model/effort pickers' list, from the installed CLI (logged in like the Coordinator), over the built-in one.
   const claudeModels = new ClaudeModels({
     claudeBin: c.claudeBin,
@@ -662,8 +672,13 @@ export function createBoxYard(
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
     // A "This computer" setup may be signed in with the computer's own claude login instead of a token.
-    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true })
-    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    const coordinatorCli = settings.get().orchestratorCli
+    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true, codexLogin: hasOwnCodexLogin(), coordinatorCli })
+    if (coordinatorCli === "claude" && !claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    if (coordinatorCli === "codex") {
+      if (codexVersion === undefined) codexVersion = await versionOf(c.codexBin)
+      if (!codexVersion) problems.push(`The Coordinator runs on Codex, but the codex CLI (${c.codexBin}) was not found. Install it: npm i -g @openai/codex`)
+    }
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
       ok: problems.length === 0,
@@ -965,7 +980,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(body.runsOn, body.projectId, body.env)
+    await tasks.requireRunner(body.runsOn, body.projectId, body.env, { agentCli: body.agentCli, model })
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -979,7 +994,7 @@ export function createBoxYard(
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
     const row = store.getTaskRow(req.params.id!)
-    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, row ? { agentCli: taskAgentCli(row) } : undefined)
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
     const task = tasks.sendInput(req.params.id!, body.content, "cody", files)

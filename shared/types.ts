@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { AgentCli } from "./agentCli.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
@@ -67,6 +68,8 @@ export interface Project {
   depCache: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
+  /** The CLI its new tasks run on (Claude Code or Codex); null uses Settings › Box agents › Agent. */
+  agentCli: AgentCli | null
   /**
    * Tasks running at once: how many of its own tasks may run at the same time on one box, GPU pod or this computer.
    * Other projects' tasks never wait for it; the box's own limit (Settings › Tasks running at once per box, or › on this
@@ -213,6 +216,8 @@ export interface Task {
   compactPending: boolean
   /** A compaction turn is running right now. */
   compacting: boolean
+  /** The CLI its agent runs on (Claude Code or Codex), fixed when it was created. */
+  agentCli: AgentCli
   /** Model currently selected for subsequent turns, when routing overrode the global agent model. */
   model: string | null
   /** Effort currently selected for subsequent turns, when routing or the orchestrator overrode the global effort. */
@@ -755,16 +760,28 @@ export interface Settings {
   startInZen: boolean
   /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
   showCloudMeter: boolean
+  /** The CLI the Coordinator runs on (shared/agentCli.ts): Claude Code unless set to Codex. */
+  orchestratorCli: AgentCli
   orchestratorModel: string
+  /** The Coordinator's model when it runs on Codex; "" is Codex's own default. */
+  orchestratorCodexModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */
   orchestratorAutoCompact: AutoCompact
   /** A lighter model or effort for the Coordinator's relay-only turns (task updates, no message from Cody); off by default. */
   orchestratorRelay: RelayModel
+  /** The CLI every project's Captain runs on. */
+  captainCli: AgentCli
   /** Model for the per-project Captains, separate from the Coordinator's. */
   captainModel: string
+  /** The Captains' model when they run on Codex; "" is Codex's own default. */
+  captainCodexModel: string
   captainEffort: Effort
+  /** The CLI new tasks run on unless their project (or the task) picks one; a task keeps the one it started on. */
+  agentCli: AgentCli
   agentModel: string
+  /** Box agents' model on Codex, unless the task or routing picks a Codex model; "" is Codex's own default. */
+  agentCodexModel: string
   agentEffort: AgentEffort
   /** YAML routing rules the orchestrator uses to choose per-task/per-turn model and effort. */
   agentRoutingConfig: string

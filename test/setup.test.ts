@@ -75,11 +75,15 @@ describe("GET /api/setup", () => {
       upstashBoxApiKey: { state: "unset", source: null },
       claudeOauthToken: { state: "unset", source: null },
       anthropicApiKey: { state: "unset", source: null },
+      codexAuthJson: { state: "unset", source: null },
+      codexApiKey: { state: "unset", source: null },
       githubToken: { state: "unset", source: null },
       runpodApiKey: { state: "unset", source: null },
     })
     expect(body.boxes).toEqual({ provider: "local", required: true })
     expect(body.claude).toEqual({ required: true, state: "unset", using: null })
+    // The Coordinator runs on Claude Code by default, so Codex is optional.
+    expect(body.codex).toEqual({ required: false, state: "unset", using: null })
     expect(body.github).toEqual({ state: "unset" })
     expect(body.owner).toEqual({ name: "Cody", source: "default" })
     expect(body.restart).toEqual([])

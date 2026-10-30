@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { BoxRow, QueuedInputRow, Store, TaskRow, TurnFlags } from "./store.js"
-import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxRowCost, meterTick, normalizeBoxSize, sourceOf } from "./store.js"
+import { BadRequestError, ConflictError, NotFoundError, cloneUrl, githubSlug, boxRowCost, meterTick, normalizeBoxSize, sourceOf, taskAgentCli } from "./store.js"
 import type { BoxProvider, BoxUsageProbe, ExecResult } from "./providers/types.js"
 import { providerOf, q, tasksRootOf } from "./providers/types.js"
 import { THIN_DIR, THIN_MARK, archiveOutcome, archiveScript, ArchiveDecoder, errorTail, thinRestoreScript, type ArchiveOutcome } from "./archive.js"
@@ -28,7 +28,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type BoxFanout, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
+import { BOX_SIZES, DEFAULT_MODEL, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type BoxFanout, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
@@ -58,10 +58,11 @@ import type { TaskIconName } from "../shared/taskIcons.js"
 import { parsePriority, queueOrder, type QueueEntry, type TaskPriority } from "../shared/priority.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
-import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
+import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { GLOBAL_CREDENTIALS, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type TurnEnv } from "./turnCredentials.js"
+import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
+import { AGENT_CLI_LABEL, cliForModel, codexModel, isOpenAiModel, type AgentCli } from "../shared/agentCli.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
@@ -310,6 +311,8 @@ export interface NewTask {
   source?: InputSource
   /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
   runsOn?: Runner | null
+  /** The CLI it runs on for good (Task.agentCli); omitted: what its model names, else its project's Agent, else Settings. */
+  agentCli?: AgentCli | null
   /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
   icon?: TaskIconName | null
   /** "high" pulls its turns from the queue before normal tasks' (shared/priority.ts); omitted is normal. */
@@ -574,9 +577,9 @@ export class TaskManager {
   onCaptainMessage: ((projectId: string, input: AgentCaptainMessage) => { message: CaptainMessage; heldUntil: number | null }) | null = null
   /**
    * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
-   * `claudeKey` says whether the task's turns would have a Claude key (turnCredentials); undefined: the global one.
+   * `key` says whether the task's turns would have a key for `cli` (turnCredentials, codexCredentials); undefined: the global one.
    */
-  runnerProblem: ((runner: Runner, claudeKey?: boolean) => Promise<string | null>) | null = null
+  runnerProblem: ((runner: Runner, key?: boolean, cli?: AgentCli) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** RunPod GPU pods, or null when this install has no GPU runner. */
@@ -813,10 +816,13 @@ export class TaskManager {
    * sign-in, or there are no Upstash boxes. Nothing falls back to the other runner. No runner asked for: no check.
    * With the task's project (and its own env), a Claude key its turns would get counts (a Docker container needs one).
    */
-  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}): Promise<void> {
+  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}, agent?: { agentCli?: AgentCli | null; model?: string | null }): Promise<void> {
     if (!runner || !this.runnerProblem) return
-    const claudeKey = projectId && this.store.getProject(projectId) ? this.turnCredentials(projectId, taskEnv).claudeFrom !== null : undefined
-    const problem = await this.runnerProblem(runner, claudeKey)
+    const project = projectId ? this.store.getProject(projectId) : null
+    // The CLI the task runs on decides which key counts: a Codex task needs a Codex login, not a Claude one.
+    const cli = project ? this.agentCliFor(agent ?? {}, project) : (agent?.agentCli ?? this.settings.get().agentCli)
+    const key = !project ? undefined : cli === "codex" ? this.codexCredentials(project.id, taskEnv).kind !== null : this.turnCredentials(project.id, taskEnv).claudeFrom !== null
+    const problem = await this.runnerProblem(runner, key, cli)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
@@ -861,6 +867,7 @@ export class TaskManager {
         const route = this.initialRoute(input)
         const task = this.store.createTask({
           ...input,
+          agentCli: this.agentCliFor(input, projects[i]!),
           batchId,
           startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
           model: route.model,
@@ -880,6 +887,14 @@ export class TaskManager {
     this.publishDirectory()
     this.schedule()
     return ids.map((id) => this.store.getTask(id)!)
+  }
+
+  /**
+   * The CLI a new task runs on: the one asked for, else the one its model names (a gpt-* model is Codex's), else its
+   * project's Agent, else Settings › Box agents › Agent. It keeps it for good.
+   */
+  private agentCliFor(input: Pick<NewTask, "agentCli" | "model">, project: Project): AgentCli {
+    return input.agentCli ?? cliForModel(input.model) ?? project.agentCli ?? this.settings.get().agentCli
   }
 
   sendInput(
@@ -1233,6 +1248,7 @@ export class TaskManager {
   compactTask(taskId: string): Task {
     const row = this.requireRow(taskId)
     if (!row.session_started) throw new BadRequestError("This agent hasn't started its session yet, so there is nothing to compact.")
+    if (taskAgentCli(row) === "codex") throw new BadRequestError("This agent runs on Codex, which compacts its own context as it goes (Settings › Box agents › Auto-compact sets when).")
     if (row.compacting || row.compact_pending) return this.store.getTask(row.id)!
     if (row.status === "failed") throw new BadRequestError("The agent's last turn failed. Retry it before compacting.")
     this.store.updateTask(row.id, { compactPending: true })
@@ -3153,6 +3169,11 @@ export class TaskManager {
     return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
   }
 
+  /** What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login. */
+  codexCredentials(projectId: string, taskEnv: Record<string, string> = {}): CodexTurnLogin {
+    return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, this.settings.credentials.codexLogin())
+  }
+
   /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
   private projectCreds(projectId: string): string {
     return credentialSet(projectId, this.store.projectEnv(projectId), this.identities.idOf(projectId))
@@ -3543,6 +3564,7 @@ export class TaskManager {
    */
   private dockerClaudeProblem(row: TaskRow): string | null {
     if (this.c.mock) return null
+    if (taskAgentCli(row) === "codex") return this.codexCredentials(row.project_id, this.store.taskEnv(row.id)).kind ? null : DOCKER_NEEDS_CODEX_KEY
     return this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom ? null : DOCKER_NEEDS_CLAUDE_KEY
   }
 
@@ -4619,6 +4641,8 @@ export class TaskManager {
     let fresh = false
     /** signing.key is on the box and no runner has taken it yet. */
     let keyWaiting = false
+    /** And codex-auth.json, the Codex login for this turn. */
+    let codexWaiting = false
     try {
       await this.provider.wake(boxId)
       const project = this.store.getProject(row.project_id)
@@ -4683,7 +4707,18 @@ export class TaskManager {
         keyWaiting = true
         await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
       }
-      await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(this.taskJson(row, project, boxId, signing), null, 2))
+      const taskJson = this.taskJson(row, project, boxId, signing)
+      if (taskJson.agent === "codex") {
+        await this.ensureCodex(boxId)
+        // The ChatGPT login goes to the box for this turn; the runner keeps whichever copy is newer, and Box Yard reads
+        // back the one Codex refreshed when the turn ends (takeBackCodexAuth).
+        const auth = taskJson.codexLogin === "chatgpt" && taskJson.isolateCodex ? this.settings.credentials.codexAuth() : ""
+        if (auth) {
+          codexWaiting = true
+          await this.provider.writeFile(boxId, `${dir}/codex-auth.json`, auth)
+        }
+      }
+      await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(taskJson, null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
         boxId,
@@ -4695,7 +4730,7 @@ export class TaskManager {
           resume: !firstTurn && !recapped,
           compact,
           ...agent,
-          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName, pushAtTurnEnd: this.pushAtTurnEnd(project), box: this.boxPromptInfo(boxId, project) }),
+          systemPrompt: workerSystemPrompt({ project, task: row, branch: row.branch, port: row.port_base ?? PORT_BASE, ownerName, pushAtTurnEnd: this.pushAtTurnEnd(project), box: this.boxPromptInfo(boxId, project), agent: taskAgentCli(row) }),
           directory,
           notes: notes.map((n) => ({ author: n.author, content: n.content })),
           recap: recapPrompt(this.store.getTask(taskId)!, this.store.listTaskMessages(taskId, 60)),
@@ -4741,6 +4776,7 @@ export class TaskManager {
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       keyWaiting = false
+      codexWaiting = false
       // A turn that never reported its end (lost with its box) is forgotten after a day.
       for (const [id, l] of this.turnLaunches) if (l.launchedAt < Date.now() - 86_400_000) this.turnLaunches.delete(id)
       this.turnLaunches.set(turnId, {
@@ -4789,6 +4825,10 @@ export class TaskManager {
       if (keyWaiting && !this.stopped) {
         await this.provider.writeFile(boxId, `${dir}/signing.key`, "").catch(() => {})
         await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      }
+      if (codexWaiting && !this.stopped) {
+        await this.provider.writeFile(boxId, `${dir}/codex-auth.json`, "").catch(() => {})
+        await this.provider.exec(boxId, `rm -f ${q(`${dir}/codex-auth.json`)}`).catch(() => {})
       }
       // Box Yard is stopping, and its database may be closed already: the next start picks the task up.
       if (this.stopped) {
@@ -4904,7 +4944,7 @@ export class TaskManager {
     this.store.updateTask(row.id, { sessionId: randomUUID() })
     const checkout = !row.branch ? "a fresh workspace" : branch === "base" ? `branch ${row.branch} recreated from ${baseBranch} (it is gone from origin)` : `a fresh checkout of branch ${row.branch}`
     const why = fallback ? "its workspace archive couldn't be restored" : "no workspace archive was left"
-    this.addEvent(row.id, `Resumed from a recap: ${why}, so a new Claude session started on ${checkout} with the task's summary, PR and recent messages.`)
+    this.addEvent(row.id, `Resumed from a recap: ${why}, so a new ${AGENT_CLI_LABEL[taskAgentCli(row)]} session started on ${checkout} with the task's summary, PR and recent messages.`)
     return this.requireRow(row.id)
   }
 
@@ -4923,7 +4963,40 @@ export class TaskManager {
       settings: s,
       sources,
     })
-    return { model: route.model, effort: route.effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window), route }
+    // Codex runs OpenAI models: a Claude model from Settings, routing or the built-in default gives way to the Codex model.
+    // And the reverse: an OpenAI model on a Claude Code task gives way to Settings' (or the built-in) Claude model.
+    const cli = taskAgentCli(row)
+    const model = cli === "codex" ? codexModel(route.model, s.agentCodexModel) : isOpenAiModel(route.model) ? (isOpenAiModel(s.agentModel) ? DEFAULT_MODEL : s.agentModel) : route.model
+    return { model, effort: route.effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window), route }
+  }
+
+  /** Boxes this server run found Codex on (or installed it on). */
+  private readonly codexReady = new Set<string>()
+
+  /**
+   * Codex on the box, installed the first time a Codex task lands on one that lacks it (Upstash and RunPod boxes start
+   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install.
+   */
+  private async ensureCodex(boxId: string) {
+    const provider = providerOf(this.provider, boxId)
+    if (this.codexReady.has(boxId) || provider.name === "local" || this.c.mock) return
+    const install = "npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1"
+    const res = await this.provider.exec(boxId, `command -v codex >/dev/null 2>&1 || ${install} || sudo -n ${install}; command -v codex >/dev/null 2>&1 && codex --version`)
+    if (res.exitCode !== 0) throw failedStep("installing Codex on the box (npm install -g @openai/codex)", new Error(errorTail(res.stderr || res.stdout) || `exit code ${res.exitCode}`))
+    this.codexReady.add(boxId)
+  }
+
+  /**
+   * After a Codex turn that ran on Settings' ChatGPT login: read the box's copy back, so tokens Codex refreshed there
+   * reach every later turn (the refresh token it replaced is spent). Best effort: a copy that isn't newer is ignored.
+   */
+  private async takeBackCodexAuth(row: TaskRow) {
+    if (taskAgentCli(row) !== "codex" || !row.box_id || this.settings.credentials.codexLogin()?.kind !== "chatgpt") return
+    if (this.codexCredentials(row.project_id, this.store.taskEnv(row.id)).kind !== "chatgpt") return
+    try {
+      const file = await this.provider.readFile(row.box_id, `${this.taskDir(row.box_id, row.id)}/codex/auth.json`)
+      if (this.settings.credentials.adoptCodexAuth(file.toString("utf8"))) console.log(`[box-yard] ${row.id}: kept the Codex login it refreshed`)
+    } catch {}
   }
 
   /**
@@ -4986,24 +5059,46 @@ export class TaskManager {
 
   private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null) {
     // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
-    const { env, unsetEnv, claudeFrom } = this.turnCredentials(project.id, this.store.taskEnv(row.id))
+    const creds = this.turnCredentials(project.id, this.store.taskEnv(row.id))
+    const { env, claudeFrom } = creds
+    let { unsetEnv } = creds
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
     // On this computer, an identity other than Default doesn't get the owner's git config or gh login.
     const home = this.identityHome(boxId, project.id)
     if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in env)) env[k] = v
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
+    const agent = taskAgentCli(row)
+    const codex = agent === "codex" ? this.codexCredentials(project.id, this.store.taskEnv(row.id)) : null
+    if (codex) {
+      // A Codex turn logs in with Codex's login: Settings' Claude login stays off its box (a project's own env stays).
+      if (claudeFrom === "global") for (const k of CLAUDE_CREDENTIAL_VARS) delete env[k]
+      Object.assign(env, codex.env)
+      unsetEnv = [...new Set([...unsetEnv, ...[...CLAUDE_CREDENTIAL_VARS, ...CODEX_CREDENTIAL_VARS].filter((v) => !(v in env))])]
+    }
+    const [codexBin, ...codexArgs] = (local || this.c.mock ? this.c.codexBin : (provider.codexBin ?? "codex")).split(" ")
     return {
       taskId: row.id,
       projectId: project.id,
       boxId,
       env,
       unsetEnv,
+      agent,
       claudeBin,
       claudeArgs,
       // A local `claude` login lives in the default config dir, so only
       // isolate when we have a token to log in with.
       isolateConfig: !local || claudeFrom !== null,
+      ...(codex
+        ? {
+            codexBin,
+            codexArgs,
+            // "chatgpt": the login file comes as codex-auth.json for the turn (box-runner.mjs prepareCodexHome).
+            codexLogin: codex.kind,
+            // The same rule for Codex: on this computer with no Codex login set, its own `codex login` (~/.codex).
+            isolateCodex: !local || this.c.mock || codex.kind !== null,
+          }
+        : {}),
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),
@@ -5538,7 +5633,7 @@ export class TaskManager {
         return say("event", `This turn's commits aren't signed: ${String(ev.error ?? "signing isn't set up")}.`, { kind: "signing" })
       case "session_reset":
         this.store.updateTask(taskId, { sessionId: String(ev.sessionId) })
-        return say("event", "Claude session was missing on this box, so the agent started a new one with a recap.")
+        return say("event", `${taskAgentCli(row) === "codex" ? "Codex" : "Claude"} session was missing on this box, so the agent started a new one with a recap.`)
       case "ask_user": {
         const question = String(ev.question ?? "")
         this.store.updateTask(taskId, { turnFlags: { ...flags, asked: question }, question })
@@ -5635,6 +5730,7 @@ export class TaskManager {
         return
       }
       case "turn_end": {
+        await this.takeBackCodexAuth(row)
         // The agent may have merged or closed its PR during the turn; ask GitHub.
         const pr = row.pr_url && row.current_turn_id ? await this.prs.check(taskId) : null
         // A failed turn on an Upstash box: read the box now, so a process its cgroup killed for memory counts (auto-sizing).
@@ -6416,7 +6512,9 @@ export class TaskManager {
     const maxBytes = this.c.archiveMaxMb * 1024 * 1024
     // A thin archive is a partial one that also leaves out the history GitHub has.
     const partial = Boolean(mode.partial || mode.thin)
-    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/run.json`, `${taskId}/events.lock`, `${taskId}/mcp.json`, `${taskId}/signing.key`]
+    // A Codex login stays with Box Yard and the box, never in an archive; Codex's own logs and scratch aren't worth keeping.
+    const codex = [`${taskId}/codex-auth.json`, `${taskId}/codex/auth.json`, `${taskId}/codex/log`, `${taskId}/codex/tmp`, `${taskId}/codex/.tmp`, `${taskId}/codex/cache`]
+    const excludes = [...ARCHIVE_EXCLUDED_DIRS, `${taskId}/task.json`, `${taskId}/turn.pid`, `${taskId}/run.json`, `${taskId}/events.lock`, `${taskId}/mcp.json`, `${taskId}/signing.key`, ...codex]
     const project = mode.thin ? this.store.getProject(this.store.getTaskRow(taskId)?.project_id ?? "") : null
     const mirror = project?.repo ? this.mirrorSpec(boxId, project).spec.mirror : undefined
     const script = archiveScript({ root: tasksRootOf(this.provider, boxId), boxRoot: this.provider.root(boxId), taskId, excludes, maxBytes, partial, thin: mode.thin, mirror, git: mode.git, keepStage: mode.keepStage })

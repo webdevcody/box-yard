@@ -18,6 +18,7 @@ import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
 import { elapsedLabel } from "../lib/runningTasks"
 import type { BoxSize, PrState, Task, TaskStatus } from "../../../shared/types"
+import { AGENT_CLI_LABEL, AGENT_CLI_SHORT, type AgentCli } from "../../../shared/agentCli"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -81,6 +82,16 @@ export function StatusBadge({ status }: { status: BadgeStatus }) {
 /** The shape every chip in the task header's meta row shares, so they line up: 44px tall on phones, 24px from sm. */
 export const META_CHIP =
   "inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md border px-2 text-xs font-medium whitespace-nowrap transition sm:h-6 sm:min-h-0 sm:px-1.5"
+
+/** "Codex" on a task whose agent runs on Codex. Claude Code is the default, so it gets no chip. */
+export function AgentCliChip({ cli, className }: { cli: AgentCli | undefined; className?: string }) {
+  if (cli !== "codex") return null
+  return (
+    <span data-testid="agent-cli-chip" title={`Runs on ${AGENT_CLI_LABEL[cli]}, fixed when the task started`} className={className}>
+      {AGENT_CLI_SHORT[cli]}
+    </span>
+  )
+}
 
 /** The quiet form of StatusBadge for header meta rows: a colored dot and the label, no pill. */
 export function StatusDot({ status, title, children, className }: { status: BadgeStatus; title?: string; children?: ReactNode; className?: string }) {
