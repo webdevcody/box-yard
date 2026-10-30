@@ -1,5 +1,6 @@
 // Turns mentions of Box Yard entities (task, project, schedule and artifact ids, box ids, artifact paths, and
-// bold task titles) in rendered markdown into in-app links. Pure, so it is unit tested.
+// bold task titles) in rendered markdown into in-app links, and GitHub references ("PR #406", "#12",
+// "owner/repo#5", "head 8269e827") into links to the repo the text is about. Pure, so it is unit tested.
 import type { InlineCode, Link, Nodes, Parent, PhrasingContent, Root, Strong, Text } from "mdast"
 import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../../../shared/types"
 
@@ -15,6 +16,8 @@ export interface EntityRef {
   hint: string
   /** A task's project. */
   projectId?: string
+  /** A project's GitHub repo ("owner/repo"), or its project's for a task. */
+  repo?: string | null
 }
 
 export interface EntityIndex {
@@ -25,6 +28,17 @@ export interface EntityIndex {
   byName: Map<string, EntityRef>
   /** Global regex for every token worth a look: prefixed ids, known box ids and /artifacts/ paths. */
   pattern: RegExp
+  /** Projects with a GitHub repo, and the words that name them in text (see inferRepo). */
+  repos: ProjectRepo[]
+}
+
+export interface ProjectRepo {
+  repo: string
+  /**
+   * Its name and the repo's own name, as whole-word patterns. `distinctive` names ("box-yard", "map3") say which
+   * project the text is about; a plain word ("health") might just be a word, so it only makes the repo ambiguous.
+   */
+  names: { pattern: RegExp; distinctive: boolean }[]
 }
 
 /** The app's routes for each kind of entity. Schedules and boxes are anchors on their list pages. */
@@ -47,13 +61,20 @@ export function buildEntityIndex(
 ): EntityIndex {
   const byId = new Map<string, EntityRef>()
   const projectNames = new Map((data.projects ?? []).map((p) => [p.id, p.name]))
+  const projectRepos = new Map((data.projects ?? []).map((p) => [p.id, githubRepo(p.repo)]))
+  const repos: ProjectRepo[] = []
   for (const p of data.projects ?? []) {
-    byId.set(p.id, { kind: "project", id: p.id, href: routes.project(p.id), label: p.name, hint: `Project: ${p.name}${p.repo ? ` (${p.repo})` : ""}` })
+    const repo = projectRepos.get(p.id) ?? null
+    byId.set(p.id, { kind: "project", id: p.id, href: routes.project(p.id), label: p.name, hint: `Project: ${p.name}${p.repo ? ` (${p.repo})` : ""}`, repo })
+    if (repo) {
+      const words = [...new Set([p.name.trim(), repo.split("/")[1]!].filter((w) => w.length >= 3))]
+      repos.push({ repo, names: words.map((w) => ({ pattern: new RegExp(`(?<![\\w-])${escapeRegExp(w)}(?![\\w-])`), distinctive: /[^A-Za-z]/.test(w) })) })
+    }
   }
   const titleCounts = new Map<string, number>()
   for (const t of data.tasks ?? []) {
     const project = projectNames.get(t.projectId)
-    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), label: t.title, hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · "), projectId: t.projectId })
+    byId.set(t.id, { kind: "task", id: t.id, href: routes.task(t.id), label: t.title, hint: [t.title, statusLabel(t.status), project].filter(Boolean).join(" · "), projectId: t.projectId, repo: projectRepos.get(t.projectId) ?? null })
     const title = t.title.trim()
     if (title) titleCounts.set(title, (titleCounts.get(title) ?? 0) + 1)
   }
@@ -83,7 +104,7 @@ export function buildEntityIndex(
   // Longest box ids first so one id that prefixes another can't win early.
   const ids = [PREFIXED_ID, ...boxIds.sort((a, b) => b.length - a.length).map(escapeRegExp)].join("|")
   const pattern = new RegExp(`${ARTIFACT_PATH}|(?<![\\w-])(?:${ids})(?![\\w-])`, "g")
-  return { byId, byTitle, byName, pattern }
+  return { byId, byTitle, byName, pattern, repos }
 }
 
 /** What a matched token links to, or null for ids nobody knows (those stay plain text). */
@@ -158,6 +179,85 @@ export function shortGithubLabel(href: string): string | null {
   const ref = githubRef(href)
   if (!ref) return null
   return ref.kind === "pull" ? `PR #${ref.number}` : `${ref.owner}/${ref.repo}#${ref.number}`
+}
+
+/** A project's repo as "owner/repo" when it's on github.com ("owner/repo", an https or git@ URL), else null. */
+export function githubRepo(repo: string | null | undefined): string | null {
+  const m = /^(?:(?:https?:\/\/(?:www\.)?|git@)github\.com[/:])?([A-Za-z0-9][\w.-]*)\/([\w.-]+?)(?:\.git)?\/?$/i.exec(repo?.trim() ?? "")
+  return m ? `${m[1]}/${m[2]}` : null
+}
+
+// GitHub references in prose, in the order a match is tried at one spot:
+// "owner/repo#12" (always its own repo); "PR #406", "PR#406", "pull request #406"; a bare "#12"; a commit SHA right
+// after "head", "commit", "as", "squash"... ("(head 8269e827)", "squash-merged as 1a2b3c4"). Numbers start at 1,
+// so "#0f0" or "#000" (colours) never match; neither do "#abc" anchors, "C#1", "/#12" or "&#123".
+const GH_TEXT = new RegExp(
+  [
+    String.raw`(?<![\w./-])(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})/(?<name>[\w.-]{1,100})#(?<xn>[1-9]\d{0,6})(?![\w-])`,
+    String.raw`(?<![\w-])(?:PRs?|[Pp]ull [Rr]equests?) ?#(?<pn>[1-9]\d{0,6})(?![\w-])`,
+    String.raw`(?<![\w&#/\\-])#(?<n>[1-9]\d{0,6})(?![\w-])`,
+    String.raw`(?<=(?<![\w-])(?:[Hh]ead|HEAD|[Cc]ommits?|as|[Ss]quash(?:ed|-merged)?|SHA|sha)(?::? +))(?<sha>[0-9a-f]{7,40})(?![\w-])`,
+  ].join("|"),
+  "g",
+)
+// "color: #123", "fill #333": a digits-only hex colour.
+const COLOUR_BEFORE = /(?:colou?r|background|fill|stroke|border)[\w-]*\s*[:=]?\s*$/i
+
+/** A cheap first look: false means splitGithubRefs would find nothing in `text`. */
+export const mayHaveGithubRef = (text: string) => /#[1-9]|[0-9a-f]{7}/.test(text)
+
+export type GithubSegment = { text: string; url?: string; kind?: "pull" | "issue" | "commit" }
+
+/**
+ * Splits prose into plain runs and GitHub references, linked to `repo` ("owner/repo"). With no repo (unknown or
+ * ambiguous) only explicit "owner/repo#12" links; "#12", "PR #12" and SHAs stay text, since a guess could be wrong.
+ * "PR #12" goes to /pull/12; a bare "#12" to /issues/12, which GitHub redirects when it's a PR.
+ */
+export function splitGithubRefs(text: string, repo: string | null): GithubSegment[] {
+  const out: GithubSegment[] = []
+  let last = 0
+  const push = (start: number, seg: GithubSegment) => {
+    if (start > last) out.push({ text: text.slice(last, start) })
+    out.push(seg)
+    last = start + seg.text.length
+  }
+  for (const m of text.matchAll(GH_TEXT)) {
+    const g = m.groups!
+    if (g.xn) {
+      if (g.owner === "www" || /^\d+$/.test(g.owner!)) continue
+      push(m.index, { text: m[0], url: `https://github.com/${g.owner}/${g.name}/issues/${g.xn}`, kind: "issue" })
+    } else if (!repo) continue
+    else if (g.pn) push(m.index, { text: m[0], url: `https://github.com/${repo}/pull/${g.pn}`, kind: "pull" })
+    else if (g.n) {
+      if (COLOUR_BEFORE.test(text.slice(Math.max(0, m.index - 24), m.index))) continue
+      push(m.index, { text: m[0], url: `https://github.com/${repo}/issues/${g.n}`, kind: "issue" })
+    } else if (g.sha && /\d/.test(g.sha) && /[a-f]/.test(g.sha)) {
+      push(m.index, { text: m[0], url: `https://github.com/${repo}/commit/${g.sha}`, kind: "commit" })
+    }
+  }
+  if (!out.length) return [{ text }]
+  if (last < text.length) out.push({ text: text.slice(last) })
+  return out
+}
+
+/**
+ * The one repo some text is about, from the Box Yard entities it links (a task, a project) and the projects it names
+ * ("box-yard"), or null when there's none or more than one. A plain-word project name ("health") can't pick a repo
+ * on its own, only rule one out.
+ */
+export function inferRepo(refs: EntityRef[], text: string, index: EntityIndex): string | null {
+  const picked = new Set<string>()
+  const named = new Set<string>()
+  for (const r of refs) if (r.repo) picked.add(r.repo)
+  for (const p of index.repos) {
+    for (const n of p.names) {
+      if (!n.pattern.test(text)) continue
+      ;(n.distinctive ? picked : named).add(p.repo)
+    }
+  }
+  if (picked.size !== 1) return null
+  const [repo] = picked
+  return [...named].every((r) => r === repo) ? repo! : null
 }
 
 /** `href` is on `origin` itself: "http://yard.test", "http://yard.test/x", "?q" or "#h" after it, not "http://yard.test.evil". */
@@ -240,12 +340,21 @@ function plainText(node: Strong): string | null {
   return s.trim()
 }
 
-function linkChildren(parent: Parent, index: EntityIndex) {
+function linkChildren(parent: Parent, index: EntityIndex, found: EntityRef[]) {
   const next: Nodes[] = []
+  const link = (ref: EntityRef, children: PhrasingContent[]) => {
+    found.push(ref)
+    return linkNode(ref, children)
+  }
   for (const node of parent.children as Nodes[]) {
     switch (node.type) {
       // Already links, or raw content: leave alone.
-      case "link":
+      case "link": {
+        const ref = refForHref((node as Link).url, index)
+        if (ref) found.push(ref)
+        next.push(node)
+        break
+      }
       case "linkReference":
       case "definition":
       case "code":
@@ -254,38 +363,102 @@ function linkChildren(parent: Parent, index: EntityIndex) {
         break
       case "text": {
         const parts = splitText((node as Text).value, index)
-        for (const p of parts) next.push(p.ref ? linkNode(p.ref, [{ type: "text", value: p.text }]) : { type: "text", value: p.text })
+        for (const p of parts) next.push(p.ref ? link(p.ref, [{ type: "text", value: p.text }]) : { type: "text", value: p.text })
         break
       }
       case "inlineCode": {
         // `task_…` links when the whole code span is one known id or artifact path.
         const token = (node as InlineCode).value.trim()
         const m = splitText(token, index)
-        next.push(m.length === 1 && m[0]?.ref ? linkNode(m[0].ref, [node as InlineCode]) : node)
+        next.push(m.length === 1 && m[0]?.ref ? link(m[0].ref, [node as InlineCode]) : node)
         break
       }
       case "strong": {
         const title = plainText(node as Strong)
         const ref = title ? index.byTitle.get(title) : undefined
         if (ref) {
-          next.push(linkNode(ref, [node as Strong]))
+          next.push(link(ref, [node as Strong]))
           break
         }
-        linkChildren(node as Parent, index)
+        linkChildren(node as Parent, index, found)
         next.push(node)
         break
       }
       default:
-        if ("children" in node) linkChildren(node as Parent, index)
+        if ("children" in node) linkChildren(node as Parent, index, found)
         next.push(node)
     }
   }
   parent.children = next as Parent["children"]
 }
 
-/** remark plugin: `remarkPlugins={[remarkGfm, [remarkEntityLinks, index]]}`. */
-export function remarkEntityLinks(index: EntityIndex) {
-  return (tree: Root) => {
-    linkChildren(tree, index)
+const githubLinkNode = (seg: GithubSegment): Link => ({
+  type: "link",
+  url: seg.url!,
+  children: [{ type: "text", value: seg.text }],
+  data: { hProperties: { "data-github": seg.kind } },
+})
+
+/** GitHub references in a subtree's prose: never in code, raw HTML or a link (entity links included). */
+function linkGithub(parent: Parent, repo: string | null) {
+  const next: Nodes[] = []
+  for (const node of parent.children as Nodes[]) {
+    if (node.type === "text") {
+      for (const seg of splitGithubRefs(node.value, repo)) next.push(seg.url ? githubLinkNode(seg) : { type: "text", value: seg.text })
+      continue
+    }
+    if ("children" in node && node.type !== "link" && node.type !== "linkReference") linkGithub(node as Parent, repo)
+    next.push(node)
   }
+  parent.children = next as Parent["children"]
+}
+
+const proseText = (node: Nodes): string =>
+  node.type === "text" ? node.value : "children" in node && node.type !== "link" ? (node.children as Nodes[]).map(proseText).join(" ") : ""
+
+/**
+ * The parts of a message whose repo is worked out on their own when it's "mentions" (a Coordinator reply spans
+ * projects): each paragraph, heading, list item and table row. A list item takes its nested lists with it.
+ */
+function repoUnits(node: Nodes, out: Parent[]) {
+  if (node.type === "root" || node.type === "list" || node.type === "blockquote" || node.type === "table" || node.type === "footnoteDefinition") {
+    for (const c of node.children as Nodes[]) repoUnits(c, out)
+  } else if ("children" in node) out.push(node as Parent)
+}
+
+/** Which repo bare "#12", "PR #12" and SHAs link to: a repo ("owner/repo"), MENTIONS, or null to leave them as text. */
+export type RepoScope = string | null
+/** Work the repo out per paragraph from what it mentions (inferRepo), for text that isn't about one project. */
+export const MENTIONS = "mentions"
+
+/**
+ * remark plugin: `remarkPlugins={[remarkGfm, [remarkEntityLinks, index, repo]]}`. Links entity mentions, then GitHub
+ * references (see splitGithubRefs) to `repo`, a scope's own repo when it's MENTIONS.
+ */
+export function remarkEntityLinks(index: EntityIndex, repo: RepoScope = null) {
+  return (tree: Root) => {
+    if (repo !== MENTIONS) {
+      linkChildren(tree, index, [])
+      linkGithub(tree, repo)
+      return
+    }
+    const units: Parent[] = []
+    repoUnits(tree, units)
+    for (const unit of units) {
+      const found: EntityRef[] = []
+      linkChildren(unit, index, found)
+      linkGithub(unit, inferRepo(found, proseText(unit as Nodes), index))
+    }
+  }
+}
+
+/**
+ * The GitHub repo of what some text belongs to: the task's project's repo, else the project's (a task the index
+ * doesn't know, e.g. deleted). Null when neither has a GitHub repo.
+ */
+export function repoOf(taskId: string | null | undefined, projectId: string | null | undefined, index: EntityIndex): string | null {
+  const task = taskId ? index.byId.get(taskId) : undefined
+  if (task?.kind === "task") return task.repo ?? null
+  const project = projectId ? index.byId.get(projectId) : undefined
+  return project?.kind === "project" ? (project.repo ?? null) : null
 }
