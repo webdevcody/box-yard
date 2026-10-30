@@ -532,6 +532,7 @@ export function createBoxYard(
   vastService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   daytonaService.onPodEvent = (e) => tasks.gpuPodEvent(e)
   daytonaService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
+  daytonaService.spendBlock = () => tasks.cloudSpend().blockedReason ?? null
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)

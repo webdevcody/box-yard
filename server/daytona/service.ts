@@ -37,6 +37,8 @@ export class DaytonaService implements GpuRunner {
   readonly store: DaytonaSettingsStore
   onPodEvent: ((e: { boxId: string; kind: "started" | "terminated"; detail: string }) => void) | null = null
   onProgress: ((boxId: string, message: string) => void) | null = null
+  /** Why no new sandbox may start (TaskManager.cloudSpend's blockedReason), or null. */
+  spendBlock: (() => string | null) | null = null
 
   constructor(
     private readonly d: {
@@ -66,6 +68,7 @@ export class DaytonaService implements GpuRunner {
         return { gpuTypes: m.gpuTypes, minRamGb: m.minRamGb, minVcpus: m.minVcpus }
       },
       keepWarmUntil: (boxId) => this.keepWarmUntil(boxId),
+      spendBlock: () => this.spendBlock?.() ?? null,
       ...(d.pollMs ? { pollMs: d.pollMs } : {}),
     })
   }

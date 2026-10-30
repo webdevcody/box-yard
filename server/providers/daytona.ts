@@ -63,6 +63,8 @@ export interface DaytonaProviderDeps {
   projectCap?: (projectId: string) => number | null
   projectMachine?: (projectId: string) => DaytonaProjectMachine
   keepWarmUntil?: (boxId: string) => number | null
+  /** Why no new sandbox may start (a cloud limit in Settings › Usage is reached), or null. */
+  spendBlock?: () => string | null
   /** How often to read a starting sandbox, shortened in tests. */
   pollMs?: number
 }
@@ -433,6 +435,9 @@ export class DaytonaProvider implements BoxProvider {
   private async make(boxId: string, bake: boolean): Promise<DaytonaSandbox> {
     const s = this.d.settings()
     const projectId = gpuBoxProject(boxId)
+    // Placement holds the task back first; this catches a start that raced the limit.
+    const blocked = this.d.spendBlock?.()
+    if (blocked) throw new Error(`Couldn't start a Daytona sandbox: Daytona sandboxes count toward the cloud limit, and ${blocked} (Settings › Usage)`)
     const cap = this.capOf(projectId)
     // The caps count every sandbox this install has, and the project's own.
     const all = await this.listPods(true)
@@ -466,7 +471,7 @@ export class DaytonaProvider implements BoxProvider {
     })
     this.listed = null
     this.setState(boxId, sb)
-    this.d.onEvent?.({ boxId, kind: "started", detail: `${shapeLabel(fit)}${fit.spot && fit.gpus ? " (spot)" : ""}, ${fit.vcpus} vCPUs, ${fit.memoryGb} GiB at about $${usd.toFixed(3)}/hr, sandbox ${sb.id}` })
+    this.d.onEvent?.({ boxId, kind: "started", detail: `${shapeLabel(fit)}${fit.spot && fit.gpus ? " (spot)" : ""}, ${fit.vcpus} vCPUs, ${fit.memoryGb} GiB at about $${usd.toFixed(2)}/hr, sandbox ${sb.id}` })
     return sb
   }
 
