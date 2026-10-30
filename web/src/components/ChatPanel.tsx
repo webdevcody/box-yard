@@ -211,8 +211,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           >
             <div className="flex min-w-0 items-center gap-2">
               <AgentIcon busy={Boolean(busy.data)} />
-              {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
+              {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. Too narrow
+                  for the word beside the view toggle (a 320px phone), the icon says it alone. */}
+              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100 @max-[23rem]:sr-only">
                 {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
                 {zen && <span className="max-sm:hidden">Box Yard </span>}
                 Coordinator
