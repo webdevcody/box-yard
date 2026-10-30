@@ -113,6 +113,18 @@ export function attachmentNote(files: unknown, ownerName?: string): string {
   return `\n\n[${withOwner("Cody", ownerName)} attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task, create_tasks or send_to_task.]\n${lines.join("\n")}`
 }
 
+/** A message asked from a task's card in the chat (meta.about) says which task it's about, before its text. */
+export function aboutNote(about: unknown, store: Pick<Store, "getTaskRow">, ownerName?: string): string {
+  if (!Array.isArray(about)) return ""
+  const named = about.flatMap((id) => {
+    const row = typeof id === "string" ? store.getTaskRow(id) : null
+    return row ? [`"${row.title}" (${row.id})`] : []
+  })
+  if (!named.length) return ""
+  const which = named.length === 1 ? `the card for the task ${named[0]}` : `the card for the tasks ${named.join(", ")}`
+  return `[${withOwner("Cody", ownerName)} asked this from ${which} in the chat, so it's about ${named.length === 1 ? "that task" : "them"}.]\n`
+}
+
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
  * tools. Every chat message runs `claude -p --resume <session>` so the
@@ -186,9 +198,9 @@ export class Orchestrator {
   }
 
   /** Save Cody's message and make sure a turn will pick it up. */
-  send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
-    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
-    const meta = { ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
+  send(content: string, id?: string, attachments: Attachment[] = [], about: string[] = []): ChatMessage {
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued). `about`: asked from those tasks' card.
+    const meta = { ...(attachments.length ? { attachments } : {}), ...(about.length ? { about } : {}), ...(this.running ? { queued: true } : {}) }
     const msg = this.store.addChat("user", content.trim(), Object.keys(meta).length ? meta : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
@@ -573,7 +585,7 @@ export class Orchestrator {
       .map((m) =>
         m.meta?.source === "hook" && typeof m.meta.hookName === "string"
           ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
-          : m.content + attachmentNote(m.meta?.attachments, this.owner()),
+          : aboutNote(m.meta?.about, this.store, this.owner()) + m.content + attachmentNote(m.meta?.attachments, this.owner()),
       )
       .filter((text) => text.trim())
   }

@@ -166,10 +166,22 @@ const schemas = {
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
   }),
-  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds, runsOn: z.enum(RUNNERS).optional() }),
+  message: z.object({
+    content: z.string().trim().max(50_000),
+    attachments: attachmentIds,
+    runsOn: z.enum(RUNNERS).optional(),
+    /** Sent from the task's card in the Coordinator chat: the chat gets a line saying so (TaskManager.sentFromChat). */
+    inChat: z.boolean().optional(),
+  }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
-  chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
+  chat: z.object({
+    id: idSchema,
+    content: z.string().trim().max(50_000),
+    attachments: attachmentIds,
+    /** Asked from these tasks' card in the chat: the Coordinator is told it's about them (Orchestrator.send). */
+    about: z.array(z.string().regex(/^task_[A-Za-z0-9-]{6,40}$/)).max(50).optional(),
+  }),
   sideThread: z.object({
     id: idSchema,
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
@@ -968,7 +980,9 @@ export function createBoxYard(
     await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
-    res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
+    const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
+    if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
+    res.json(task)
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
   api.get("/tasks/:id/queue", (req, res) => {
@@ -1282,7 +1296,8 @@ export function createBoxYard(
   api.post("/chat", (req, res) => {
     const body = parse(schemas.chat, req.body)
     const files = withAttachments(body.content, body.attachments)
-    res.status(201).json(orchestrator.send(body.content, body.id, files))
+    const about = (body.about ?? []).filter((id) => store.getTaskRow(id))
+    res.status(201).json(orchestrator.send(body.content, body.id, files, about))
   })
   // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
   api.patch("/chat/messages/:messageId", (req, res) => {
