@@ -10,7 +10,7 @@
 // opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
 // over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
 // Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import {
   AlertTriangle,
@@ -574,7 +574,7 @@ function CardTitle({ card, title }: { card: ChatCard; title: string }) {
 
 /**
  * The line under a card's title: its project, status, run time and PR (a batch's counts), what it holds, and when.
- * `children` go at its end (a card's ⋯), so the title keeps the card's width.
+ * `children` go at its end (a card's new count, ✓ and ⤢), so the title keeps the card's width.
  */
 function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; children?: ReactNode }) {
   const { first, tasks, statuses } = head
@@ -600,7 +600,7 @@ function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; ch
       )}
       {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
       <TimeAgo ts={card.last} />
-      {children && <span className="ml-auto flex shrink-0 items-center">{children}</span>}
+      {children && <span className="ml-auto flex shrink-0 items-center gap-0.5">{children}</span>}
     </div>
   )
 }
@@ -616,6 +616,12 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const atWork = statuses.some((s) => AT_WORK.has(s))
   const markDone = useCardMarkDone(card, tasks)
   const selecting = useSelecting()
+  // The header's ✓: only on a resting card (as Mark all idle), so it never stops a turn or skips a question.
+  const resting = useMemo(() => {
+    const left = tasks.filter((t) => t.status !== "done")
+    return left.length > 0 && left.every((t) => CLEARABLE.has(t.status))
+  }, [tasks])
+  const quickDone = resting ? markDone : null
   const picked = usePicked(card.key)
   const closing = usePendingCloses()
   const pickable = selecting && tasks.some((t) => CLEARABLE.has(t.status) && !closing.has(t.id))
@@ -625,7 +631,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
   const onHead = (e: MouseEvent | KeyboardEvent) => {
-    // Its PR link, its ⋯ and its ⤢ keep their click.
+    // Its PR link, its ✓ and its ⤢ keep their click.
     if ((e.target as HTMLElement).closest("a, button")) return
     if ("key" in e && e.key !== "Enter" && e.key !== " ") return
     e.preventDefault()
@@ -677,12 +683,16 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
           )}
           <CardIcon card={card} size="lg" />
           <CardTitle card={card} title={title} />
+          <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
+        </div>
+        <CardMeta card={card} head={head}>
           {unread > 0 && (
-            <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="mt-[3px] inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
+            <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="mr-1 inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
               <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
               {unread} new
             </span>
           )}
+          {!selecting && quickDone && <CardCheck markDone={quickDone} />}
           <button
             type="button"
             data-testid="chat-card-panel"
@@ -694,10 +704,6 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
           >
             <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
           </button>
-          <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
-        </div>
-        <CardMeta card={card} head={head}>
-          {!selecting && <CardMenu card={card} markDone={markDone} pickable={tasks.some((t) => CLEARABLE.has(t.status) && !closing.has(t.id))} />}
         </CardMeta>
         {!open && <LatestLine card={card} batch={batch} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
@@ -707,35 +713,19 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   )
 })
 
-/** A card's ⋯ at the end of its meta line (on hover or focus, always on touch): Mark done, Select, Show in timeline. */
-function CardMenu({ card, markDone, pickable }: { card: ChatCard; markDone: ReturnType<typeof useCardMarkDone>; pickable: boolean }) {
-  const more = useRef<HTMLButtonElement>(null)
-  const [menu, setMenu] = useState(false)
-  const items: MenuItem[] = [
-    ...(markDone ? [{ icon: CircleCheck, label: markDone.label, run: markDone.run }] : []),
-    ...(pickable ? [{ icon: ListChecks, label: "Select", run: () => startSelecting(card.key) }] : []),
-    { icon: List, label: "Show in timeline", run: () => showInTimeline({ key: card.key, taskIds: card.taskIds }) },
-  ]
+/** A resting card's ✓ at the end of its meta line: Mark done in one click, with the toast's Undo. */
+function CardCheck({ markDone }: { markDone: NonNullable<ReturnType<typeof useCardMarkDone>> }) {
   return (
-    <>
-      <button
-        ref={more}
-        type="button"
-        data-testid="chat-card-more"
-        onClick={() => setMenu(!menu)}
-        aria-haspopup="menu"
-        aria-expanded={menu}
-        aria-label="Card actions"
-        title="Mark done, select…"
-        className={cx(
-          "-my-1 grid h-5 w-6 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9",
-          "opacity-0 group-focus-within/card:opacity-100 group-hover/card:opacity-100 focus-visible:opacity-100 aria-expanded:bg-zinc-800 aria-expanded:opacity-100 pointer-coarse:opacity-100",
-        )}
-      >
-        <MoreHorizontal className="h-[14px] w-[14px]" aria-hidden />
-      </button>
-      {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
-    </>
+    <button
+      type="button"
+      data-testid="chat-card-check"
+      onClick={markDone.run}
+      aria-label={markDone.label}
+      title={markDone.label}
+      className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
+    >
+      <CircleCheck className="h-[14px] w-[14px]" aria-hidden />
+    </button>
   )
 }
 
@@ -899,7 +889,7 @@ function CardSession({
   )
 }
 
-/** An open card: its session, the box to reply in (a batch's are in its tasks' rows), and the way to its timeline, the side panel and its page. */
+/** An open card: its session, the box to reply in (a batch's are in its tasks' rows), and the way to the side panel and its page. */
 function CardBody({
   card,
   batch,
@@ -917,16 +907,11 @@ function CardBody({
   onFollowUp: (text: string) => void
   markDone: ReturnType<typeof useCardMarkDone>
 }) {
-  const showInTimelineCard = useCallback(() => showInTimeline({ key: card.key, taskIds: card.taskIds }), [card.key, card.taskIds])
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
       <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />
       {!card.batchId && tasks[0] && <CardComposer task={tasks[0]} />}
       <div className="flex flex-wrap items-center gap-1 pt-0.5">
-        <button type="button" onClick={showInTimelineCard} className={FOOT} data-testid="chat-card-timeline">
-          <List className="h-3 w-3" aria-hidden />
-          Show in timeline
-        </button>
         <button type="button" onClick={() => openCard(COORDINATOR_CHAT, card.key)} className={FOOT} data-testid="chat-card-open-panel">
           <Maximize2 className="h-3 w-3" aria-hidden />
           Open in panel

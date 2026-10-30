@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The Coordinator chat as cards: a card per task (a batch's one card), the Coordinator card with Cody's thread, opening
-// a card, "Show in timeline" and back, Cards ⇄ Timeline, "N new" with the ↓ pill, "N done today" and the project bar.
+// a card, its ✓, the Timeline of one card and back, Cards ⇄ Timeline, "N new" with the ↓ pill, "N done today" and the project bar.
 // A card's box replies to its task (the Coordinator only when the task refuses it); with a project picked, the panel
 // talks to its Captain, whose card takes the Coordinator card's place; either card folds to its header.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -160,7 +160,9 @@ describe("Coordinator cards", () => {
     expect(chip.textContent).toContain("opened PR #9")
     expect(chip.textContent).not.toContain("Coordinator cards")
 
-    click(body.querySelector('[data-testid="chat-card-timeline"]')!)
+    // An open card has no "Show in timeline" (the side panel's ⋯ keeps it).
+    expect(body.querySelector('[data-testid="chat-card-timeline"]')).toBeNull()
+    act(() => showInTimeline({ key: LOGIN.id, taskIds: [LOGIN.id] }))
     expect(viewButton("Timeline").getAttribute("aria-pressed")).toBe("true")
     expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
     const banner = host.querySelector('[data-testid="timeline-card-banner"]')!
@@ -803,7 +805,6 @@ describe("Mark done in the cards", () => {
   const settings = (s: Partial<SettingsInfo["settings"]>) => qc.setQueryData(keys.agentSettings, { settings: s } as unknown as SettingsInfo)
   const live = () => cards().map((c) => c.dataset.card)
   const fold = (id: "done" | "idle") => host.querySelector(`[data-testid="cards-${id}"]`) as HTMLElement | null
-  const menuItem = (label: string) => [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === label) as HTMLElement | undefined
   const toastTitles = () => currentToasts().map((t) => t.title)
   const undo = () => act(() => currentToasts().at(-1)!.action!.onClick())
 
@@ -833,11 +834,16 @@ describe("Mark done in the cards", () => {
     expect(live()).not.toContain(OLD.id)
   })
 
-  it("marks a card done from its ⋯, which folds it into done, with an Undo toast", () => {
+  it("marks a card done from its ✓, which folds it into done, with an Undo toast; cards have no ⋯", () => {
     render()
-    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
-    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Mark done", "Select", "Show in timeline"])
-    click(menuItem("Mark done")!)
+    expect(host.querySelector('[data-testid="chat-card-more"]')).toBeNull()
+    const check = card(CARDS.id).querySelector('[data-testid="chat-card-check"]') as HTMLElement
+    expect(check.getAttribute("aria-label")).toBe("Mark done")
+    expect(check.title).toBe("Mark done")
+    // Beside the ⤢, under the title, so the title keeps the card's width.
+    expect(check.nextElementSibling!.getAttribute("data-testid")).toBe("chat-card-panel")
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-title"]')!.parentElement!.querySelector("button")).toBeNull()
+    click(check)
     expect(live()).toEqual([LOGIN.id, `batch:${B}`])
     expect(fold("done")!.textContent).toContain("2 done today")
     expect(toastTitles()).toEqual(["Marked done"])
@@ -847,7 +853,7 @@ describe("Mark done in the cards", () => {
     expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
   })
 
-  it("marks a task waiting on Cody done from the open card's footer; a batch's ⋯ has no Mark done while its tasks run", () => {
+  it("marks a task waiting on Cody done from the open card's footer; no ✓ on a card that's running or asking", () => {
     render()
     click(head(LOGIN.id))
     click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
@@ -855,8 +861,8 @@ describe("Mark done in the cards", () => {
     // Open, it stays where it is (it folds once closed), and says it's done.
     expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
-    click(card(`batch:${B}`).querySelector('[data-testid="chat-card-more"]')!)
-    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Show in timeline"])
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
+    expect(card(`batch:${B}`).querySelector('[data-testid="chat-card-check"]')).toBeNull()
   })
 
   it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
@@ -906,8 +912,8 @@ describe("Mark done in the cards", () => {
     expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
     expect(head(CARDS.id).getAttribute("role")).toBe("button")
 
-    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
-    click(menuItem("Select")!)
+    click(host.querySelector('[data-testid="cards-select"]')!)
+    click(head(CARDS.id))
     expect(count()).toBe("1 task selected")
     click(host.querySelector('[data-testid="cards-select-done"]')!)
     expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
