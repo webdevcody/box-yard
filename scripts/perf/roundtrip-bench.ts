@@ -151,7 +151,7 @@ for (let i = 0; i <= rounds; i++) {
     wake,
   }
   if (i > 0) trips.push(trip)
-  process.stderr.write(`trip ${i}${i ? "" : " (warm-up)"}: reply ${trip.toCaptainReplyMs ?? "–"} ms, done ${trip.toCoordinatorDoneMs ?? "no wake"} ms, quiet ${trip.toQuietMs} ms\n`)
+  process.stderr.write(`trip ${i}${i ? "" : " (warm-up)"}: reply ${trip.toCaptainReplyMs ?? "–"} ms, done ${trip.toCoordinatorDoneMs === null ? "(no wake)" : `${trip.toCoordinatorDoneMs} ms`}, quiet ${trip.toQuietMs} ms\n`)
 }
 
 // buildMcpServer runs on every /mcp request: the handshake makes ~3 and each tool call 1.
