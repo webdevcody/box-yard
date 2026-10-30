@@ -64,14 +64,14 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
   const list = useRef<StickyScrollHandle>(null)
-  // Picked in a chat switcher: the composer takes focus.
-  useComposerFocus(COORDINATOR_CHAT, box)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
   const skipped = useSetupSkipped()
   const showSetup = zen && setup.needed && !skipped
   const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(COORDINATOR_CHAT, box)
   // Then an empty Zen chat shows example requests, until one message is sent or they're dismissed.
   const tryFirstDone = useTryFirstDone()
   const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])

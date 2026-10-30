@@ -6,7 +6,7 @@ import { useId, useLayoutEffect, useMemo, useRef, type KeyboardEvent, type React
 import { createPortal } from "react-dom"
 import { useLocation } from "wouter"
 import { useQueries } from "@tanstack/react-query"
-import { Bot, Check, ChevronDown, FolderGit2 } from "lucide-react"
+import { Bot, Check, ChevronDown, FolderGit2, FolderOpen } from "lucide-react"
 import { api } from "../lib/api"
 import { keys, useChatBusy, useProjects } from "../lib/queries"
 import { COORDINATOR_CHAT } from "../lib/threads"
@@ -196,7 +196,11 @@ function SwitcherItem({ item, current, onPick }: { item: Item; current: boolean;
   )
 }
 
-/** The project's mark, one icon wide: where its colour and icon go once projects have them. */
-function ProjectMark({ project: _project }: { project: Project }) {
-  return <FolderGit2 className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+/**
+ * The project's mark, the sidebar row's folder. Once projects have colours (Coordinator cards, PR #187) it takes the
+ * project's, as the sidebar does: `style={projectColorStyle(colors.get(project.id))}` and `text-(--pc)`.
+ */
+function ProjectMark({ project }: { project: Project }) {
+  const Icon = project.repo ? FolderGit2 : FolderOpen
+  return <Icon className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
 }
