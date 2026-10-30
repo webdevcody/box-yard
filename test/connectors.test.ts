@@ -61,6 +61,10 @@ describe("connector store", () => {
     const made = c.create({ name: "linear", label: "Linear", kind: "http", url: "https://mcp.linear.app/mcp", auth: "token" })
     expect(made).toMatchObject({ name: "linear", status: "needs_auth", scope: { sessions: ["coordinator"], projects: null, runners: ["local"] } })
     expect(() => c.create({ name: "linear", kind: "http", url: "https://x.example/mcp" })).toThrow(/named linear already/)
+    // Names that would share env vars or read as another server's tool.
+    c.create({ name: "my-app", kind: "http", url: "https://x.example/mcp" })
+    expect(() => c.create({ name: "my_app", kind: "http", url: "https://x.example/mcp" })).toThrow(/too like my-app/)
+    expect(() => c.create({ name: "a__b", kind: "http", url: "https://x.example/mcp" })).toThrow(/can't hold __/)
   })
 
   it("seals secrets: the database and the views hold fingerprints only", () => {

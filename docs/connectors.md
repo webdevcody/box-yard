@@ -8,7 +8,7 @@ Connectors carry account access, so the rules below start from the smallest expo
 
 | Field | What it does |
 | --- | --- |
-| Name | The MCP server name sessions see, so its tools are `mcp__<name>__*`. Lowercase letters, digits, `-` and `_`, starting with a letter. It must be unique and can't be `boxyard` |
+| Name | The MCP server name sessions see, so its tools are `mcp__<name>__*`. Lowercase letters, digits, `-` and `_`, starting with a letter, without `__`. It must be unique (`my-app` and `my_app` count as the same) and can't be `boxyard` |
 | Label | What Settings shows ("Gmail") |
 | Kind | `http` (Streamable HTTP), `sse` (the older HTTP+SSE transport) or `stdio` (a command) |
 | URL | For `http` and `sse`. Must be `https`, or plain `http` only to this computer (`localhost`, `127.0.0.1`, `[::1]`). It can't hold a user name or password |

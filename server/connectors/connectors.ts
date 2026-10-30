@@ -11,6 +11,7 @@ import {
   DEFAULT_CONNECTOR_SCOPE,
   OAUTH_CLIENT_KINDS,
   RESERVED_CONNECTOR_NAMES,
+  connectorVar,
   type Connector,
   type ConnectorAuth,
   type ConnectorKind,
@@ -623,9 +624,12 @@ export class Connectors {
     for (const fn of this.listeners) fn()
   }
 
+  /** No other connector has the name, or one that differs only in - and _ (they'd share their env var names, connectorVar). */
   private requireFreeName(name: string, except?: string) {
-    const taken = this.d.db.prepare("SELECT id FROM connectors WHERE name = ? AND id != ?").get(name, except ?? "") as { id: string } | undefined
-    if (taken) throw new ConflictError(`There's a connector named ${name} already: pick another name.`)
+    const rows = this.d.db.prepare("SELECT name FROM connectors WHERE id != ?").all(except ?? "") as { name: string }[]
+    const taken = rows.find((r) => connectorVar(r.name) === connectorVar(name))
+    if (taken?.name === name) throw new ConflictError(`There's a connector named ${name} already: pick another name.`)
+    if (taken) throw new ConflictError(`${name} is too like ${taken.name}, another connector's name (only - and _ differ): pick another name.`)
   }
 
   /** The fields that must fit together: a remote server has an https address, a command has a command, and so on. */
@@ -640,6 +644,8 @@ export class Connectors {
   }) {
     const name = s.name.trim().toLowerCase()
     if (!CONNECTOR_NAME_RE.test(name)) throw new BadRequestError("A connector's name is lowercase letters, digits, - and _, starting with a letter (it becomes its tools' prefix, like mcp__gmail__search).")
+    // mcp__a__b would read as server a's tool b in a permission rule.
+    if (name.includes("__")) throw new BadRequestError("A connector's name can't hold __ (its tools are mcp__<name>__<tool>).")
     if ((RESERVED_CONNECTOR_NAMES as readonly string[]).includes(name)) throw new BadRequestError(`${name} is Box Yard's own MCP server: pick another name.`)
     if (s.kind === "stdio") {
       if (!s.command) throw new BadRequestError("A command connector needs its command (like npx).")
