@@ -114,6 +114,17 @@ describe("projectBarRows", () => {
     expect(barCounts(rows[0]!).map((c) => `${c.n} ${c.label}`)).toEqual(["1 needs you", "1 running", "1 PR ready"])
   })
 
+  it("keeps pinned projects on and unpinned ones off (but the filter, and +N for any asking you)", () => {
+    const pins = { [NOTES.id]: "pinned", [YARD.id]: "unpinned", [MAP.id]: "unpinned" } as const
+    const { rows, active, hidden } = projectBarRows(PROJECTS, tasks, new Set([YARD.id]), null, pins)
+    expect(rows.map((r) => r.name)).toEqual(["Notes"])
+    // All still counts every project's tasks.
+    expect(active).toBe(4)
+    // box-yard has a task asking; Map 3 is only busy.
+    expect(hidden.map((r) => r.name)).toEqual(["box-yard"])
+    expect(projectBarRows(PROJECTS, tasks, new Set(), MAP.id, pins).rows.map((r) => r.name)).toEqual(["Map 3", "Notes"])
+  })
+
   it("shows a quiet project the chat talked about, and the one it's filtered to", () => {
     expect(projectBarRows(PROJECTS, tasks, new Set([NOTES.id]), null).rows.map((r) => r.name)).toEqual(["box-yard", "Map 3", "Notes"])
     expect(projectBarRows(PROJECTS, [], new Set(), NOTES.id).rows.map((r) => r.name)).toEqual(["Notes"])

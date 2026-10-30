@@ -6,7 +6,7 @@ import { act, createElement, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ChatPanel } from "../web/src/components/ChatPanel.js"
-import { setChatProjectFilter } from "../web/src/lib/projectBar.js"
+import { PINS_KEY, pickProject, readPins, setChatProjectFilter } from "../web/src/lib/projectBar.js"
 import { keys } from "../web/src/lib/queries.js"
 import { projectColors } from "../shared/projectColors.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
@@ -42,6 +42,7 @@ const CHAT = [
 ]
 
 beforeEach(() => {
+  localStorage.clear()
   vi.stubGlobal("fetch", () => new Promise(() => {}))
   history.replaceState(null, "", "/")
   qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
@@ -66,6 +67,10 @@ const render = (node: ReactNode) => act(() => root.render(createElement(QueryCli
 const click = (el: Element) => act(() => void el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })))
 const chips = () => [...host.querySelectorAll('[data-testid="project-chip"]')] as HTMLElement[]
 const chip = (name: string) => chips().find((c) => c.textContent?.includes(name))!
+/** The chip's pill: its button and its unpin ×. */
+const pill = (name: string) => chip(name).closest<HTMLElement>("[data-project]")!
+const unpin = (name: string) => pill(name).querySelector<HTMLElement>('[data-testid="project-unpin"]')!
+const hiddenChip = () => host.querySelector<HTMLElement>('[data-testid="project-bar-hidden"]')
 const allChip = () => host.querySelector('[data-testid="project-bar"] button')! as HTMLElement
 const text = () => host.querySelector('[data-testid="chat-panel"]')!.textContent ?? ""
 
@@ -77,7 +82,7 @@ describe("project bar", () => {
     // Quiet has no task and the chat never names it.
     expect(chips().map((c) => c.textContent)).toEqual(["box-yard · 1 needs you · 1 running", "Map 3 · 1 queued"])
     const colors = projectColors([YARD, MAP, QUIET])
-    expect(chip("Map 3").style.getPropertyValue("--pc")).toBe("#fb923c")
+    expect(pill("Map 3").style.getPropertyValue("--pc")).toBe("#fb923c")
     expect(colors.get(MAP.id)).toBe("orange")
   })
 
@@ -123,7 +128,7 @@ describe("project bar", () => {
     render(createElement(ChatPanel))
     act(() => qc.setQueryData(keys.projects, [{ ...YARD, color: "cyan" }, MAP, QUIET]))
     expect(host.querySelector(`a[href="/tasks/${LOGIN.id}"] [data-testid="task-tile"]`)!.getAttribute("data-color")).toBe("cyan")
-    expect(chip("box-yard").style.getPropertyValue("--pc")).toBe("#22d3ee")
+    expect(pill("box-yard").style.getPropertyValue("--pc")).toBe("#22d3ee")
   })
 
   it("has no bar when no project is busy or talked about", () => {
@@ -131,6 +136,78 @@ describe("project bar", () => {
     qc.setQueryData(keys.chat, [])
     render(createElement(ChatPanel))
     expect(host.querySelector('[data-testid="project-bar"]')).toBeNull()
+  })
+})
+
+describe("pinning and unpinning", () => {
+  const names = () => chips().map((c) => c.textContent!.split(" · ")[0])
+
+  it("each project chip, never All, has an unpin × that takes it off the bar, and it stays off after a reload", () => {
+    render(createElement(ChatPanel))
+    expect(host.querySelectorAll('[data-testid="project-unpin"]')).toHaveLength(2)
+    expect(allChip().closest("[data-project]")).toBeNull()
+    expect(unpin("Map 3").getAttribute("aria-label")).toBe("Unpin Map 3")
+    click(unpin("Map 3"))
+    expect(names()).toEqual(["box-yard"])
+    expect(JSON.parse(localStorage.getItem(PINS_KEY)!)).toEqual({ [MAP.id]: "unpinned" })
+    // A reload: a fresh mount reads it back.
+    act(() => root.unmount())
+    root = createRoot(host)
+    render(createElement(ChatPanel))
+    expect(names()).toEqual(["box-yard"])
+    // Still busy, so All still counts it.
+    expect(allChip().textContent).toBe("All · 3 active")
+  })
+
+  it("an unpinned project stays off however busy it gets, until it's picked again", () => {
+    render(createElement(ChatPanel))
+    click(unpin("Map 3"))
+    act(() => qc.setQueryData(keys.tasks, [LOGIN, CARDS, LEVEL, task("task_more0001", MAP.id, "Level 8", "working")]))
+    expect(names()).toEqual(["box-yard"])
+    act(() => pickProject(MAP.id))
+    expect(names()).toEqual(["box-yard", "Map 3"])
+    expect(readPins()[MAP.id]).toBe("pinned")
+  })
+
+  it("unpinning the project the chat shows switches to All", () => {
+    render(createElement(ChatPanel))
+    click(chip("Map 3"))
+    expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
+    click(unpin("Map 3"))
+    expect(allChip().getAttribute("aria-pressed")).toBe("true")
+    expect(names()).toEqual(["box-yard"])
+    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
+  })
+
+  it("a pinned project stays on the bar with nothing going on", () => {
+    render(createElement(ChatPanel))
+    expect(names()).not.toContain("Quiet")
+    act(() => pickProject(QUIET.id))
+    act(() => setChatProjectFilter(null))
+    expect(names()).toEqual(["box-yard", "Map 3", "Quiet"])
+    expect(chip("Quiet").textContent).toBe("Quiet")
+  })
+
+  it("an unpinned project with a task asking you shows as +N needs you, which puts it back and shows it", () => {
+    render(createElement(ChatPanel))
+    expect(hiddenChip()).toBeNull()
+    click(unpin("box-yard"))
+    expect(names()).toEqual(["Map 3"])
+    expect(hiddenChip()!.textContent).toBe("+1 needs you")
+    expect(hiddenChip()!.title).toContain("box-yard")
+    click(hiddenChip()!)
+    expect(hiddenChip()).toBeNull()
+    expect(names()).toEqual(["box-yard", "Map 3"])
+    expect(chip("box-yard").getAttribute("aria-pressed")).toBe("true")
+    expect(readPins()[YARD.id]).toBe("pinned")
+  })
+
+  it("keeps the bar for +N needs you when every chip is unpinned", () => {
+    render(createElement(ChatPanel))
+    click(unpin("box-yard"))
+    click(unpin("Map 3"))
+    expect(chips()).toEqual([])
+    expect(hiddenChip()!.textContent).toBe("+1 needs you")
   })
 })
 

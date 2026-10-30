@@ -18,7 +18,7 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(naviga
 /**
  * Alt+Shift+Z toggles Zen (by key position, like the voice toggle's Alt+Shift+V, since Option changes the
  * letter on macOS). Free of the other hotkeys: ⌘K and "/" (palette), Alt+Shift+V (voice), Alt/Ctrl(+Shift)+Space
- * (dictation), 1-4 (Yard tabs), ←/→ and Z (file preview, no modifiers), Ctrl+N/P (palette rows).
+ * (dictation), 1-4 (Yard tabs), ←/→ and Z (file preview, no modifiers), P (project picker), Ctrl+N/P (palette rows).
  */
 export const isZenShortcut = (e: Pick<KeyboardEvent, "altKey" | "shiftKey" | "metaKey" | "ctrlKey" | "code">) =>
   e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && e.code === "KeyZ"
