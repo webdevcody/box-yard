@@ -12,6 +12,7 @@ import {
   pickVoice,
   speakableEvents,
   spokenSummary,
+  spokenText,
   voiceAllowed,
   type VoiceSettings,
 } from "./voice"
@@ -110,8 +111,9 @@ export class SpeechQueue {
   }
 
   say(text: string, opts: SpeakOptions) {
+    // Every line, whoever built it, is cleaned once more here, so no voice ever reads an id, URL or code.
     // Slower speech fits fewer characters into Chrome's ~15 s limit.
-    const chunks = chunkForSpeech(text, this.synth.chunkMax ?? Math.max(60, Math.round(160 * Math.min(1, opts.rate))))
+    const chunks = chunkForSpeech(spokenText(text), this.synth.chunkMax ?? Math.max(60, Math.round(160 * Math.min(1, opts.rate))))
     if (!chunks.length) return
     this.items.push({ chunks, opts, at: Date.now() })
     while (this.items.length > MAX_QUEUE) this.items.shift()
@@ -586,7 +588,7 @@ export function speakBrowserPreview(text: string, s: VoiceSettings) {
   unlockVoice()
   queue()?.stop()
   const o = options(s)
-  const u = new SpeechSynthesisUtterance(text)
+  const u = new SpeechSynthesisUtterance(spokenText(text))
   if (o.voice) u.voice = o.voice
   if (o.lang) u.lang = o.lang
   u.rate = o.rate

@@ -5,12 +5,10 @@ import {
   MAX_SUMMARY,
   VOICE_DEFAULTS,
   chunkForSpeech,
-  cleanForSpeech,
   eventsLine,
   inQuietHours,
   parseVoiceSettings,
   pickVoice,
-  shortTitle,
   speakableEvents,
   splitSentences,
   spokenSummary,
@@ -38,34 +36,6 @@ const note = (id: string, taskId: string, status: AppNotification["status"], cre
 
 const reply = (id: string, content: string): ChatMessage => ({ id, role: "assistant", content, meta: null, createdAt: 1 })
 
-describe("cleanForSpeech", () => {
-  it("strips markdown but keeps the words", () => {
-    expect(cleanForSpeech("**PR 30 merged.** Task cards now have _equal_ heights.")).toBe("PR 30 merged. Task cards now have equal heights.")
-    expect(cleanForSpeech("## Done\n- one\n- two")).toBe("Done one two")
-    expect(cleanForSpeech("> quoted ~~old~~ text")).toBe("quoted old text")
-  })
-
-  it("keeps link text and drops the URL", () => {
-    expect(cleanForSpeech("Started [Voice announcements](/tasks/task_8df1468eb1dc) and [docs](https://example.com/a?b=1).")).toBe(
-      "Started Voice announcements and docs.",
-    )
-    expect(cleanForSpeech("See ![shot](https://x.y/a.png) here")).toBe("See here")
-  })
-
-  it("drops bare URLs, app paths, ids, commit shas, code and emoji", () => {
-    expect(cleanForSpeech("Preview at https://abc.upstash.app/x ready")).toBe("Preview at ready")
-    expect(cleanForSpeech("Task task_8df1468eb1dc in prj_1a2b3c4d5e6f is done")).toBe("Task in is done")
-    expect(cleanForSpeech("Merged at 6715385 and d631f30 🎉✅")).toBe("Merged at 6715385 and")
-    expect(cleanForSpeech("Run `npm test` then\n```\nnpm run build\n```\ndone")).toBe("Run then done")
-    expect(cleanForSpeech("Open /artifacts/art_96efb3c6cbea/report.html now")).toBe("Open now")
-  })
-
-  it("reads #30 as number 30", () => {
-    expect(cleanForSpeech("PR #30 merged (#29 too)")).toBe("PR number 30 merged (number 29 too)")
-    expect(cleanForSpeech("Fixed issue#5")).toBe("Fixed issue#5")
-  })
-})
-
 describe("spokenSummary", () => {
   it("speaks the opening sentence, cleaned", () => {
     expect(spokenSummary("Three tasks finished and the docs PR is ready for review. Details below.")).toBe("Three tasks finished and the docs PR is ready for review.")
@@ -84,7 +54,7 @@ describe("spokenSummary", () => {
     expect(spokenSummary("Yes.")).toBe("Yes.")
     expect(spokenSummary("Yes.\n\nThe retry worked and both boxes are healthy again.")).toBe("Yes. The retry worked and both boxes are healthy again.")
     expect(spokenSummary("PR #30 merged. Task cards now have equal heights. Nothing else changed.")).toBe(
-      "PR number 30 merged. Task cards now have equal heights.",
+      "PR 30 merged. Task cards now have equal heights.",
     )
   })
 
@@ -109,7 +79,7 @@ describe("spokenSummary", () => {
   })
 
   it("ignores dots inside code spans, links and URLs", () => {
-    expect(spokenSummary("Set `config.ts` and see https://docs.example.com/a.b. It's live now on every box.")).toBe("Set and see. It's live now on every box.")
+    expect(spokenSummary("Set `config.ts` and see https://docs.example.com/a.b. It's live now on every box.")).toBe("Set and see a link. It's live now on every box.")
     expect(spokenSummary("[Box resize](https://github.com/x/y/pull/75)\n\nResizing works on Upstash by moving workspaces to a new box.")).toBe(
       "Box resize Resizing works on Upstash by moving workspaces to a new box.",
     )
@@ -169,15 +139,6 @@ describe("task event lines", () => {
   it("batches a burst into one line, most urgent first", () => {
     expect(eventsLine([note("a", "t1", "done"), note("b", "t2", "done"), note("c", "t3", "done")])).toBe("3 tasks finished.")
     expect(eventsLine([note("a", "t1", "done"), note("b", "t2", "failed"), note("c", "t3", "done")])).toBe("1 task failed, 2 tasks finished.")
-  })
-
-  it("shortens titles", () => {
-    expect(shortTitle("Voice announcements (browser text-to-speech) for orchestrator updates, configurable in Settings")).toBe(
-      "Voice announcements for orchestrator updates",
-    )
-    expect(shortTitle("Inbox: mark card as reviewed directly from the card")).toBe("Inbox: mark card as reviewed directly")
-    expect(shortTitle("UI performance deep dive: long orchestrator/task threads, laggy typing")).toBe("UI performance deep dive")
-    expect(shortTitle("🎉")).toBe("A task")
   })
 
   it("maps notifications to voice events and filters by the per-status toggles", () => {
@@ -433,7 +394,7 @@ describe("Announcer", () => {
     a.chatMessage(reply("c1", "PR #30 merged. Cards are equal height now."))
     a.chatTurn({ startedAt: 0, replyId: "c1" })
     a.chatTurn({ startedAt: 0, replyId: null })
-    expect(said).toEqual(["PR number 30 merged. Cards are equal height now."])
+    expect(said).toEqual(["PR 30 merged. Cards are equal height now."])
     done()
   })
 

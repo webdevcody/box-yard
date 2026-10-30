@@ -3,6 +3,9 @@
 // side (speech queue, unlock, wiring to the event stream) is in lib/speech.ts.
 import type { AppNotification } from "../../../shared/types"
 import { parseNextSteps } from "../../../shared/nextSteps"
+import { capWords, spokenText, spokenTitle } from "./spokenText"
+
+export { MAX_SPOKEN, capWords, spokenText, spokenTitle } from "./spokenText"
 
 // ------------------------------------------------------------------ settings (localStorage)
 
@@ -109,50 +112,7 @@ export function voiceAllowed(s: VoiceSettings, now: Date, hidden: boolean): bool
 
 // ------------------------------------------------------------------ text → speech
 
-/** Longest line we speak. Chrome cuts long utterances off, and announcements should be glanceable. */
-export const MAX_SPOKEN = 200
 export const NO_UPDATE = "(no update)"
-
-const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]/gu
-
-/** Markdown → plain words a speech engine reads well. Keeps link text, drops code, URLs, ids and emoji. */
-export function cleanForSpeech(md: string): string {
-  let t = md
-  t = t.replace(/```[\s\S]*?(```|$)/g, " ") // fenced code
-  t = t.replace(/<[^>\n]+>/g, " ") // html tags and <autolinks>
-  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, " ") // images
-  t = t.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // [text](url) → text
-  t = t.replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1") // [text][ref]
-  t = t.replace(/`[^`\n]*`/g, " ") // inline code
-  t = t.replace(/\b(?:https?:\/\/|www\.)\S+?(?=[.,;:!?)]*(?:\s|$))/gi, " ") // bare URLs (trailing punctuation stays)
-  t = t.replace(/(?:^|\s)\/(?:tasks|projects|schedules|boxes|artifacts)\/\S*/g, " ") // app paths
-  t = t.replace(/\b(?:task|prj|sch|art|ntf|box|run|chat)_[A-Za-z0-9-]{4,}\b/g, " ") // ids
-  t = t.replace(/\b[0-9a-f]{7,40}\b/g, (m) => (/[a-f]/.test(m) && /\d/.test(m) ? " " : m)) // commit shas
-  t = t.replace(EMOJI, " ")
-  t = t.replace(/^\s{0,3}#{1,6}\s+/gm, "") // headings
-  t = t.replace(/^\s{0,3}>\s?/gm, "") // quotes
-  t = t.replace(/^\s*(?:[-*+]|\d+[.)])\s+/gm, "") // list markers
-  t = t.replace(/^\s*\|?[\s:|-]+\|[\s:|-]*$/gm, " ") // table rules
-  t = t.replace(/\|/g, ", ")
-  t = t.replace(/(\*\*|__|~~)(.+?)\1/g, "$2") // bold, strike
-  t = t.replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,!?:;]|$)/g, "$1$2") // italics
-  t = t.replace(/[*_~]{2,}/g, " ")
-  t = t.replace(/(^|[\s(])#(\d+)\b/g, "$1number $2") // #30 → number 30
-  t = t.replace(/\(\s*[,.;:]?\s*\)/g, " ") // brackets left empty by removals
-  t = t.replace(/\s+([,.;:!?])/g, "$1")
-  t = t.replace(/([,;:])(?:\s*[,;:])+/g, "$1")
-  t = t.replace(/\s+/g, " ").trim()
-  t = t.replace(/^[,;:.\s-]+/, "").replace(/[,;:\s-]+$/, "")
-  return t
-}
-
-/** At most `max` characters, cut at the last word boundary that fits. */
-export function capWords(text: string, max = MAX_SPOKEN): string {
-  if (text.length <= max) return text
-  const cut = text.slice(0, max + 1)
-  const space = cut.lastIndexOf(" ")
-  return (space > max * 0.5 ? cut.slice(0, space) : text.slice(0, max)).replace(/[,;:\s-]+$/, "")
-}
 
 /** Longest Coordinator summary: a short opener may pull in the sentences after it. */
 export const MAX_SUMMARY = 300
@@ -223,7 +183,7 @@ export function spokenSummary(reply: string): string | null {
   const raw = parseNextSteps(reply).content.trim()
   if (!raw || raw === NO_UPDATE) return null
   const lines = raw.replace(/```[\s\S]*?(```|$)/g, "\n").split("\n")
-  const speakable = (l: string) => !isHeading(l) && !isTableRule(l) && hasWords(cleanForSpeech(l))
+  const speakable = (l: string) => !isHeading(l) && !isTableRule(l) && hasWords(spokenText(l))
   // The first prose line; for a list-first reply, the first prose line after it, else the first item.
   let at = lines.findIndex((l) => speakable(l) && !isListItem(l))
   const firstItem = lines.findIndex(speakable)
@@ -234,7 +194,7 @@ export function spokenSummary(reply: string): string | null {
     const l = lines[i]!
     if (i > at && (isListItem(l) || isHeading(l) || isTableRule(l) || isListItem(lines[at]!))) break
     if (!l.trim()) continue
-    const text = cleanForSpeech(l)
+    const text = spokenText(l)
     if (!hasWords(text)) continue
     // A line break ends a sentence, so lines never run together.
     sentences.push(...splitSentences(text))
@@ -260,24 +220,13 @@ export function voiceEvent(n: Pick<AppNotification, "status" | "summary">): Voic
   return n.status === "idle" ? null : n.status
 }
 
-const TRAILING_FILLER = /\s+(?:a|an|and|the|for|of|to|in|on|with|via|from|by|or)$/i
-
-/** A task title short enough to say: cleaned, no parentheses, cut at a colon or comma, at most 6 words. */
-export function shortTitle(title: string): string {
-  let t = cleanForSpeech(title).replace(/\s*\([^)]*\)/g, "")
-  const cut = t.search(/[,;:]\s|\s[-–—]\s/)
-  if (cut >= 12) t = t.slice(0, cut)
-  t = t.split(" ").filter(Boolean).slice(0, 6).join(" ")
-  while (TRAILING_FILLER.test(t)) t = t.replace(TRAILING_FILLER, "")
-  return t.replace(/[,;:.\s-]+$/, "") || "A task"
-}
-
+/** The line for one event; `title` is the spoken title, "" when the task's title had nothing to say. */
 const SINGLE: Record<VoiceEvent, (title: string, n: AppNotification) => string> = {
-  done: (t) => (/^task\b/i.test(t) ? `${t} finished.` : `Task ${t} finished.`),
-  pr_ready: (t) => `${t} has a PR ready.`,
+  done: (t) => (!t ? "A task finished." : /^task\b/i.test(t) ? `${t} finished.` : `Task ${t} finished.`),
+  pr_ready: (t) => `${t || "A task"} has a PR ready.`,
   merged: (_t, n) => `PR ${mergedPrNumber(n)} merged.`,
-  needs_input: (t) => `${t} needs your input.`,
-  failed: (t) => `${t} failed.`,
+  needs_input: (t) => `${t || "A task"} needs your input.`,
+  failed: (t) => `${t || "A task"} failed.`,
 }
 /** Most urgent first, for "1 task failed, 2 tasks finished." */
 const ORDER: VoiceEvent[] = ["failed", "needs_input", "pr_ready", "merged", "done"]
@@ -308,7 +257,7 @@ export function eventsLine(items: readonly AppNotification[]): string | null {
   if (items.length === 1) {
     const n = items[0]!
     const ev = voiceEvent(n)
-    return ev ? capWords(SINGLE[ev](shortTitle(n.title), n)) : null
+    return ev ? capWords(SINGLE[ev](spokenTitle(n.title) ?? "", n)) : null
   }
   const counts = ORDER.map((ev) => [ev, items.filter((n) => voiceEvent(n) === ev).length] as const).filter(([, k]) => k > 0)
   const line = counts.map(([ev, k]) => COUNT[ev](k)).join(", ")
