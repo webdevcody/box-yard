@@ -6,6 +6,7 @@ import type { WorkerSize } from "../../shared/types.js"
 import { LOCAL_BOX_ID } from "../../shared/runner.js"
 import { isDockerBox } from "../../shared/docker.js"
 import { isGpuBox } from "../../shared/runpod.js"
+import { isMachineBox } from "../../shared/machines.js"
 import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
 import { TURN_SH } from "../turnProcess.js"
 
@@ -264,6 +265,8 @@ export class LocalRunnerRouter implements BoxProvider {
     readonly gpu: BoxProvider | null = null,
     /** Docker containers on this computer (`docker-<projectId>`, shared/docker.ts). */
     readonly docker: BoxProvider | null = null,
+    /** Cody's SSH machines (`ssh-<machineId>`, shared/machines.ts). */
+    readonly machines: BoxProvider | null = null,
   ) {
     if (base.resize) this.resize = (boxId, size) => this.of(boxId).resize!(boxId, size)
     // Snapshots are the box provider's; the local runner's computer is never snapshotted (LocalRunnerProvider).
@@ -283,6 +286,15 @@ export class LocalRunnerRouter implements BoxProvider {
     if (isDockerBox(boxId)) {
       if (!this.docker) throw new Error("Docker containers aren't set up on this Box Yard")
       return this.docker
+    }
+    if (isMachineBox(boxId)) {
+      if (!this.machines) throw new Error("SSH machines aren't set up on this Box Yard")
+      // A removed machine: the provider itself, whose calls say so (health: gone).
+      try {
+        return this.machines.of?.(boxId) ?? this.machines
+      } catch {
+        return this.machines
+      }
     }
     return this.base.of?.(boxId) ?? this.base
   }
