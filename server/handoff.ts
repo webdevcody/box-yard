@@ -29,6 +29,10 @@ export const NAMED_TASKS_HEADING =
 export const COORDINATOR_NAMED_HEADING =
   "[What this message names, as it stands now: each task's status, PR and the start of its last reply. Answer quick questions from this; get_task has the full reply]"
 
+/** In front of a task thread's first prompt (a question from a task's card in the Coordinator chat), and again when the task changed. */
+export const TASK_THREAD_HEADING = "[The task as it stands now: status, PR and the start of its last reply. get_task has the full reply and transcript]"
+export const BATCH_THREAD_HEADING = "[These tasks as they stand now: each one's status, PR and the start of its last reply. get_task has the full reply and transcript]"
+
 /** PrTracker's part (server/prs.ts). */
 export interface PrLookup {
   ensureFresh(taskIds: string[] | null, opts?: { timeoutMs?: number }): Promise<void>
@@ -170,6 +174,26 @@ function projectBlock(p: Project, open: Task[], o: StateOptions, now: number): s
 
 const OPEN = (t: Task) => t.status !== "done"
 
+/** Ask GitHub for these tasks' open PRs, for at most NAMED_PR_TIMEOUT_MS. Either way, an unanswered PR shows as unconfirmed. */
+async function freshenPrs(tasks: Task[], o: StateOptions) {
+  const prIds = tasks.filter((t) => t.prUrl && !isFinalPrState(t.prState)).map((t) => t.id)
+  if (!prIds.length || !o.prs) return
+  // PrTracker stops waiting by itself; the race is a backstop.
+  let timer: NodeJS.Timeout | undefined
+  await Promise.race([
+    o.prs.ensureFresh(prIds, { timeoutMs: NAMED_PR_TIMEOUT_MS }).catch(() => {}),
+    new Promise<void>((resolve) => (timer = setTimeout(resolve, NAMED_PR_TIMEOUT_MS + 250))),
+  ])
+  clearTimeout(timer)
+}
+
+/** These tasks as they stand now, in full, under `heading`: a side thread from a task's card starts from it (server/sideThreads.ts). */
+export async function tasksState(tasks: Task[], o: StateOptions, heading: string): Promise<string> {
+  await freshenPrs(tasks, o)
+  const now = o.now ?? Date.now()
+  return [heading, ...tasks.map((t) => taskBlock(o.store.getTask(t.id) ?? t, o, now))].join("\n")
+}
+
 /**
  * The block that goes in front of a message: the tasks it names (and, for the Coordinator, the projects), as they
  * stand now. Null when it names none. The named PRs are asked of GitHub first, for at most NAMED_PR_TIMEOUT_MS.
@@ -184,16 +208,7 @@ export async function namedState(
   const projects = scope.projects ? namedProjects(text, scope.projects) : []
   if (!named.length && !projects.length) return null
   const open = new Map(projects.map((p) => [p.id, o.store.listTasks({ projectId: p.id }).filter(OPEN).sort((a, b) => b.updatedAt - a.updatedAt)]))
-  const prIds = [...named, ...[...open.values()].flatMap((l) => l.slice(0, NAMED_PROJECT_TASKS_MAX))].filter((t) => t.prUrl && !isFinalPrState(t.prState)).map((t) => t.id)
-  if (prIds.length && o.prs) {
-    // PrTracker stops waiting by itself; the race is a backstop. Either way, an unanswered PR shows as unconfirmed.
-    let timer: NodeJS.Timeout | undefined
-    await Promise.race([
-      o.prs.ensureFresh(prIds, { timeoutMs: NAMED_PR_TIMEOUT_MS }).catch(() => {}),
-      new Promise<void>((resolve) => (timer = setTimeout(resolve, NAMED_PR_TIMEOUT_MS + 250))),
-    ])
-    clearTimeout(timer)
-  }
+  await freshenPrs([...named, ...[...open.values()].flatMap((l) => l.slice(0, NAMED_PROJECT_TASKS_MAX))], o)
   // Read again: the GitHub check may have changed a PR's state.
   const fresh = (t: Task) => o.store.getTask(t.id) ?? t
   const now = o.now ?? Date.now()

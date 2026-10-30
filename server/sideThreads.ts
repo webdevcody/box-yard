@@ -8,6 +8,11 @@
 // a fresh session instead, with the summary of the compaction before the highlighted message plus the messages from
 // there up to it (context "summary").
 //
+// A task's card in the Coordinator chat has a thread too (kind "task", one per card, anchored on the task's id or a
+// batch's `batch:<id>`): Cody's questions to the Coordinator about that task, answered in the card. It forks the
+// Coordinator's session at its newest answer and starts from the task as it stands now (ThreadHost.taskState) and its
+// updates in the chat. Like every thread, the main chat and its session never see it.
+//
 // Threads are for questions: they see the chat's tools (so the fork keeps the chat's prompt cache) but may only use
 // the read-only ones in THREAD_TOOLS. The CLI refuses the rest (dontAsk with an allowlist), and so does the MCP
 // server, for the thread's own read-only token.
@@ -26,7 +31,7 @@ import { resultUsageObject } from "./usage.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
-import type { ChatMessage, SideThread, SideThreadKind, SideThreadMessage } from "../shared/types.js"
+import type { ChatMessage, SideThread, SideThreadKind, SideThreadMessage, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 10 * 60_000
 /** The most of a highlight or question a thread keeps. */
@@ -35,6 +40,12 @@ export const MAX_QUESTION_CHARS = 20_000
 /** The summary fallback replays at most this many messages, each cut to this many characters. */
 const FALLBACK_MESSAGES = 30
 const FALLBACK_MESSAGE_CHARS = 1500
+/** A task thread starts with at most this many of the task's updates in the chat. */
+const TASK_NOTICES = 12
+/** A batch card's thread starts with at most this many of its tasks in full. */
+const TASK_THREAD_TASKS = 20
+/** A task card's thread anchor: the task's id, or a batch's `batch:<batch id>` (lib/chatCards.ts's card key). */
+export const BATCH_ANCHOR = "batch:"
 
 /**
  * The Box Yard tools a side thread may call: lookups that change nothing. Every other tool is listed (the fork keeps
@@ -97,6 +108,13 @@ export interface ThreadHost {
   claudeLogin(): Record<string, string> | null
   /** How its runs are counted in usage. */
   usage: { source: "orchestrator" | "captain"; projectId: string | null }
+  /**
+   * These tasks as they stand now (status, PR, question, last reply), as the chat may see them: a task thread starts
+   * from it. Only the Coordinator's chat has task threads.
+   */
+  taskState?(tasks: Task[]): Promise<string>
+  /** The project shows the chat its tasks' status only (docs/identities.md): a task thread gets none of their updates. */
+  statusOnly?(projectId: string): boolean
 }
 
 /** Where a fork starts: the session line of the newest assistant message at or before the highlighted one. */
@@ -129,7 +147,7 @@ export function forkPoint(messages: ChatMessage[], sessionId: string, lastCompac
  * The fallback context: the summary of the newest compaction at or before the highlighted message, then the
  * conversation from that compaction up to and including the highlighted message (never anything after it).
  */
-export function summaryContext(messages: ChatMessage[], summary: { at: number; markdown: string } | null, ownerName?: string): string {
+export function summaryContext(messages: ChatMessage[], summary: { at: number; markdown: string } | null, ownerName?: string, upTo = "the highlighted message"): string {
   const since = summary?.at ?? 0
   const lines = messages
     .filter((m) => m.createdAt >= since && (m.role === "user" || m.role === "assistant" || m.role === "notice") && m.meta?.cancelled !== true && m.content.trim())
@@ -140,8 +158,8 @@ export function summaryContext(messages: ChatMessage[], summary: { at: number; m
       return `[${who}] ${text}`
     })
   return [
-    summary ? `The summary you wrote when the chat was compacted, before the highlighted message:\n${summaryBody(summary.markdown)}` : null,
-    lines.length ? `The conversation${summary ? " since then" : ""}, up to and including the highlighted message:\n${lines.join("\n\n")}` : null,
+    summary ? `The summary you wrote when the chat was compacted, before ${upTo}:\n${summaryBody(summary.markdown)}` : null,
+    lines.length ? `The conversation${summary ? " since then" : ""}, up to and including ${upTo}:\n${lines.join("\n\n")}` : null,
   ]
     .filter(Boolean)
     .join("\n\n")
@@ -193,12 +211,47 @@ export function replyPrompt(o: { original: string; reply: string; context: strin
     .join("\n\n")
 }
 
+/** The read-only rule every thread's first prompt ends with. */
+const READ_ONLY_RULE =
+  "This thread is read-only: you may look things up (get_task, list_tasks, search_history, read_artifact and the other list_, get_ and read_ tools), but nothing that changes Box Yard works here (no create_task, send_to_task, schedules, settings or other changes). If Cody wants something done, say what you would do; Cody can ask for it in the main chat or send it to the task from its card. No next-step block in this thread."
+
+/** A task's updates in the chat, oldest first, one line each (cut), for a task thread's first prompt. */
+export function noticeLines(notices: ChatMessage[]): string {
+  return notices
+    .filter((m) => m.content.trim())
+    .map((m) => `- ${m.content.length > FALLBACK_MESSAGE_CHARS ? `${m.content.slice(0, FALLBACK_MESSAGE_CHARS)}…` : m.content}`)
+    .join("\n")
+}
+
+/**
+ * A task thread's first prompt: which card Cody asks from, the task (or batch) as it stands now, its updates in the
+ * chat, and the question. `context`: a fresh session's notes, when the chat's session couldn't be forked.
+ */
+export function taskThreadPrompt(o: { title: string; batch: boolean; state: string; notices: string; question: string; context: string | null; ownerName?: string }): string {
+  const own = (t: string) => withOwner(t, o.ownerName)
+  const which = o.batch ? `the card of the batch of tasks "${o.title}"` : `the card of the task "${o.title}"`
+  return [
+    own(
+      `[Box Yard side thread] Cody is asking you about a task, from ${which} in the Coordinator chat. This thread is separate from the main conversation: the main chat never sees it, and it starts at your newest message there.`,
+    ),
+    o.context ? `[Your session for this thread was started fresh, from your notes.]\n\n${o.context}` : null,
+    o.state,
+    o.notices ? `${o.batch ? "Their" : "Its"} updates in the chat, oldest first:\n${o.notices}` : null,
+    own(`Answer briefly and directly, about ${o.batch ? "these tasks" : "this task"}. ${READ_ONLY_RULE}`),
+    `${own("Cody")}'s question:\n${o.question}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+}
+
 interface RunState {
   child: ChildProcess | null
   running: boolean
   pending: boolean
   /** The last user message a turn has taken: the next turn takes the ones after it. */
   lastAskId: string | null
+  /** A task thread's: the task's state as its last turn was told it. */
+  taskState?: string
 }
 
 interface RunResult {
@@ -253,7 +306,8 @@ export class SideThreads {
   /**
    * Open a thread on a chat message with Cody's first message: a question about a highlighted passage (kind "ask"),
    * or a reply to the whole message (kind "reply", no quote needed). A message has one reply thread: replying to it
-   * again adds to that thread.
+   * again adds to that thread. Kind "task": a question from a task's card in the Coordinator chat (anchorId: the
+   * task's id, or `batch:<batch id>`); a card has one thread too.
    */
   create(input: { projectId: string | null; anchorId: string; quote?: string; question: string; kind?: SideThreadKind; id?: string; messageId?: string }): {
     thread: SideThread
@@ -263,10 +317,11 @@ export class SideThreads {
     const kind = input.kind ?? "ask"
     const question = input.question.trim()
     if (!question) throw new BadRequestError(kind === "reply" ? "question: write a reply" : "question: ask something")
+    if (kind === "task") return this.createOnCard(input, question)
     const anchor = this.store.chatUpTo(input.projectId, input.anchorId, 1)?.[0]
     if (!anchor) throw new BadRequestError(`anchorId: no message ${input.anchorId} in this chat`)
     if (kind === "reply") {
-      const existing = this.store.replyThreadOn(input.projectId, input.anchorId)
+      const existing = this.store.threadOn(input.projectId, input.anchorId, "reply")
       if (existing) {
         const message = this.send(existing.id, question, input.messageId)
         return { thread: this.get(existing.id), message }
@@ -279,6 +334,34 @@ export class SideThreads {
     this.hub.broadcast({ type: "thread", thread: this.decorate(thread) })
     const message = this.send(thread.id, question, input.messageId)
     return { thread: this.get(thread.id), message }
+  }
+
+  /** A task card's thread: its first question, or the next one in the thread it has. */
+  private createOnCard(input: { projectId: string | null; anchorId: string; id?: string; messageId?: string }, question: string) {
+    if (input.projectId) throw new BadRequestError("kind: only the Coordinator chat has task cards")
+    const card = this.cardOf(input.anchorId)
+    if (!card) throw new BadRequestError(`anchorId: no task or batch ${input.anchorId}`)
+    const existing = this.store.threadOn(null, input.anchorId, "task")
+    if (existing) {
+      const message = this.send(existing.id, question, input.messageId)
+      return { thread: this.get(existing.id), message }
+    }
+    if (input.id && this.store.getSideThread(input.id)) throw new BadRequestError(`A side thread ${input.id} already exists`)
+    const thread = this.store.createSideThread({ id: input.id, projectId: null, anchorId: input.anchorId, kind: "task", quote: card.title.slice(0, MAX_QUOTE_CHARS), sessionId: randomUUID() })
+    this.hub.broadcast({ type: "thread", thread: this.decorate(thread) })
+    const message = this.send(thread.id, question, input.messageId)
+    return { thread: this.get(thread.id), message }
+  }
+
+  /** A task card's tasks (a batch's, oldest first) and what to call it. null when there's no such task or batch. */
+  private cardOf(anchorId: string): { tasks: Task[]; title: string; batch: boolean } | null {
+    if (anchorId.startsWith(BATCH_ANCHOR)) {
+      const tasks = this.store.tasksInBatch(anchorId.slice(BATCH_ANCHOR.length))
+      if (!tasks.length) return null
+      return { tasks, title: tasks.length === 1 ? tasks[0]!.title : `${tasks[0]!.title} (and ${tasks.length - 1} more)`, batch: true }
+    }
+    const task = this.store.getTask(anchorId)
+    return task ? { tasks: [task], title: task.title, batch: false } : null
   }
 
   /** Cody's next message in a thread; answered right away, or after the turn that's running. It reopens a resolved thread. */
@@ -401,6 +484,7 @@ export class SideThreads {
     const session = this.store.sideThreadSession(id)!
     const owner = this.settings.get().ownerName
 
+    if (thread.kind === "task") return this.taskTurn(id, r, thread, host, question, session, owner)
     if (session.started) {
       const result = await this.run(id, r, host, question, ["--resume", session.sessionId], session.sessionId, true)
       return this.finish(id, result)
@@ -428,6 +512,64 @@ export class SideThreads {
     const prompt = first(context || null, false)
     const fresh = randomUUID()
     const result = await this.run(id, r, host, prompt, ["--session-id", fresh], fresh, false, "summary")
+    this.finish(id, result)
+  }
+
+  /**
+   * A task card's turn. The first forks the Coordinator's session at its newest answer (or, when it can't, starts fresh
+   * from the chat's last summary and messages) and starts from the task as it stands now and its updates in the chat.
+   * Later turns resume the thread, with the task's state again when it changed.
+   */
+  private async taskTurn(
+    id: string,
+    r: RunState,
+    thread: SideThread,
+    host: ThreadHost,
+    question: string,
+    session: { sessionId: string; started: boolean },
+    owner: string | undefined,
+  ) {
+    const card = this.cardOf(thread.anchorId)
+    if (!card || !host.taskState) {
+      this.finish(id, { ok: false, error: card ? "This chat has no task cards." : "Its task was deleted.", noSession: true })
+      return
+    }
+    const tasks = card.tasks.slice(-TASK_THREAD_TASKS)
+    const state = await host.taskState(tasks)
+    if (this.stopped || !this.store.getSideThread(id)) return
+    const changed = state !== r.taskState
+    r.taskState = state
+
+    if (session.started) {
+      const prompt = changed ? `[${card.batch ? "These tasks" : "The task"} now:]\n${state}\n\n${question}` : question
+      const result = await this.run(id, r, host, prompt, ["--resume", session.sessionId], session.sessionId, true)
+      return this.finish(id, result)
+    }
+
+    const recent = this.store.listChat(400)
+    const main = host.session()
+    const compactions = this.compactions(host.compactionsDir)
+    const fork = main.started ? forkPoint(recent, main.id, compactions.at(-1)?.at ?? null) : null
+    const open = tasks.filter((t) => !host.statusOnly?.(t.projectId)).map((t) => t.id)
+    const notices = noticeLines(this.store.taskNotices(open, TASK_NOTICES))
+    const first = (context: string | null) =>
+      taskThreadPrompt({ title: card.title, batch: card.batch, state, notices, question, context, ownerName: owner })
+    if (fork) {
+      const args = ["--resume", main.id, "--resume-session-at", fork.uuid, "--fork-session", "--session-id", session.sessionId]
+      const result = await this.run(id, r, host, first(null), args, session.sessionId, true, "fork")
+      if (result.ok || !result.noSession || this.stopped || !this.store.getSideThread(id)) return this.finish(id, result)
+    }
+    // A fresh session replays the chat as the Coordinator read it: not Cody's messages straight to tasks (marked read
+    // for it), nor a status-only project's updates.
+    const sealed = (m: ChatMessage) => {
+      const row = typeof m.meta?.taskId === "string" ? this.store.getTaskRow(m.meta.taskId) : null
+      return Boolean(row && host.statusOnly?.(row.project_id))
+    }
+    const read = recent.filter((m) => m.role !== "notice" || (m.meta?.sent !== true && !sealed(m)))
+    const summary = this.summaryBefore(compactions, Date.now())
+    const context = summaryContext(read, summary, owner, "your newest message")
+    const fresh = randomUUID()
+    const result = await this.run(id, r, host, first(context || null), ["--session-id", fresh], fresh, false, "summary")
     this.finish(id, result)
   }
 

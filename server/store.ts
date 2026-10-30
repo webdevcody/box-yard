@@ -95,7 +95,7 @@ function sideThreadFrom(r: SideThreadRow): SideThread {
     id: r.id,
     projectId: r.project_id,
     anchorId: r.anchor_id,
-    kind: r.kind === "reply" ? "reply" : "ask",
+    kind: r.kind === "reply" || r.kind === "task" ? r.kind : "ask",
     quote: r.quote,
     context: r.context === "fork" || r.context === "summary" ? r.context : null,
     busy: false,
@@ -2235,14 +2235,31 @@ export class Store {
     return r ? sideThreadFrom(r) : null
   }
 
-  /** The reply thread on a chat message, if it has one. */
-  replyThreadOn(projectId: string | null, anchorId: string): SideThread | null {
+  /** The thread of a kind that has one per anchor (a message's reply thread, a task card's thread), if there is one. */
+  threadOn(projectId: string | null, anchorId: string, kind: "reply" | "task"): SideThread | null {
     const r = (
       projectId
-        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, projectId)
-        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId)
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = ? AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, kind, projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = ? AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, kind)
     ) as SideThreadRow | undefined
     return r ? sideThreadFrom(r) : null
+  }
+
+  /** The tasks one create_tasks call started (Task.batchId), oldest first. */
+  tasksInBatch(batchId: string): Task[] {
+    return (this.db.prepare("SELECT * FROM tasks WHERE batch_id = ? ORDER BY created_at ASC, rowid ASC").all(batchId) as TaskRow[]).map((r) => this.taskFromRow(r))
+  }
+
+  /** The newest `limit` Coordinator chat notices about any of these tasks (meta.taskId), oldest first. */
+  taskNotices(taskIds: readonly string[], limit = 20): ChatMessage[] {
+    if (!taskIds.length) return []
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid FROM chat_messages WHERE role = 'notice' AND json_extract(meta_json, '$.taskId') IN (${taskIds.map(() => "?").join(",")})
+         ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC`,
+      )
+      .all(...taskIds, limit) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({ id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
   }
 
   /** Resolve a thread (folded away under its message), or reopen it. */

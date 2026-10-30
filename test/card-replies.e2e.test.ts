@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { searchHistory } from "../server/history.js"
-import type { ChatMessage, Project, Task } from "../shared/types.js"
+import { BATCH_THREAD_HEADING, TASK_THREAD_HEADING } from "../server/handoff.js"
+import type { ChatMessage, Project, SideThread, SideThreadMessage, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Replying from a task's card in the Coordinator chat: "This task" sends to the task and leaves a line in the chat,
-// "Coordinator" asks the Coordinator with the task named in its prompt.
+// "Coordinator" asks in the card's own side thread (kind "task"), which the main chat never sees.
 
 interface Running {
   yard: BoxYard
@@ -61,6 +63,15 @@ const untilQuiet = (r: Running, id: string) => waitFor(async () => (quiet(await 
 /** The task's first turn has run and the Coordinator has read its notices. */
 const settled = (r: Running, id: string) =>
   untilQuiet(r, id).then(() => waitFor(() => (!r.yard.store.hasUnseenNotices() && !r.yard.orchestrator.busy ? true : null), "coordinator to settle"))
+const fakeSession = (id: string) =>
+  JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".fake-claude"), "fake-sessions", `${id}.json`), "utf8")) as { turns: { prompt: string }[] }
+/** A thread's answers, once it has `n` and isn't busy. */
+const answers = (r: Running, id: string, n: number) =>
+  waitFor(async () => {
+    const done = (await call<SideThreadMessage[]>(r, "GET", `/api/threads/${id}/messages`)).filter((m) => m.role === "assistant" || m.role === "error")
+    const busy = (await call<SideThread[]>(r, "GET", "/api/threads")).find((t) => t.id === id)?.busy
+    return done.length >= n && !busy ? done : null
+  }, `${n} side thread answers`)
 const seenByCoordinator = (r: Running, id: string) =>
   (r.yard.store.db.prepare("SELECT seen_by_orchestrator AS seen FROM chat_messages WHERE id = ?").get(id) as { seen: number }).seen
 
@@ -113,28 +124,89 @@ describe("reply in a card", () => {
     expect(searchHistory({ store: r.yard.store }, { coordinator: true, statusOnly: (id) => id === p.id }, q).hits).toEqual([])
   })
 
-  it("Coordinator: the question names its task in the prompt, and keeps which task in its meta", async () => {
-    const lines = logFile()
+  it("Coordinator: a question goes to the task's own side thread, forked from the Coordinator and told the task's state", async () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Haiku", prompt: "write a haiku" })
     await settled(r, t.id)
+    await call(r, "POST", "/api/chat", { content: "status one" })
+    await waitFor(async () => ((await chat(r)).at(-1)?.role === "assistant" && !r.yard.orchestrator.busy ? true : null), "the Coordinator's reply")
+    const before = await chat(r)
+    const mainId = String(before.filter((m) => m.role === "assistant").at(-1)!.meta!.sessionId)
+    const mainTurns = fakeSession(mainId).turns.length
 
-    // A task deleted since (or never there) is dropped.
-    await call(r, "POST", "/api/chat", { content: "is it any good?", about: [t.id, "task_gone123456"] })
-    const asked = await waitFor(async () => (await chat(r)).find((m) => m.role === "user" && m.content === "is it any good?"), "the question")
-    expect(asked.meta).toEqual({ about: [t.id] })
-    const turn = await waitFor(() => lines().find((l) => l.prompt.includes("is it any good?")), "the Coordinator's turn")
-    expect(turn.prompt).toContain(`[Cody asked this from the card for the task "Haiku" (${t.id}) in the chat, so it's about that task.]\nis it any good?`)
+    const { thread, message } = await call<{ thread: SideThread; message: SideThreadMessage }>(r, "POST", "/api/threads", { kind: "task", anchorId: t.id, question: "is it any good?" })
+    expect(thread).toMatchObject({ projectId: null, anchorId: t.id, kind: "task", quote: "Haiku" })
+    expect(message).toMatchObject({ role: "user", content: "is it any good?" })
+    const [first] = await answers(r, thread.id, 1)
+    expect(first!.content).toContain("(forked)")
+    expect(first!.content).toContain("You asked: is it any good?")
+    const session = r.yard.store.sideThreadSession(thread.id)!
+    const prompt = fakeSession(session.sessionId).turns.at(-1)!.prompt
+    expect(prompt).toContain('[Box Yard side thread] Cody is asking you about a task, from the card of the task "Haiku" in the Coordinator chat.')
+    expect(prompt).toContain(`${TASK_THREAD_HEADING}\n- ${t.id} "Haiku" [demo] done`)
+    expect(prompt).toMatch(/Its updates in the chat, oldest first:\n- .*\*\*Haiku\*\*/)
+    expect(prompt).toContain("This thread is read-only")
 
-    // A plain message has no note.
-    await call(r, "POST", "/api/chat", { content: "anything else?" })
-    const plain = await waitFor(() => lines().find((l) => l.prompt.includes("anything else?")), "the second turn")
-    expect(plain.prompt).not.toContain("asked this from the card")
+    // Asking again from the card adds to the same thread, which resumes its own session.
+    const again = await call<{ thread: SideThread }>(r, "POST", "/api/threads", { kind: "task", anchorId: t.id, question: "and the title?" })
+    expect(again.thread.id).toBe(thread.id)
+    const [, second] = await answers(r, thread.id, 2)
+    expect(second!.content).toContain("You asked: and the title?")
+    // The task didn't change, so its state isn't told again.
+    expect(fakeSession(session.sessionId).turns.at(-1)!.prompt).toBe("and the title?")
+
+    // The main chat and the Coordinator's session never see it.
+    expect(await chat(r)).toEqual(before)
+    expect(fakeSession(mainId).turns).toHaveLength(mainTurns)
+    expect((await call<SideThread[]>(r, "GET", "/api/threads")).map((x) => [x.id, x.kind])).toEqual([[thread.id, "task"]])
   })
 
-  it("refuses an about that isn't a task id", async () => {
+  it("Coordinator, from a batch card: the thread is the batch's, told every task's state", async () => {
     const r = await start()
-    await expect(call(r, "POST", "/api/chat", { content: "hi", about: ["../etc"] })).rejects.toThrow(/-> 400/)
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const a = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Level 1: map", prompt: "x" })
+    const b = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Level 2: map", prompt: "x" })
+    await settled(r, a.id)
+    await settled(r, b.id)
+    r.yard.store.db.prepare("UPDATE tasks SET batch_id = 'bat_levels' WHERE id IN (?, ?)").run(a.id, b.id)
+
+    const { thread } = await call<{ thread: SideThread }>(r, "POST", "/api/threads", { kind: "task", anchorId: "batch:bat_levels", question: "which is behind?" })
+    expect(thread).toMatchObject({ anchorId: "batch:bat_levels", kind: "task", quote: "Level 1: map (and 1 more)" })
+    await answers(r, thread.id, 1)
+    const prompt = fakeSession(r.yard.store.sideThreadSession(thread.id)!.sessionId).turns.at(-1)!.prompt
+    expect(prompt).toContain('from the card of the batch of tasks "Level 1: map (and 1 more)"')
+    expect(prompt).toContain(BATCH_THREAD_HEADING)
+    expect(prompt).toContain(`- ${a.id} "Level 1: map"`)
+    expect(prompt).toContain(`- ${b.id} "Level 2: map"`)
+    expect(prompt).toContain("Their updates in the chat")
+  })
+
+  it("Coordinator, for a status-only project: the thread gets the task's status, not what it said", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Haiku", prompt: "write a haiku" })
+    await settled(r, t.id)
+    r.yard.tasks.sentFromChat(t.id, "the secret is pineapples")
+    r.yard.orchestrator.statusOnly = (id) => id === p.id
+    const { thread } = await call<{ thread: SideThread }>(r, "POST", "/api/threads", { kind: "task", anchorId: t.id, question: "what did it write?" })
+    await answers(r, thread.id, 1)
+    const prompt = fakeSession(r.yard.store.sideThreadSession(thread.id)!.sessionId).turns.at(-1)!.prompt
+    // No chat turn to fork yet: it starts fresh, from the chat as the Coordinator read it (here, nothing).
+    expect((await call<SideThread[]>(r, "GET", "/api/threads"))[0]).toMatchObject({ context: "summary" })
+    expect(prompt).toContain(`- ${t.id} "Haiku" [demo] done`)
+    expect(prompt).toContain("(status only: ask its Captain for what it said)")
+    expect(prompt).not.toContain("pineapples")
+    expect(prompt).not.toContain("updates in the chat")
+  })
+
+  it("refuses a task thread on no task, or in a Captain's chat", async () => {
+    const r = await start()
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
+    const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Haiku", prompt: "write a haiku" })
+    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "task_gone123456", question: "hi" })).rejects.toThrow(/-> 400.*no task or batch/)
+    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "batch:nope", question: "hi" })).rejects.toThrow(/-> 400/)
+    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: t.id, projectId: p.id, question: "hi" })).rejects.toThrow(/-> 400.*only the Coordinator chat/)
+    expect(r.yard.store.listSideThreads(null)).toEqual([])
   })
 })

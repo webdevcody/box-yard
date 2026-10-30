@@ -6,10 +6,10 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import { COORDINATOR_NAMED_HEADING, namedState, type PrLookup } from "./handoff.js"
+import { BATCH_THREAD_HEADING, COORDINATOR_NAMED_HEADING, namedState, TASK_THREAD_HEADING, tasksState, type PrLookup } from "./handoff.js"
 import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
-import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun } from "../shared/types.js"
+import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun, Task } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
@@ -113,18 +113,6 @@ export function attachmentNote(files: unknown, ownerName?: string): string {
   return `\n\n[${withOwner("Cody", ownerName)} attached ${files.length === 1 ? "a file" : "files"}. Open them with the Read tool (images included). To give them to an agent, pass the ids in the \`attachments\` param of create_task, create_tasks or send_to_task.]\n${lines.join("\n")}`
 }
 
-/** A message asked from a task's card in the chat (meta.about) says which task it's about, before its text. */
-export function aboutNote(about: unknown, store: Pick<Store, "getTaskRow">, ownerName?: string): string {
-  if (!Array.isArray(about)) return ""
-  const named = about.flatMap((id) => {
-    const row = typeof id === "string" ? store.getTaskRow(id) : null
-    return row ? [`"${row.title}" (${row.id})`] : []
-  })
-  if (!named.length) return ""
-  const which = named.length === 1 ? `the card for the task ${named[0]}` : `the card for the tasks ${named.join(", ")}`
-  return `[${withOwner("Cody", ownerName)} asked this from ${which} in the chat, so it's about ${named.length === 1 ? "that task" : "them"}.]\n`
-}
-
 /**
  * The orchestrator is Claude Code in headless mode with the Box Yard MCP
  * tools. Every chat message runs `claude -p --resume <session>` so the
@@ -198,9 +186,9 @@ export class Orchestrator {
   }
 
   /** Save Cody's message and make sure a turn will pick it up. */
-  send(content: string, id?: string, attachments: Attachment[] = [], about: string[] = []): ChatMessage {
-    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued). `about`: asked from those tasks' card.
-    const meta = { ...(attachments.length ? { attachments } : {}), ...(about.length ? { about } : {}), ...(this.running ? { queued: true } : {}) }
+  send(content: string, id?: string, attachments: Attachment[] = []): ChatMessage {
+    // Mid-turn it waits for the next turn: queued (see Store.deliverQueued).
+    const meta = { ...(attachments.length ? { attachments } : {}), ...(this.running ? { queued: true } : {}) }
     const msg = this.store.addChat("user", content.trim(), Object.keys(meta).length ? meta : null, id)
     this.hub.broadcast({ type: "chat.message", message: msg })
     this.pending = true
@@ -495,6 +483,8 @@ export class Orchestrator {
       caller: { kind: "coordinator" },
       claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
+      taskState: (tasks) => tasksState(tasks, this.stateOptions(), tasks.length === 1 ? TASK_THREAD_HEADING : BATCH_THREAD_HEADING),
+      statusOnly: (projectId) => this.statusOnly(projectId),
     }
   }
 
@@ -585,7 +575,7 @@ export class Orchestrator {
       .map((m) =>
         m.meta?.source === "hook" && typeof m.meta.hookName === "string"
           ? `[From the Box Yard hook "${m.meta.hookName}": ${withOwner("an automation, not a new message from Cody", this.owner())}]\n${m.content}`
-          : aboutNote(m.meta?.about, this.store, this.owner()) + m.content + attachmentNote(m.meta?.attachments, this.owner()),
+          : m.content + attachmentNote(m.meta?.attachments, this.owner()),
       )
       .filter((text) => text.trim())
   }
@@ -641,12 +631,12 @@ export class Orchestrator {
   /** The tasks and projects Cody's message names, as they stand now (server/handoff.ts), so a quick question needs no lookup step. */
   private namedState(text: string): Promise<string | null> {
     const projects = this.store.listProjects()
-    return namedState(
-      text,
-      { tasks: this.store.listTasks(), projects },
-      { store: this.store, prs: this.prs, sealed: (t) => this.statusOnly(t.projectId), projectNames: new Map(projects.map((p) => [p.id, p.name])) },
-      COORDINATOR_NAMED_HEADING,
-    )
+    return namedState(text, { tasks: this.store.listTasks(), projects }, this.stateOptions(projects), COORDINATOR_NAMED_HEADING)
+  }
+
+  /** How the Coordinator is shown tasks' state: each with its project's name, a status-only project's sealed. */
+  private stateOptions(projects = this.store.listProjects()) {
+    return { store: this.store, prs: this.prs, sealed: (t: Task) => this.statusOnly(t.projectId), projectNames: new Map(projects.map((p) => [p.id, p.name])) }
   }
 
   /** The model and effort a run uses: Settings' relay pair for a relay-only turn when it's on, else the Coordinator's. */
