@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "credentials" | "identities" | "runpod" | "vast" | "docker" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "credentials" | "identities" | "runpod" | "vast" | "docker" | "machines" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -74,6 +74,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "Docker",
     description:
       "Isolated containers on this computer for projects whose Runs on is Docker container: one per project, from an image built here, with its own CPU and memory limits. It stops when idle and keeps its workspaces in a volume.",
+    fields: [],
+  },
+  {
+    key: "machines",
+    label: "Machines",
+    description:
+      "Your own computers (an old laptop, a GPU tower) that Box Yard reaches over SSH and runs agents on, like this computer but elsewhere. Label them (laptops, gpu) and a project's Runs on, or a task's runs_on, picks a free machine with that label. Agents there aren't sandboxed: they run as the user Box Yard logs in as.",
     fields: [],
   },
   {

@@ -927,6 +927,29 @@ export const MIGRATIONS: string[] = [
   -- Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that's on).
   ALTER TABLE projects ADD COLUMN gpu_provider TEXT;
   `,
+  `
+  -- SSH machines (shared/machines.ts, docs/machines.md): computers of the owner's that agents run on over SSH. The
+  -- key is a reference (file:~/.ssh/<key>, agent, agent:<fingerprint>, default), never the key itself.
+  CREATE TABLE machines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    host TEXT NOT NULL,
+    user TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 22,
+    key_ref TEXT NOT NULL,
+    max_tasks INTEGER NOT NULL DEFAULT 1,
+    labels_json TEXT NOT NULL DEFAULT '[]',
+    dir TEXT NOT NULL DEFAULT '~/boxyard',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    test_json TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  -- Which SSH machines a task (with its own runs_on) or a project (Runs on: SSH machine) runs on: a label or a
+  -- machine's name. NULL: any machine.
+  ALTER TABLE tasks ADD COLUMN machine_label TEXT;
+  ALTER TABLE projects ADD COLUMN machine_label TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

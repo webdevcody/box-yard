@@ -306,6 +306,7 @@ async function runTurn() {
     // /compact prints no usage of its own; ask the session what it holds now.
     usage = (await contextReport(sessionId, turn.model || task.model)) ?? null
   }
+  dropTaskJson()
   await emit({
     t: "turn_end",
     startedAt: attempt.startedAt,
@@ -514,6 +515,18 @@ function takeDelivered(file) {
   } catch {}
   fs.rmSync(file, { force: true })
   if (held) fs.rmSync(held, { force: true })
+}
+
+/**
+ * task.json carries the turn's credentials (its env). On an SSH machine (task.json `dropAfterTurn`) they don't stay
+ * there between turns: it goes before turn_end, so Box Yard's next turn writes a fresh one and this never removes that.
+ * The turn already holds what it needs in memory, and its MCP server read its own copy when Claude started it.
+ */
+function dropTaskJson() {
+  if (!task.dropAfterTurn) return
+  try {
+    takeDelivered(path.join(taskDir, "task.json"))
+  } catch {}
 }
 
 /** On this computer, an identity's own git and gh config folders (task.json identityHome), made on first use. */
@@ -2002,6 +2015,7 @@ if (mode === "turn" && !leadOwnGroup()) {
     },
     async (err) => {
       cleanupSigning()
+      dropTaskJson()
       try {
         await emit({ t: "turn_end", exitCode: 1, ok: false, error: `runner crashed: ${err?.stack ?? err}` })
       } catch {}
