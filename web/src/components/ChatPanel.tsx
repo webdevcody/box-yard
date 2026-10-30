@@ -13,6 +13,8 @@ import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import { VoiceControl } from "./VoiceControl"
 import { CloudMeter, useShowCloudMeter } from "./CloudMeter"
 import { RunningTasksBadge } from "./RunningTasks"
@@ -68,6 +70,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const skipped = useSetupSkipped()
   const showSetup = zen && setup.needed && !skipped
   const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(COORDINATOR_CHAT, box)
   // Then an empty Zen chat shows example requests, until one message is sent or they're dismissed.
   const tryFirstDone = useTryFirstDone()
   const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
@@ -160,10 +164,13 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               <AgentIcon busy={Boolean(busy.data)} />
               {zen && <RunningTasksBadge />}
               {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
-                {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-                {zen && <span className="max-sm:hidden">Box Yard </span>}
-                Coordinator
+              {/* The title opens the chat switcher: the Coordinator, then every project's Captain. */}
+              <div className="flex min-w-0 flex-1">
+                <ChatSwitcher current={COORDINATOR_CHAT} onLeave={onClose}>
+                  {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+                  {zen && <span className="max-sm:hidden">Box Yard </span>}
+                  Coordinator
+                </ChatSwitcher>
               </div>
               {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">

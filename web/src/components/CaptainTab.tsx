@@ -46,6 +46,8 @@ import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
 import { PublishedRow, SLIM_TITLE_LINK } from "./PublishedNotices"
 import { menuItem, usePopover } from "./TaskHeader"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
 const NO_MESSAGES: CaptainMessage[] = []
@@ -66,6 +68,8 @@ function CaptainChat({ project }: { project: Project }) {
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   const thread = useRef<StickyScrollHandle>(null)
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(project.id, box)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
@@ -462,7 +466,8 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
     // Like the task header: name, status and a small context reading (when wide); model, last active and the full meter are in ⋯.
     <header className={cx(HEAD_CONTAINER, "flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4")}>
       <AgentIcon busy={Boolean(state?.busy)} />
-      <span className="text-sm font-semibold text-zinc-100">Captain</span>
+      {/* Opens the chat switcher: the Coordinator, then every project's Captain. */}
+      <ChatSwitcher current={projectId}>Captain</ChatSwitcher>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">
         {meter && headerMeter !== null && (
