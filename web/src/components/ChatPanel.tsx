@@ -21,6 +21,8 @@ import { ChatRows, useCoordinatorRows } from "./UpdateChips"
 import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider } from "./SideThread"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -62,6 +64,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
   const list = useRef<StickyScrollHandle>(null)
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(COORDINATOR_CHAT, box)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
@@ -160,10 +164,13 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               <AgentIcon busy={Boolean(busy.data)} />
               {zen && <RunningTasksBadge />}
               {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
-                {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-                {zen && <span className="max-sm:hidden">Box Yard </span>}
-                Coordinator
+              {/* The title opens the chat switcher: the Coordinator, then every project's Captain. */}
+              <div className="flex min-w-0 flex-1">
+                <ChatSwitcher current={COORDINATOR_CHAT} onLeave={onClose}>
+                  {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+                  {zen && <span className="max-sm:hidden">Box Yard </span>}
+                  Coordinator
+                </ChatSwitcher>
               </div>
               {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">
