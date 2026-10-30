@@ -395,6 +395,8 @@ export interface NewTask {
   icon?: TaskIconName | null
   /** "high" pulls its turns from the queue before normal tasks' (shared/priority.ts); omitted is normal. */
   priority?: TaskPriority | null
+  /** Never moved to done when its PR merges (a long-running runner); omitted: the settings decide. */
+  stayOpenOnMerge?: boolean
 }
 
 /**
