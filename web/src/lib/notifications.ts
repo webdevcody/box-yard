@@ -7,6 +7,7 @@ import { api } from "./api"
 import { keys } from "./queries"
 import { toast, type ToastTone } from "./toast"
 import { voiceNotification } from "./speech"
+import { openInZenPanel, zenPanelTaskId } from "./zenPanel"
 import type { AppNotification, NotifyStatus } from "../../../shared/types"
 
 /** Notifications that land within this window of each other share one toast. */
@@ -120,8 +121,8 @@ export function toastContent(plan: ToastPlan) {
 // ------------------------------------------------------------------ live
 
 const isVisible = () => typeof document === "undefined" || document.visibilityState === "visible"
-/** The task Cody is actually looking at: open in a visible tab. */
-const seenTaskId = () => (isVisible() ? viewingTaskId(window.location.pathname) : null)
+/** The task Cody is actually looking at: open in a visible tab, or in Zen's side panel. */
+const seenTaskId = () => (isVisible() ? (viewingTaskId(window.location.pathname) ?? zenPanelTaskId()) : null)
 
 /** Mark notifications read, here at once and then on the server (which tells the other tabs). */
 export async function markRead(qc: QueryClient, by: { ids?: string[]; taskId?: string; all?: boolean }) {
@@ -190,7 +191,7 @@ function showBrowserNotification(title: string, body: string, href: string, onOp
     const note = new Notification(title, { body, tag: "box-yard" })
     note.onclick = () => {
       window.focus()
-      navigate(href)
+      if (!openInZenPanel(href)) navigate(href)
       onOpen()
       note.close()
     }

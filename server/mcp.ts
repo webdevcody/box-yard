@@ -32,6 +32,7 @@ import { usd } from "./cloudLimit.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 import { loadLine, memLine } from "../shared/memory.js"
+import type { MachineStats } from "./machineStats.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
@@ -42,6 +43,9 @@ import type { Identities } from "./identity/identities.js"
 import { IdentityDetector } from "./identity/detect.js"
 import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
+import { redactValues } from "./redact.js"
+import { scopeLine, type Connectors } from "./connectors/connectors.js"
+import type { Connector } from "../shared/connectors.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
 import { timingReport, type McpHandshakes } from "./turnTimings.js"
@@ -75,6 +79,10 @@ export interface McpDeps {
   identityDetector?: IdentityDetector
   /** Side threads' read-only tokens (server/sideThreads.ts). */
   threads?: { callerForToken(token: string): McpCaller | null }
+  /** This computer's memory, swap and load (machine_stats). Without it, the tool isn't offered. */
+  machine?: MachineStats
+  /** Settings › Connectors (docs/connectors.md). Without it, list_connectors isn't offered. */
+  connectors?: Connectors
 }
 
 /**
@@ -835,6 +843,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
         for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
         await tasks.projectDeleted(p.id)
+        deps.connectors?.projectDeleted(p.id)
         store.deleteProject(p.id)
         hub.broadcast({ type: "project.deleted", projectId: p.id })
         return ok(`Deleted project ${p.name}.`)
@@ -1909,7 +1918,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1966,6 +1975,25 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
     }),
   )
+
+  const machine = deps.machine
+  if (machine)
+    server.registerTool(
+      "machine_stats",
+      {
+        description:
+          "This computer's resources (the one running Box Yard, where \"Runs on: This computer\" tasks and the Docker containers run; pool_status covers the Upstash boxes): memory used and free with the OS's memory pressure, swap and whether it's growing, the 1/5/15-minute load and CPU count, the heaviest processes by kind (claude, chrome, docker, node, other), local tasks running against the localAgents limit with what each one uses, and the last 15 minutes of samples (one a minute). " +
+          "It reads the computer directly, so never start a task to measure it. " +
+          "recommendation says whether there's room to raise localAgents (tasks running at once on this computer), when to hold, and when to lower it, with the value to set: a starting point that raises by at most 2 a step. " +
+          (scopeId
+            ? "Only the Coordinator changes localAgents; tell Cody when your project's local tasks are held back by it."
+            : "To keep local concurrency in line with the machine on a schedule, make a Coordinator schedule (create_schedule without a project, e.g. every 10 minutes) whose prompt calls machine_stats, then update_settings { localAgents } within the min and max Cody gave, and says nothing when nothing changes."),
+      },
+      safe(async () => {
+        const limits = tasks.poolLimits()
+        return ok(await machine.report({ running: limits.localAgentsRunning, limit: limits.localAgents }))
+      }),
+    )
 
   coordinatorOnly(
     server.registerTool(
@@ -2036,6 +2064,58 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           return ok({ changed: changes, next: "Applies from the next turn on; the pool already uses new limits." })
         }),
       ),
+    )
+  }
+
+  // ---------------------------------------------------------------- connectors (docs/connectors.md)
+  // External MCP servers some sessions get. Read-only here: only Settings adds, signs in, scopes or removes one, so no
+  // model can widen a connector's reach. The view has no value in it (a remote server shows its host only: some put a
+  // key in the path), and the whole result is also run through the connectors' own secret values.
+  const connectorStore = deps.connectors
+  if (connectorStore) {
+    const projectName = (id: string) => store.getProject(id)?.name ?? id
+    const connectorView = (c: Connector) => {
+      const yours = scopeId ? { captain: connectorStore.reaches(c, { kind: "captain", projectId: scopeId }), agents: RUNNERS.filter((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })) } : undefined
+      return {
+        name: c.name,
+        label: c.label,
+        tools: `mcp__${c.name}__*`,
+        kind: c.kind,
+        server: c.kind === "stdio" ? `command: ${(c.command ?? "").split("/").pop()}` : (() => {
+          try {
+            return new URL(c.url!).host
+          } catch {
+            return "?"
+          }
+        })(),
+        auth: c.auth,
+        enabled: c.enabled,
+        status: c.status,
+        ...(c.statusDetail ? { detail: c.statusDetail } : {}),
+        ...(c.oauth ? { signedIn: c.oauth.signedInAt !== null && c.status !== "needs_auth", renewsItself: c.oauth.refreshable, signInHost: c.oauth.signInHost } : {}),
+        secrets: c.secrets.map((x) => ({ name: x.name, fingerprint: x.fingerprint, ...(x.readable ? {} : { unreadable: true }) })),
+        lastTest: c.lastTest && { at: new Date(c.lastTest.at).toISOString(), ok: c.lastTest.ok, tools: c.lastTest.tools.slice(0, 60).map((t) => t.name), ...(c.lastTest.error ? { error: c.lastTest.error } : {}) },
+        ...(scopeId
+          ? { yours, otherProjects: c.scope.projects ? c.scope.projects.filter((id) => id !== scopeId).length : "every project" }
+          : { reaches: scopeLine(c.scope, projectName), ...(c.sealedSkipped.length ? { leftOut: `${c.sealedSkipped.map(projectName).join(", ")} (status only, and the Coordinator uses it)` } : {}) }),
+      }
+    }
+    server.registerTool(
+      "list_connectors",
+      {
+        description:
+          "External MCP connectors Cody set up in Settings › Connectors (Gmail, Notion, Linear, …): each one's name (its tools are mcp__<name>__*), server host or command, how it signs in, status (connected; needs_auth: Cody signs in again in Settings › Connectors; error, with the detail; untested), its last test's tools, and " +
+          (scopeId ? "whether you and your project's agents get it (yours). Only connectors that reach your project are listed. " : "who gets it. ") +
+          "Never a token or key: secrets show as fingerprints. You can't add, change or sign in a connector: tell Cody what to do in Settings › Connectors.",
+        inputSchema: {},
+      },
+      safe(async () => {
+        const list = connectorStore
+          .list()
+          .filter((c) => !scopeId || connectorStore.reaches(c, { kind: "captain", projectId: scopeId }) || RUNNERS.some((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })))
+        const text = JSON.stringify({ connectors: list.map(connectorView) })
+        return { content: [{ type: "text", text: redactValues(text, connectorStore.secretValues()) }] }
+      }),
     )
   }
 

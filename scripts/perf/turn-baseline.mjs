@@ -7,6 +7,7 @@
 //
 // dataDir defaults to $BOXYARD_DATA_DIR or ./data (it reads <dataDir>/box-yard.sqlite; a .backup copy works too).
 // --split: dates to compare before and after (a settings change, such as captainEffort or the auto-compact threshold).
+// Without it, the latest update_settings call that changed one of those is the split.
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -188,6 +189,23 @@ for (const m of chat.filter((x) => x.role === "user" && !x.meta?.scheduleId && x
   if (r && r.at - m.at < 30 * 60_000) replies.push(r.at - m.at)
 }
 out.push("## Cody → the Coordinator's reply", "", ...HEAD, row("message → first reply", replies), "")
+
+// ---------------------------------------------------------------- settings changes
+
+// Settings live in kv with no timestamp, but a change the Coordinator made (update_settings) is a dated tool line in
+// its chat. Without --split, the latest change to captainEffort or an auto-compact threshold becomes the split.
+const changes = db
+  .prepare("SELECT content, meta_json AS meta, created_at AS at FROM chat_messages WHERE role = 'tool' AND content LIKE '%update_settings' AND created_at >= ? ORDER BY created_at")
+  .all(since)
+  .map((m) => ({ at: m.at, input: JSON.stringify(json(m.meta)?.input ?? null) }))
+if (changes.length) {
+  out.push("## Settings changes (the Coordinator's update_settings calls)", "", "| At (UTC) | Input |", "|---|---|")
+  for (const c of changes) out.push(`| ${new Date(c.at).toISOString()} | \`${c.input.slice(0, 300).replaceAll("|", "\\|")}\` |`)
+  out.push("", "Changes made in the Settings dialog leave no timestamp, so they don't show here.", "")
+  const speed = changes.filter((c) => /captainEffort|AutoCompact/i.test(c.input)).at(-1)
+  if (!splits.length && speed) splits.push({ label: `${new Date(speed.at).toISOString()} (update_settings)`, at: speed.at })
+}
+data.settingsChanges = changes
 
 // ---------------------------------------------------------------- before / after a change
 

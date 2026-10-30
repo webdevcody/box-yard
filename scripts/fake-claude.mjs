@@ -242,11 +242,14 @@ async function notesRetro(mcp, prompt) {
 /** A side thread's turn: what it can see of the chat it forked, and any tool its question asks to try. */
 async function sideThread(mcp, prompt) {
   const earlier = session.turns.filter((t) => !t.thread)
-  const question = prompt.includes("[Box Yard side thread]") ? (prompt.split(/'s question:\n/).pop() ?? prompt) : prompt
+  const question = prompt.includes("[Box Yard side thread]") ? (prompt.split(/'s (?:question|reply):\n/).pop() ?? prompt) : prompt
   const lines = [`Side thread answer (mock Claude). I can see ${earlier.length} earlier chat turn${earlier.length === 1 ? "" : "s"}${session.forkedFrom ? " (forked)" : ""}.`]
   const last = earlier.at(-1)
   if (last) lines.push(`The last one asked: "${last.prompt.split("\n").filter((l) => l.trim() && !l.startsWith("[Yard now]") && !l.startsWith("- ")).pop()?.slice(0, 120) ?? ""}"`)
   if (/Your session for this thread was started fresh/.test(prompt)) lines.push("I started fresh from the summary.")
+  // A reply thread's first prompt quotes the message replied to.
+  const original = prompt.match(/The message .+ is replying to:\n((?:> .*\n?)+)/)
+  if (original) lines.push(`Replying to: "${original[1].replace(/^> /gm, "").trim().split("\n")[0].slice(0, 120)}"`)
   lines.push(`You asked: ${question.trim().slice(0, 200)}`)
   const tool = question.match(/\btry (\w+)/i)
   if (tool) lines.push(`${tool[1]} said: ${(await useTool(mcp, tool[1], tool[1] === "create_task" ? { project: "demo", title: "From a side thread", prompt: "x" } : {})).slice(0, 300)}`)

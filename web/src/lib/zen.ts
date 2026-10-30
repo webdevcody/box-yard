@@ -9,6 +9,7 @@ import { useEffect, useLayoutEffect, useState } from "react"
 import { navigate, useLocationProperty } from "wouter/use-browser-location"
 import { isModalOpen } from "../components/Modal"
 import { keepScrollOnNextBack } from "./scrollMemory"
+import { closeZenPanel, zenPanelState } from "./zenPanel"
 
 export const ZEN_PATH = "/zen"
 
@@ -52,9 +53,10 @@ export function leaveZen() {
 export const toggleZen = () => (isZenPath(location.pathname) ? leaveZen() : enterZen())
 
 /**
- * Mounted once (App): the shortcut toggles Zen from anywhere, typing included. In Zen, Esc leaves, but only
- * once nothing else wants it: an open modal (the palette, settings, the file preview) closes first, and
- * handlers that use Esc themselves (dictation, menus) call preventDefault.
+ * Mounted once (App): the shortcut toggles Zen from anywhere, typing included. In Zen, Esc closes the side panel
+ * (lib/zenPanel.ts) and then leaves, but only once nothing else wants it: an open modal (the palette, settings, the
+ * file preview) closes first, and handlers that use Esc themselves (dictation, menus, a side thread) call
+ * preventDefault or stop it.
  */
 export function useZenHotkeys(zen: boolean) {
   useEffect(() => {
@@ -66,7 +68,8 @@ export function useZenHotkeys(zen: boolean) {
       }
       if (!zen || e.key !== "Escape" || e.defaultPrevented || e.isComposing || isModalOpen()) return
       e.preventDefault()
-      leaveZen()
+      if (zenPanelState()) closeZenPanel()
+      else leaveZen()
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
