@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-// The Coordinator chat's update chips (components/UpdateChips.tsx): collapsed by default, open in place, groups,
-// attention cards that never fold, the reply's "from:" line, per-session state, and no thread-wide re-renders.
+// The Coordinator chat's update chips (components/UpdateChips.tsx): collapsed by default, open in place, attention
+// cards that never fold, the reply's "from:" line, per-session state, and no thread-wide re-renders. A card lists its
+// entries the same way (CardEntries in CoordinatorCards.tsx): a chip per update, a ChatLine per message.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement, useState } from "react"
 import { createRoot, type Root } from "react-dom/client"
@@ -21,7 +22,8 @@ vi.mock("../web/src/components/RecommendedNextSteps.js", async (importOriginal) 
   return { ...mod, nextStepsFromMeta: (meta: unknown) => (renders.replies++, mod.nextStepsFromMeta(meta as never)) }
 })
 
-const { ChatRows, useCoordinatorRows } = await import("../web/src/components/UpdateChips.js")
+const { UpdateChip, useCoordinatorRows } = await import("../web/src/components/UpdateChips.js")
+const { ChatLine } = await import("../web/src/components/ChatLine.js")
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -44,7 +46,12 @@ function Thread({ initial }: { initial: ChatMessage[] }) {
   const [messages, set] = useState(initial)
   setThread = set
   const rows = useCoordinatorRows(messages)
-  return createElement(ChatRows, { rows, onFollowUp })
+  const newest = rows.findLast((r) => r.type === "message" && r.message.role === "assistant")?.id
+  return rows.flatMap((r) =>
+    r.type === "message"
+      ? [createElement(ChatLine, { key: r.id, m: r.message, sources: r.sources, onFollowUp, next: r.id === newest })]
+      : (r.type === "update" ? [r.item] : r.items).map((item) => createElement(UpdateChip, { key: item.id, item })),
+  )
 }
 
 const render = (messages: ChatMessage[]) =>
@@ -104,17 +111,6 @@ describe("update chips", () => {
     expect($('[data-testid="update-chip-line"]')!.getAttribute("aria-expanded")).toBe("false")
   })
 
-  it("back-to-back updates are one 'N updates' chip that opens to their chips", () => {
-    render([captain("c1", "a"), done("d1"), done("d2", "Dark mode")])
-    const group = $('[data-testid="update-group"]')!
-    expect(group.dataset.count).toBe("3")
-    expect(group.querySelector("button")!.textContent).toContain("3 updates")
-    expect(group.querySelector("button")!.textContent).toContain("box-yard Captain, Fix login +1")
-    expect($$('[data-testid="update-chip"]')).toHaveLength(0)
-    click(group.querySelector("button")!)
-    expect($$('[data-testid="update-chip"]').map((c) => c.id)).toEqual(["chat-c1", "chat-d1", "chat-d2"])
-  })
-
   it("questions, failures and merge requests stay full cards with an accent", () => {
     render([done("d1"), asks("q1"), msg("f1", "notice", "❌ **Build** failed: tsc exited 2", { taskId: "task_f100" })])
     const cards = $$('[data-testid="notice-card"]')
@@ -133,19 +129,18 @@ describe("update chips", () => {
     expect($('[data-testid="update-chip-line"]')!.getAttribute("aria-expanded")).toBe("true")
   })
 
-  it("an open chip stays open when another update joins it into a group", () => {
+  it("an open chip stays open when another update comes in after it", () => {
     const c1 = captain("c1", "a")
     render([c1])
     click($('[data-testid="update-chip-line"]')!)
     act(() => setThread([c1, done("d1")]))
-    const group = $('[data-testid="update-group"]')!
-    expect(group.querySelector("button")!.getAttribute("aria-expanded")).toBe("true")
     expect($("#chat-c1 [data-testid='update-chip-body']")).not.toBeNull()
+    expect($("#chat-d1 [data-testid='update-chip-body']")).toBeNull()
   })
 })
 
 describe("the reply's from: line", () => {
-  it("names the updates the reply read and opens them (and their group), scrolling to the first", () => {
+  it("names the updates the reply read and opens them, scrolling to the first", () => {
     const reveals: string[] = []
     const onReveal = (e: Event) => reveals.push((e as CustomEvent<string>).detail)
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
@@ -159,7 +154,8 @@ describe("the reply's from: line", () => {
     expect(reveals).toEqual(["c1"])
     expect($$('[data-testid="update-chip"][data-open]').map((c) => c.id)).toEqual(["chat-c1", "chat-w1"])
     click(from)
-    expect($('[data-testid="update-group"]')!.querySelector("button")!.getAttribute("aria-expanded")).toBe("false")
+    expect(from.getAttribute("aria-expanded")).toBe("false")
+    expect($$('[data-testid="update-chip"][data-open]')).toHaveLength(0)
     window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
   })
 

@@ -9,7 +9,6 @@ import { App } from "../web/src/App.js"
 import { CaptainTab } from "../web/src/components/CaptainTab.js"
 import { keys } from "../web/src/lib/queries.js"
 import { placeMessage, settleOptimistic, splitQueued } from "../web/src/lib/queued.js"
-import { setCoordinatorView } from "../web/src/lib/coordinatorView.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project, UiEvent } from "../shared/types"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -47,10 +46,16 @@ const emit = async (...events: UiEvent[]) => {
   await flush()
 }
 
-/** The chat panel's rows top to bottom, as text: user bubbles, replies and the streaming reply (not the typing dots). */
+/** The Coordinator card's rows top to bottom, as text: user bubbles, replies and the streaming reply (not the typing dots). */
 const rows = () => {
-  const list = document.querySelector("[data-testid=chat-panel] .space-y-3")!
-  return [...list.children].map((el) => el.textContent!.trim()).filter(Boolean)
+  const list = document.querySelector("[data-testid=chat-panel] [data-testid=coordinator-card] > .space-y-3")!
+  return [...list.children].map((el) => el.textContent!.trim()).filter((t) => t && !/^\d+ earlier$/.test(t))
+}
+/** All of them: the card's "N earlier" opened first. Tool calls aren't in the cards. */
+const allRows = () => {
+  const earlier = document.querySelector<HTMLElement>("[data-testid=coordinator-card] [data-testid=card-earlier]")
+  if (earlier) act(() => earlier.click())
+  return rows()
 }
 const queuedLabels = () => document.querySelectorAll("[data-testid=chat-panel] [data-testid=queued-label]").length
 
@@ -78,8 +83,6 @@ function type(text: string) {
 
 beforeEach(() => {
   localStorage.clear()
-  // The Timeline: these read the thread's rows in order (the Cards view puts the same under the Coordinator card).
-  setCoordinatorView("timeline")
   es = null
   server = [msg("chat_ask000001", "user", "Build the thing", now - 3000), msg("chat_tool00001", "tool", "list_tasks", now - 2000, { input: {} })]
   posted = null
@@ -145,13 +148,13 @@ describe("Coordinator chat: a message sent mid-stream", () => {
     const answer = msg("chat_reply0002", "assistant", "Great, glad it works.", now - 100)
     server = [...server.filter((m) => m.id !== id), delivered, answer]
     await emit({ type: "chat.message", message: delivered }, { type: "chat.message", message: answer }, { type: "chat.busy", busy: false })
-    const expected = ["Build the thing", "list_tasks", expect.stringContaining("Done."), "k it works perfect", "Great, glad it works."]
-    expect(rows()).toEqual(expected)
+    const expected = ["Build the thing", expect.stringContaining("Done."), "k it works perfect", "Great, glad it works."]
+    expect(allRows()).toEqual(expected)
     expect(queuedLabels()).toBe(0)
 
     // A refetch (reconnect, reload) gives the same thread.
     await act(() => qc.refetchQueries({ queryKey: keys.chat }))
-    expect(rows()).toEqual(expected)
+    expect(allRows()).toEqual(expected)
   })
 })
 
@@ -179,11 +182,11 @@ describe("Coordinator chat: several messages sent mid-stream", () => {
     await emit({ type: "chat.message", message: reply }, { type: "chat.turn", startedAt: now - 2500, replyId: reply.id })
     expect(rows().slice(-3)).toEqual([expect.stringContaining("Done."), expect.stringContaining("first thought"), expect.stringContaining("second thought")])
     await emit({ type: "chat.message", message: d1 }, { type: "chat.message", message: d2 }, { type: "chat.message", message: answer }, { type: "chat.busy", busy: false })
-    const expected = ["Build the thing", "list_tasks", expect.stringContaining("Done."), "first thought", "second thought", "Noted both."]
-    expect(rows()).toEqual(expected)
+    const expected = ["Build the thing", expect.stringContaining("Done."), "first thought", "second thought", "Noted both."]
+    expect(allRows()).toEqual(expected)
     expect(queuedLabels()).toBe(0)
     await act(() => qc.refetchQueries({ queryKey: keys.chat }))
-    expect(rows()).toEqual(expected)
+    expect(allRows()).toEqual(expected)
   })
 })
 

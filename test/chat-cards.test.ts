@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { jumpDirection, nextJump } from "../web/src/lib/cardJump.js"
 import { arrangeCards, batchTaskName, batchTitle, batchesOf, chatCards, newSince, stableCards, CARD_WINDOW_MS, type CardTask, type ChatCard } from "../web/src/lib/chatCards.js"
-import { chatProvenance, filterByTasks } from "../web/src/lib/chatProvenance.js"
 import { coordinatorRows } from "../web/src/lib/chatUpdates.js"
 import { buildEntityIndex } from "../web/src/lib/linkify.js"
 import type { BadgeStatus } from "../web/src/lib/prState.js"
@@ -295,21 +294,6 @@ describe("card helpers", () => {
     // Never a whole title.
     expect(batchTitle(["Ship it", "Ship it now"])).toBe("Ship")
     expect(batchTaskName("Draft a tweet", null)).toBe("Draft a tweet")
-  })
-})
-
-describe("filterByTasks", () => {
-  it("keeps one card's part of the timeline: the turns that name its tasks, its notices, and the turn still waiting", () => {
-    const ask = user("Fix login")
-    const call = tool("create_task", { project: "box-yard", title: "Fix login" }, { resultId: LOGIN.id })
-    const answer = reply("Started.")
-    const other = notice(CARDS, "▶️ **Coordinator cards** started")
-    const own = notice(LOGIN, "✅ **Fix login** is done")
-    const waiting = user("And now?")
-    const all = [ask, call, answer, other, own, waiting]
-    const prov = chatProvenance(all, index)
-    expect(ids(filterByTasks(all, prov, [LOGIN.id]))).toEqual([ask.id, call.id, answer.id, own.id, waiting.id])
-    expect(filterByTasks(all, prov, null)).toBe(all)
   })
 })
 

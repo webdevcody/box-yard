@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { chatProvenance, filterByProject, messageRefs, recentProjects } from "../web/src/lib/chatProvenance.js"
+import { chatProvenance, messageRefs, recentProjects } from "../web/src/lib/chatProvenance.js"
 import { coordinatorRows, sourceNames } from "../web/src/lib/chatUpdates.js"
 import { buildEntityIndex } from "../web/src/lib/linkify.js"
 import { barCounts, projectBarRows } from "../web/src/lib/projectBar.js"
@@ -7,7 +7,7 @@ import { buildTiles } from "../web/src/lib/taskTiles.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
 
 // The Coordinator chat's project bar: which projects each message is about (a Coordinator turn as one unit, a notice
-// on its own), the filter that keeps a project's part of the chat, and what each chip counts.
+// on its own), the projects talked about lately, and what each chip counts.
 
 const project = (id: string, name: string, createdAt = 1, extra: Partial<Project> = {}) => ({ id, name, repo: null, createdAt, color: null, ...extra }) as Project
 const task = (id: string, projectId: string, title: string, status: TaskStatus = "idle", extra: Partial<Task> = {}) => ({ id, projectId, title, status, createdAt: 1, ...extra }) as Task
@@ -60,7 +60,6 @@ describe("chatProvenance", () => {
     const answer = reply(`Started it; [Fix login](/tasks/${LOGIN.id}) is still idle.`)
     const p = chatProvenance([ask, call, answer], index)
     for (const m of [ask, call, answer]) expect([...p.projects.get(m.id)!].sort()).toEqual([MAP.id, YARD.id].sort())
-    expect(p.pending.size).toBe(0)
   })
 
   it("keeps a notice to its own project, even mid-turn", () => {
@@ -85,35 +84,9 @@ describe("chatProvenance", () => {
     expect(chatProvenance(all, index).projects.get(answer.id)!.size).toBe(0)
   })
 
-  it("marks the turn still waiting for its reply as pending", () => {
-    const answered = [user("hi"), reply("hello")]
-    const waiting = user("What's up with Notes?")
-    const p = chatProvenance([...answered, waiting], index)
-    expect([...p.pending]).toEqual([waiting.id])
-  })
 })
 
-describe("filterByProject", () => {
-  const a = user("Map work")
-  const b = tool("create_task", { project: "Map 3", title: "x" })
-  const c = reply("Started.")
-  const d = notice(LOGIN.id, YARD.id, "✅ **Fix login** is done")
-  const e = user("thanks")
-  const f = reply("You're welcome.")
-  const waiting = user("And box-yard?")
-  const queued = msg("user", "queued one", { queued: true })
-  const all = [a, b, c, d, e, f, waiting]
-  const p = chatProvenance(all, index, coordinatorRows(all))
-
-  it("keeps a project's turns and notices, the turn waiting for a reply, and what isn't read yet", () => {
-    expect(filterByProject([...all, queued], p, MAP.id).map((m) => m.id)).toEqual([a.id, b.id, c.id, waiting.id, queued.id])
-    expect(filterByProject(all, p, YARD.id).map((m) => m.id)).toEqual([d.id, waiting.id])
-  })
-
-  it("keeps everything without a filter", () => {
-    expect(filterByProject(all, p, null)).toBe(all)
-  })
-
+describe("recentProjects", () => {
   it("lists the projects talked about lately", () => {
     const old = { ...notice(LEVEL.id, MAP.id, "▶️ **Level 7 terrain** started"), createdAt: 0 }
     const now = { ...notice(LOGIN.id, YARD.id, "✅ **Fix login** is done"), createdAt: 100 }
