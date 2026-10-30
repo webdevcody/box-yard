@@ -814,6 +814,7 @@ class TurnClock {
       outputTokens: clockNum(u.output_tokens) ?? 0,
       cacheReadTokens: clockNum(u.cache_read_input_tokens) ?? 0,
       cacheWriteTokens: clockNum(u.cache_creation_input_tokens) ?? 0,
+      cacheWrite1hTokens: clockNum(u.cache_creation?.ephemeral_1h_input_tokens) ?? 0,
       contextTokens: this.contextTokens,
       ok,
       steps,
