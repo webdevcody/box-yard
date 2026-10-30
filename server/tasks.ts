@@ -1184,8 +1184,8 @@ export class TaskManager {
 
   /**
    * Raise or lower a task's priority (set_task_priority, send_to_task's and create_task's `priority`). A high task's
-   * turns are pulled from the queue before every normal task's, here, on a box, a GPU pod or a Docker container; it
-   * never stops a running agent, and its project's limits still hold. It stays until changed.
+   * turns are pulled from the queue before every normal task's, here, on a box, a GPU pod, a Docker container or an
+   * SSH machine; it never stops a running agent, and its project's limits still hold. It stays until changed.
    */
   setTaskPriority(taskId: string, priority: TaskPriority, by: string): Task {
     const row = this.requireRow(taskId)

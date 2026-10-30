@@ -216,7 +216,7 @@ const iconSchema = z
 
 /** When a task's turns are pulled from the queue (shared/priority.ts). */
 const PRIORITY_HELP =
-  '"high" puts its turns at the front of the queue: when a slot frees up (Settings › Tasks running at once on this computer (localAgents), a box, a GPU pod or a Docker container), it goes before every normal task waiting, first in, first out among the high ones. ' +
+  '"high" puts its turns at the front of the queue: when a slot frees up (Settings › Tasks running at once on this computer (localAgents), a box, a GPU pod, a Docker container or an SSH machine), it goes before every normal task waiting, first in, first out among the high ones. ' +
   "Use it when Cody wants something to run before the work already queued, e.g. while the localAgents limit is full. It never stops a running agent, and its project's own limits (agents_per_box, whole_machine) still hold; a high task they hold back doesn't block other tasks. " +
   "It stays on the task (its follow-ups go first too) until set_task_priority lowers it."
 const prioritySchema = z.enum(TASK_PRIORITIES).optional()
