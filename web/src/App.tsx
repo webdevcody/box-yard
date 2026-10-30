@@ -32,6 +32,7 @@ import { BrandLogo } from "./components/BrandLogo"
 import { useZen, useZenHotkeys, useZenLanding } from "./lib/zen"
 import { closeZenPanel, zenAroundNav } from "./lib/zenPanel"
 import { ZenPanel } from "./components/ZenPanel"
+import { OPEN_COORDINATOR_EVENT } from "./lib/chatSwitch"
 
 export function App() {
   const me = useMe()
@@ -65,6 +66,12 @@ export function App() {
     setNavOpen(false)
     setChatOpen(false)
   }, [zen])
+
+  // A chat switcher picked the Coordinator: the drawer opens (docked or in Zen, it's already on screen).
+  useEffect(() => {
+    window.addEventListener(OPEN_COORDINATOR_EVENT, openChat)
+    return () => window.removeEventListener(OPEN_COORDINATOR_EVENT, openChat)
+  }, [openChat])
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })

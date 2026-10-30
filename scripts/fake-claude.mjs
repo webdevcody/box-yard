@@ -61,6 +61,39 @@ if (args.includes("--version")) {
   process.exit(0)
 }
 
+// The model list Box Yard's pickers ask for (server/claudeModels.ts): answer stream-json's `initialize` control
+// request like the real CLI. FAKE_CLAUDE_MODELS=<json array> replaces the rows; "fail" exits without answering.
+if (args.includes("--input-format") && flag("--input-format") === "stream-json") {
+  if (process.env.FAKE_CLAUDE_MODELS === "fail") process.exit(1)
+  const all = ["low", "medium", "high", "xhigh", "max"]
+  const models = process.env.FAKE_CLAUDE_MODELS
+    ? JSON.parse(process.env.FAKE_CLAUDE_MODELS)
+    : [
+        { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", supportsEffort: true, supportedEffortLevels: all },
+        { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", supportsEffort: true, supportedEffortLevels: all },
+        { value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable", supportsEffort: true, supportedEffortLevels: all },
+        { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: all },
+        { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku", supportsEffort: true, supportedEffortLevels: all },
+      ]
+  let buf = ""
+  process.stdin.setEncoding("utf8").on("data", (d) => {
+    buf += d
+    for (let nl; (nl = buf.indexOf("\n")) >= 0; buf = buf.slice(nl + 1)) {
+      let msg
+      try {
+        msg = JSON.parse(buf.slice(0, nl))
+      } catch {
+        continue
+      }
+      if (msg.type === "control_request" && msg.request?.subtype === "initialize") {
+        process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: msg.request_id, response: { commands: [], models } } }) + "\n")
+      }
+    }
+  })
+  process.stdin.on("end", () => process.exit(0))
+  await new Promise(() => {})
+}
+
 const partial = args.includes("--include-partial-messages")
 const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".fake-claude")
 const sessionsDir = path.join(configDir, "fake-sessions")

@@ -162,7 +162,7 @@ describe("Zen mode", () => {
     expect(ctx.querySelector("button[aria-label=Compact]")!.className).toContain("amber")
     // Container queries on the header, not the viewport: the reading is wide-only, the ⋯ button narrow-only.
     expect(ctx.className).toContain(WIDE_HEAD_ONLY)
-    const chip = header.querySelector<HTMLButtonElement>("button[aria-haspopup=menu]")!
+    const chip = header.querySelector<HTMLButtonElement>("[data-testid=context-menu-button]")!
     expect(chip.className).toContain(NARROW_HEAD_ONLY)
     expect(chip.className).toContain("amber")
     expect(chip.querySelector("[data-testid=context-mini]")).toBeNull()

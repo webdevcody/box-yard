@@ -27,7 +27,7 @@ import {
   X,
 } from "lucide-react"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { Modal } from "./Modal"
 import { MessageMenu, type MenuItem } from "./MessageActions"
 import { Button, LineIcon, Markdown, cx, inputClass } from "./ui"
@@ -263,6 +263,7 @@ function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: O
   const pane = useRef<HTMLDivElement>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const more = useRef<HTMLButtonElement>(null)
+  const list = useRef<StickyScrollHandle>(null)
   const [menu, setMenu] = useState(false)
   const busy = Boolean(thread?.busy)
   const reply = draft !== null || thread?.kind === "reply"
@@ -285,6 +286,7 @@ function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: O
   const submit = (text: string) => {
     const content = text.trim()
     if (!content) return
+    list.current?.scrollToEnd()
     if (!thread && draft) return start.mutateAsync({ id, messageId: newClientId("thm"), anchorId: draft.anchorId, quote: draft.text, question: content, kind: "reply" })
     return send.mutateAsync({ id: newClientId("thm"), content })
   }
@@ -374,7 +376,7 @@ function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: O
           )}
         </div>
       )}
-      <StickyScroll count={messages.length} resetKey={id} className={cx("px-3 py-3", open.expanded && "mx-auto w-full max-w-3xl")} contentClassName="space-y-3">
+      <StickyScroll handle={list} count={messages.length} resetKey={id} className={cx("px-3 py-3", open.expanded && "mx-auto w-full max-w-3xl")} contentClassName="space-y-3">
         {reply && (
           <div data-testid="side-thread-original" className="space-y-2.5">
             <div className="text-sm text-zinc-200">
