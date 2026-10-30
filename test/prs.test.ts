@@ -47,13 +47,13 @@ function fakeGithub() {
   }
 }
 
-function setup(opts: { token?: (projectId: string) => string | null; now?: () => number } = {}) {
+function setup(opts: { token?: (projectId: string) => string | null; now?: () => number; autoDone?: () => boolean } = {}) {
   const store = new Store(openDb(tmpDir()))
   const gh = fakeGithub()
   const changes: PrChange[] = []
   const logs: string[] = []
   const project = store.createProject({ name: "site" })
-  const tracker = new PrTracker({ store, token: opts.token ?? (() => "tok"), fetch: gh.fetch, now: opts.now, onChange: (c) => changes.push(c), log: (m) => logs.push(m) })
+  const tracker = new PrTracker({ store, token: opts.token ?? (() => "tok"), fetch: gh.fetch, now: opts.now, autoDone: opts.autoDone, onChange: (c) => changes.push(c), log: (m) => logs.push(m) })
   const task = (n: number, status: TaskStatus = "pr_ready", extra: Parameters<Store["updateTask"]>[1] = {}) => {
     const t = store.createTask({ projectId: project.id, title: `Task ${n}`, prompt: "p" })
     store.updateTask(t.id, { status, prUrl: `https://github.com/acme/site/pull/${n}`, ...extra }, { quiet: true })
@@ -109,6 +109,39 @@ describe("PR state tracking", () => {
     expect(store.getTask(working)).toMatchObject({ status: "working", prState: "merged" })
     expect(store.getTask(asking)).toMatchObject({ status: "needs_input", prState: "merged" })
     expect(store.getTask(finished)).toMatchObject({ status: "done", prState: "closed" })
+  })
+
+  it("a merge moves a resting idle task to done too, but never one whose turn is running or that waits on Cody", async () => {
+    const { store, gh, tracker, task, changes } = setup()
+    const idle = task(1, "idle", { prState: "open" })
+    const busyIdle = task(2, "idle", { prState: "open", currentTurnId: "turn_2" })
+    const waiting = task(3, "waiting", { prState: "open" })
+    const failed = task(4, "failed", { prState: "open" })
+    for (const n of [1, 2, 3, 4]) gh.prs.set(`acme/site#${n}`, { state: "MERGED" })
+    await tracker.pollAll()
+    expect([idle, busyIdle, waiting, failed].map((id) => store.getTask(id)!.status)).toEqual(["done", "idle", "waiting", "failed"])
+    expect(changes.find((c) => c.taskId === idle)).toMatchObject({ status: "done" })
+    expect(store.listNotifications().map((n) => n.taskId)).toEqual([idle])
+  })
+
+  it("with autoDoneOnMerge off, a merge leaves a pr_ready task idle and an idle one as it is", async () => {
+    let on = false
+    const { store, gh, tracker, task } = setup({ autoDone: () => on })
+    const ready = task(1, "pr_ready", { prState: "open" })
+    const idle = task(2, "idle", { prState: "open" })
+    for (const n of [1, 2]) gh.prs.set(`acme/site#${n}`, { state: "MERGED" })
+    await tracker.pollAll()
+    expect([ready, idle].map((id) => store.getTask(id))).toMatchObject([
+      { status: "idle", prState: "merged" },
+      { status: "idle", prState: "merged" },
+    ])
+    expect(store.listNotifications()).toHaveLength(0)
+    // Read at each change, not once.
+    on = true
+    const later = task(3, "pr_ready", { prState: "open" })
+    gh.prs.set("acme/site#3", { state: "MERGED" })
+    await tracker.pollAll()
+    expect(store.getTask(later)!.status).toBe("done")
   })
 
   it("draft PRs are tracked as draft and keep polling", async () => {
@@ -317,8 +350,10 @@ describe("PR state tracking", () => {
     await tracker.pollAll()
     expect(gh.calls[0]!.asked).toEqual(["acme/site#1", "acme/site#2", "acme/site#3"])
     expect([done, idle, failed].map((id) => store.getTask(id)!.prState)).toEqual(["merged", "merged", "merged"])
-    // Statuses other than pr_ready are left alone; the change still reaches the UI and hooks (onChange).
-    expect(store.getTask(idle)!.status).toBe("idle")
+    // A resting idle task moves to done (Settings' autoDoneOnMerge, on by default); failed is left alone. The change
+    // still reaches the UI and hooks (onChange).
+    expect(store.getTask(idle)!.status).toBe("done")
+    expect(store.getTask(failed)!.status).toBe("failed")
     expect(changes.map((c) => [c.taskId, c.prev, c.info.state])).toEqual([
       [done, "open", "merged"],
       [idle, "open", "merged"],

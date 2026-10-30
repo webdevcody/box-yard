@@ -42,7 +42,7 @@ import { formatTokens } from "./usage.js"
 import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
-import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { AUTO_DONE_FROM, PrTracker, prNumber, restingStatus, type PrChange } from "./prs.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
@@ -658,6 +658,7 @@ export class TaskManager {
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
+      autoDone: () => this.settings.get().autoDoneOnMerge,
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
@@ -714,6 +715,7 @@ export class TaskManager {
     }
     this.timers.push(setInterval(() => void this.poll(), this.c.pollMs))
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
+    this.doneMergedResting()
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
@@ -1274,6 +1276,28 @@ export class TaskManager {
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
     return this.store.getTask(row.id)!
+  }
+
+  /**
+   * Settings' autoDoneOnMerge: resting tasks (pr_ready or idle, no turn running) whose PR already merged move to done,
+   * as the PR tracker does for a merge it sees. Catches merges seen while the setting was off; runs at start and on
+   * every settings save. Returns how many moved.
+   */
+  doneMergedResting(): number {
+    if (!this.settings.get().autoDoneOnMerge) return 0
+    let moved = 0
+    for (const t of this.store.listTasks({ status: [...AUTO_DONE_FROM] })) {
+      if (t.prState !== "merged") continue
+      const row = this.store.getTaskRow(t.id)
+      if (!row || restingStatus(row, "merged", true) !== "done") continue
+      // Not new activity: an old task stays where "recent" lists had it.
+      this.store.updateTask(row.id, { status: "done" }, { quiet: true, touch: false })
+      this.addEvent(row.id, `Moved to done: its pull request #${prNumber(row.pr_url) ?? "?"} is merged (Settings › Done when its PR merges).`)
+      this.emitTask(row.id)
+      moved++
+    }
+    if (moved) this.publishDirectory()
+    return moved
   }
 
   /**
@@ -5924,7 +5948,8 @@ export class TaskManager {
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
-    else if (pr === "merged") status = "done"
+    // Settings' autoDoneOnMerge off: the task rests idle until it's marked done.
+    else if (pr === "merged" && this.settings.get().autoDoneOnMerge) status = "done"
     else if (openPr) status = "pr_ready"
     else status = "idle"
 

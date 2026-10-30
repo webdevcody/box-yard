@@ -574,6 +574,8 @@ export function createBoxYard(
     notes.checkAllBudgets()
     // Turning the notes retro on picks up what finished while it was off.
     retro.catchUp()
+    // Turning auto-done on moves the resting tasks whose PR merged while it was off.
+    tasks.doneMergedResting()
     return info
   }
   const saveRunpodSettings = (patch: unknown) => {
@@ -1465,6 +1467,7 @@ export function createBoxYard(
     applyPoolChange()
     notes.checkAllBudgets()
     retro.catchUp()
+    tasks.doneMergedResting()
     res.json(info)
   })
   api.post("/chat/stop", (_req, res) => {
