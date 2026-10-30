@@ -43,6 +43,14 @@ export function CollapsibleMarkdown({ children, className }: { children: string;
 }
 
 /**
+ * A collapsed tool line's parts, in the order they give way on a narrow row: the preview first (flex-1 from a zero
+ * basis, so it only ever takes the room that's left), then the target; the tool name never shrinks.
+ */
+const TOOL_NAME = "max-w-full shrink-0 truncate font-mono"
+const TOOL_TARGET = "min-w-0 truncate"
+const TOOL_PREVIEW = "min-w-0 flex-1 truncate"
+
+/**
  * A send_to_captain / ask_captain / wait_for_captain call: links that project's Captain tab and
  * expands on click to the message the Coordinator sent and, for ask/wait, what the Captain replied.
  */
@@ -70,16 +78,24 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
         className="-mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
       >
         <Wrench className="h-3 w-3 shrink-0" />
-        <span className="min-w-0 truncate font-mono">{m.content}</span>
+        <span data-testid="tool-name" className={TOOL_NAME}>
+          {m.content}
+        </span>
         <span className="shrink-0 text-zinc-600">·</span>
         {v.href ? (
-          <AppLink href={v.href} className="shrink-0 text-zinc-400 hover:text-zinc-200 hover:underline">
+          <AppLink href={v.href} className={cx(TOOL_TARGET, "text-zinc-400 hover:text-zinc-200 hover:underline")}>
             {v.project!.label} Captain
           </AppLink>
         ) : (
-          <span className="shrink-0">{projectRef ?? "project"} Captain</span>
+          <span data-testid="tool-target" className={TOOL_TARGET}>
+            {projectRef ?? "project"} Captain
+          </span>
         )}
-        {!open && v.message && <span className="min-w-0 truncate text-zinc-600">· {v.message.replace(/\s+/g, " ")}</span>}
+        {!open && v.message && (
+          <span data-testid="tool-preview" className={cx(TOOL_PREVIEW, "text-zinc-600")}>
+            · {v.message.replace(/\s+/g, " ")}
+          </span>
+        )}
         {pending && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-600" aria-label="Waiting for the Captain" />}
         <ChevronRight className={cx("ml-auto h-3.5 w-3.5 shrink-0 transition-transform", open && "rotate-90")} />
       </div>
@@ -124,9 +140,11 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 pl-1 text-xs text-zinc-500">
       <Wrench className="h-3 w-3 shrink-0" />
-      <span className="min-w-0 truncate font-mono">{m.content}</span>
+      <span data-testid="tool-name" className={TOOL_NAME}>
+        {m.content}
+      </span>
       {mentions.length > 0 && (
-        <span className="truncate text-zinc-600">
+        <span data-testid="tool-target" className={cx(TOOL_TARGET, "text-zinc-600")}>
           ·{" "}
           {mentions.map((t, i) => (
             <span key={i}>
@@ -142,7 +160,11 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
           ))}
         </span>
       )}
-      {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
+      {detail && (
+        <span data-testid="tool-target" className={cx(TOOL_TARGET, "text-zinc-600")}>
+          · {String(detail).slice(0, 60)}
+        </span>
+      )}
     </div>
   )
 })

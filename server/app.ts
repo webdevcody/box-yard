@@ -19,6 +19,7 @@ import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js
 import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
+import { MachineStats, type MachineReaders } from "./machineStats.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -305,6 +306,8 @@ export function createBoxYard(
     detect?: Pick<DetectOptions, "home" | "env">
     /** Stands in for fetch in connectors' OAuth requests (tests). */
     connectorFetch?: typeof globalThis.fetch
+    /** A made-up computer for machine_stats to read instead of this one (tests). */
+    machine?: MachineReaders
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -326,6 +329,8 @@ export function createBoxYard(
   })
   /** Reads this computer's gh, git and ssh for detect_identities and the gh:/file:/agent: references (server-side only). */
   const identityDetector = new IdentityDetector({ ...opts.detect, github: opts.github?.fetch })
+  /** This computer's memory, swap and load for machine_stats, sampled once a minute from start(). */
+  const machine = new MachineStats(opts.machine)
   /** Every credential value in effect: no transcript keeps one, and no error shows one. */
   const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues(), ...connectors.store.secretValues()]
   store.transcriptSecrets = secretValues
@@ -556,7 +561,7 @@ export function createBoxYard(
   app.all(
     "/mcp",
     mcpHandler(
-      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads, connectors: connectors.store },
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads, machine, connectors: connectors.store },
       mcpToken,
     ),
   )
@@ -1515,6 +1520,7 @@ export function createBoxYard(
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
       if (setup.onThisComputer()) await setup.refreshLocal()
       await tasks.start()
+      machine.start()
       scheduler.start()
       orchestrator.resumeScheduled()
       stopSnapshots = startSelfSnapshots(c, db)
@@ -1535,6 +1541,7 @@ export function createBoxYard(
       retro.stop()
       hooks.stop()
       scheduler.stop()
+      machine.stop()
       tasks.stop()
       captains.stop()
       orchestrator.stop()
