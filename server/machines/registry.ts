@@ -57,12 +57,13 @@ function parse<T>(s: string | null, fallback: T): T {
   }
 }
 
-/** A work folder: `~/…` or absolute, below the home or root (never the home itself), with no `..`. */
+/** A work folder: `~/…` or absolute, below the home or root (never the home itself), with no `.` or `..`. */
 export function checkDir(v: unknown): string {
-  const dir = typeof v === "string" ? v.trim().replace(/\/+$/, "") : ""
-  if (!dir) return DEFAULT_MACHINE_DIR
+  const typed = typeof v === "string" ? v.trim() : ""
+  if (!typed) return DEFAULT_MACHINE_DIR
+  const dir = typed.replace(/\/+$/, "")
   // Two levels at least: ~/boxyard or /srv/boxyard, never ~ or /srv itself.
-  if (!/^(~\/|\/)[\w./ -]+$/.test(dir) || dir.split("/").some((p) => p === "..") || dir.split("/").filter(Boolean).length < 2) {
+  if (!/^(~\/|\/)[\w./ -]+$/.test(dir) || dir.split("/").some((p) => p === ".." || p === ".") || dir.split("/").filter(Boolean).length < 2) {
     throw new BadRequestError(`The work folder must be a folder of its own, like ~/boxyard or /srv/boxyard (letters, digits, space, . _ - and /).`)
   }
   return dir
