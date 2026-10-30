@@ -692,6 +692,8 @@ export function useCreateProject() {
           partialClone: null,
           pushAtTurnEnd: null,
           depCache: null,
+          closeIssuesOnMerge: null,
+          autoDoneOnMerge: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
           machineLabel: input.machineLabel ?? null,
@@ -741,6 +743,9 @@ export function useUpdateProject() {
       notesMaxTokens?: number | null
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
+      /** When its PRs merge; null uses Settings › Coordinator's. */
+      closeIssuesOnMerge?: boolean | null
+      autoDoneOnMerge?: boolean | null
       runner?: Runner
       /** Runs on: SSH machine: the machines' label or name; null is any machine. */
       machineLabel?: string | null
@@ -1079,6 +1084,24 @@ export function useRequestMerge() {
       if (delivery === "queued") toast.info("Merge request queued", `${task.title} is mid-turn; the request goes out when that turn ends.`)
       else toast.info("Merge requested", task.title)
     },
+  })
+}
+
+/** Task options › Done when its PR merges: stayOpenOnMerge keeps a long-running task open when its PR merges. */
+export function useSetStayOpenOnMerge() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ taskId, stayOpen }: { taskId: string; stayOpen: boolean }) => api<Task>(`/api/tasks/${taskId}`, { method: "PATCH", body: { stayOpenOnMerge: stayOpen } }),
+    onMutate: ({ taskId, stayOpen }) => {
+      const undo = snapshot<Task[]>(qc, keys.tasks)
+      patchTask(qc, taskId, { stayOpenOnMerge: stayOpen })
+      return { undo }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      fail("Couldn't change the task's option")(err)
+    },
+    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
   })
 }
 

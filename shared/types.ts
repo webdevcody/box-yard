@@ -68,6 +68,10 @@ export interface Project {
   pushAtTurnEnd: boolean | null
   /** Restore and save node_modules through the box's dependency cache; null uses Settings → Dependency cache. */
   depCache: boolean | null
+  /** Close the issues a merged PR names (when it merged into another branch than the default); null uses Settings. */
+  closeIssuesOnMerge: boolean | null
+  /** A task whose PR merges moves to done (and its workspace is archived); null uses Settings. */
+  autoDoneOnMerge: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
   /** Runs on: SSH machine: the machines it runs on, by label or machine name (shared/machines.ts); null: any machine. */
@@ -258,6 +262,8 @@ export interface Task {
   batchId?: string | null
   /** "high": its next turn goes before every normal task waiting for a slot (shared/priority.ts). Sticky until changed. */
   priority?: TaskPriority
+  /** Never moved to done when its PR merges (a long-running task), whatever Settings and its project say. */
+  stayOpenOnMerge?: boolean
   /** When it last joined the queue (a new task, a message): FIFO within a priority (queueOrder). */
   lastActiveAt?: number
   createdAt: number
@@ -783,6 +789,11 @@ export interface Settings {
    * merged PR leaves the task idle until it's marked done.
    */
   autoDoneOnMerge: boolean
+  /**
+   * When a task's PR merges into a branch other than the repo's default (GitHub only closes "Fixes #N" issues on the
+   * default branch), Box Yard closes the same-repo issues its title and body name with a closing keyword.
+   */
+  closeIssuesOnMerge: boolean
   /** The CLI the Coordinator runs on (shared/agentCli.ts): Claude Code unless set to Codex. */
   orchestratorCli: AgentCli
   orchestratorModel: string

@@ -33,6 +33,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "notesMaxTokens",
       "cardsIdleHours",
       "autoDoneOnMerge",
+      "closeIssuesOnMerge",
     ],
   },
   {

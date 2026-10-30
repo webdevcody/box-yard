@@ -43,6 +43,7 @@ import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
 import { AUTO_DONE_FROM, PrTracker, prNumber, restingStatus, type PrChange } from "./prs.js"
+import { GithubRest, IssueCloser, restPrState } from "./mergeFollowUp.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
@@ -532,6 +533,8 @@ export class TaskManager {
   private readonly settings: SettingsStore
   /** Polls GitHub for the state of every open PR. */
   readonly prs: PrTracker
+  /** Closes the issues a merged PR names (server/mergeFollowUp.ts). */
+  readonly issues: IssueCloser
   /** When this computer slept: local-runner turns and starts that sleep broke resume instead of failing (#104). */
   readonly sleep: SleepWatch
 
@@ -645,6 +648,10 @@ export class TaskManager {
   private smallBoxNoted = new Set<string>()
   /** The GitHub account behind each token, as a turn's author (null: mock mode with no fake GitHub). */
   private readonly githubAuthors: GithubAuthors | null
+  /** GitHub's fetch (the seam), or null in mock mode with no fake GitHub. */
+  private readonly githubFetch: typeof fetch | null
+  /** The token Box Yard itself asks GitHub with about a project's PRs and issues (null: mock mode, or none). */
+  private readonly githubTokenFor: (projectId: string) => string | null
   private readonly hostGit: () => Promise<HostGit | null>
   /** Tests: the token a fake GitHub gets when a turn has none of its own. */
   private readonly githubTokenSeam: ((projectId: string) => string | null) | undefined
@@ -713,15 +720,28 @@ export class TaskManager {
     this.reader = new EventReader(deps.provider, deps.redis)
     this.sleep = new SleepWatch()
     const githubFetch = deps.github?.fetch ?? (this.c.mock ? null : fetch)
+    this.githubFetch = githubFetch
     this.githubAuthors = githubFetch ? new GithubAuthors(githubFetch) : null
     this.hostGit = deps.hostGit ?? (() => readHostGit())
     this.githubTokenSeam = deps.github?.token
+    this.githubTokenFor = deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null))
     this.prs = new PrTracker({
       store: deps.store,
-      token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
+      token: this.githubTokenFor,
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
-      autoDone: () => this.settings.get().autoDoneOnMerge,
+      autoDone: (row) => this.autoDoneOnMerge(row) && !this.mergeDoneBlocker(row),
+      log: (msg) => console.warn(msg),
+    })
+    this.issues = new IssueCloser({
+      store: deps.store,
+      fetch: githubFetch,
+      token: this.githubTokenFor,
+      enabled: (projectId) => this.closeIssuesOnMerge(projectId),
+      event: (taskId, text) => {
+        this.addEvent(taskId, text, { kind: "issues_closed" })
+        this.emitTask(taskId)
+      },
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
@@ -782,6 +802,8 @@ export class TaskManager {
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
+    // Merges whose issues were still being closed when Box Yard stopped.
+    void this.issues.run()
     this.sleep.start(5_000, (gap) => {
       console.log(`[box-yard] this computer slept for ${Math.round(gap.ms / 1000)}s`)
       // PRs may have been merged meanwhile, and requests that failed while asleep backed the tracker off.
@@ -1398,25 +1420,125 @@ export class TaskManager {
   }
 
   /**
-   * Settings' autoDoneOnMerge: resting tasks (pr_ready or idle, no turn running) whose PR already merged move to done,
-   * as the PR tracker does for a merge it sees. Catches merges seen while the setting was off; runs at start and on
-   * every settings save. Returns how many moved.
+   * Done when its PR merges (autoDoneOnMerge): resting tasks (pr_ready or idle, no turn running) whose PR already
+   * merged move to done and their workspaces are archived, as the PR tracker does for a merge it sees. Catches merges
+   * seen while it was off (Settings, or the project's own); runs at start and on every settings or project save.
+   * A task with queued messages, its own opt-out or another PR that may still be open is left as it is (the other PRs
+   * are asked about, quietly). Returns how many moved.
    */
   doneMergedResting(): number {
-    if (!this.settings.get().autoDoneOnMerge) return 0
     let moved = 0
     for (const t of this.store.listTasks({ status: [...AUTO_DONE_FROM] })) {
       if (t.prState !== "merged") continue
       const row = this.store.getTaskRow(t.id)
-      if (!row || restingStatus(row, "merged", true) !== "done") continue
+      if (!row || restingStatus(row, "merged", true) !== "done" || !this.autoDoneOnMerge(row)) continue
+      const blocker = this.mergeDoneBlocker(row)
+      if (blocker === "other_prs") void this.doneIfOtherPrsSettled(row.id, false)
+      if (blocker) continue
       // Not new activity: an old task stays where "recent" lists had it.
       this.store.updateTask(row.id, { status: "done" }, { quiet: true, touch: false })
-      this.addEvent(row.id, `Moved to done: its pull request #${prNumber(row.pr_url) ?? "?"} is merged (Settings › Done when its PR merges).`)
-      this.emitTask(row.id)
+      this.mergedDone(row.id)
       moved++
     }
     if (moved) this.publishDirectory()
     return moved
+  }
+
+  /** Done when its PR merges, for this task: never with its own opt-out, else its project's setting, else Settings'. */
+  autoDoneOnMerge(row: Pick<TaskRow, "project_id" | "stay_open_on_merge">): boolean {
+    if (row.stay_open_on_merge === 1) return false
+    return this.store.getProject(row.project_id)?.autoDoneOnMerge ?? this.settings.get().autoDoneOnMerge
+  }
+
+  /** Close the issues a merged PR names, for this project: its own setting, else Settings'. */
+  closeIssuesOnMerge(projectId: string): boolean {
+    return this.store.getProject(projectId)?.closeIssuesOnMerge ?? this.settings.get().closeIssuesOnMerge
+  }
+
+  /** Where the auto-done setting that applies to a task lives, for its events. */
+  private autoDoneSource(row: Pick<TaskRow, "project_id">): string {
+    return this.store.getProject(row.project_id)?.autoDoneOnMerge != null ? "the project's settings" : "Settings"
+  }
+
+  /**
+   * Why a merged PR doesn't move this resting task to done now, or null when it does: Cody (or an agent) queued it a
+   * message, or it opened another PR that may still be open ("other_prs": doneIfOtherPrsSettled asks GitHub).
+   */
+  private mergeDoneBlocker(row: TaskRow): "queued" | "other_prs" | null {
+    if (this.store.hasInputs(row.id)) return "queued"
+    if (this.store.taskPrUrls(row.id).some((u) => u !== row.pr_url)) return "other_prs"
+    return null
+  }
+
+  /** A task moved to done because its PR merged: say so, and archive its workspace and free its box slot, as close_task does. */
+  private mergedDone(taskId: string) {
+    const row = this.store.getTaskRow(taskId)
+    if (!row) return
+    const where = isLocalRunnerBox(row.box_id) ? "" : " Its workspace is archived and its box slot freed."
+    this.addEvent(row.id, `Moved to done: its pull request #${prNumber(row.pr_url) ?? "?"} is merged (${this.autoDoneSource(row)} › Done when its PR merges).${where}`, { kind: "auto_done" })
+    this.emitTask(row.id)
+    void this.evictWhenSettled(row.id)
+  }
+
+  /**
+   * The task's PR merged but it opened other PRs too: ask GitHub about them, and move it to done only when none is
+   * still open. `announce`: say on the task why it stays (a merge seen live), not on every catch-up.
+   */
+  private async doneIfOtherPrsSettled(taskId: string, announce: boolean): Promise<void> {
+    const first = this.store.getTaskRow(taskId)
+    if (!first?.pr_url) return
+    const others = this.store.taskPrUrls(taskId).filter((u) => u !== first.pr_url)
+    const token = this.githubTokenFor(first.project_id)
+    const open: string[] = []
+    let unknown: string | null = null
+    if (!this.githubFetch || !token) unknown = "this project has no GitHub token"
+    else {
+      const gh = new GithubRest(this.githubFetch, token)
+      for (const url of others) {
+        try {
+          if ((await restPrState(gh, url)) === "open") open.push(url)
+        } catch (err) {
+          unknown = errorMessage(err)
+          break
+        }
+      }
+    }
+    if (this.stopped) return
+    const row = this.store.getTaskRow(taskId)
+    // Anything moved meanwhile (a message, a new turn, another PR, the setting): leave it.
+    if (!row || row.pr_url !== first.pr_url || row.pr_state !== "merged" || restingStatus(row, "merged", true) !== "done" || !this.autoDoneOnMerge(row)) return
+    if (this.store.hasInputs(row.id)) return
+    const n = prNumber(row.pr_url) ?? "?"
+    if (open.length || unknown) {
+      if (announce)
+        this.addEvent(
+          row.id,
+          open.length
+            ? `Not moved to done, though PR #${n} merged: it also opened ${open.map((u) => `PR #${prNumber(u) ?? "?"}`).join(", ")}, still open.`
+            : `Not moved to done, though PR #${n} merged: it also opened other PRs, and Box Yard couldn't check them (${unknown}).`,
+          { kind: "auto_done_skipped" },
+        )
+      return this.emitTask(row.id)
+    }
+    this.store.updateTask(row.id, { status: "done" }, { quiet: true, touch: !announce ? false : undefined })
+    this.mergedDone(row.id)
+    this.publishDirectory()
+  }
+
+  /** Task options: keep this task open when its PR merges (a long-running runner), or let the settings decide again. */
+  setStayOpenOnMerge(taskId: string, stayOpen: boolean, by: string): Task {
+    const row = this.requireRow(taskId)
+    if ((row.stay_open_on_merge === 1) === stayOpen) return this.store.getTask(row.id)!
+    this.store.updateTask(row.id, { stayOpenOnMerge: stayOpen }, { touch: false })
+    this.addEvent(
+      row.id,
+      stayOpen
+        ? `Stays open when its PR merges (set by ${by}): Box Yard won't move it to done.`
+        : `Done when its PR merges again (set by ${by}): ${this.autoDoneOnMerge({ ...row, stay_open_on_merge: 0 }) ? "a merged PR moves it to done" : "but its project's settings or Settings have that off"}.`,
+    )
+    this.emitTask(row.id)
+    if (!stayOpen) this.doneMergedResting()
+    return this.store.getTask(row.id)!
   }
 
   /**
@@ -6252,13 +6374,33 @@ export class TaskManager {
     if (info.state !== "open") this.settleMergeRequest(taskId, "pr")
     this.emitTask(taskId)
     if (status) this.publishDirectory()
-    // Hooks: a merge seen live (not the startup backfill of an old PR), or a resting task's draft marked ready.
+    // A merge seen live (not the startup backfill of an old PR): its follow-ups, then the pr.merged hooks.
+    const live = info.state === "merged" && (prev === "open" || prev === "draft")
+    if (live) this.followUpMerge(row, status)
+    // Hooks: a merge seen live, or a resting task's draft marked ready.
     const flags = this.store.turnFlags(row)
     const originHookIds = (row.current_turn_id ? flags.hookIds : flags.lastHookIds) ?? []
-    if (info.state === "merged" && (prev === "open" || prev === "draft")) {
+    if (live) {
       this.emitTaskEvent({ type: "pr.merged", taskId, turnId: row.current_turn_id, originHookIds })
     } else if (prev === "draft" && info.state === "open" && ["pr_ready", "done", "idle"].includes(row.status) && !row.current_turn_id) {
       this.emitTaskEvent({ type: "task.pr_ready", taskId, turnId: null, originHookIds })
+    }
+  }
+
+  /**
+   * A task's PR merged (seen live): close the issues it names (Close the issues it names), and when the tracker moved
+   * the resting task to done (Done when its PR merges), archive it as close_task does; when it didn't, say why.
+   * A merge seen during a turn is settled when the turn ends (finishTurn).
+   */
+  private followUpMerge(row: TaskRow, status: TaskStatus | null) {
+    if (row.pr_url && this.closeIssuesOnMerge(row.project_id)) this.issues.queue(row.id, row.pr_url)
+    if (status === "done") return this.mergedDone(row.id)
+    if (row.current_turn_id || !AUTO_DONE_FROM.includes(row.status) || !this.autoDoneOnMerge(row)) return
+    const blocker = this.mergeDoneBlocker(row)
+    if (blocker === "other_prs") void this.doneIfOtherPrsSettled(row.id, true)
+    else if (blocker === "queued") {
+      this.addEvent(row.id, `Not moved to done, though PR #${prNumber(row.pr_url) ?? "?"} merged: it has queued messages to answer first.`, { kind: "auto_done_skipped" })
+      this.emitTask(row.id)
     }
   }
 
@@ -6288,6 +6430,7 @@ export class TaskManager {
     // (The tracker already wrote "Pull request ... was merged" to the transcript when it saw the change.)
     const openPr = Boolean(row.pr_url) && !isFinalPrState(pr)
     let status: TaskStatus
+    let mergedDone = false
     let error: string | null = null
     if (stopped) status = openPr ? "pr_ready" : "idle"
     else if (!ev.ok) {
@@ -6297,10 +6440,14 @@ export class TaskManager {
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
-    // Settings' autoDoneOnMerge off: the task rests idle until it's marked done.
-    else if (pr === "merged" && this.settings.get().autoDoneOnMerge) status = "done"
-    else if (openPr) status = "pr_ready"
+    // Done when its PR merges off (or this task stays open): the task rests idle until it's marked done. Queued
+    // messages or another PR that may still be open keep it idle too (the PR is asked about once the turn has ended).
+    else if (pr === "merged" && this.autoDoneOnMerge(row) && !this.mergeDoneBlocker(row)) {
+      status = "done"
+      mergedDone = true
+    } else if (openPr) status = "pr_ready"
     else status = "idle"
+    const askOtherPrs = pr === "merged" && status === "idle" && this.autoDoneOnMerge(row) && this.mergeDoneBlocker(row) === "other_prs"
 
     const result = typeof ev.result === "string" ? ev.result : null
     const noopIgnored = flags.noop && !stopped ? noopBlockers(this.runEvidence(row, flags, status)) : []
@@ -6348,6 +6495,9 @@ export class TaskManager {
 
     this.emitTask(row.id)
     this.publishDirectory()
+    // Done when its PR merges: archived and its box slot freed, as close_task does.
+    if (mergedDone) this.mergedDone(row.id)
+    else if (askOtherPrs) void this.doneIfOtherPrsSettled(row.id, true)
     void this.archive(row.id).finally(() => this.schedule())
     this.schedule()
   }
@@ -7391,6 +7541,8 @@ export class TaskManager {
     if (this.stopped) return
     const now = Date.now()
     this.meterBoxes(now)
+    // Issue closes that failed for now (network, rate limit) and are due again.
+    void this.issues.run()
     this.meter.keepOnly(new Set(this.store.listTaskRows({ status: ["working", "starting"] }).flatMap((r) => (r.current_turn_id ? [r.current_turn_id] : []))))
     for (const box of this.store.listBoxes()) {
       void this.refreshBoxUsage(box.id)

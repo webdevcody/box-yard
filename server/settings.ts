@@ -64,6 +64,8 @@ export const DEFAULT_SETTINGS: Settings = {
   cardsIdleHours: CARDS_IDLE_HOURS.default,
   // On, as before this setting: a merged PR already moved a pr_ready task to done; this adds idle ones.
   autoDoneOnMerge: true,
+  // On: Map 4's PRs merge into an epic branch, where GitHub doesn't close "Fixes #N" issues itself.
+  closeIssuesOnMerge: true,
   orchestratorCli: DEFAULT_AGENT_CLI,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorCodexModel: "",
@@ -204,6 +206,7 @@ export const settingsPatch = z
     showCloudMeter: z.boolean(),
     cardsIdleHours: z.number().min(CARDS_IDLE_HOURS.min).max(CARDS_IDLE_HOURS.max),
     autoDoneOnMerge: z.boolean(),
+    closeIssuesOnMerge: z.boolean(),
     orchestratorCli: z.enum(AGENT_CLIS),
     orchestratorModel: model,
     orchestratorCodexModel: codexModelSetting,

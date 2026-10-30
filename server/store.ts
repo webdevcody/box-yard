@@ -213,6 +213,8 @@ export interface TaskRow {
   batch_id?: string | null
   /** 'high' jumps the queue (shared/priority.ts); null (and old rows) are normal. */
   priority?: string | null
+  /** 1: never moved to done when its PR merges (server/mergeFollowUp.ts). */
+  stay_open_on_merge?: number
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -352,6 +354,8 @@ interface ProjectRow {
   partial_clone: number | null
   push_at_turn_end: number | null
   dep_cache?: number | null
+  close_issues_on_merge?: number | null
+  auto_done_on_merge?: number | null
   runner?: string | null
   machine_label?: string | null
   heavy_tasks: string | null
@@ -527,6 +531,7 @@ type TaskPatch = Partial<{
   pushState: PushState | null
   placedHow: BoxPick | null
   priority: TaskPriority
+  stayOpenOnMerge: boolean
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -574,6 +579,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   pushState: "push_state_json",
   placedHow: "placed_how",
   priority: "priority",
+  stayOpenOnMerge: "stay_open_on_merge",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -830,6 +836,8 @@ export class Store {
       partialClone: row.partial_clone === null || row.partial_clone === undefined ? null : row.partial_clone === 1,
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
+      closeIssuesOnMerge: row.close_issues_on_merge === null || row.close_issues_on_merge === undefined ? null : row.close_issues_on_merge === 1,
+      autoDoneOnMerge: row.auto_done_on_merge === null || row.auto_done_on_merge === undefined ? null : row.auto_done_on_merge === 1,
       runner: normalizeRunner(row.runner),
       machineLabel: row.machine_label || null,
       agentCli: isAgentCli(row.agent_cli) ? row.agent_cli : null,
@@ -942,6 +950,8 @@ export class Store {
     partialClone?: boolean | null
     pushAtTurnEnd?: boolean | null
     depCache?: boolean | null
+    closeIssuesOnMerge?: boolean | null
+    autoDoneOnMerge?: boolean | null
     runner?: Runner
     /** Runs on: SSH machine: the machines' label or name (Project.machineLabel). */
     machineLabel?: string | null
@@ -981,6 +991,7 @@ export class Store {
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
+    this.setProjectMergeFollowUp(id, input)
     this.setRunner(id, input.runner, input.machineLabel)
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
@@ -1013,6 +1024,10 @@ export class Store {
       pushAtTurnEnd?: boolean | null
       /** null clears it (Settings → Dependency cache applies). */
       depCache?: boolean | null
+      /** null clears it (Settings › Close the issues it names applies). */
+      closeIssuesOnMerge?: boolean | null
+      /** null clears it (Settings › Done when its PR merges applies). */
+      autoDoneOnMerge?: boolean | null
       /** Where its agents run: Upstash boxes or this computer (shared/runner.ts). */
       runner?: Runner
       /** Runs on: SSH machine: the machines' label or name; null: any machine. Cleared when it runs elsewhere. */
@@ -1070,10 +1085,18 @@ export class Store {
     this.setRunner(id, patch.runner, patch.machineLabel)
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
+    this.setProjectMergeFollowUp(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
     if (patch.agentCli !== undefined) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(patch.agentCli, id)
     if (patch.color !== undefined) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(patch.color, id)
     return this.getProject(id)!
+  }
+
+  /** What a merged PR does in this project (server/mergeFollowUp.ts); undefined leaves a value as it is, null clears it (Settings applies). */
+  private setProjectMergeFollowUp(id: string, m: { closeIssuesOnMerge?: boolean | null; autoDoneOnMerge?: boolean | null }) {
+    const bit = (v: boolean | null) => (v === null ? null : v ? 1 : 0)
+    if (m.closeIssuesOnMerge !== undefined) this.db.prepare("UPDATE projects SET close_issues_on_merge = ? WHERE id = ?").run(bit(m.closeIssuesOnMerge), id)
+    if (m.autoDoneOnMerge !== undefined) this.db.prepare("UPDATE projects SET auto_done_on_merge = ? WHERE id = ?").run(bit(m.autoDoneOnMerge), id)
   }
 
   /** The box snapshot new boxes for the project start from; null clears it (they start cold). */
@@ -1320,6 +1343,7 @@ export class Store {
       icon: isTaskIcon(row.icon) ? row.icon : null,
       batchId: row.batch_id ?? null,
       priority: parsePriority(row.priority),
+      stayOpenOnMerge: row.stay_open_on_merge === 1,
       lastActiveAt: row.last_active_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1417,6 +1441,42 @@ export class Store {
     return ids ? rows.filter((r) => ids.includes(r.id)) : rows
   }
 
+  /** Every pull request a task opened (its "Opened pull request" events), oldest first; its current one included. */
+  taskPrUrls(taskId: string): string[] {
+    const rows = this.db
+      .prepare(
+        "SELECT DISTINCT json_extract(meta_json, '$.url') AS url FROM task_messages WHERE task_id = ? AND role = 'event' AND json_extract(meta_json, '$.kind') = 'pr' ORDER BY created_at ASC",
+      )
+      .all(taskId) as { url: unknown }[]
+    return rows.map((r) => r.url).filter((u): u is string => typeof u === "string" && u.length > 0)
+  }
+
+  /** A merged PR whose named issues are still to be closed (server/mergeFollowUp.ts). Queuing one twice keeps the first. */
+  queueIssueClose(prUrl: string, taskId: string) {
+    this.db.prepare("INSERT OR IGNORE INTO pr_issue_closes (pr_url, task_id, created_at) VALUES (?, ?, ?)").run(prUrl, taskId, Date.now())
+  }
+
+  /** The queued issue closes due by `now`, oldest first. */
+  dueIssueCloses(now = Date.now()): { prUrl: string; taskId: string; attempts: number }[] {
+    return (
+      this.db.prepare("SELECT pr_url, task_id, attempts FROM pr_issue_closes WHERE retry_at <= ? ORDER BY created_at ASC").all(now) as {
+        pr_url: string
+        task_id: string
+        attempts: number
+      }[]
+    ).map((r) => ({ prUrl: r.pr_url, taskId: r.task_id, attempts: r.attempts }))
+  }
+
+  /** A try that failed for now: try again at `retryAt`. */
+  retryIssueClose(prUrl: string, retryAt: number) {
+    this.db.prepare("UPDATE pr_issue_closes SET attempts = attempts + 1, retry_at = ? WHERE pr_url = ?").run(retryAt, prUrl)
+  }
+
+  /** Handled (or given up on): it leaves the queue. */
+  finishIssueClose(prUrl: string) {
+    this.db.prepare("DELETE FROM pr_issue_closes WHERE pr_url = ?").run(prUrl)
+  }
+
   createTask(input: {
     id?: string
     projectId: string
@@ -1443,6 +1503,8 @@ export class Store {
     batchId?: string | null
     /** "high" jumps the queue (shared/priority.ts); omitted is normal. */
     priority?: TaskPriority | null
+    /** Never moved to done when its PR merges (TaskRow.stay_open_on_merge). */
+    stayOpenOnMerge?: boolean
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1476,6 +1538,7 @@ export class Store {
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     if (input.priority === "high") this.db.prepare("UPDATE tasks SET priority = 'high' WHERE id = ?").run(id)
+    if (input.stayOpenOnMerge) this.db.prepare("UPDATE tasks SET stay_open_on_merge = 1 WHERE id = ?").run(id)
     return this.getTask(id)!
   }
 
@@ -1579,7 +1642,7 @@ export class Store {
       if (key === "previews" || key === "turnFlags" || key === "prLabels") args.push(JSON.stringify(value))
       else if (key === "waitFor") args.push((value as WaitFor[]).length ? JSON.stringify(value) : null)
       else if (key === "mergeRequest" || key === "pushState") args.push(value === null ? null : JSON.stringify(value))
-      else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
+      else if (key === "sessionStarted" || key === "compactPending" || key === "compacting" || key === "stayOpenOnMerge") args.push(value ? 1 : 0)
       else if (key === "priority") args.push(value === "high" ? "high" : null)
       else args.push(value)
     }

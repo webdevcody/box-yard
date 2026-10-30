@@ -93,8 +93,11 @@ export interface PrTrackerDeps {
   intervalMs?: number
   /** After a task's PR state changed (and maybe its status); the task is already saved. */
   onChange?: (change: PrChange) => void
-  /** Settings › Coordinator › Done when its PR merges (default on, as when it wasn't a setting). */
-  autoDone?: () => boolean
+  /**
+   * Whether a merge moves this resting task to done (Done when its PR merges: Settings, its project's, its own opt-out,
+   * and nothing queued for it). Default on, as when it wasn't a setting.
+   */
+  autoDone?: (row: TaskRow) => boolean
   log?: (message: string) => void
 }
 
@@ -469,7 +472,7 @@ fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } headRefOi
       this.store.updateTask(row.id, { prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}) }, { quiet: true, touch: false })
       return
     }
-    const status = restingStatus(row, info.state, this.deps.autoDone?.() ?? true)
+    const status = restingStatus(row, info.state, info.state === "merged" ? (this.deps.autoDone?.(row) ?? true) : true)
     const task = this.store.updateTask(
       row.id,
       { prState: info.state, prMergedAt: info.mergedAt, prMergedBy: info.mergedBy, prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}), ...(status ? { status } : {}) },

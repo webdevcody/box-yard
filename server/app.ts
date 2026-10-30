@@ -160,6 +160,9 @@ const schemas = {
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
+    /** When its PRs merge (server/mergeFollowUp.ts); null: Settings › Coordinator's. */
+    closeIssuesOnMerge: z.boolean().nullable().optional(),
+    autoDoneOnMerge: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     /** Runs on: SSH machine: the machines' label or name (null: any machine). Ignored on another runner. */
     machineLabel: machineLabelSchema,
@@ -183,6 +186,9 @@ const schemas = {
     partialClone: z.boolean().nullable().optional(),
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
+    /** When its PRs merge (server/mergeFollowUp.ts); null: Settings › Coordinator's. */
+    closeIssuesOnMerge: z.boolean().nullable().optional(),
+    autoDoneOnMerge: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     /** Runs on: SSH machine: the machines' label or name (null: any machine). Ignored on another runner. */
     machineLabel: machineLabelSchema,
@@ -195,6 +201,7 @@ const schemas = {
     ...projectNotesBudget,
   }),
   note: z.object({ content: z.string().trim().min(1).max(MAX_NOTE_CHARS) }),
+  taskPatch: z.object({ stayOpenOnMerge: z.boolean() }).strict(),
   task: z.object({
     id: idSchema,
     projectId: z.string().min(1),
@@ -826,6 +833,8 @@ export function createBoxYard(
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
     if (body.runner || [body.machineLabel, body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.gpuProvider, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
     if (body.identityId !== undefined && body.identityId !== before?.identityId) hub.broadcast({ type: "identities", identities: identities.list() })
+    // Done when its PR merges, turned on here: its resting tasks whose PR merged meanwhile move to done.
+    if (body.autoDoneOnMerge !== undefined) tasks.doneMergedResting()
     res.json(project)
   })
 
@@ -1127,6 +1136,11 @@ export function createBoxYard(
   })
   api.post("/tasks/:id/stop", async (req, res) => {
     res.json(await tasks.stopTask(req.params.id!))
+  })
+  // Task options: stayOpenOnMerge keeps a long-running task open when its PR merges.
+  api.patch("/tasks/:id", (req, res) => {
+    const body = parse(schemas.taskPatch, req.body)
+    res.json(tasks.setStayOpenOnMerge(req.params.id!, body.stayOpenOnMerge, ownerEditor().by))
   })
   api.post("/tasks/:id/close", async (req, res) => {
     res.json(await tasks.closeTask(req.params.id!))
