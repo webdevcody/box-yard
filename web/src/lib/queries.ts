@@ -14,8 +14,10 @@ import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type Iden
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
+import type { VastGpuOption, VastStatus } from "../../../shared/vast"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
+import type { AgentCli } from "../../../shared/agentCli"
 import type { ProjectColor } from "../../../shared/projectColors"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -92,6 +94,8 @@ export const keys = {
   setup: ["setup"] as const,
   runpod: ["runpod"] as const,
   runpodGpus: ["runpod-gpus"] as const,
+  vast: ["vast"] as const,
+  vastGpus: ["vast-gpus"] as const,
   docker: ["docker"] as const,
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
@@ -505,6 +509,24 @@ export function useRunPodAction<T>(title: string, call: (input: T) => Promise<Ru
   })
 }
 
+// ------------------------------------------------------------------ Vast.ai GPU (Settings › Vast.ai GPU)
+
+/** Settings, instances and the account's credit. Polled while open: instances change at Vast.ai, not here. */
+export const useVast = (o: { enabled?: boolean; poll?: boolean } = {}) =>
+  useQuery({ queryKey: keys.vast, queryFn: () => api<VastStatus>("/api/vast"), enabled: o.enabled, refetchInterval: o.poll ? 15_000 : false, staleTime: 5_000 })
+/** GPU types with offers on Vast.ai's marketplace now (under the global filters), cheapest first. Each call is one search of Vast's daily quota, so it's kept a while. */
+export const useVastGpus = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.vastGpus, queryFn: () => api<VastGpuOption[]>("/api/vast/gpus"), enabled: o.enabled, staleTime: 5 * 60_000, retry: false })
+/** A Vast.ai action: save settings, keep an instance warm. */
+export function useVastAction<T>(title: string, call: (input: T) => Promise<VastStatus>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => qc.setQueryData(keys.vast, r),
+    onError: fail(title),
+  })
+}
+
 // ------------------------------------------------------------------ Docker (Settings › Docker)
 
 /** Docker on this computer, the settings, the image and its build, and Box Yard's containers. Polled while open: containers change in Docker, not here. */
@@ -604,7 +626,7 @@ export function useToggleHook(scope: string) {
 export function useCreateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner }) =>
+    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner; agentCli?: AgentCli | null }) =>
       api<Project>("/api/projects", { body: input }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -627,12 +649,14 @@ export function useCreateProject() {
           depCache: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
+          agentCli: input.agentCli ?? null,
           agentsPerBox: null,
           wholeMachine: false,
           tasksPerBox: null,
           maxBoxes: null,
           gpuMaxHourlyUsd: null,
           gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
+          gpuProvider: null,
           docker: { image: null, dockerfile: null },
           identityId: DEFAULT_IDENTITY_ID,
           snapshot: null,
@@ -672,6 +696,8 @@ export function useUpdateProject() {
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
       runner?: Runner
+      /** Claude Code or Codex for its new tasks; null uses Settings › Box agents. */
+      agentCli?: AgentCli | null
       agentsPerBox?: number | null
       wholeMachine?: boolean
       tasksPerBox?: number | null
@@ -837,6 +863,8 @@ export function useCreateTask() {
       attachments?: string[]
       /** Run on this computer (or a box) over the project's "Runs on". */
       runsOn?: Runner
+      /** Run on Claude Code or Codex over the project's Agent. */
+      agentCli?: AgentCli
     }) =>
       api<Task>("/api/tasks", { body: input }),
     onMutate: async (input) => {
@@ -873,6 +901,8 @@ export function useCreateTask() {
           contextWindow: null,
           compactPending: false,
           compacting: false,
+          // The server settles it (the project's Agent, else Settings); this is only the card until it answers.
+          agentCli: input.agentCli ?? qc.getQueryData<Project[]>(keys.projects)?.find((p) => p.id === input.projectId)?.agentCli ?? "claude",
           model: null,
           effort: null,
           claudeCostUsd: 0,
@@ -1203,6 +1233,7 @@ export function useDeleteBox() {
       void qc.invalidateQueries({ queryKey: keys.boxes })
       void qc.invalidateQueries({ queryKey: keys.tasks })
       void qc.invalidateQueries({ queryKey: keys.runpod })
+      void qc.invalidateQueries({ queryKey: keys.vast })
       void qc.invalidateQueries({ queryKey: keys.docker })
     },
   })

@@ -7,7 +7,7 @@ import { z } from "zod"
 import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
-import { Store, BadRequestError, ConflictError, NotFoundError } from "./store.js"
+import { Store, BadRequestError, ConflictError, NotFoundError, taskAgentCli } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
@@ -45,9 +45,12 @@ import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../sh
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import { AGENT_CLIS } from "../shared/agentCli.js"
+import { hasOwnCodexLogin } from "./chatAgent.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
+import { VastService } from "./vast/service.js"
 import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
 import { assignChecked, detectFor, importDetected, importInput, runningTask, testRepos } from "./identity/setup.js"
@@ -56,6 +59,7 @@ import { ConnectorService } from "./connectors/service.js"
 import { ConnectorSignIns } from "./connectors/oauth.js"
 import { OAUTH_CALLBACK_PATH } from "../shared/connectors.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
+import { GPU_PROVIDERS, gpuBoxProvider } from "../shared/gpu.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
@@ -83,6 +87,7 @@ const projectBoxLimits = {
   maxBoxes: z.number().int().min(PROJECT_BOX_LIMITS.maxBoxes.min).max(PROJECT_BOX_LIMITS.maxBoxes.max).nullable().optional(),
   gpuMaxHourlyUsd: z.number().min(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.min).max(PROJECT_BOX_LIMITS.gpuMaxHourlyUsd.max).nullable().optional(),
   gpuMachine: gpuMachinePatch.optional(),
+  gpuProvider: z.enum(GPU_PROVIDERS).nullable().optional(),
   docker: projectDockerPatch.optional(),
 }
 
@@ -131,6 +136,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** The CLI its new tasks run on; null/omitted: Settings › Box agents. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
@@ -150,6 +157,8 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** null: back to Settings › Box agents. Its tasks keep the CLI they started on. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
@@ -167,6 +176,8 @@ const schemas = {
     attachments: attachmentIds,
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
+    /** Run on Claude Code or Codex over the project's Agent (Task.agentCli), for good. */
+    agentCli: z.enum(AGENT_CLIS).nullish(),
   }),
   message: z.object({
     content: z.string().trim().max(50_000),
@@ -308,6 +319,10 @@ export function createBoxYard(
     localRunner?: BoxProvider
     /** Stands in for RunPod GPU pods (tests): `runpod-*` boxes route to its provider, and placement asks it. */
     gpu?: GpuRunner
+    /** Stands in for Vast.ai's whole runner (tests): `vastai-*` boxes route to its provider, and placement asks it. */
+    vast?: GpuRunner
+    /** Stands in for fetch in Vast.ai API calls (tests: a mocked Vast.ai, never the real one). */
+    vastFetch?: typeof globalThis.fetch
     /** Stands in for the Docker runner's placement (tests): `docker-*` boxes route to its provider, and placement asks it. */
     docker?: DockerRunner
     /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
@@ -383,6 +398,16 @@ export function createBoxYard(
     install,
     git: { name: c.gitUserName, email: c.gitUserEmail },
   })
+  // Vast.ai GPU instances, the other cloud behind "Runs on: GPU" (docs/vast.md). Idle until a Vast.ai key is set.
+  const vastService = new VastService({
+    store,
+    credentials: settings.credentials,
+    dataDir: c.dataDir,
+    install,
+    git: { name: c.gitUserName, email: c.gitUserEmail },
+    runpodImage: () => runpod.store.get().image,
+    fetch: opts.vastFetch,
+  })
   // Docker containers on this computer, for projects that run on "Docker container" (docs/docker.md). Docker is only
   // asked when one is needed; in mock mode the containers are folders.
   const dockerService = new DockerService({
@@ -397,6 +422,7 @@ export function createBoxYard(
   })
   // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
+  const vast = opts.vast ?? vastService
   const docker = opts.docker ?? dockerService
   // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
   // as this process last saw them (no API or Docker call).
@@ -406,10 +432,10 @@ export function createBoxYard(
       return name ? { container: name } : null
     }
     if (!isGpuBox(boxId)) return null
-    const pod = gpu?.provider.cached(boxId)
+    const pod = (gpuBoxProvider(boxId) === "vast" ? vast : gpu).provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider)
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider)
   const setup = new Setup({
     c,
     store,
@@ -429,10 +455,12 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
-  tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, vast, docker, identities })
+  tasks.runnerProblem = (runner, key, cli, gpuCloud) => setup.runnerProblem(runner, key, cli, gpuCloud)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
+  vastService.onPodEvent = (e) => tasks.gpuPodEvent(e)
+  vastService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
@@ -518,11 +546,13 @@ export function createBoxYard(
   const publicUrl = () => c.publicUrl
 
   let claudeVersion: string | null | undefined
-  const checkClaude = () =>
+  let codexVersion: string | null | undefined
+  const versionOf = (cmd: string) =>
     new Promise<string | null>((resolve) => {
-      const [bin, ...pre] = c.claudeBin.split(" ")
+      const [bin, ...pre] = cmd.split(" ")
       execFile(bin!, [...pre, "--version"], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : stdout.trim()))
     })
+  const checkClaude = () => versionOf(c.claudeBin)
   // The model/effort pickers' list, from the installed CLI (logged in like the Coordinator), over the built-in one.
   const claudeModels = new ClaudeModels({
     claudeBin: c.claudeBin,
@@ -552,6 +582,10 @@ export function createBoxYard(
     runpod.store.update(patch)
     applyPoolChange()
   }
+  const saveVastSettings = (patch: unknown) => {
+    vastService.store.update(patch)
+    applyPoolChange()
+  }
   const saveDockerSettings = (patch: unknown) => {
     dockerService.store.update(patch)
     applyPoolChange()
@@ -574,6 +608,7 @@ export function createBoxYard(
     settings,
     tts: ttsSettings,
     runpod: runpod.store,
+    vast: vastService.store,
     docker: dockerService.store,
     runner: () => setup.runnerChoice(),
     credentials: () => setup.status().credentials,
@@ -584,7 +619,7 @@ export function createBoxYard(
       boxProvider: { value: setup.status().boxes.provider, envVar: "BOX_PROVIDER", note: "BOX_PROVIDER, else Upstash once an Upstash key is saved in Settings › Credentials" },
       localDir: { value: tildePath(c.localDir), envVar: "BOXYARD_LOCAL_DIR" },
     }),
-    save: { settings: saveSettings, runpod: saveRunpodSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },
+    save: { settings: saveSettings, runpod: saveRunpodSettings, vast: saveVastSettings, docker: saveDockerSettings, voice: saveTtsSettings, runner: saveRunner },
   })
 
   // MCP endpoint for the Coordinator and Captains (their own token, local only in practice).
@@ -664,8 +699,13 @@ export function createBoxYard(
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
     // A "This computer" setup may be signed in with the computer's own claude login instead of a token.
-    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true })
-    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    const coordinatorCli = settings.get().orchestratorCli
+    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true, codexLogin: hasOwnCodexLogin(), coordinatorCli })
+    if (coordinatorCli === "claude" && !claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    if (coordinatorCli === "codex") {
+      if (codexVersion === undefined) codexVersion = await versionOf(c.codexBin)
+      if (!codexVersion) problems.push(`The Coordinator runs on Codex, but the codex CLI (${c.codexBin}) was not found. Install it: npm i -g @openai/codex`)
+    }
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
       ok: problems.length === 0,
@@ -717,7 +757,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.gpuProvider, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
     if (body.identityId !== undefined && body.identityId !== before?.identityId) hub.broadcast({ type: "identities", identities: identities.list() })
     res.json(project)
   })
@@ -967,7 +1007,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(body.runsOn, body.projectId, body.env)
+    await tasks.requireRunner(body.runsOn, body.projectId, body.env, { agentCli: body.agentCli, model })
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -981,7 +1021,7 @@ export function createBoxYard(
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
     const row = store.getTaskRow(req.params.id!)
-    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, row ? { agentCli: taskAgentCli(row) } : undefined)
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
     const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
@@ -1147,6 +1187,30 @@ export function createBoxYard(
   api.delete("/runpod/volumes/:id", async (req, res) => {
     await runpod.deleteVolume(String(req.params.id))
     res.json(await runpodStatus())
+  })
+
+  // ---- Vast.ai GPU (Settings › Vast.ai GPU): settings, instances and the GPU types on offer. No secrets go out. A
+  // Vast.ai instance is terminated with DELETE /boxes/vastai-<projectId>[-<n>], which archives its workspaces first.
+  const vastStatus = () =>
+    vastService.status({ name: (id) => store.getProjectName(id), running: (boxId) => store.listTaskRows({ boxId }).filter((r) => r.current_turn_id).length })
+  api.get("/vast", async (_req, res) => {
+    res.json(await vastStatus())
+  })
+  api.put("/vast/settings", async (req, res) => {
+    saveVastSettings(req.body)
+    res.json(await vastStatus())
+  })
+  api.get("/vast/gpus", async (_req, res) => {
+    try {
+      res.json(await vastService.gpuOptions())
+    } catch (err) {
+      throw new BadRequestError((err as Error).message)
+    }
+  })
+  api.post("/vast/instances/:boxId/keep-warm", async (req, res) => {
+    const { minutes } = parse(z.object({ minutes: z.number().int().positive().nullable() }).strict(), req.body)
+    await vastService.keepWarm(String(req.params.boxId), minutes)
+    res.json(await vastStatus())
   })
 
   // ---- Docker (Settings › Docker): settings, containers and the image build. No secrets go out. Deleting a container

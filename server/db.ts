@@ -916,6 +916,17 @@ export const MIGRATIONS: string[] = [
   -- Task priority (shared/priority.ts): 'high' tasks are pulled from the queue before normal ones. NULL: normal.
   ALTER TABLE tasks ADD COLUMN priority TEXT;
   `,
+  // Which CLI an agent runs on (shared/agentCli.ts, docs/codex.md): a project's choice for its new tasks (null:
+  // Settings › Box agents), and the one each task started on (null on older rows: Claude Code).
+  `
+  ALTER TABLE projects ADD COLUMN agent_cli TEXT;
+  ALTER TABLE tasks ADD COLUMN agent_cli TEXT;
+  `,
+  `
+  -- Which GPU cloud a "Runs on: GPU" project's boxes come from (shared/gpu.ts): 'runpod' or 'vast'. NULL follows
+  -- Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that's on).
+  ALTER TABLE projects ADD COLUMN gpu_provider TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

@@ -9,6 +9,8 @@ import { Panel, Row, SourceHint } from "./SettingsDialog"
 import { useDraft, useInSettingsDraft } from "../lib/settingsDraft"
 import type { SettingsSection } from "../lib/settingsNav"
 import {
+  CODEX_AUTH_FILE,
+  CODEX_LOGIN_COMMAND,
   CREDENTIAL_INFO,
   GITHUB_TOKEN_SCOPES,
   LOCAL_TOOL_INFO,
@@ -37,9 +39,12 @@ export function useSetupNeeded(): { status: SetupStatus | undefined; needed: boo
 
 type TestState = { state: "running" } | { state: "ok" | "error"; text: string }
 
+/** Credentials that are a whole file, not a one-line key: a text box takes them. */
+const MULTILINE_CREDENTIALS: CredentialKey[] = ["codexAuthJson"]
+
 /**
- * A credential's control. Unset: a password input with Save and Test (the typed value, not saved). Saved: masked,
- * with Replace, Remove and Test. From env: masked and read-only (the env var wins), with Test. Inside the Settings
+ * A credential's control. Unset: a password input (a text box for a file like Codex's auth.json) with Save and Test
+ * (the typed value, not saved). Saved: masked, with Replace, Remove and Test. From env: masked and read-only (the env var wins), with Test. Inside the Settings
  * dialog a typed key or a Remove is a draft that the dialog's Save writes, so the field has no Save of its own.
  */
 export function CredentialField({ k, status, id, section = "credentials" }: { k: CredentialKey; status: CredentialStatus; id: string; section?: SettingsSection }) {
@@ -58,6 +63,8 @@ export function CredentialField({ k, status, id, section = "credentials" }: { k:
   const removing = drafted && edit === null
   const [result, setResult] = useState<TestState | null>(null)
   const fromEnv = status.source === "env"
+  // The Codex login is a whole JSON file (~/.codex/auth.json), pasted into a text box rather than a one-line password field.
+  const multiline = MULTILINE_CREDENTIALS.includes(k)
   // GitHub only: this computer's `gh auth` login stands in until a token is saved here.
   const fromGh = status.source === "gh"
   const showInput = !fromEnv && !removing && (editing || typeof edit === "string" || status.state === "unset")
@@ -98,8 +105,9 @@ export function CredentialField({ k, status, id, section = "credentials" }: { k:
     save.reset()
   }
   const onKey = (e: ReactKeyboardEvent) => {
-    // Enter saves this key, not a form around it. In Settings it's the dialog's Save, like any other field.
-    if (e.key === "Enter" && !drafted) {
+    // Enter saves this key, not a form around it (⌘/Ctrl+Enter in a file's text box, where Enter is a new line).
+    // In Settings it's the dialog's Save, like any other field.
+    if (e.key === "Enter" && !drafted && (!multiline || e.metaKey || e.ctrlKey)) {
       e.preventDefault()
       submit()
     }
@@ -108,26 +116,29 @@ export function CredentialField({ k, status, id, section = "credentials" }: { k:
       cancel()
     }
   }
+  const inputProps = {
+    id,
+    autoComplete: "off",
+    spellCheck: false,
+    placeholder: info.placeholder,
+    value,
+    onChange: (e: { target: { value: string } }) => {
+      setValue(e.target.value)
+      if (result?.state !== "running") setResult(null)
+    },
+    onKeyDown: onKey,
+    "aria-label": info.label,
+    "aria-describedby": `${id}-result`,
+  }
 
   return (
     <div className="space-y-2" data-credential={k}>
       {showInput ? (
-        <input
-          id={id}
-          type="password"
-          autoComplete="off"
-          spellCheck={false}
-          className={cx(inputClass, "font-mono")}
-          placeholder={info.placeholder}
-          value={value}
-          onChange={(e) => {
-            setValue(e.target.value)
-            if (result?.state !== "running") setResult(null)
-          }}
-          onKeyDown={onKey}
-          aria-label={info.label}
-          aria-describedby={`${id}-result`}
-        />
+        multiline ? (
+          <textarea {...inputProps} rows={5} className={cx(inputClass, "min-h-28 resize-y font-mono text-xs leading-5")} />
+        ) : (
+          <input {...inputProps} type="password" className={cx(inputClass, "font-mono")} />
+        )
       ) : removing ? (
         <p id={id} className="flex min-h-11 items-center rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 text-xs text-amber-200 sm:min-h-9" data-key-removing>
           Removed when you save.
@@ -220,8 +231,8 @@ function ResultLine({ ok, text }: { ok: boolean; text: string }) {
   )
 }
 
-/** `claude setup-token` on its own line, with a copy button. */
-export function SetupTokenCommand() {
+/** A shell command on its own line, with a copy button (`claude setup-token` by default). */
+export function SetupTokenCommand({ command = SETUP_TOKEN_COMMAND }: { command?: string }) {
   const [copied, setCopied] = useState(false)
   useEffect(() => {
     if (!copied) return
@@ -232,14 +243,14 @@ export function SetupTokenCommand() {
     <div className="mt-2 flex max-w-sm items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 pl-3">
       <code className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">
         <span className="text-zinc-600 select-none">$ </span>
-        {SETUP_TOKEN_COMMAND}
+        {command}
       </code>
       <button
         type="button"
         className="grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 sm:h-8 sm:w-8"
-        aria-label={copied ? "Copied" : `Copy ${SETUP_TOKEN_COMMAND}`}
+        aria-label={copied ? "Copied" : `Copy ${command}`}
         title={copied ? "Copied" : "Copy"}
-        onClick={() => void navigator.clipboard?.writeText(SETUP_TOKEN_COMMAND).then(() => setCopied(true), () => {})}
+        onClick={() => void navigator.clipboard?.writeText(command).then(() => setCopied(true), () => {})}
       >
         {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
       </button>
@@ -264,6 +275,13 @@ function CredentialHelp({ k }: { k: CredentialKey }) {
         <SetupTokenCommand />
       </>
     )
+  if (k === "codexAuthJson")
+    return (
+      <>
+        {info.help} Run this on a computer with a browser, sign in, then paste all of <span className="font-mono">{CODEX_AUTH_FILE}</span>. {link}.
+        <SetupTokenCommand command={CODEX_LOGIN_COMMAND} />
+      </>
+    )
   if (k === "githubToken")
     return (
       <>
@@ -286,14 +304,55 @@ const CLAUDE_CHOICES: { key: ClaudeKey; label: string }[] = [
 ]
 
 function ClaudeChoice({ status, id }: { status: SetupStatus; id: string }) {
-  const [choice, setChoice] = useState<ClaudeKey>(status.claude.using ?? "claudeOauthToken")
-  const both = status.credentials.claudeOauthToken.state === "set" && status.credentials.anthropicApiKey.state === "set"
+  return (
+    <SignInChoice
+      status={status}
+      id={id}
+      label="How Claude signs in"
+      choices={CLAUDE_CHOICES}
+      start={status.claude.using ?? "claudeOauthToken"}
+      bothNote="Both are set, so Claude Code uses the API key."
+    />
+  )
+}
+
+// ------------------------------------------------------------------ Codex: ChatGPT login or API key
+
+type CodexKey = "codexAuthJson" | "codexApiKey"
+const CODEX_CHOICES: { key: CodexKey; label: string }[] = [
+  { key: "codexAuthJson", label: "ChatGPT login" },
+  { key: "codexApiKey", label: "API key" },
+]
+const CODEX_BOTH = "Both are set, so Codex uses the ChatGPT login."
+
+function CodexChoice({ status, id }: { status: SetupStatus; id: string }) {
+  return <SignInChoice status={status} id={id} label="How Codex signs in" choices={CODEX_CHOICES} start={status.codex?.using ?? "codexAuthJson"} bothNote={CODEX_BOTH} />
+}
+
+/** Two ways to sign one CLI in (a plan's login or an API key): a toggle, the chosen one's help and its field. */
+function SignInChoice<K extends CredentialKey>({
+  status,
+  id,
+  label,
+  choices,
+  start,
+  bothNote,
+}: {
+  status: SetupStatus
+  id: string
+  label: string
+  choices: { key: K; label: string }[]
+  start: K
+  bothNote: string
+}) {
+  const [choice, setChoice] = useState<K>(start)
+  const both = choices.every((c) => status.credentials[c.key]?.state === "set")
   return (
     <div className="space-y-3">
-      <div role="group" aria-label="How Claude signs in" className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-        {CLAUDE_CHOICES.map((c) => {
+      <div role="group" aria-label={label} className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+        {choices.map((c) => {
           const on = choice === c.key
-          const set = status.credentials[c.key].state === "set"
+          const set = status.credentials[c.key]?.state === "set"
           return (
             <button
               key={c.key}
@@ -314,11 +373,14 @@ function ClaudeChoice({ status, id }: { status: SetupStatus; id: string }) {
       <div className="text-xs leading-relaxed text-zinc-400">
         <CredentialHelp k={choice} />
       </div>
-      <CredentialField key={choice} k={choice} status={status.credentials[choice]} id={`${id}-${choice}`} />
-      {both && <p className="text-xs text-zinc-500">Both are set, so Claude Code uses the API key.</p>}
+      <CredentialField key={choice} k={choice} status={status.credentials[choice] ?? UNSET} id={`${id}-${choice}`} />
+      {both && <p className="text-xs text-zinc-500">{bothNote}</p>}
     </div>
   )
 }
+
+/** A credential the server didn't list (an older server) reads as unset. */
+const UNSET: CredentialStatus = { state: "unset", source: null }
 
 // ------------------------------------------------------------------ where agents run: this computer, Upstash boxes or Docker
 
@@ -411,6 +473,12 @@ function toolLine(t: LocalTool, s: SetupStatus): { ok: boolean; text: string } {
     if (s.credentials.claudeOauthToken.state === "set" || s.credentials.anthropicApiKey.state === "set") return { ok: true, text: `${version} · signs in with the token below` }
     if (local.claudeLogin === true) return { ok: true, text: `${version} · signed in` }
     if (local.claudeLogin === false) return { ok: false, text: `${version} · not signed in: run claude, then /login` }
+    return { ok: true, text: version }
+  }
+  if (t.key === "codex") {
+    if (s.credentials.codexAuthJson?.state === "set" || s.credentials.codexApiKey?.state === "set") return { ok: true, text: `${version} · signs in with the saved Codex login` }
+    if (local.codexLogin === true) return { ok: true, text: `${version} · signed in` }
+    if (local.codexLogin === false) return { ok: false, text: `${version} · not signed in: run ${CODEX_LOGIN_COMMAND}` }
     return { ok: true, text: version }
   }
   if (t.key === "gh") return local.ghLogin ? { ok: true, text: `${version} · signed in` } : { ok: false, text: `${version} · not signed in: run gh auth login` }
@@ -585,6 +653,16 @@ export function SetupCard({ status, className }: { status: SetupStatus; classNam
         >
           <ClaudeChoice status={status} id={`${id}-claude`} />
         </Step>
+        {status.codex?.required && (
+          <Step
+            n={++n}
+            done={status.codex.state === "set"}
+            title="Codex"
+            help={status.local?.codexLogin === true ? "Signed in with this computer's codex login. A login here is only needed to use a different account." : "The Coordinator runs on Codex (Settings › Coordinator), so it needs a Codex login."}
+          >
+            <CodexChoice status={status} id={`${id}-codex`} />
+          </Step>
+        )}
         <Step n={++n} done={set("githubToken")} title={CREDENTIAL_INFO.githubToken.label} tag="Recommended" help={<CredentialHelp k="githubToken" />}>
           <CredentialField k="githubToken" status={status.credentials.githubToken} id={`${id}-gh`} />
         </Step>
@@ -668,6 +746,23 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
           ))}
           {s.credentials.claudeOauthToken.state === "set" && s.credentials.anthropicApiKey.state === "set" && (
             <p className="mt-2 text-xs text-zinc-500">Both Claude credentials are set, so Claude Code uses the API key.</p>
+          )}
+          <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Codex</h4>
+          <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500" data-testid="codex-credentials-intro">
+            {s.codex?.required
+              ? "The Coordinator runs on Codex, so it needs one of these."
+              : "Only for agents set to run on Codex: the Coordinator, the Captains or a project's agents."}{" "}
+            {s.local?.codexLogin === true && "Agents on this computer can use its codex login; boxes and containers need one of these."}
+          </p>
+          {(["codexAuthJson", "codexApiKey"] as const).map((k) => (
+            <Row key={k} id={fid(`cred-${k}`)} label={CREDENTIAL_INFO[k].label} help={<CredentialHelp k={k} />}>
+              <CredentialField k={k} status={s.credentials[k] ?? UNSET} id={fid(`cred-${k}`)} />
+            </Row>
+          ))}
+          {s.credentials.codexAuthJson?.state === "set" && s.credentials.codexApiKey?.state === "set" && (
+            <p className="mt-2 text-xs text-zinc-500" data-testid="codex-both">
+              {CODEX_BOTH}
+            </p>
           )}
           {s.restart.map((r) => (
             <p key={r} className="mt-4 rounded-lg border border-amber-900/40 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200">

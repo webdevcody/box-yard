@@ -12,7 +12,7 @@ import { FolderDockerProvider } from "../server/providers/dockerFolders.js"
 import { LocalProvider } from "../server/providers/local.js"
 import type { DockerRunner } from "../server/tasks.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
-import { DEFAULT_DOCKER_SETTINGS, DOCKER_NEEDS_CLAUDE_KEY, dockerBoxId, type DockerStatus } from "../shared/docker.js"
+import { DEFAULT_DOCKER_SETTINGS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, type DockerStatus } from "../shared/docker.js"
 import { placementView } from "../shared/placement.js"
 import type { Identity } from "../shared/identities.js"
 import type { Project, Task } from "../shared/types.js"
@@ -219,6 +219,18 @@ describe("Docker runner: when Docker can't run", () => {
     const p = await project(r, "boxes", "box")
     const coordinator = await mcpAs(r, { kind: "coordinator" })
     await expect(coordinator("create_tasks", { project: p.id, tasks: [{ title: "x", prompt: "y", runs_on: "docker" }] })).rejects.toThrow(/Docker is installed but not running/)
+  })
+
+  it("waits for a Codex login for a task on Codex, and a Claude key doesn't count for it", async () => {
+    const r = await start({ ownDocker: true, config: { mock: false, anthropicApiKey: "global-key-0001" } })
+    r.docker!.problem = null
+    const p = await project(r, "codexed", "docker")
+    const keyless = r.yard.tasks.createTask({ projectId: p.id, title: "keyless", prompt: "write a haiku", agentCli: "codex" })
+    await until(r, keyless.id, (x) => x.status === "queued" && x.waitReason === `Waiting: ${DOCKER_NEEDS_CODEX_KEY}`, "to wait for a Codex login")
+    const own = r.yard.tasks.createTask({ projectId: p.id, title: "own key", prompt: "write a haiku", agentCli: "codex", env: { CODEX_API_KEY: "sk-proj-task-000000000000000" } })
+    await done(r, own.id)
+    expect(getTask(r, own.id).agentCli).toBe("codex")
+    expect(getTask(r, keyless.id)).toMatchObject({ status: "queued", boxId: null })
   })
 
   // Not mock mode, so a Claude key is needed: the one a turn would get (turnCredentials), wherever it comes from.

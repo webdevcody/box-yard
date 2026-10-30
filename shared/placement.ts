@@ -4,6 +4,7 @@
 import type { BoxSize } from "./types.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, type Runner } from "./runner.js"
 import { gpuBoxIndex, isGpuBox } from "./runpod.js"
+import { GPU_PROVIDER_LABEL, gpuBoxProvider } from "./gpu.js"
 import { isDockerBox } from "./docker.js"
 
 /**
@@ -73,6 +74,9 @@ export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", b
 /** "Upstash" for Upstash boxes, "Local box" for mock mode's folder boxes. */
 const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider) : PLACE_NAME.box)
 
+/** "RunPod", or "Vast.ai" for a Vast.ai instance's box. */
+const gpuPlaceName = (p: Place) => (gpuBoxProvider(p.boxId) === "vast" ? GPU_PROVIDER_LABEL.vast : PLACE_NAME.gpu)
+
 /** RunPod pod ids are 14 characters; the first 6 tell pods apart. */
 export const shortPodId = (id: string) => (id.length > 8 ? id.slice(0, 6) : id)
 
@@ -89,7 +93,7 @@ export function placeLabel(p: Place): string {
     case "box":
       return join([boxProviderName(p), p.boxId, p.size, p.how && BOX_PICK_LABEL[p.how]])
     case "gpu":
-      return join([PLACE_NAME.gpu, p.gpu, podName(p)])
+      return join([gpuPlaceName(p), p.gpu, podName(p)])
     case "docker":
       return join([PLACE_NAME.docker, p.container ?? p.boxId])
   }
@@ -103,7 +107,7 @@ export function placeShort(p: Place): string {
     case "box":
       return join([boxProviderName(p), p.size])
     case "gpu":
-      return join([PLACE_NAME.gpu, p.gpu ?? podName(p)])
+      return join([gpuPlaceName(p), p.gpu ?? podName(p)])
     case "docker":
       return join([PLACE_NAME.docker, p.container ?? p.boxId])
   }

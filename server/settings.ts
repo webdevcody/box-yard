@@ -33,6 +33,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS, projectNoteBudget, type NoteBudget } from "../shared/notes.js"
 import { DEFAULT_MEMORY_POLICY } from "../shared/memory.js"
 import { LOCAL_AGENTS_LIMITS } from "../shared/runner.js"
+import { AGENT_CLIS, DEFAULT_AGENT_CLI, isClaudeModel } from "../shared/agentCli.js"
 import {
   ELEVENLABS_SPEED,
   MAX_INSTRUCTIONS,
@@ -61,15 +62,21 @@ export const DEFAULT_SETTINGS: Settings = {
   cardsIdleHours: CARDS_IDLE_HOURS.default,
   // On, as before this setting: a merged PR already moved a pr_ready task to done; this adds idle ones.
   autoDoneOnMerge: true,
+  orchestratorCli: DEFAULT_AGENT_CLI,
   orchestratorModel: DEFAULT_MODEL,
+  orchestratorCodexModel: "",
   orchestratorEffort: DEFAULT_EFFORT,
   // A fixed token count, not a share of the window: 80% of a 1M window let every Coordinator and Captain turn
   // carry up to 800k tokens of history. A value saved in Settings wins (only changed keys are saved).
   orchestratorAutoCompact: { enabled: true, unit: "tokens", value: DEFAULT_AUTOCOMPACT_TOKENS },
   orchestratorRelay: DEFAULT_RELAY_MODEL,
+  captainCli: DEFAULT_AGENT_CLI,
   captainModel: DEFAULT_CAPTAIN_MODEL,
+  captainCodexModel: "",
   captainEffort: DEFAULT_CAPTAIN_EFFORT,
+  agentCli: DEFAULT_AGENT_CLI,
   agentModel: DEFAULT_MODEL,
+  agentCodexModel: "",
   agentEffort: DEFAULT_EFFORT,
   agentRoutingConfig: "",
   // Off means the CLI's own default (compact near the model's window) applies.
@@ -171,6 +178,8 @@ const autoCompact = z
   })
   .describe(`value is a percent of the context window (10–95) or a token count (${AUTOCOMPACT_MIN_TOKENS}–${AUTOCOMPACT_MAX_TOKENS})`)
 const model = z.string().trim().min(1).max(100).regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
+/** A Codex model, or "" for Codex's own default; a Claude model can't run there. */
+const codexModelSetting = z.union([z.literal(""), model.refine((m) => !isClaudeModel(m), "That's a Claude model: Codex runs OpenAI models (leave it empty for Codex's default)")])
 const usd = z.number().min(0).max(1_000_000)
 const bySize = z.object(Object.fromEntries(BOX_SIZES.map((s) => [s, usd])) as Record<BoxSize, z.ZodNumber>).strict()
 const costRates = z
@@ -189,16 +198,22 @@ export const settingsPatch = z
     showCloudMeter: z.boolean(),
     cardsIdleHours: z.number().min(CARDS_IDLE_HOURS.min).max(CARDS_IDLE_HOURS.max),
     autoDoneOnMerge: z.boolean(),
+    orchestratorCli: z.enum(AGENT_CLIS),
     orchestratorModel: model,
+    orchestratorCodexModel: codexModelSetting,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
     orchestratorRelay: z
       .object({ enabled: z.boolean(), model, effort: z.enum(EFFORTS) })
       .strict()
       .describe("The Coordinator's relay-only turns (task updates, no message from Cody) on this model and effort when enabled. Off by default: another model or effort starts each such turn with a cold prompt cache."),
+    captainCli: z.enum(AGENT_CLIS),
     captainModel: model,
+    captainCodexModel: codexModelSetting,
     captainEffort: z.enum(EFFORTS),
+    agentCli: z.enum(AGENT_CLIS),
     agentModel: model,
+    agentCodexModel: codexModelSetting,
     agentEffort: z.enum([...EFFORTS, "orchestrator"]),
     agentRoutingConfig: z.string().max(50_000),
     agentAutoCompact: autoCompact,

@@ -7,6 +7,7 @@ import { boxBusyReason, statusCounts } from "../lib/boxOverview"
 import { formatBytes } from "../../../shared/disk"
 import { deleteAtRisk, type BoxContents, type BoxDeleteVerdict, type BoxInfo } from "../../../shared/types"
 import type { RunPodPodInfo } from "../../../shared/runpod"
+import { GPU_PROVIDER_LABEL, gpuBoxProvider } from "../../../shared/gpu"
 import type { DockerContainerInfo } from "../../../shared/docker"
 import { Modal } from "./Modal"
 import { Button, LineIcon, STATUS, cx, inputClass } from "./ui"
@@ -44,6 +45,16 @@ const COPY = {
     ],
     confirm: "Terminate pod",
   },
+  terminateVast: {
+    title: "Terminate",
+    verb: "terminate",
+    steps: [
+      "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included. If one can't be archived, nothing is terminated.",
+      "Destroys the instance at Vast.ai (never just stops it): its disk goes with it, so billing stops.",
+      "Its tasks rent a new instance on their next message, restoring from the archive.",
+    ],
+    confirm: "Terminate instance",
+  },
   container: {
     title: "Delete",
     verb: "delete",
@@ -56,7 +67,7 @@ const COPY = {
   },
 } as const
 
-/** What the dialog acts on: a worker box from the Boxes page, a RunPod GPU pod from Settings › RunPod GPU, or a Docker container from Settings › Docker. */
+/** What the dialog acts on: a worker box from the Boxes page, a GPU pod from Settings › RunPod GPU (or a Vast.ai instance from Settings › Vast.ai GPU), or a Docker container from Settings › Docker. */
 interface Target {
   id: string
   kind: "box" | "pod" | "container"
@@ -81,7 +92,7 @@ const podTarget = (p: RunPodPodInfo): Target => ({
   id: p.boxId,
   kind: "pod",
   name: `${p.projectName ?? p.projectId}'s GPU pod #${p.index}`,
-  description: `RunPod · ${p.gpu ?? "GPU"}${p.dataCenter ? ` · ${p.dataCenter}` : ""}${p.costPerHr !== null ? ` · $${p.costPerHr.toFixed(2)}/hr` : ""}`,
+  description: `${GPU_PROVIDER_LABEL[gpuBoxProvider(p.boxId) ?? "runpod"]} · ${p.gpu ?? "GPU"}${p.dataCenter ? ` · ${p.dataCenter}` : ""}${p.costPerHr !== null ? ` · $${p.costPerHr.toFixed(2)}/hr` : ""}`,
   reachable: p.status === "RUNNING",
   running: p.running,
   busy: p.status === "RUNNING" ? null : `The pod is ${p.status.toLowerCase()}`,
@@ -117,7 +128,7 @@ export function BoxActionDialog({
 }) {
   const target = box ? boxTarget(box) : pod ? podTarget(pod) : containerTarget(container!)
   const removing = action === "delete"
-  const copy = removing ? (target.kind === "pod" ? COPY.terminate : target.kind === "container" ? COPY.container : COPY.delete) : COPY.clear
+  const copy = removing ? (target.kind === "pod" ? (gpuBoxProvider(target.id) === "vast" ? COPY.terminateVast : COPY.terminate) : target.kind === "container" ? COPY.container : COPY.delete) : COPY.clear
   const contents = useBoxContents(target.id)
   const clear = useClearBox()
   const del = useDeleteBox()

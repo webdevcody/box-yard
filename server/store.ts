@@ -8,12 +8,14 @@ import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { parsePriority, type TaskPriority } from "../shared/priority.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { DEFAULT_AGENT_CLI, isAgentCli, type AgentCli } from "../shared/agentCli.js"
 import { isProjectColor, type ProjectColor } from "../shared/projectColors.js"
 import { isTaskIcon, type TaskIconName } from "../shared/taskIcons.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
+import { isGpuProvider, type GpuProvider } from "../shared/gpu.js"
 import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
@@ -191,6 +193,8 @@ export interface TaskRow {
   routing_reason: string | null
   /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
   runs_on?: string | null
+  /** The CLI its agent runs on, 'claude' or 'codex'; null on rows from before Codex: Claude Code. */
+  agent_cli?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
   placed_how?: string | null
@@ -356,9 +360,11 @@ interface ProjectRow {
   gpu_cloud?: string | null
   gpu_min_ram_gb?: number | null
   gpu_min_vcpus?: number | null
+  gpu_provider?: string | null
   docker_image?: string | null
   docker_dockerfile?: string | null
   identity_id?: string | null
+  agent_cli?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -627,6 +633,8 @@ interface TaskCompactionRow {
 }
 
 const taskRunsOn = (row: { runs_on?: string | null }) => parseRunsOn(row.runs_on)
+/** The CLI a task's agent runs on: the one it was created with; older rows ran on Claude Code. */
+export const taskAgentCli = (row: { agent_cli?: string | null }): AgentCli => (isAgentCli(row.agent_cli) ? row.agent_cli : DEFAULT_AGENT_CLI)
 
 const oneLine = (text: string | null | undefined, max = 200) => {
   const t = (text ?? "").replace(/\s+/g, " ").trim()
@@ -815,12 +823,14 @@ export class Store {
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
+      agentCli: isAgentCli(row.agent_cli) ? row.agent_cli : null,
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
       wholeMachine: row.whole_machine === 1,
       tasksPerBox: row.tasks_per_box ?? null,
       maxBoxes: row.max_boxes ?? null,
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       gpuMachine: gpuMachineOf(row),
+      gpuProvider: isGpuProvider(row.gpu_provider) ? row.gpu_provider : null,
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       identityId: row.identity_id || DEFAULT_IDENTITY_ID,
       color: isProjectColor(row.color) ? row.color : null,
@@ -875,6 +885,12 @@ export class Store {
     return gpuMachineOf(row ?? {})
   }
 
+  /** A GPU project's own cloud (Project.gpuProvider), or null to follow the global one, without loading the rest. */
+  projectGpuProvider(id: string): GpuProvider | null {
+    const row = this.db.prepare("SELECT gpu_provider FROM projects WHERE id = ?").get(id) as { gpu_provider: string | null } | undefined
+    return isGpuProvider(row?.gpu_provider) ? row.gpu_provider : null
+  }
+
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
   /** Where a task's turns run: its own runs_on when set, else its project's "Runs on". */
   taskRunner(row: Pick<TaskRow, "project_id" | "runs_on">): Runner {
@@ -915,8 +931,11 @@ export class Store {
     maxBoxes?: number | null
     gpuMaxHourlyUsd?: number | null
     gpuMachine?: Partial<ProjectGpuMachine>
+    gpuProvider?: GpuProvider | null
     docker?: Partial<ProjectDocker>
     identityId?: string
+    /** The CLI its new tasks run on; null/omitted uses Settings › Box agents. */
+    agentCli?: AgentCli | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
     color?: ProjectColor | null
@@ -946,6 +965,7 @@ export class Store {
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
+    if (input.agentCli) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     if (input.color) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(input.color, id)
     return this.getProject(id)!
   }
@@ -987,6 +1007,8 @@ export class Store {
       gpuMaxHourlyUsd?: number | null
       /** Each field: undefined leaves it, null clears it (Settings › RunPod GPU's applies). */
       gpuMachine?: Partial<ProjectGpuMachine>
+      /** null clears it (Settings › Vast.ai GPU › Use for GPU projects decides). */
+      gpuProvider?: GpuProvider | null
       /** Each field: undefined leaves it, null clears it (Settings › Docker's image applies). */
       docker?: Partial<ProjectDocker>
       /** null clears it (Settings › Max notes applies). */
@@ -995,6 +1017,8 @@ export class Store {
       notesMaxTokens?: number | null
       /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
       identityId?: string
+      /** The CLI its new tasks run on; null clears it (Settings › Box agents applies). Its existing tasks keep theirs. */
+      agentCli?: AgentCli | null
       /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
       color?: ProjectColor | null
     },
@@ -1025,6 +1049,7 @@ export class Store {
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
+    if (patch.agentCli !== undefined) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(patch.agentCli, id)
     if (patch.color !== undefined) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(patch.color, id)
     return this.getProject(id)!
   }
@@ -1051,7 +1076,10 @@ export class Store {
    * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
    * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
    */
-  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine>; docker?: Partial<ProjectDocker> }) {
+  private setProjectBoxLimits(
+    id: string,
+    b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine>; gpuProvider?: GpuProvider | null; docker?: Partial<ProjectDocker> },
+  ) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
     if (b.wholeMachine !== undefined) this.db.prepare("UPDATE projects SET whole_machine = ? WHERE id = ?").run(b.wholeMachine ? 1 : 0, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
@@ -1062,6 +1090,7 @@ export class Store {
     if (m.cloud !== undefined) this.db.prepare("UPDATE projects SET gpu_cloud = ? WHERE id = ?").run(m.cloud, id)
     if (m.minRamGb !== undefined) this.db.prepare("UPDATE projects SET gpu_min_ram_gb = ? WHERE id = ?").run(m.minRamGb, id)
     if (m.minVcpus !== undefined) this.db.prepare("UPDATE projects SET gpu_min_vcpus = ? WHERE id = ?").run(m.minVcpus, id)
+    if (b.gpuProvider !== undefined) this.db.prepare("UPDATE projects SET gpu_provider = ? WHERE id = ?").run(b.gpuProvider, id)
     const d = b.docker ?? {}
     if (d.image !== undefined) this.db.prepare("UPDATE projects SET docker_image = ? WHERE id = ?").run(d.image?.trim() || null, id)
     if (d.dockerfile !== undefined) this.db.prepare("UPDATE projects SET docker_dockerfile = ? WHERE id = ?").run(d.dockerfile?.trim() ? d.dockerfile : null, id)
@@ -1246,6 +1275,7 @@ export class Store {
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
+      agentCli: taskAgentCli(row),
       model: row.model ?? null,
       effort: row.effort ?? null,
       claudeCostUsd: usage.costUsd,
@@ -1371,6 +1401,8 @@ export class Store {
     startedBy?: string | null
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
+    /** The CLI its agent runs on for good (TaskRow.agent_cli); omitted: Claude Code. */
+    agentCli?: AgentCli | null
     /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
     icon?: TaskIconName | null
     /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
@@ -1405,6 +1437,7 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
+    if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     if (input.priority === "high") this.db.prepare("UPDATE tasks SET priority = 'high' WHERE id = ?").run(id)
@@ -1540,10 +1573,10 @@ export class Store {
     return rows.map((r) => r.box_id)
   }
 
-  /** GPU pods' boxes (`runpod-…`) with a turn on them: pods that are up or starting. */
+  /** GPU boxes (`runpod-…`, `vastai-…`) with a turn on them: pods and instances that are up or starting. */
   gpuBoxesInUse(): string[] {
     const rows = this.db
-      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE box_id LIKE 'runpod-%' AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE (box_id LIKE 'runpod-%' OR box_id LIKE 'vastai-%') AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
       .all() as { box_id: string }[]
     return rows.map((r) => r.box_id)
   }

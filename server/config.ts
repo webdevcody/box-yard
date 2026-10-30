@@ -67,6 +67,8 @@ const sizeDefaults = SIZE_DEFAULTS[size]
 const mock = env.BOXYARD_MOCK === "1"
 const fakeClaude = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/fake-claude.mjs")
 const fakeClaudeSrc = path.resolve(process.cwd(), "scripts/fake-claude.mjs")
+const fakeCodex = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../scripts/fake-codex.mjs")
+const fakeCodexSrc = path.resolve(process.cwd(), "scripts/fake-codex.mjs")
 
 export type ProviderName = "upstash" | "local"
 
@@ -144,9 +146,14 @@ export const config = {
 
   claudeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? "",
+  /** Codex's ChatGPT login (the whole ~/.codex/auth.json, or it base64-encoded) and API key (docs/codex.md). Optional. */
+  codexAuthJson: env.CODEX_AUTH_JSON ?? "",
+  codexApiKey: env.CODEX_API_KEY ?? "",
   githubToken: env.GITHUB_TOKEN ?? "",
   /** RunPod GPU pods (Settings › RunPod GPU, docs/runpod.md). Optional. */
   runpodApiKey: env.RUNPOD_API_KEY ?? "",
+  /** Vast.ai GPU instances (Settings › Vast.ai GPU, docs/vast.md). Optional. */
+  vastApiKey: env.VAST_API_KEY ?? "",
   /** The docker CLI for Docker projects (docs/docker.md); empty: found on PATH or where Docker Desktop puts it. */
   dockerBin: env.DOCKER_BIN?.trim() ?? "",
   /**
@@ -162,6 +169,8 @@ export const config = {
   mockHeavy: mock && env.BOXYARD_MOCK_HEAVY === "1",
   /** Claude binary used by the orchestrator (and by local workers). */
   claudeBin: mock ? `${process.execPath} ${fs.existsSync(fakeClaude) ? fakeClaude : fakeClaudeSrc}` : (env.CLAUDE_BIN ?? "claude"),
+  /** Codex binary for agents set to run on Codex (docs/codex.md); mock mode uses a stand-in. */
+  codexBin: mock ? `${process.execPath} ${fs.existsSync(fakeCodex) ? fakeCodex : fakeCodexSrc}` : (env.CODEX_BIN ?? "codex"),
   /** What Box Yard calls its human in prompts and labels; empty means the Settings default ("Cody"). */
   ownerName: env.BOXYARD_OWNER_NAME?.trim() ?? "",
   orchestratorModel: env.ORCHESTRATOR_MODEL ?? "",
@@ -220,11 +229,16 @@ export function redisEnabled(c: Config = config) {
 
 /** Problems that stop Box Yard from doing real work, shown in the UI. Pass the credentials in effect (env or saved). */
 /** `claudeLogin`: this computer's own `claude` is signed in, and agents run here, so no token is needed. */
-export function configProblems(c: Config = config, opts: { claudeLogin?: boolean } = {}): string[] {
+/** `codexLogin`: this computer's own `codex login` is there, so a Coordinator on Codex needs no key either. */
+export function configProblems(c: Config = config, opts: { claudeLogin?: boolean; codexLogin?: boolean; coordinatorCli?: "claude" | "codex" } = {}): string[] {
   const problems: string[] = []
   if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
-  if (!c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
+  // The Coordinator needs a sign-in for the CLI it runs on; agents on the other one say so when they start.
+  if ((opts.coordinatorCli ?? "claude") === "claude" && !c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
     problems.push("Claude isn't signed in: add a subscription token (`claude setup-token`) or an Anthropic API key in Settings › Credentials, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.")
+  }
+  if (opts.coordinatorCli === "codex" && !c.codexAuthJson && !c.codexApiKey && !opts.codexLogin) {
+    problems.push("The Coordinator runs on Codex, but Codex isn't signed in: run `codex login` on this computer, or add a Codex login in Settings › Credentials (CODEX_AUTH_JSON or CODEX_API_KEY).")
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {
     problems.push("BOX_PROVIDER is upstash but there's no Upstash Box API key: add one in Settings › Credentials, or set UPSTASH_BOX_API_KEY.")
