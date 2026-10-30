@@ -1,10 +1,11 @@
-// The cloud meter on the Coordinator (docked and Zen): how many boxes run, what they cost an hour now, and today's box
-// spend against the daily cloud limit. It opens a sheet with the limits, "Raise today's limit" and every box.
+// The cloud meter: how many boxes run, what they cost an hour now, and today's box spend against the daily cloud limit.
+// It opens a sheet with the limits, "Raise today's limit" and every box. The Boxes page always has it; the Coordinator's
+// header (docked and Zen) only with Settings › Usage › Box spend in the header.
 import { memo, useState } from "react"
 import { Link } from "wouter"
 import { Boxes, ChevronRight, Cpu, Settings as SettingsIcon } from "lucide-react"
 import type { CloudStatus } from "../../../shared/types"
-import { useAllowMoreBoxes, useCloud, useRaiseCloudLimit } from "../lib/queries"
+import { useAgentSettings, useAllowMoreBoxes, useCloud, useRaiseCloudLimit } from "../lib/queries"
 import { BAR_TONE, METER_TONE, boxState, countsLine, dollars, limitPct, meterLabel, meterState, newBoxes, perHour, todayLine } from "../lib/cloud"
 import { useOpenSettings } from "./SettingsDialog"
 import { Modal } from "./Modal"
@@ -12,16 +13,26 @@ import { Button, cx } from "./ui"
 
 /** The chip's look; `inline` has META_CHIP's sizes but may shrink (its text truncates before the header's buttons overflow). */
 const CHIP = "inline-flex min-w-0 items-center gap-1 rounded-md border text-xs font-medium whitespace-nowrap tabular-nums transition"
-const VARIANT = { inline: "min-h-11 px-2 sm:h-6 sm:min-h-0 sm:px-1.5 @max-[26rem]:hidden", strip: "mb-2 h-8 w-full px-2.5 @min-[26rem]:hidden" }
+const VARIANT = {
+  inline: "min-h-11 px-2 sm:h-6 sm:min-h-0 sm:px-1.5 @max-[26rem]:hidden",
+  strip: "mb-2 h-8 w-full px-2.5 @min-[26rem]:hidden",
+  page: "min-h-11 max-w-full px-2.5 sm:h-8 sm:min-h-0",
+}
+type Variant = keyof typeof VARIANT
+
+/** Whether the Coordinator's header shows the meter (Settings › Usage). Off until settings say otherwise. */
+export function useShowCloudMeter(): boolean {
+  return useAgentSettings().data?.settings.showCloudMeter ?? false
+}
 
 /**
  * The meter, read by the header's width (the header is a container). `inline` sits beside the title from 26rem:
  * "$8.50 of $10 · 3 boxes · $0.49/h" from 56rem, "$8.50 of $10 · 3 boxes" from 34rem (Zen's column is 48rem),
  * "$8.50/$10 · 3" below, its text truncating when the header is full. `strip` is the full reading as a row under the
- * header below 26rem (phones), where the header's buttons leave no room. Calm, then amber from 80% of a limit, rose at
- * it. Either opens the sheet.
+ * header below 26rem (phones), where the header's buttons leave no room. `page` is the full reading as a chip on the
+ * Boxes page. Calm, then amber from 80% of a limit, rose at it. Each opens the sheet.
  */
-export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inline" | "strip" }) {
+export const CloudMeter = memo(function CloudMeter({ variant }: { variant: Variant }) {
   const cloud = useCloud()
   const [open, setOpen] = useState(false)
   const s = cloud.data
@@ -35,7 +46,7 @@ export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inli
     <>
       <button
         type="button"
-        data-testid={variant === "inline" ? "cloud-meter" : "cloud-meter-strip"}
+        data-testid={variant === "inline" ? "cloud-meter" : `cloud-meter-${variant}`}
         data-state={meterState(s)}
         onClick={() => setOpen(true)}
         title={label}
@@ -52,11 +63,13 @@ export const CloudMeter = memo(function CloudMeter({ variant }: { variant: "inli
             </span>
             <span className="truncate @min-[34rem]:hidden">{short}</span>
           </>
-        ) : (
+        ) : variant === "strip" ? (
           <>
             <span className="truncate">{full}</span>
             <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 opacity-60" aria-hidden />
           </>
+        ) : (
+          <span className="truncate">{s.spend.dailyLimitUsd > 0 ? `Today ${full}` : full}</span>
         )}
       </button>
       {open && <CloudSheet status={s} onClose={() => setOpen(false)} />}
