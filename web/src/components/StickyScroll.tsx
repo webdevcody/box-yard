@@ -51,7 +51,8 @@ export type StickyScrollHandle = { scrollToEnd: () => void }
 // With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
 // (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
 // `handle.scrollToEnd()` (after a send) re-pins it and smooth-scrolls to the bottom, even from far up.
-// `overlay` floats bottom-center over the list, beside "Jump to latest" (the Coordinator cards' "↓ N new").
+// `overlay` floats bottom-center over the list, beside "Jump to latest" (the Coordinator cards' "↓ N new"), above
+// everything in it (sticky headers included), with room left under the last row so it covers nothing at the bottom.
 export function StickyScroll({
   handle,
   count,
@@ -467,8 +468,10 @@ export function StickyScroll({
   )
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} onScroll={onScroll} className={cx("scroll-thin min-h-0 flex-1 overflow-x-hidden overflow-y-auto", className)}>
+    <div className="group/sticky relative flex min-h-0 flex-1 flex-col">
+      {/* relative z-0: the list is its own stacking context, so what's inside it (the cards' sticky z-20 headers, their
+          menus) stays under the overlay, whatever its z-index. */}
+      <div ref={scroller} onScroll={onScroll} className={cx("scroll-thin relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto", className)}>
         <div ref={content} className={contentClassName}>
           {hidden > 0 && (
             <button
@@ -482,9 +485,11 @@ export function StickyScroll({
           )}
           {children}
         </div>
+        {/* Room under the last row while the overlay shows something, so at the bottom it covers nothing. */}
+        <div aria-hidden data-testid="overlay-room" className="hidden h-12 group-has-[[data-overlay]>*]/sticky:block pointer-coarse:h-16" />
       </div>
       {(away || overlay) && (
-        <div className="pointer-events-none absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 *:pointer-events-auto">
+        <div data-overlay className="pointer-events-none absolute bottom-3 left-1/2 z-10 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 *:pointer-events-auto">
           {overlay}
           {away && (
             <button
