@@ -99,16 +99,19 @@ export function SourceHint({ source, env, changed }: { source?: SettingSource; e
 /** One setting: label and help text on the left, the control and where its value comes from on the right. */
 export function Row({ id, label, help, hint, children }: { id?: string; label: string; help: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className="grid gap-x-8 gap-y-2 border-t border-zinc-900 py-4 first:border-t-0 first:pt-0 sm:grid-cols-[minmax(0,1fr)_17rem]">
-      <div>
-        <label htmlFor={id} className="text-sm font-medium text-zinc-200">
-          {label}
-        </label>
-        <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
-      </div>
-      <div className="space-y-1.5">
-        {children}
-        {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+    // Two columns by the row's own width, not the window's: at 125% zoom the sidebar leaves the help text a sliver.
+    <div className="@container border-t border-zinc-900 py-4 first:border-t-0 first:pt-0">
+      <div className="grid gap-x-8 gap-y-2 @md:grid-cols-[minmax(0,1fr)_17rem]">
+        <div>
+          <label htmlFor={id} className="text-sm font-medium text-zinc-200">
+            {label}
+          </label>
+          <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
+        </div>
+        <div className="space-y-1.5">
+          {children}
+          {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+        </div>
       </div>
     </div>
   )
@@ -381,7 +384,7 @@ export function SettingsDialog({
         aria-label="Settings categories"
         aria-orientation="vertical"
         onKeyDown={onNavKey}
-        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:p-3"
+        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-r sm:border-b-0 sm:p-3"
       >
         {SETTINGS_SECTIONS.map((sec) => {
           const Icon = SECTION_ICON[sec.key]
