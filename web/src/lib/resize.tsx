@@ -85,8 +85,11 @@ export function useResizable(opts: Options) {
 
 type HandleProps = ReturnType<typeof useResizable>["handle"]
 
-/** Slim drag strip on a panel border. `className` picks the breakpoint (e.g. "lg:block") where the panel sits beside the content. */
-export function ResizeHandle({ dragging, edge, className, ...events }: HandleProps & { className: string }) {
+/**
+ * Slim drag strip on a panel border. `className` picks the breakpoint (e.g. "lg:block") where the panel sits beside the
+ * content. `inside` keeps the strip within the panel, for a panel that clips its overflow.
+ */
+export function ResizeHandle({ dragging, edge, className, inside, ...events }: HandleProps & { className: string; inside?: boolean }) {
   return (
     <div
       role="separator"
@@ -96,9 +99,23 @@ export function ResizeHandle({ dragging, edge, className, ...events }: HandlePro
       className={cx(
         "absolute inset-y-0 z-20 hidden w-1.5 cursor-col-resize touch-none transition-colors hover:bg-yard-500/40",
         className,
-        edge === "right" ? "-right-[3px]" : "-left-[3px]",
+        edge === "right" ? (inside ? "right-0" : "-right-[3px]") : inside ? "left-0" : "-left-[3px]",
         dragging && "bg-yard-500/60",
       )}
     />
   )
+}
+
+/** An element's width in px, kept current while it's mounted; undefined until measured. */
+export function useElementWidth(el: Element | null | undefined): number | undefined {
+  const [width, setWidth] = useState<number>()
+  useEffect(() => {
+    if (!el) return
+    setWidth(el.getBoundingClientRect().width)
+    if (typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(() => setWidth(el.getBoundingClientRect().width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [el])
+  return width
 }
