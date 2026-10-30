@@ -660,6 +660,8 @@ export function useUpdateProject() {
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
       runner?: Runner
+      /** Claude Code or Codex for its new tasks; null uses Settings › Box agents. */
+      agentCli?: AgentCli | null
       agentsPerBox?: number | null
       wholeMachine?: boolean
       tasksPerBox?: number | null

@@ -30,6 +30,7 @@ import { confirmDialog } from "../lib/confirm"
 import { EFFORT_LABEL, MODELS } from "../lib/models"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
+import { AGENT_CLIS, AGENT_CLI_LABEL, CODEX_MODEL_SUGGESTIONS, isClaudeModel, type AgentCli } from "../../../shared/agentCli"
 import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_AGENTS_LIMITS, LOCAL_UNSANDBOXED } from "../../../shared/runner"
 import {
@@ -183,6 +184,43 @@ function EffortOptions() {
       {EFFORT_LABEL[x]}
     </option>
   ))
+}
+
+/** Claude Code or Codex (shared/agentCli.ts). */
+function AgentCliSelect({ id, value, onChange, testId }: { id: string; value: AgentCli; onChange: (v: AgentCli) => void; testId: string }) {
+  return (
+    <Select id={id} className="w-full" value={value} onChange={(e) => onChange(e.target.value as AgentCli)} data-testid={testId}>
+      {AGENT_CLIS.map((c) => (
+        <option key={c} value={c}>
+          {AGENT_CLI_LABEL[c]}
+        </option>
+      ))}
+    </Select>
+  )
+}
+
+/** A Codex model id, from the suggestions or typed; empty is Codex's own default. Warns on a Claude model, which Codex can't run. */
+function CodexModelInput({ id, value, onChange, testId }: { id: string; value: string; onChange: (v: string) => void; testId: string }) {
+  const claude = isClaudeModel(value)
+  return (
+    <>
+      <input
+        id={id}
+        className={inputClass}
+        list="boxyard-codex-models"
+        placeholder="Codex's default"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-invalid={claude || undefined}
+        data-testid={testId}
+      />
+      {claude && (
+        <p className="text-xs text-red-300" role="alert">
+          That's a Claude model: Codex runs OpenAI models.
+        </p>
+      )}
+    </>
+  )
 }
 
 // ------------------------------------------------------------------ dialog
@@ -467,19 +505,38 @@ export function SettingsDialog({
               </label>
             </Row>
             <Row
-              id={fid("om")}
-              label="Model"
-              help="The Claude model the Coordinator chat runs on. Type any model id, or pick one."
-              hint={hint("orchestratorModel")}
+              id={fid("ocli")}
+              label="Agent"
+              help="The coding agent the Coordinator chat runs on; Codex needs a Codex login in Settings › Credentials."
+              hint={hint("orchestratorCli")}
             >
-              <input
-                id={fid("om")}
-                className={inputClass}
-                list="boxyard-models"
-                value={s.orchestratorModel}
-                onChange={(e) => set("orchestratorModel", e.target.value)}
-              />
+              <AgentCliSelect id={fid("ocli")} value={s.orchestratorCli} onChange={(v) => set("orchestratorCli", v)} testId="orchestrator-cli" />
             </Row>
+            {s.orchestratorCli === "codex" ? (
+              <Row
+                id={fid("ocm")}
+                label="Codex model"
+                help="The OpenAI model the Coordinator runs on; leave it empty for Codex's own default."
+                hint={hint("orchestratorCodexModel")}
+              >
+                <CodexModelInput id={fid("ocm")} value={s.orchestratorCodexModel} onChange={(v) => set("orchestratorCodexModel", v)} testId="orchestrator-codex-model" />
+              </Row>
+            ) : (
+              <Row
+                id={fid("om")}
+                label="Model"
+                help="The Claude model the Coordinator chat runs on. Type any model id, or pick one."
+                hint={hint("orchestratorModel")}
+              >
+                <input
+                  id={fid("om")}
+                  className={inputClass}
+                  list="boxyard-models"
+                  value={s.orchestratorModel}
+                  onChange={(e) => set("orchestratorModel", e.target.value)}
+                />
+              </Row>
+            )}
             <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
               <Select
                 id={fid("oe")}
@@ -506,17 +563,36 @@ export function SettingsDialog({
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
-              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
-              share the auto-compact threshold above.
+              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its agent, model and effort separately to tune that cost.
+              Captains share the auto-compact threshold above.
             </p>
             <Row
-              id={fid("cm")}
-              label="Captain model"
-              help="The Claude model every project Captain runs on. Type any model id, or pick one."
-              hint={hint("captainModel")}
+              id={fid("ccli")}
+              label="Captain agent"
+              help="The coding agent every project's Captain runs on; Codex needs a Codex login in Settings › Credentials."
+              hint={hint("captainCli")}
             >
-              <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
+              <AgentCliSelect id={fid("ccli")} value={s.captainCli} onChange={(v) => set("captainCli", v)} testId="captain-cli" />
             </Row>
+            {s.captainCli === "codex" ? (
+              <Row
+                id={fid("ccm")}
+                label="Captain Codex model"
+                help="The OpenAI model every Captain runs on; leave it empty for Codex's own default."
+                hint={hint("captainCodexModel")}
+              >
+                <CodexModelInput id={fid("ccm")} value={s.captainCodexModel} onChange={(v) => set("captainCodexModel", v)} testId="captain-codex-model" />
+              </Row>
+            ) : (
+              <Row
+                id={fid("cm")}
+                label="Captain model"
+                help="The Claude model every project Captain runs on. Type any model id, or pick one."
+                hint={hint("captainModel")}
+              >
+                <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
+              </Row>
+            )}
             <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Lower is faster and cheaper." hint={hint("captainEffort")}>
               <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
                 <EffortOptions />
@@ -577,8 +653,24 @@ export function SettingsDialog({
             >
               <input id={fid("on")} className={inputClass} value={s.ownerName} maxLength={40} onChange={(e) => set("ownerName", e.target.value)} />
             </Row>
+            <Row
+              id={fid("acli")}
+              label="Agent"
+              help="The coding agent new tasks run on: a project can pick its own, a task keeps the agent it started on, and a task given a gpt-* model runs on Codex."
+              hint={hint("agentCli")}
+            >
+              <AgentCliSelect id={fid("acli")} value={s.agentCli} onChange={(v) => set("agentCli", v)} testId="agent-cli" />
+            </Row>
             <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on, unless the task or its project's Routing YAML entry picks one. Once saved here or set by an env var, it wins over the YAML's defaults and fallback." hint={hint("agentModel")}>
               <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
+            </Row>
+            <Row
+              id={fid("acm")}
+              label="Codex model"
+              help="The OpenAI model tasks on Codex run on, unless the task or its Routing YAML entry picks one; leave it empty for Codex's own default."
+              hint={hint("agentCodexModel")}
+            >
+              <CodexModelInput id={fid("acm")} value={s.agentCodexModel} onChange={(v) => set("agentCodexModel", v)} testId="agent-codex-model" />
             </Row>
             <Row
               id={fid("ae")}
@@ -639,6 +731,11 @@ export function SettingsDialog({
 
       <datalist id="boxyard-models">
         {MODELS.map((m) => (
+          <option key={m} value={m} />
+        ))}
+      </datalist>
+      <datalist id="boxyard-codex-models">
+        {CODEX_MODEL_SUGGESTIONS.map((m) => (
           <option key={m} value={m} />
         ))}
       </datalist>

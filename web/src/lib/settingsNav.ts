@@ -42,7 +42,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     key: "credentials",
     label: "Credentials",
     description:
-      "Where agents run, and the keys Box Yard works with: Upstash boxes, Claude and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Saved changes apply from the next turn, no restart needed.",
+      "Where agents run, and the keys Box Yard works with: Upstash boxes, Claude, Codex and GitHub. They're kept on this server and never sent back to the browser. An env var on the server always wins. Saved changes apply from the next turn, no restart needed.",
     fields: [],
   },
   {
