@@ -507,7 +507,7 @@ export function SettingsDialog({
             <Row
               id={fid("pc1h")}
               label="1-hour prompt cache"
-              help="Keeps the Coordinator's and every Captain's context in Claude's prompt cache for an hour instead of 5 minutes, so the first reply after a quiet spell reads it instead of re-sending it all (about 6 s more per 50k tokens). With an Anthropic API key, 1-hour cache writes cost 2× the input price instead of 1.25×; reads cost the same. A Claude subscription already uses the 1-hour cache, so off makes it 5 minutes there too."
+              help="Keeps the Coordinator's and every Captain's context in Claude's prompt cache for an hour instead of 5 minutes, so the first reply after a quiet spell of 5–60 minutes reads it from the cache instead of writing it all again. With an Anthropic API key, 1-hour cache writes cost 2× the input price instead of 1.25×, while a cache read costs 0.1×: it pays off when a few turns in a hundred come after such a gap. A Claude subscription already uses the 1-hour cache, so off makes it 5 minutes there too."
               hint={hint("promptCache1h")}
             >
               <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
