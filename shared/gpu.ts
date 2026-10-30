@@ -34,3 +34,9 @@ export const gpuBoxIdOn = (provider: GpuProvider, projectId: string, n = 1) => `
 export const isAnyGpuBox = (id: string | null | undefined): id is string => gpuBoxProvider(id) !== null
 export const anyGpuBoxProject = (id: string) => gpuBoxRest(id).replace(POD_SUFFIX, "")
 export const anyGpuBoxIndex = (id: string) => Number(POD_SUFFIX.exec(gpuBoxRest(id))?.[1] ?? 1)
+
+/** Where each cloud's settings live, for wait reasons and notices. */
+export const GPU_SETTINGS_PATH: Record<GpuProvider, string> = { runpod: "Settings › RunPod GPU", vast: "Settings › Vast.ai GPU" }
+
+/** The cloud a GPU project's new pods come from: its own pick, else Vast.ai when Settings › Vast.ai GPU › Use for GPU projects is on, else RunPod. */
+export const effectiveGpuProvider = (own: GpuProvider | null | undefined, vastDefault: boolean): GpuProvider => own ?? (vastDefault ? "vast" : "runpod")

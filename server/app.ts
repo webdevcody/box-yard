@@ -48,6 +48,7 @@ import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
+import { VastService } from "./vast/service.js"
 import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
 import { assignChecked, detectFor, importDetected, importInput, runningTask, testRepos } from "./identity/setup.js"
@@ -56,6 +57,7 @@ import { ConnectorService } from "./connectors/service.js"
 import { ConnectorSignIns } from "./connectors/oauth.js"
 import { OAUTH_CALLBACK_PATH } from "../shared/connectors.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
+import { gpuBoxProvider, isGpuProvider } from "../shared/gpu.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
@@ -308,6 +310,10 @@ export function createBoxYard(
     localRunner?: BoxProvider
     /** Stands in for RunPod GPU pods (tests): `runpod-*` boxes route to its provider, and placement asks it. */
     gpu?: GpuRunner
+    /** Stands in for Vast.ai's whole runner (tests): `vastai-*` boxes route to its provider, and placement asks it. */
+    vast?: GpuRunner
+    /** Stands in for fetch in Vast.ai API calls (tests: a mocked Vast.ai, never the real one). */
+    vastFetch?: typeof globalThis.fetch
     /** Stands in for the Docker runner's placement (tests): `docker-*` boxes route to its provider, and placement asks it. */
     docker?: DockerRunner
     /** Tests: real Docker containers even in mock mode, whose agents run this claude command (test/docker-real.e2e.test.ts). */
@@ -383,6 +389,16 @@ export function createBoxYard(
     install,
     git: { name: c.gitUserName, email: c.gitUserEmail },
   })
+  // Vast.ai GPU instances, the other cloud behind "Runs on: GPU" (docs/vast.md). Idle until a Vast.ai key is set.
+  const vastService = new VastService({
+    store,
+    credentials: settings.credentials,
+    dataDir: c.dataDir,
+    install,
+    git: { name: c.gitUserName, email: c.gitUserEmail },
+    runpodImage: () => runpod.store.get().image,
+    fetch: opts.vastFetch,
+  })
   // Docker containers on this computer, for projects that run on "Docker container" (docs/docker.md). Docker is only
   // asked when one is needed; in mock mode the containers are folders.
   const dockerService = new DockerService({
@@ -397,6 +413,7 @@ export function createBoxYard(
   })
   // Every box provider gets the local runner, the GPU pods and the Docker containers beside it (shared/runner.ts).
   const gpu = opts.gpu ?? runpod
+  const vast = opts.vast ?? vastService
   const docker = opts.docker ?? dockerService
   // A task's GPU pod or Docker container as its placement shows it: the GPU type and pod id, or the container's name,
   // as this process last saw them (no API or Docker call).
@@ -406,10 +423,10 @@ export function createBoxYard(
       return name ? { container: name } : null
     }
     if (!isGpuBox(boxId)) return null
-    const pod = gpu?.provider.cached(boxId)
+    const pod = (gpuBoxProvider(boxId) === "vast" ? vast : gpu).provider.cached(boxId)
     return pod ? { podId: pod.id, gpu: pod.gpu?.id ? shortGpu(pod.gpu.id) : null } : null
   }
-  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider)
+  const provider = new LocalRunnerRouter(opts.provider ?? makeProvider(c, settings.credentials), opts.localRunner ?? localRunner(c), gpu.provider, docker.provider, vast.provider)
   const setup = new Setup({
     c,
     store,
@@ -429,10 +446,12 @@ export function createBoxYard(
   const uploads = new Uploads(uploadsDir(c.dataDir), c.maxUploadMb * 1024 * 1024)
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
-  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
+  const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, vast, docker, identities })
   tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
+  vastService.onPodEvent = (e) => tasks.gpuPodEvent(e)
+  vastService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
