@@ -7052,12 +7052,15 @@ export class TaskManager {
 
   private async evictWhenSettled(taskId: string) {
     for (let i = 0; i < 30; i++) {
+      if (this.stopped) return
       const row = this.store.getTaskRow(taskId)
       if (!row) return
       if (!row.current_turn_id) break
       await new Promise((r) => setTimeout(r, 2000))
     }
     await this.archive(taskId, { closing: true })
+    // Box Yard may have stopped (and closed the database) while it archived.
+    if (this.stopped) return
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
     if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays until the task is deleted
