@@ -130,13 +130,15 @@ describe("identities over the API", () => {
     ])
 
     // An identity without a token gets none (never the global one); without a Claude login it uses the global one.
+    // With no author and no token either, its commits go out as the fallback author (server/gitAuthor.ts).
+    const fallback = ["GIT_AUTHOR_EMAIL=box-yard@users.noreply.github.com", "GIT_AUTHOR_NAME=Box Yard Agent", "GIT_COMMITTER_EMAIL=box-yard@users.noreply.github.com", "GIT_COMMITTER_NAME=Box Yard Agent"]
     const onSolo = await r.call<Project>("POST", "/api/projects", { name: "solo-app", identityId: solo.id })
-    expect((await r.runTask(onSolo)).env).toEqual(["ANTHROPIC_API_KEY=global-key"])
+    expect((await r.runTask(onSolo)).env).toEqual(["ANTHROPIC_API_KEY=global-key", ...fallback])
 
-    // Every other project is on Default: Settings › Credentials, as before.
+    // Every other project is on Default: Settings › Credentials, as before (this fake GitHub doesn't know global-gh).
     const plain = await r.call<Project>("POST", "/api/projects", { name: "plain" })
     expect(plain.identityId).toBe(DEFAULT_IDENTITY_ID)
-    expect((await r.runTask(plain)).env).toEqual(["ANTHROPIC_API_KEY=global-key", "GH_TOKEN=global-gh", "GITHUB_TOKEN=global-gh"])
+    expect((await r.runTask(plain)).env).toEqual(["ANTHROPIC_API_KEY=global-key", "GH_TOKEN=global-gh", "GITHUB_TOKEN=global-gh", ...fallback])
 
     // A project's own env vars still win over its identity's.
     await r.call("PATCH", `/api/projects/${onAcme.id}`, { env: { GITHUB_TOKEN: "project-gh" } })

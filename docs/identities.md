@@ -34,6 +34,18 @@ From strongest to weakest:
 
 Each turn gets exactly one Claude var, and its GitHub token in both `GITHUB_TOKEN` and `GH_TOKEN`. The author goes in `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`, which beat any `user.name` a repo sets. The runner drops every credential var the turn mustn't use from its own env first.
 
+### Git author
+
+A turn's commits are by the first of these that's there (`server/gitAuthor.ts`):
+
+1. The task's or project's own `GIT_AUTHOR_*` env vars, else the identity's author (and its signing key, below).
+2. Settings › Credentials › **Git author** (`GIT_USER_NAME` / `GIT_USER_EMAIL`; a value saved there wins over the env var).
+3. On this computer, for the Default identity only: your own git config. On the local runner Box Yard sets no author at all, so git does what it always does in that repo: `user.name`, `user.email`, `includeIf` blocks for the repo's path, and `commit.gpgsign` with `gpg.format`, `user.signingkey` and `gpg.ssh.program`. In a Docker container, the global config's name and email go in as env vars (its signing key can't follow, and the task's log says so).
+4. The GitHub account behind the turn's token: its name (else its login) and `<id>+<login>@users.noreply.github.com`. Box Yard asks GitHub (`GET /user`) from the server and remembers the answer per token for a day.
+5. Only then `Box Yard Agent <box-yard@users.noreply.github.com>`, unsigned. The task's log gets a warning that says why each step gave nothing, and Settings › Credentials and Identities list the projects whose last turn committed that way until a later turn has a real author.
+
+Box Yard writes no author into a clone's `.git/config` or a box's global config. Clones made before this have `user.name = Box Yard Agent` in their `.git/config`; the local runner removes it before a turn, and everywhere else the author env vars beat it.
+
 Box Yard's own git work for the project (clones, fetches, the turn-end push, PR checks, branch cleanup) uses the same token. A project's Captain runs on its identity's Claude login.
 
 On the local runner, a project on any identity but Default is walled off from this computer's own git and `gh` setup:

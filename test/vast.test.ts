@@ -292,7 +292,8 @@ describe("VastProvider", () => {
     // It SSHed in straight to the host, uploaded bootstrap.sh and init.sh, and set the git identity.
     expect(ssh.commands[0]!.target).toEqual({ podId: "vast1000", host: "203.0.113.7", port: 40000 })
     expect(ssh.commands.some((c) => c.command.includes("/opt/boxyard/init.sh"))).toBe(true)
-    expect(ssh.commands.some((c) => c.command.includes("git config --global user.email"))).toBe(true)
+    // No author is baked into the instance: each turn brings its own (server/gitAuthor.ts).
+    expect(ssh.commands.some((c) => c.command.includes("git config --global user."))).toBe(false)
     expect(await p.health(BOX)).toBe("running")
     expect(await p.publicUrl(BOX, POD_HTTP_PORTS[0]!)).toBe("http://203.0.113.7:40001")
     await expect(p.publicUrl(BOX, 5173)).rejects.toThrow(/Only the first port of each task/)
