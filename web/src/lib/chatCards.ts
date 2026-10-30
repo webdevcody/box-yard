@@ -4,8 +4,8 @@
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
 // - A reply the Coordinator wrote on its own after reading updates (the "from:" line, lib/chatUpdates.ts) goes to the
 //   cards of the tasks those updates are about. A reply to Cody stays with his message, in the Coordinator card.
-// - What Cody sends from a card stays in it: his message to the task (a sent notice), or his question to the
-//   Coordinator (meta.about) and the reply to it.
+// - What Cody sends to a task from its card stays in it (a sent notice). Cody's questions to the Coordinator from a card
+//   aren't in the chat at all: they're the card's side thread (CardThread.tsx).
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
 //   Tool calls show only in the timeline.
 // - A card's place is where the chat first named its task, so new activity never moves it.
@@ -121,8 +121,6 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   const items = new Map<string, UpdateItem>()
   /** The newest user message since the last reply: a reply after one answers it. */
   let asked: ChatMessage | null = null
-  /** The tasks a question was asked about from their card (meta.about), that the app knows. */
-  const aboutOf = (q: ChatMessage) => (Array.isArray(q.meta?.about) ? q.meta.about.filter((t): t is string => typeof t === "string" && tasks.has(t)) : NO_TASKS)
 
   const name = (m: ChatMessage, origin: ChatMessage | null) => {
     for (const t of messageRefs(m, index).tasks) if (!named.has(t)) named.set(t, { at: m.createdAt, seq: named.size, origin })
@@ -169,9 +167,8 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
         for (const t of startedBy(m, index)) started.add(t)
         continue
       }
-      // A question from a card, and the reply to it, go to that card. A reply about tasks that are all gone stays in
-      // the Coordinator card rather than vanishing.
-      const about = asked ? aboutOf(asked) : m.role === "assistant" ? readTasks(r.sources).filter((t) => tasks.has(t)) : NO_TASKS
+      // A reply about tasks that are all gone stays in the Coordinator card rather than vanishing.
+      const about = m.role === "assistant" && !asked ? readTasks(r.sources).filter((t) => tasks.has(t)) : NO_TASKS
       if (about.length) placed.push({ ...entry, tasks: about })
       else coordinator.push({ ...entry, tasks: NO_TASKS })
       if (m.role === "assistant" || m.role === "error") asked = null

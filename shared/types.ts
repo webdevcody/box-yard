@@ -401,11 +401,14 @@ export interface SideThread {
   id: string
   /** null: the Coordinator chat; else that project's Captain chat. */
   projectId: string | null
-  /** The chat message the highlight is in (an ask), or the message replied to (a reply thread). */
+  /** The chat message the highlight is in (an ask), the message replied to (a reply thread), or a task card's key (a task thread: the task's id, or `batch:<batch id>`). */
   anchorId: string
-  /** "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown as "N replies" under it. */
+  /**
+   * "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown
+   * as "N replies" under it. "task": questions to the Coordinator from a task's card, one thread per card, shown in it.
+   */
   kind: SideThreadKind
-  /** The highlighted text, as selected; for a reply thread, the whole message replied to. */
+  /** The highlighted text, as selected; for a reply thread, the whole message replied to; for a task thread, the card's title. */
   quote: string
   /** How the thread got the chat's context: a fork of its session at the message, or (after a compaction) its summary. null until the first answer. */
   context: "fork" | "summary" | null
@@ -421,7 +424,7 @@ export interface SideThread {
   updatedAt: number
 }
 
-export type SideThreadKind = "ask" | "reply"
+export type SideThreadKind = "ask" | "reply" | "task"
 
 export type SideThreadRole = "user" | "assistant" | "tool" | "error"
 

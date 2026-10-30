@@ -46,7 +46,7 @@ describe("grouping updates", () => {
     expect(shape(rows)).toEqual(["g:a,b", "m:q", "u:c", "m:f", "m:m", "u:w"])
   })
 
-  it("Cody's message to a task from its card is his own line, never a chip, and the Coordinator doesn't read it", () => {
+  it("Cody's message to a task from its card is Cody's own line, never a chip, and the Coordinator doesn't read it", () => {
     const sent = msg("s", "notice", "✉️ **Fix login** got a message from Cody: try the: new form\nand log in", { taskId: "task_s", sent: true })
     const rows = coordinatorRows([done("a"), sent, done("b"), reply("r")])
     expect(shape(rows)).toEqual(["u:a", "m:s", "u:b", "m:r"])

@@ -13,7 +13,7 @@ export const ATTENTION_KINDS: ReadonlySet<NoticeKind> = new Set(["needs_input", 
 
 export const isAttention = (m: Pick<ChatMessage, "role" | "content" | "meta">) => m.role === "notice" && ATTENTION_KINDS.has(noticeKind(m.content, m.meta))
 
-/** Cody's message to a task from its card (TaskManager.sentFromChat): his words, so a bubble, never a chip. */
+/** Cody's message to a task from its card (TaskManager.sentFromChat): Cody's words, so a bubble, never a chip. */
 export const isSent = (m: Pick<ChatMessage, "role" | "meta">) => m.role === "notice" && m.meta?.sent === true
 
 /**

@@ -177,20 +177,14 @@ const schemas = {
   }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
-  chat: z.object({
-    id: idSchema,
-    content: z.string().trim().max(50_000),
-    attachments: attachmentIds,
-    /** Asked from these tasks' card in the chat: the Coordinator is told it's about them (Orchestrator.send). */
-    about: z.array(z.string().regex(/^task_[A-Za-z0-9-]{6,40}$/)).max(50).optional(),
-  }),
+  chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
   sideThread: z.object({
     id: idSchema,
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
-    kind: z.enum(["ask", "reply"]).optional(),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. "task": from a task card (anchorId: the task, or `batch:<id>`). */
+    kind: z.enum(["ask", "reply", "task"]).optional(),
     quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
@@ -1308,8 +1302,7 @@ export function createBoxYard(
   api.post("/chat", (req, res) => {
     const body = parse(schemas.chat, req.body)
     const files = withAttachments(body.content, body.attachments)
-    const about = (body.about ?? []).filter((id) => store.getTaskRow(id))
-    res.status(201).json(orchestrator.send(body.content, body.id, files, about))
+    res.status(201).json(orchestrator.send(body.content, body.id, files))
   })
   // A message queued mid-turn (meta.queued) can be edited or deleted (Undo: restore) until the next turn takes it.
   api.patch("/chat/messages/:messageId", (req, res) => {

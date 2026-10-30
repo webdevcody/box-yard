@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { forkPoint, replyPrompt, sessionLineMeta, summaryContext, threadPrompt } from "../server/sideThreads.js"
+import { forkPoint, noticeLines, replyPrompt, sessionLineMeta, summaryContext, taskKey, taskThreadPrompt, threadPrompt } from "../server/sideThreads.js"
 import type { ChatMessage } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
@@ -117,6 +117,62 @@ describe("side thread context", () => {
   })
 })
 
+describe("task threads", () => {
+  it("are one per card, and find a card's tasks and their updates in the chat", () => {
+    const store = memStore()
+    const p = store.createProject({ name: "demo" })
+    const a = store.createTask({ projectId: p.id, title: "Level 1", prompt: "x", batchId: "bat_1" })
+    const b = store.createTask({ projectId: p.id, title: "Level 2", prompt: "x", batchId: "bat_1" })
+    const c = store.createTask({ projectId: p.id, title: "Other", prompt: "x" })
+    expect(store.tasksInBatch("bat_1").map((t) => t.id)).toEqual([a.id, b.id])
+    expect(store.tasksInBatch("bat_none")).toEqual([])
+
+    const t = store.createSideThread({ projectId: null, anchorId: a.id, quote: "Level 1", sessionId: "s-1", kind: "task" })
+    expect(t.kind).toBe("task")
+    expect(store.threadOn(null, a.id, "task")!.id).toBe(t.id)
+    // A message's reply thread and a card's thread don't mix.
+    expect(store.threadOn(null, a.id, "reply")).toBeNull()
+
+    store.addChat("notice", "✅ **Level 1** is done", { taskId: a.id })
+    store.addChat("notice", "✅ **Other** is done", { taskId: c.id })
+    store.addChat("assistant", "Both done.")
+    store.addChat("notice", "🚧 **Level 2** is working", { taskId: b.id })
+    expect(store.taskNotices([a.id]).map((m) => m.content)).toEqual(["✅ **Level 1** is done"])
+    expect(store.taskNotices([a.id, b.id]).map((m) => m.content)).toEqual(["✅ **Level 1** is done", "🚧 **Level 2** is working"])
+    expect(store.taskNotices([a.id, b.id], 1).map((m) => m.content)).toEqual(["🚧 **Level 2** is working"])
+    expect(store.taskNotices([])).toEqual([])
+    expect(noticeLines(store.taskNotices([a.id, b.id]))).toBe("- ✅ **Level 1** is done\n- 🚧 **Level 2** is working")
+  })
+
+  it("start from the card, the task's state and its updates", () => {
+    const prompt = taskThreadPrompt({ title: "Haiku", batch: false, state: "[The task]\n- task_1 \"Haiku\" done", notices: "- ✅ **Haiku** is done", question: "Any good?", context: null, ownerName: "Sam" })
+    expect(prompt).toMatch(/^\[Box Yard side thread\] Sam is asking you about a task, from the card of the task "Haiku" in the Coordinator chat\./)
+    expect(prompt).toContain("the main chat never sees it")
+    expect(prompt).toContain('[The task]\n- task_1 "Haiku" done\n\nIts updates in the chat, oldest first:\n- ✅ **Haiku** is done')
+    expect(prompt).toContain("This thread is read-only")
+    expect(prompt).toMatch(/Sam's question:\nAny good\?$/)
+    expect(prompt).not.toContain("started fresh")
+
+    const batch = taskThreadPrompt({ title: "Level 1 (and 1 more)", batch: true, state: "[These tasks]", notices: "", question: "?", context: "the summary" })
+    expect(batch).toContain('from the card of the batch of tasks "Level 1 (and 1 more)"')
+    expect(batch).toContain("started fresh, from your notes.]\n\nthe summary")
+    expect(batch).toContain("about these tasks")
+    expect(batch).not.toContain("updates in the chat")
+  })
+
+  it("tell a later turn the task's state again only when the task changed, not when time passed", () => {
+    const store = memStore()
+    const p = store.createProject({ name: "demo" })
+    const t = store.createTask({ projectId: p.id, title: "Haiku", prompt: "x" })
+    const key = taskKey([store.getTask(t.id)!])
+    expect(taskKey([store.getTask(t.id)!])).toBe(key)
+    const pr = { ...store.getTask(t.id)!, prState: "merged" as const }
+    expect(taskKey([pr])).not.toBe(key)
+    store.updateTask(t.id, { status: "done" })
+    expect(taskKey([store.getTask(t.id)!])).not.toBe(key)
+  })
+})
+
 describe("reply threads", () => {
   it("count Cody's messages and the answers, mark answers after the last look unread, and resolve", () => {
     const store = memStore()
@@ -125,8 +181,8 @@ describe("reply threads", () => {
     expect(t).toMatchObject({ kind: "reply", replies: 0, unread: false, resolvedAt: null })
     // An older thread (before the kind column) is an ask.
     expect(store.createSideThread({ projectId: null, anchorId: a.id, quote: "x", sessionId: "s-2" }).kind).toBe("ask")
-    expect(store.replyThreadOn(null, a.id)!.id).toBe(t.id)
-    expect(store.replyThreadOn(null, "chat_other")).toBeNull()
+    expect(store.threadOn(null, a.id, "reply")!.id).toBe(t.id)
+    expect(store.threadOn(null, "chat_other", "reply")).toBeNull()
 
     const ask = store.addSideThreadMessage(t.id, "user", "Why?")
     store.seeSideThread(t.id, ask.createdAt)
