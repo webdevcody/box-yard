@@ -20,7 +20,6 @@ import {
   ChevronRight,
   ChevronUp,
   ChevronsDownUp,
-  EyeOff,
   LocateFixed,
   CircleCheck,
   ListChecks,
@@ -63,7 +62,7 @@ import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
 import { CardComposer, WorkingLine } from "./CardComposer"
-import { BottomCardHead, bottomCardFolded } from "./BottomCard"
+import { BottomCardHead, HiddenCard, bottomCardFolded } from "./BottomCard"
 import { MESSAGE_BLOCK, MessageActions, MessageMenu, type MenuItem } from "./MessageActions"
 import { COMPOSER_FOOTER } from "./Composer"
 import { PANEL_ICON, PANEL_WIDE, PanelHeader, type CardPanelProps } from "./SideThread"
@@ -1335,13 +1334,7 @@ function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entr
 
 /** In place of the Coordinator card while "Tasks only" hides it: what's hidden, and the way back. */
 function CoordinatorHidden() {
-  return (
-    <button type="button" onClick={() => setTasksOnly(false)} data-testid="coordinator-hidden" className={cx(FOLD, "w-full")}>
-      <EyeOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      <span className="min-w-0 flex-1 truncate">Coordinator card hidden (Tasks only)</span>
-      <span className="shrink-0 text-zinc-500">show</span>
-    </button>
-  )
+  return <HiddenCard label="Coordinator card" onShow={() => setTasksOnly(false)} testId="coordinator-hidden" />
 }
 
 /** What the pill covers at the bottom of the chat: a card under it is still below. */
@@ -1452,22 +1445,21 @@ const TOGGLE_BUTTON =
   "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
 
 /**
- * "Tasks only", in the chat's header: hides the Coordinator card under the cards (lib/coordinatorView.ts; this browser
- * remembers it). Its icon only in a narrow header. With a project picked there's no Coordinator card to hide (its
- * Captain's card is in its place), so it's gone.
+ * "Tasks only", in the chat's header: hides the card under the task cards, the Coordinator's under "All" or the picked
+ * project's Captain's (lib/coordinatorView.ts; this browser remembers each). Its icon only in a narrow header.
  */
 export const TasksOnlyToggle = memo(function TasksOnlyToggle() {
-  const tasksOnly = useTasksOnly()
   const picked = useChatProjectFilter() !== null
-  if (picked) return null
+  const tasksOnly = useTasksOnly(picked)
+  const card = picked ? "the Captain card" : "the Coordinator card"
   return (
     <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
       <button
         type="button"
         aria-pressed={tasksOnly}
-        aria-label="Tasks only"
-        title={tasksOnly ? "Tasks only: the Coordinator card is hidden. Click to show it" : "Tasks only: hide the Coordinator card under the task cards"}
-        onClick={() => setTasksOnly(!tasksOnly)}
+        aria-label={`Tasks only: hide ${card}`}
+        title={tasksOnly ? `Tasks only: ${card} is hidden. Click to show it` : `Tasks only: hide ${card} under the task cards`}
+        onClick={() => setTasksOnly(!tasksOnly, picked)}
         data-testid="tasks-only"
         className={cx(TOGGLE_BUTTON, tasksOnly ? "bg-zinc-800 text-yard-300" : "text-zinc-500 hover:text-zinc-200")}
       >

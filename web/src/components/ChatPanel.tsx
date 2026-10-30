@@ -143,6 +143,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         if (!content && !attachments.length) return
         sending = sendCaptain.mutateAsync({ id: newClientId("chat"), content, attachments })
         sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+        // Its answer lands in the Captain card: "Tasks only" shows it again.
+        setTasksOnly(false, true)
         scroller.current?.scrollToEnd()
       } else sending = followUp(text, attachments)
       box.current?.focus()
