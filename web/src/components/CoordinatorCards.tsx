@@ -448,10 +448,10 @@ function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable
       data-testid="cards-select-bar"
       className="sticky top-0 z-20 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-[10px] border border-yard-500/40 bg-zinc-950/95 px-2 py-1.5 text-xs text-zinc-300 shadow-lg shadow-black/40 backdrop-blur"
     >
-      <span className="min-w-0 flex-1 truncate" data-testid="cards-select-count">
-        {chosen.length ? `${chosen.length} task${chosen.length === 1 ? "" : "s"} selected` : "Pick the cards to mark done"}
+      <span className="whitespace-nowrap" data-testid="cards-select-count">
+        {chosen.length ? `${chosen.length} task${chosen.length === 1 ? "" : "s"} selected` : "Pick cards to mark done"}
       </span>
-      <span className="flex shrink-0 items-center gap-1">
+      <span className="ml-auto flex shrink-0 items-center gap-1">
         <button type="button" onClick={() => setPicked(all ? [] : pickable.map((c) => c.key))} className={FOOT}>
           {all ? "Select none" : "Select all"}
         </button>
@@ -536,8 +536,11 @@ function CardTitle({ card, title }: { card: ChatCard; title: string }) {
   )
 }
 
-/** The line under a card's title: its project, status, run time and PR (a batch's counts), what it holds, and when. */
-function CardMeta({ card, head }: { card: ChatCard; head: CardHead }) {
+/**
+ * The line under a card's title: its project, status, run time and PR (a batch's counts), what it holds, and when.
+ * `children` go at its end (a card's ⋯), so the title keeps the card's width.
+ */
+function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; children?: ReactNode }) {
   const { first, tasks, statuses } = head
   const updates = card.entries.filter((e) => e.type === "update").length
   const replies = card.entries.length - updates
@@ -561,6 +564,7 @@ function CardMeta({ card, head }: { card: ChatCard; head: CardHead }) {
       )}
       {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
       <TimeAgo ts={card.last} />
+      {children && <span className="ml-auto flex shrink-0 items-center">{children}</span>}
     </div>
   )
 }
@@ -641,7 +645,6 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
               {unread} new
             </span>
           )}
-          {!selecting && <CardMenu card={card} markDone={markDone} pickable={tasks.some((t) => CLEARABLE.has(t.status) && !closing.has(t.id))} />}
           <button
             type="button"
             data-testid="chat-card-panel"
@@ -649,13 +652,15 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
             aria-pressed={inPanel}
             aria-label="Open in the side panel"
             title={inPanel ? "Close the side panel" : "Open in the side panel"}
-            className={cx(CARD_ICON_BUTTON, "aria-pressed:text-yard-300")}
+            className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-pressed:text-yard-300 pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
           >
             <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
           </button>
           <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
-        <CardMeta card={card} head={head} />
+        <CardMeta card={card} head={head}>
+          {!selecting && <CardMenu card={card} markDone={markDone} pickable={tasks.some((t) => CLEARABLE.has(t.status) && !closing.has(t.id))} />}
+        </CardMeta>
         {!open && <LatestLine card={card} batch={batch} thread={thread} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
       </div>
@@ -664,10 +669,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   )
 })
 
-const CARD_ICON_BUTTON =
-  "-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
-
-/** A card's ⋯ (on hover, or always on touch): Mark done, Select, Show in timeline. */
+/** A card's ⋯ at the end of its meta line (on hover or focus, always on touch): Mark done, Select, Show in timeline. */
 function CardMenu({ card, markDone, pickable }: { card: ChatCard; markDone: ReturnType<typeof useCardMarkDone>; pickable: boolean }) {
   const more = useRef<HTMLButtonElement>(null)
   const [menu, setMenu] = useState(false)
@@ -688,7 +690,7 @@ function CardMenu({ card, markDone, pickable }: { card: ChatCard; markDone: Retu
         aria-label="Card actions"
         title="Mark done, select…"
         className={cx(
-          CARD_ICON_BUTTON,
+          "-my-1 grid h-5 w-6 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9",
           "opacity-0 group-focus-within/card:opacity-100 group-hover/card:opacity-100 focus-visible:opacity-100 aria-expanded:bg-zinc-800 aria-expanded:opacity-100 pointer-coarse:opacity-100",
         )}
       >
