@@ -337,10 +337,11 @@ export const useSettings = () =>
   })
 export const useOrchestratorState = () =>
   useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
-export const useCaptainState = (projectId: string) =>
-  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity })
-export const useCaptainMessages = (projectId: string) =>
-  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`) })
+/** `enabled` false: no project yet (the Coordinator chat's bottom panel with "All" picked). */
+export const useCaptainState = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity, enabled: o.enabled })
+export const useCaptainMessages = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`), enabled: o.enabled })
 export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
