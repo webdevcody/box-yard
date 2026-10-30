@@ -5,7 +5,8 @@ import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCo
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
-import { AgentIcon, Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { AgentIcon, Button, InRepo, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { MENTIONS } from "../lib/linkify"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
@@ -115,7 +116,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const hidden = tail.hidden
   const index = useEntityIndex()
   useEffect(() => {
-    if (hidden) warmMarkdown(messages.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
+    if (hidden) warmMarkdown(messages.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index, MENTIONS)
   }, [messages, hidden, index])
 
   // Links to a chat message (e.g. a schedule run) may point above the rendered part of the thread.
@@ -244,9 +245,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                <ChatRows rows={shown} onFollowUp={followUp} />
-                <StreamingReply busy={Boolean(busy.data)} />
-                {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
+                <InRepo mentions>
+                  <ChatRows rows={shown} onFollowUp={followUp} />
+                  <StreamingReply busy={Boolean(busy.data)} />
+                  {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                </InRepo>
               </StickyScroll>
             </SelectionToTask>
 

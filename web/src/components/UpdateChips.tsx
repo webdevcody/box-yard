@@ -4,7 +4,7 @@
 // re-renders only that chip.
 import { memo, useMemo, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Bot, ChevronRight, type LucideIcon } from "lucide-react"
-import { AppLink, Markdown, cx } from "./ui"
+import { AppLink, InRepo, LinkedText, Markdown, cx } from "./ui"
 import { ChatLine, FullReplyLink, NoticeProject } from "./ChatLine"
 import { PublishedCard } from "./PublishedNotices"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
@@ -77,7 +77,9 @@ const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
         {v.preview && !open && (
           <span data-testid="update-chip-preview" className={cx("min-w-0 flex-1 truncate", v.source ? "text-zinc-600" : "text-zinc-400")}>
             {v.source || v.verb ? "· " : ""}
-            {v.preview}
+            <InRepo taskId={typeof m.meta?.taskId === "string" ? m.meta.taskId : null} projectId={typeof m.meta?.projectId === "string" ? m.meta.projectId : null}>
+              <LinkedText text={v.preview} />
+            </InRepo>
           </span>
         )}
       </ChipLine>
@@ -98,7 +100,9 @@ function NoticeBody({ m }: { m: ChatMessage }) {
     const text = stripTruncation(m.content).text.replace(/^Captain(?: for .+?)?(?: replied)?:\s*/, "")
     return (
       <div data-testid="update-chip-body" className={cx(CHIP_BODY, "text-sm text-zinc-300")}>
-        <Markdown>{text}</Markdown>
+        <InRepo projectId={projectId}>
+          <Markdown>{text}</Markdown>
+        </InRepo>
       </div>
     )
   }
@@ -106,7 +110,9 @@ function NoticeBody({ m }: { m: ChatMessage }) {
     <div data-testid="update-chip-body" className={cx(CHIP_BODY, "text-xs leading-relaxed wrap-anywhere text-zinc-400")}>
       {taskId && <NoticeProject taskId={taskId} projectId={projectId} />}
       <div className="inline [&>.prose-chat]:inline [&>.prose-chat>p:first-child]:inline">
-        <Markdown>{n.event}</Markdown>
+        <InRepo taskId={taskId} projectId={projectId}>
+          <Markdown>{n.event}</Markdown>
+        </InRepo>
       </div>
       {n.truncated && taskId && <FullReplyLink taskId={taskId} />}
     </div>

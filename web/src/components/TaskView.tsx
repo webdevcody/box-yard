@@ -13,7 +13,7 @@ import {
 } from "../lib/queries"
 import { useEntityIndex } from "../lib/entities"
 import { useTail } from "../lib/tail"
-import { AppLink, Empty, LineIcon, Markdown, TimeAgo, cx, warmMarkdown, WaitIcon } from "./ui"
+import { AppLink, Empty, InRepo, LineIcon, LinkedText, Markdown, TimeAgo, cx, useRepoScope, warmMarkdown, WaitIcon } from "./ui"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
@@ -32,7 +32,16 @@ import { userMessageLabel } from "../../../shared/sender"
 import { useOwnerName } from "../lib/queries"
 import { WaitFixButton, WaitReason } from "./WaitReason"
 
+/** A task's page. "#12" and "PR #12" in its text link to its project's repo. */
 export function TaskView({ id }: { id: string }) {
+  return (
+    <InRepo taskId={id}>
+      <TaskPage id={id} />
+    </InRepo>
+  )
+}
+
+function TaskPage({ id }: { id: string }) {
   // Only this task: other tasks' live updates don't re-render the view.
   const tasks = useTask(id)
   const projects = useProjects()
@@ -80,7 +89,9 @@ export function TaskView({ id }: { id: string }) {
           <MessageCircleQuestion className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
           <div>
             <div className="text-xs font-semibold tracking-wide text-amber-400 uppercase">The agent needs you</div>
-            <div className="mt-1 text-sm">{task.question}</div>
+            <div className="mt-1 text-sm">
+              <LinkedText text={task.question} />
+            </div>
           </div>
         </div>
       )}
@@ -96,7 +107,9 @@ export function TaskView({ id }: { id: string }) {
         </div>
       )}
       {task.status === "failed" && task.error && (
-        <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap wrap-anywhere text-red-200">{task.error}</div>
+        <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm whitespace-pre-wrap wrap-anywhere text-red-200">
+          <LinkedText text={task.error} />
+        </div>
       )}
 
       <TaskThread
@@ -152,9 +165,10 @@ const TaskThread = memo(function TaskThread({
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
   const index = useEntityIndex()
+  const repo = useRepoScope()
   useEffect(() => {
-    if (hidden) warmMarkdown(shown.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
-  }, [shown, hidden, index])
+    if (hidden) warmMarkdown(shown.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index, repo)
+  }, [shown, hidden, index, repo])
 
   return (
     <SelectionToTask source={selectionSource} onPrompt={onStartFromSelection}>

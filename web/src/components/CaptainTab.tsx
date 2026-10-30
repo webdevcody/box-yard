@@ -29,7 +29,7 @@ import { useEntityIndex } from "../lib/entities"
 import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
-import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AgentIcon, AppLink, Button, InRepo, LineIcon, Markdown, TimeAgo, cx, useRepoScope, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown, FullReplyLink } from "./ChatLine"
 import { stripTruncation } from "../lib/truncated"
 import { QueuedChatMessage } from "./QueuedMessages"
@@ -50,7 +50,16 @@ import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, Capt
 
 const NO_MESSAGES: CaptainMessage[] = []
 
+/** A project's Captain chat. Everything in it is about the project, so "#12" and "PR #12" link to its repo. */
 export function CaptainTab({ project }: { project: Project }) {
+  return (
+    <InRepo projectId={project.id}>
+      <CaptainChat project={project} />
+    </InRepo>
+  )
+}
+
+function CaptainChat({ project }: { project: Project }) {
   const state = useCaptainState(project.id)
   const messages = useCaptainMessages(project.id)
   const send = useSendCaptainMessage(project.id)
@@ -99,9 +108,10 @@ export function CaptainTab({ project }: { project: Project }) {
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
   const index = useEntityIndex()
+  const repo = useRepoScope()
   useEffect(() => {
-    if (hidden) warmMarkdown(rows.slice(0, hidden).flatMap((r) => (r.type === "message" && r.message.role === "assistant" ? [r.message.content] : [])), index)
-  }, [rows, hidden, index])
+    if (hidden) warmMarkdown(rows.slice(0, hidden).flatMap((r) => (r.type === "message" && r.message.role === "assistant" ? [r.message.content] : [])), index, repo)
+  }, [rows, hidden, index, repo])
 
   const busy = Boolean(state.data?.busy)
   // Selected Captain output becomes a task request to this Captain.
