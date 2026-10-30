@@ -9,7 +9,7 @@ import { memo, useEffect, useMemo, useRef } from "react"
 import { X } from "lucide-react"
 import { useProjects, useTasks } from "../lib/queries"
 import { useTiles } from "../lib/taskTiles"
-import { barCounts, pickProject, pinProject, projectBarRows, setChatProjectFilter, unpinProject, useBarPins, useChatProjectFilter, type BarRow } from "../lib/projectBar"
+import { barCounts, centredScrollLeft, pickProject, pinProject, projectBarRows, setChatProjectFilter, unpinProject, useBarPins, useChatProjectFilter, type BarRow } from "../lib/projectBar"
 import { projectColorStyle } from "./TaskIcon"
 import { cx } from "./ui"
 import type { ProjectColor } from "../../../shared/projectColors"
@@ -38,10 +38,16 @@ export const ProjectBar = memo(function ProjectBar({ recent, className }: { rece
   useEffect(() => {
     if (filter && projects.data && !projects.data.some((p) => p.id === filter)) setChatProjectFilter(null)
   }, [filter, projects.data])
-  // The pressed chip stays in view on a narrow bar.
+  // The pressed chip scrolls to the bar's middle whenever the pick changes (the switcher, P, a chip, +N needs you), or
+  // the bar first shows. Only the bar scrolls: scrollIntoView would move the page and the panel too.
+  const shown = rows.length > 0 || hidden.length > 0
+  const centred = useRef(false)
   useEffect(() => {
-    bar.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView?.({ block: "nearest", inline: "nearest" })
-  }, [filter])
+    const el = bar.current
+    if (!el) return
+    centreSelected(el, centred.current)
+    centred.current = true
+  }, [filter, shown])
   if (!rows.length && !hidden.length) return null
   return (
     <div
@@ -71,6 +77,18 @@ export const ProjectBar = memo(function ProjectBar({ recent, className }: { rece
     </div>
   )
 })
+
+/** Scrolls `bar` sideways so its pressed chip is centred: smoothly once it's on screen, unless motion is reduced. */
+export function centreSelected(bar: HTMLElement, smooth: boolean) {
+  const pressed = bar.querySelector<HTMLElement>('[aria-pressed="true"]')
+  const chip = pressed?.closest<HTMLElement>("[data-project]") ?? pressed
+  if (!chip) return
+  const left = centredScrollLeft(bar.getBoundingClientRect(), chip.getBoundingClientRect(), bar.scrollLeft, bar.clientWidth, bar.scrollWidth)
+  if (Math.abs(left - bar.scrollLeft) < 1) return
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches
+  if (typeof bar.scrollTo === "function") bar.scrollTo({ left, behavior: smooth && !reduced ? "smooth" : "auto" })
+  else bar.scrollLeft = left
+}
 
 function ProjectChip({ row, color, on }: { row: BarRow; color: ProjectColor | undefined; on: boolean }) {
   const counts = barCounts(row)
