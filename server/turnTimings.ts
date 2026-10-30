@@ -279,6 +279,8 @@ export interface TimingReportQuery {
   kind?: string
   days?: number
   recent?: number
+  /** Rows counted in the stage percentiles but kept out of the tool list and the recent runs (a status-only project's). */
+  hidden?: (t: TurnTiming) => boolean
 }
 
 /** p50/p95 per role and stage over the last `days` (default 7), and the newest runs: the turn_timings MCP tool and API. */
@@ -290,5 +292,7 @@ export function timingReport(
   const days = Math.min(30, Math.max(1 / 24, q.days ?? 7))
   const since = now - days * 24 * 3_600_000
   const rows = list({ since, role: q.role, projectId: q.projectId, taskId: q.taskId, kind: q.kind ?? "turn" })
-  return { days, summary: summarizeTimings(rows, since), recent: rows.slice(0, Math.min(50, Math.max(0, q.recent ?? 10))).map(briefTiming) }
+  const shown = q.hidden ? rows.filter((r) => !q.hidden!(r)) : rows
+  const summary = { ...summarizeTimings(rows, since), tools: summarizeTimings(shown, since).tools }
+  return { days, summary, recent: shown.slice(0, Math.min(50, Math.max(0, q.recent ?? 10))).map(briefTiming), hiddenTurns: rows.length - shown.length }
 }
