@@ -3,6 +3,10 @@
 // handshake and tool calls, and the hops between the Coordinator and a Captain. Rerun it before and after a change.
 //
 //   npx tsx scripts/perf/roundtrip-bench.ts [rounds=8] [--port 4001] [--json out.json] [--claude "<cmd>"] [--keep]
+//     [--message "status {i} [fyi]"] [--exit-ms 700]
+//
+// --message is what Cody asks the Captain ({i} is the trip number); with [fyi] fake-claude's Captain marks its reply FYI.
+// --exit-ms holds fake-claude between its result line and exiting, like the real CLI's 400–1,000 ms exit tail.
 //
 // It runs its own server (in a temp data dir, on --port) and never touches a live one.
 import fs from "node:fs"
@@ -26,6 +30,9 @@ const port = Number(opt("--port") ?? 4001)
 const jsonOut = opt("--json")
 const claudeBin = opt("--claude") ?? `${process.execPath} ${path.resolve("scripts/fake-claude.mjs")}`
 const keep = args.includes("--keep") ? (args.splice(args.indexOf("--keep"), 1), true) : false
+const message = opt("--message") ?? "status {i}"
+const exitMs = opt("--exit-ms")
+if (exitMs) process.env.FAKE_CLAUDE_EXIT_MS = exitMs
 const rounds = Number(args[0] ?? 8)
 process.env.FAKE_CLAUDE_WORD_MS ??= "1"
 
@@ -87,8 +94,10 @@ const idle = async (p: Project) => {
 interface Trip {
   /** Cody's message posted → the Captain's reply notice on the Coordinator chat. */
   toCaptainReplyMs: number
-  /** → the Coordinator's automatic turn on that reply ended. */
-  toCoordinatorDoneMs: number
+  /** → the Coordinator's automatic turn on that reply ended (null: the reply didn't wake it). */
+  toCoordinatorDoneMs: number | null
+  /** → every Coordinator and Captain turn of the trip ended, and no wake is pending. */
+  toQuietMs: number
   coordinator: TurnTiming
   captain: TurnTiming
   wake: TurnTiming | null
@@ -102,25 +111,30 @@ for (let i = 0; i <= rounds; i++) {
   const before = new Set(yard.store.listTurnTimings({ since: 0, limit: 10_000 }).map((t) => t.id))
   const notices = new Set(yard.store.listChat(1000).map((m) => m.id))
   const t0 = Date.now()
-  await call("POST", "/api/chat", { content: `tell captain demo: status ${i}` })
+  await call("POST", "/api/chat", { content: `tell captain demo: ${message.replaceAll("{i}", String(i))}` })
   const notice = await until(() => yard.store.listChat(1000).find((m: ChatMessage) => !notices.has(m.id) && m.role === "notice" && m.meta?.captain === true && m.meta?.replyTo), "the Captain's reply")
   // The automatic Coordinator turn the reply wakes, then quiet.
   const fresh = () => yard.store.listTurnTimings({ since: t0 - 1000, limit: 100 }).filter((t) => !before.has(t.id))
+  // A reply that wakes the Coordinator does so within its debounce; one that doesn't is done once both are idle.
+  const wakeBy = notice.createdAt + yard.orchestrator.tuning.wakeDebounceMs + 3000
   const rows = await until(() => {
     const r = fresh()
-    return r.some((t) => t.role === "coordinator" && t.trigger === "updates") && r.some((t) => t.role === "captain") ? r : null
-  }, "the Coordinator's wake on the reply", 30_000)
+    const captainDone = r.some((t) => t.role === "captain")
+    return captainDone && (r.some((t) => t.role === "coordinator" && t.trigger === "updates") || Date.now() > wakeBy) ? r : null
+  }, "the Coordinator's wake on the reply, or its debounce passing", 30_000)
   await idle(p)
   const wake = rows.find((t) => t.role === "coordinator" && t.trigger === "updates") ?? null
+  const ends = fresh().map((t) => t.endedAt)
   const trip: Trip = {
     toCaptainReplyMs: notice.createdAt - t0,
-    toCoordinatorDoneMs: (wake?.endedAt ?? Date.now()) - t0,
+    toCoordinatorDoneMs: wake ? wake.endedAt - t0 : null,
+    toQuietMs: Math.max(...ends) - t0,
     coordinator: rows.find((t) => t.role === "coordinator" && t.trigger === "cody")!,
     captain: rows.find((t) => t.role === "captain")!,
     wake,
   }
   if (i > 0) trips.push(trip)
-  process.stderr.write(`trip ${i}${i ? "" : " (warm-up)"}: reply ${trip.toCaptainReplyMs} ms, done ${trip.toCoordinatorDoneMs} ms\n`)
+  process.stderr.write(`trip ${i}${i ? "" : " (warm-up)"}: reply ${trip.toCaptainReplyMs} ms, ${wake ? `wake done ${trip.toCoordinatorDoneMs} ms` : "no wake"}, quiet ${trip.toQuietMs} ms\n`)
 }
 
 // buildMcpServer runs on every /mcp request: the handshake makes ~3 and each tool call 1.
@@ -156,12 +170,14 @@ const toolRows = (label: string, rows: TurnTiming[]) => {
 }
 
 const out = [
-  `Round trips: ${trips.length} (after one warm-up), claude = ${claudeBin.includes("fake-claude") ? "fake-claude" : claudeBin}`,
+  `Round trips: ${trips.length} (after one warm-up), claude = ${claudeBin.includes("fake-claude") ? "fake-claude" : claudeBin}, message "${message}"${exitMs ? `, exit tail ${exitMs} ms` : ""}`,
+  `Coordinator woken on the reply: ${trips.filter((t) => t.wake).length} of ${trips.length}`,
   "",
   "| Stage | p50 | p95 | max | n |",
   "|---|---:|---:|---:|---:|",
   line("Cody → the Captain's reply on the Coordinator chat", trips.map((t) => t.toCaptainReplyMs)),
   line("Cody → the Coordinator's wake on it done", trips.map((t) => t.toCoordinatorDoneMs)),
+  line("Cody → all turns done (quiet)", trips.map((t) => t.toQuietMs)),
   ...stageRows("Coordinator (Cody)", trips.map((t) => t.coordinator)),
   ...toolRows("Coordinator", trips.map((t) => t.coordinator)),
   ...stageRows("Captain", trips.map((t) => t.captain)),
