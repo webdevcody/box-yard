@@ -132,6 +132,15 @@ Requirements are Node 20+ and git. `./yard local` installs the Claude Code CLI i
 
 `list_tasks` takes a `query`, so even a fresh Captain session finds the agent that did related work. For quick work the Captain calls `wait_for_tasks` and answers in the same reply. For long work it ends its turn. When an agent finishes, fails, asks something or opens a PR, the project's Captain wakes up, checks whether a project-local next step is needed, and reports a concise result upward when Cody or the Coordinator should hear it.
 
+A Captain's reply shows on the Coordinator chat as soon as its turn's result is in. It wakes the Coordinator for a turn of its own only when there's something to act on. A reply the Captain marks FYI (a hidden `<!-- boxyard-coordinator: fyi -->` line: a status or an answer for Cody) doesn't wake it, and goes to the Coordinator with its next turn's updates instead. These replies always wake it:
+
+- a question, a decision for Cody or a failure in the text, even when marked FYI;
+- a failed Captain turn;
+- one reply in a fan-out (the Coordinator asked several Captains in one turn);
+- a reply to `send_to_captain` with `act_on_reply: true`, or to an `ask_captain` that ran out of time.
+
+When unsure, it wakes (`server/captainWake.ts`).
+
 **Model/effort routing.** Box agent model and effort can be routed per task without adding UI controls. Put YAML in `<data-dir>/routing.yaml` (or `routing.yml`), or paste the same YAML into Settings → Box agents → Routing YAML. See [`docs/routing.example.yaml`](docs/routing.example.yaml) for a starter config with `fallback`, optional `defaults`, per-project defaults and semantic rules. The Coordinator and Captains read the merged rules in their system prompt and pass `model`, `effort`, `routing_rule` and `routing_reason` to `create_task` or `send_to_task` only when a `rules` entry matches or you ask for a specific model. A task shows its own route as a small read-only label, and Box Yard records the model/effort/rule of every turn in `task_turns` so cost tracking can attribute usage later.
 
 Box Yard resolves each turn's model and effort when the turn starts (model and effort separately, first match wins), so a change to Settings or the YAML reaches existing tasks from their next turn:
