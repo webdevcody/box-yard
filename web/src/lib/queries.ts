@@ -17,6 +17,7 @@ import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../s
 import type { VastGpuOption, VastStatus } from "../../../shared/vast"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
+import type { AgentCli } from "../../../shared/agentCli"
 import type { ProjectColor } from "../../../shared/projectColors"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
@@ -625,7 +626,7 @@ export function useToggleHook(scope: string) {
 export function useCreateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner }) =>
+    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner; agentCli?: AgentCli | null }) =>
       api<Project>("/api/projects", { body: input }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -648,6 +649,7 @@ export function useCreateProject() {
           depCache: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
+          agentCli: input.agentCli ?? null,
           agentsPerBox: null,
           wholeMachine: false,
           tasksPerBox: null,
@@ -694,6 +696,8 @@ export function useUpdateProject() {
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
       runner?: Runner
+      /** Claude Code or Codex for its new tasks; null uses Settings › Box agents. */
+      agentCli?: AgentCli | null
       agentsPerBox?: number | null
       wholeMachine?: boolean
       tasksPerBox?: number | null
@@ -859,6 +863,8 @@ export function useCreateTask() {
       attachments?: string[]
       /** Run on this computer (or a box) over the project's "Runs on". */
       runsOn?: Runner
+      /** Run on Claude Code or Codex over the project's Agent. */
+      agentCli?: AgentCli
     }) =>
       api<Task>("/api/tasks", { body: input }),
     onMutate: async (input) => {
@@ -895,6 +901,8 @@ export function useCreateTask() {
           contextWindow: null,
           compactPending: false,
           compacting: false,
+          // The server settles it (the project's Agent, else Settings); this is only the card until it answers.
+          agentCli: input.agentCli ?? qc.getQueryData<Project[]>(keys.projects)?.find((p) => p.id === input.projectId)?.agentCli ?? "claude",
           model: null,
           effort: null,
           claudeCostUsd: 0,

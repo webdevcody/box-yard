@@ -8,6 +8,9 @@ import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 /** Env vars a `claude` process logs in with, strongest first (Claude Code's own order). */
 export const CLAUDE_CREDENTIAL_VARS = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] as const
 
+/** The env var a `codex` process logs in with an API key (docs/codex.md); a ChatGPT login is a file instead. */
+export const CODEX_CREDENTIAL_VARS = ["CODEX_API_KEY"] as const
+
 /** The GitHub token env vars that `gh` (GH_TOKEN first) and Box Yard's git credential helper (GITHUB_TOKEN) read. */
 export const GITHUB_TOKEN_VARS = ["GH_TOKEN", "GITHUB_TOKEN"] as const
 
@@ -68,6 +71,29 @@ export function turnEnv(
   return { env, unsetEnv, claudeFrom: Object.keys(ownClaude).length ? "project" : Object.keys(claude).length ? "global" : null }
 }
 
+/** What a Codex turn logs in with (codexTurnLogin). */
+export interface CodexTurnLogin {
+  /** CODEX_API_KEY, when that's the login. */
+  env: Record<string, string>
+  /** The ChatGPT login file to hand the turn (codex-auth.json), when that's the login. */
+  auth: string | null
+  /** "chatgpt" or "api_key", for task.json's codexLogin; null: none (this computer's own `codex login`, if any). */
+  kind: "chatgpt" | "api_key" | null
+  /** Whose: the project's (or task's) own CODEX_API_KEY, Settings › Credentials, or none. */
+  from: "project" | "global" | null
+}
+
+/**
+ * The login of a Codex turn: its project's (or task's) own CODEX_API_KEY, else Settings › Credentials' Codex login
+ * (the ChatGPT login when it's set, else the API key), else none. Project identities have no Codex login of their own.
+ */
+export function codexTurnLogin(own: Record<string, string>, global: { kind: "chatgpt"; auth: string } | { kind: "api_key"; key: string } | null): CodexTurnLogin {
+  if (own.CODEX_API_KEY) return { env: { CODEX_API_KEY: own.CODEX_API_KEY }, auth: null, kind: "api_key", from: "project" }
+  if (global?.kind === "chatgpt") return { env: {}, auth: global.auth, kind: "chatgpt", from: "global" }
+  if (global?.kind === "api_key") return { env: { CODEX_API_KEY: global.key }, auth: null, kind: "api_key", from: "global" }
+  return { env: {}, auth: null, kind: null, from: null }
+}
+
 /** A project's (or task's) own GitHub token env var, GITHUB_TOKEN first. */
 export const ownGithubToken = (env: Record<string, string>) => env.GITHUB_TOKEN || env.GH_TOKEN || ""
 
@@ -85,10 +111,10 @@ export function identityHomeEnv(home: string): Record<string, string> {
 /**
  * The credential set a project's turns use, for the box wall: tasks of two sets never share a pool box, since an agent
  * can read everything on its box (other workspaces, their task.json, the repo mirrors). A project with its own Claude
- * login or GitHub token in its env has a set of its own; the projects of another identity share that identity's; the
+ * login, Codex API key or GitHub token in its env has a set of its own; the projects of another identity share that identity's; the
  * rest (the Default identity) use the global one. A task's own env doesn't count: its tasks share their project's boxes.
  */
 export function credentialSet(projectId: string, projectEnv: Record<string, string>, identityId: string = DEFAULT_IDENTITY_ID): string {
-  if ([...CLAUDE_CREDENTIAL_VARS, ...GITHUB_TOKEN_VARS].some((v) => projectEnv[v])) return `project:${projectId}`
+  if ([...CLAUDE_CREDENTIAL_VARS, ...CODEX_CREDENTIAL_VARS, ...GITHUB_TOKEN_VARS].some((v) => projectEnv[v])) return `project:${projectId}`
   return identityId === DEFAULT_IDENTITY_ID ? GLOBAL_CREDENTIALS : `identity:${identityId}`
 }

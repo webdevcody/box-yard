@@ -1,5 +1,5 @@
 // The task page header, three calm rows: the breadcrumb, the title with the actions that matter right now
-// (Merge PR, Stop / Mark done / Retry, ⋯), and one meta row (status · PR · files · previews · context).
+// (Merge PR, Stop / Mark done / Retry, ⋯), and one meta row (status · Codex · PR · files · previews · context).
 // Everything else (model and route, times, box, branch, id, full context numbers) is in the ⋯ details popover.
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Link, useLocation } from "wouter"
@@ -22,7 +22,7 @@ import { useCloseTask, useCompactTask, useDeleteTask, useIdentities, useRetryTas
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { Button, META_CHIP, NewTabLink, PriorityPill, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
+import { AgentCliChip, Button, META_CHIP, NewTabLink, PriorityPill, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
 import { FilesChip } from "./TaskFiles"
 import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
@@ -30,6 +30,7 @@ import { pushStateLine } from "../lib/pushState"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./ContextMeter"
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
+import { AGENT_CLI_LABEL } from "../../../shared/agentCli"
 import { gpuBoxIndex, isGpuBox } from "../../../shared/runpod"
 import { GPU_PROVIDER_LABEL, gpuBoxProvider } from "../../../shared/gpu"
 import { isDockerBox } from "../../../shared/docker"
@@ -107,11 +108,11 @@ export function TaskHeader({
 }
 
 /**
- * The one meta row, always in this order so nothing jumps as the task moves along: status · PR · files ·
- * previews, then where it runs and the context reading at the far right. Placement is right-aligned beside the
- * context, so its text changing (queued → placed → archived) never moves the chips, and chips appearing never move
- * it. On phones it is two lines at most: status, placement and context, then the chips, which scroll sideways
- * inside their line. Everything else (model, times, branch, id, full context numbers) is in the ⋯ details.
+ * The one meta row, always in this order so nothing jumps as the task moves along: status · Codex (a task on Codex
+ * only; it never changes) · PR · files · previews, then where it runs and the context reading at the far right.
+ * Placement is right-aligned beside the context, so its text changing (queued → placed → archived) never moves the
+ * chips, and chips appearing never move it. On phones it is two lines at most: status, Codex, placement and context,
+ * then the chips, which scroll sideways inside their line. Everything else (model, times, branch, id, full context numbers) is in the ⋯ details.
  */
 export function TaskMetaRow({ task, project, files }: { task: Task; project: Project | undefined; files: Artifact[] }) {
   const hasChips = Boolean(task.prUrl) || files.length > 0 || task.previews.length > 0
@@ -125,6 +126,7 @@ export function TaskMetaRow({ task, project, files }: { task: Task; project: Pro
         )}
         <PriorityPill task={task} />
       </StatusDot>
+      <AgentCliChip cli={task.agentCli} className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300")} />
       {hasChips && (
         <div data-testid="task-chips" className="flex items-center gap-2 max-sm:order-last max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] sm:contents">
           <MergePrChip task={task} className={META_CHIP} />
@@ -362,6 +364,11 @@ function TaskMenu({
               )}
               {project && <IdentityDetail identityId={project.identityId} onOpen={() => setOpen(false)} />}
               {task.pushState && <PushDetail push={task.pushState} />}
+              <Detail label="Agent">
+                <span className="min-w-0 truncate text-zinc-300" data-testid="task-agent-cli">
+                  {AGENT_CLI_LABEL[task.agentCli ?? "claude"]}
+                </span>
+              </Detail>
               {(task.model || task.effort) && (
                 <Detail label="Model">
                   <span className="min-w-0 truncate text-zinc-300">{[task.model, task.effort ? `${task.effort} effort` : ""].filter(Boolean).join(" · ")}</span>

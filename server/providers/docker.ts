@@ -72,6 +72,9 @@ const isRunningError = (stderr: string) => /is not running|is paused/i.test(stde
  * keeps the volume; `destroy` removes both. Every container and volume carries this install's labels, and nothing
  * here touches one that doesn't.
  */
+/** Task folder files writeFile keeps on the tmpfs, and the suffix each gets there. */
+const HELD_IN_MEMORY: Record<string, string> = { "task.json": "json", "signing.key": "signing.key", "codex-auth.json": "codex-auth.json" }
+
 export class DockerProvider implements BoxProvider {
   readonly name = "docker"
   readonly nodeBin = "node"
@@ -324,9 +327,9 @@ export class DockerProvider implements BoxProvider {
     const dir = path.posix.dirname(filePath)
     let command: string
     const name = path.posix.basename(filePath)
-    if ((name === "task.json" || name === "signing.key") && path.posix.dirname(dir) === `${ROOT}/tasks`) {
-      // The turn's credentials and signing key: kept in memory (the tmpfs), linked from the task folder where the runner reads them.
-      const held = `${DOCKER_SECRETS_DIR}/${path.posix.basename(dir)}.${name === "task.json" ? "json" : "signing.key"}`
+    if (HELD_IN_MEMORY[name] && path.posix.dirname(dir) === `${ROOT}/tasks`) {
+      // The turn's credentials, signing key and Codex login: kept in memory (the tmpfs), linked from the task folder where the runner reads them.
+      const held = `${DOCKER_SECRETS_DIR}/${path.posix.basename(dir)}.${HELD_IN_MEMORY[name]}`
       command = `umask 077 && cat > ${q(held + ".tmp")} && mv ${q(held + ".tmp")} ${q(held)} && mkdir -p ${q(dir)} && ln -sfn ${q(held)} ${q(filePath)}`
     } else {
       const tmp = `${filePath}.boxyard-tmp`

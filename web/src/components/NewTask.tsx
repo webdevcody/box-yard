@@ -1,5 +1,5 @@
 // "New task": a button that opens a small popover anchored to it (a bottom sheet on phones) with one textarea.
-// Enter starts the task, titled from its prompt; "More options" opens the full dialog (title, model, effort, files,
+// Enter starts the task, titled from its prompt; "More options" opens the full dialog (title, agent, model, effort, files,
 // env vars) with the text in it. Esc, a click outside or More options keep the draft (lib/newTask.ts).
 import { useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react"
 import { createPortal } from "react-dom"
@@ -14,6 +14,7 @@ import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
 import { type Attachment, type Effort, type Project } from "../../../shared/types"
 import { LOCAL_UNSANDBOXED, type Runner } from "../../../shared/runner"
+import { AGENT_CLIS, AGENT_CLI_LABEL, CODEX_MODEL_SUGGESTIONS, DEFAULT_AGENT_CLI, type AgentCli } from "../../../shared/agentCli"
 import { Modal, focusables } from "./Modal"
 import { formatSize } from "./Attachments"
 import { Button, Field, LineIcon, Select, cx, inputClass, parseEnv } from "./ui"
@@ -393,7 +394,7 @@ let nextKey = 0
 
 /**
  * The full New task form: an optional title (made from the prompt when blank), the prompt, and the options the
- * popover leaves out: model, effort, "Run on this computer", files and env vars. `onCancel` gets the prompt so the popover's draft keeps it.
+ * popover leaves out: agent, model, effort, "Run on this computer", files and env vars. `onCancel` gets the prompt so the popover's draft keeps it.
  */
 export function NewTaskDialog({
   projectId: projectProp,
@@ -426,6 +427,10 @@ export function NewTaskDialog({
   const projectRunner: Runner = project?.runner ?? "box"
   const [runner, setRunner] = useState<Runner | null>(null)
   const runsOn = runner ?? projectRunner
+  // Starts on the project's Agent (else Settings › Box agents); picking the other one pins this task to it for good.
+  const projectCli: AgentCli = project?.agentCli ?? settings?.agentCli ?? DEFAULT_AGENT_CLI
+  const [cli, setCli] = useState<AgentCli | "">("")
+  const agentCli = cli || projectCli
   const picker = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
@@ -479,6 +484,7 @@ export function NewTaskDialog({
           ...(model && { model }),
           ...(effort && { effort }),
           ...(runsOn !== projectRunner && { runsOn }),
+          ...(agentCli !== projectCli && { agentCli }),
           attachments: files.flatMap((f) => (f.attachment ? [f.attachment.id] : [])),
         })
         onDone()
@@ -512,9 +518,39 @@ export function NewTaskDialog({
       <Field label="What should the agent do?">
         <textarea ref={promptRef} className={inputClass} rows={5} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Goal, constraints, and what done looks like." />
       </Field>
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Field label="Agent">
+          <Select
+            className="w-full"
+            value={cli}
+            onChange={(e) => {
+              setCli(e.target.value as AgentCli | "")
+              // Each agent has its own models.
+              setModel("")
+            }}
+            data-testid="new-task-agent-cli"
+          >
+            <option value="">Default ({AGENT_CLI_LABEL[projectCli]})</option>
+            {AGENT_CLIS.map((c) => (
+              <option key={c} value={c}>
+                {AGENT_CLI_LABEL[c]}
+              </option>
+            ))}
+          </Select>
+        </Field>
         <Field label="Model">
-          <ModelPicker value={model} onChange={setModel} defaultLabel={`Default${settings?.agentModel ? ` (${settings.agentModel})` : ""}`} testId="new-task-model" />
+          {agentCli === "codex" ? (
+            <Select className="w-full" value={model} onChange={(e) => setModel(e.target.value)} data-testid="new-task-model">
+              <option value="">Default ({settings?.agentCodexModel || "Codex's default"})</option>
+              {CODEX_MODEL_SUGGESTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </Select>
+          ) : (
+            <ModelPicker value={model} onChange={setModel} defaultLabel={`Default${settings?.agentModel ? ` (${settings.agentModel})` : ""}`} testId="new-task-model" />
+          )}
         </Field>
         <Field label="Effort">
           <EffortPicker

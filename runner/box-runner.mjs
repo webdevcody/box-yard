@@ -2,8 +2,8 @@
 // Box Yard worker runner. Copied into every worker box and run there with plain
 // Node (no npm install). It has three modes:
 //
-//   node box-runner.mjs turn  <taskDir>  run one headless Claude turn for a task
-//   node box-runner.mjs mcp   <taskDir>  stdio MCP server Claude uses to talk back
+//   node box-runner.mjs turn  <taskDir>  run one headless Claude Code (or Codex) turn for a task
+//   node box-runner.mjs mcp   <taskDir>  stdio MCP server the agent uses to talk back
 //   node box-runner.mjs clean <taskDir>  delete regenerable dirs from a resting work/
 //   node box-runner.mjs deps  <taskDir> restore|save   the dependency cache step of a turn, on its own
 //
@@ -16,6 +16,8 @@
 //   turn.json     the turn to run (prompt, session id, resume flag)
 //   work/         the agent's working directory (repo clone or scratch space)
 //   claude/       CLAUDE_CONFIG_DIR, so the session transcript lives with the task
+//   codex/        CODEX_HOME for a Codex task (task.json agent: "codex"): its sessions, and its login file
+//   codex-auth.json  the Codex ChatGPT login for the next turn, when Box Yard hands one over; the turn moves it into codex/
 //   events.jsonl  append-only event log
 //   turn.pid      pid of the running turn (it leads a process group of its own)
 //   run.json      the running turn's record: pid, process identity, turn id, events offset
@@ -270,18 +272,29 @@ async function runTurn() {
     if (note) prompt = `${note}\n\n${prompt}`
   }
 
+  const codex = task.agent === "codex"
+  if (codex) prepareCodexHome()
+  // Codex has no /compact to run headless (it compacts on its own); Box Yard doesn't ask, but an old turn.json might.
+  if (codex && turn.compact) {
+    await emit({ t: "turn_end", startedAt: Date.now(), stopped: false, exitCode: 0, ok: true, result: null, sessionId: turn.sessionId, compact: true, usage: null, error: null, sleptMs: 0 })
+    return
+  }
+  const runAgent = codex ? runCodex : runClaude
   let sessionId = turn.sessionId
   // Runner start → the CLI's spawn (signing, MCP config, dependency restore): the box side of a task's setup.
   const preSpawnMs = Date.now() - clocks.wall
-  let attempt = await runClaude({ turn, sessionId, resume: turn.resume, prompt, mcpConfigFile })
+  let attempt = await runAgent({ turn, sessionId, resume: turn.resume, prompt, mcpConfigFile })
 
   // The session file can go missing (fresh box, lost archive). Start a new
   // session that carries a recap instead of failing the task.
-  if (!stopping && attempt.exitCode !== 0 && turn.resume && /no conversation found|session.*not found/i.test(attempt.errorText)) {
+  if (!stopping && attempt.exitCode !== 0 && turn.resume && /no conversation found|session.*not found|no rollout found/i.test(attempt.errorText)) {
     sessionId = randomUUID()
-    await emit({ t: "session_reset", sessionId, reason: "Previous Claude session was not found on this box." })
-    attempt = await runClaude({ turn, sessionId, resume: false, prompt: `${turn.recap ?? ""}\n\n---\n\n${prompt}`.trim(), mcpConfigFile })
+    await emit({ t: "session_reset", sessionId, reason: `Previous ${codex ? "Codex" : "Claude"} session was not found on this box.` })
+    attempt = await runAgent({ turn, sessionId, resume: false, prompt: `${turn.recap ?? ""}\n\n---\n\n${prompt}`.trim(), mcpConfigFile })
   }
+  // Codex names its own thread; that's the session the next turn resumes.
+  if (attempt.sessionId) sessionId = attempt.sessionId
+  if (codex) parkCodexAuth()
 
   const ok = stopping || (attempt.exitCode === 0 && !attempt.result?.is_error)
   if (!turn.compact && !stopping) {
@@ -309,7 +322,7 @@ async function runTurn() {
     compact: Boolean(turn.compact),
     usage,
     resultUsage: attempt.result?.usage ?? null,
-    error: ok ? null : clip(attempt.errorText || attempt.result?.result || `claude exited with code ${attempt.exitCode}`, 2000),
+    error: ok ? null : clip(attempt.errorText || attempt.result?.result || `${codex ? "codex" : "claude"} exited with code ${attempt.exitCode}`, 2000),
     sleptMs: Math.max(0, Math.round(Date.now() - clocks.wall - (performance.now() - clocks.mono))),
     // Where the turn's time went (shared/turnTimings.ts), on the box's clock: the server adds its side.
     timing: attempt.timing ? { ...attempt.timing, preSpawnMs, runnerStartedAt: clocks.wall } : null,
@@ -695,6 +708,303 @@ function translate(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// Codex (docs/codex.md). The same turn as runClaude, with `codex exec --json`: the arguments, the translation of its
+// events and the context reading are server/codex.ts's, copied here (this file runs on boxes with plain Node);
+// test/codex-task.e2e.test.ts keeps them in step.
+
+const codexHome = path.join(taskDir, "codex")
+const codexAuthDelivery = path.join(taskDir, "codex-auth.json")
+
+/** The Codex home this turn uses: the task's own, or this computer's when it runs on the owner's own `codex login`. */
+function codexHomeInUse() {
+  return task.isolateCodex === false ? turnBaseEnv().CODEX_HOME || path.join(os.homedir(), ".codex") : codexHome
+}
+
+function codexEnv() {
+  const env = { ...turnBaseEnv(), IS_SANDBOX: "1", PORT: String(task.port ?? 4000), BOXYARD_TASK_ID: task.taskId, BOXYARD_TASK_DIR: taskDir }
+  delete env.CLAUDE_CONFIG_DIR
+  if (task.isolateCodex !== false) env.CODEX_HOME = codexHome
+  return env
+}
+
+const parseAuth = (text) => {
+  try {
+    const raw = JSON.parse(text)
+    const at = Date.parse(raw?.last_refresh ?? "")
+    return { account: raw?.tokens?.account_id ?? null, at: Number.isFinite(at) ? at : 0 }
+  } catch {
+    return null
+  }
+}
+/** `candidate` is `current`'s login refreshed later (server/codex.ts isRefreshOf). */
+function isRefreshOf(current, candidate) {
+  const a = parseAuth(current)
+  const b = parseAuth(candidate)
+  return Boolean(a && b && a.account && a.account === b.account && b.at > a.at)
+}
+
+/**
+ * The task's Codex home, with the login Box Yard handed over (codex-auth.json, taken out of the task folder) unless
+ * the copy already there is the same login refreshed since: Codex rotates the refresh token, so the newer one wins.
+ * Box Yard reads the copy back after the turn. With an API key (or no login) a login file left there is removed: it
+ * would win over CODEX_API_KEY.
+ */
+function prepareCodexHome() {
+  let delivered = null
+  try {
+    delivered = fs.readFileSync(codexAuthDelivery, "utf8")
+  } catch {}
+  takeDelivered(codexAuthDelivery)
+  if (task.isolateCodex === false) return
+  fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 })
+  const file = path.join(codexHome, "auth.json")
+  if (task.codexLogin !== "chatgpt") {
+    fs.rmSync(file, { force: true })
+    return
+  }
+  let existing = ""
+  try {
+    existing = fs.readFileSync(file, "utf8")
+  } catch {}
+  // The copy the last turn parked in memory (parkCodexAuth) is the newest unless the hand-over beats it.
+  const keep = existing && (!delivered || existing === delivered || isRefreshOf(delivered, existing))
+  const text = keep ? existing : delivered
+  if (!text) return
+  let linked = false
+  try {
+    linked = fs.lstatSync(file).isSymbolicLink()
+  } catch {}
+  if (keep && !linked) return
+  const tmp = `${file}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, text, { mode: 0o600 })
+  fs.renameSync(tmp, file)
+}
+
+/**
+ * In a box with a tmpfs for secrets (Docker), the login goes back into memory between turns: moved there and linked
+ * from codex/auth.json, where Box Yard reads it back. The next turn copies it onto the disk again for Codex, which
+ * replaces the file when it refreshes. A container that stops loses it, and the next turn takes Box Yard's copy.
+ */
+function parkCodexAuth() {
+  if (!task.secretsDir || task.isolateCodex === false) return
+  const file = path.join(codexHome, "auth.json")
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) return
+  } catch {
+    return
+  }
+  const held = path.join(task.secretsDir, `${task.taskId ?? "none"}.codex-auth.json`)
+  try {
+    fs.copyFileSync(file, `${held}.tmp`)
+    fs.chmodSync(`${held}.tmp`, 0o600)
+    fs.renameSync(`${held}.tmp`, held)
+    fs.rmSync(file, { force: true })
+    fs.symlinkSync(held, file)
+  } catch {}
+}
+
+const toml = (v) => JSON.stringify(v)
+const CODEX_OFF = ["apps", "plugins", "computer_use", "browser_use", "in_app_browser", "image_generation", "memories"]
+
+/** server/codex.ts codexExecArgs for a task agent: Box Yard's stdio tools, approved, and no sandbox (the box is one). */
+function codexArgs({ resume, model, effort, instructions, autoCompactTokens }) {
+  const args = ["exec", "--json", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules", "--dangerously-bypass-approvals-and-sandbox"]
+  const c = (k, v) => args.push("-c", `${k}=${toml(v)}`)
+  c("developer_instructions", instructions)
+  c("mcp_servers.boxyard.command", process.execPath)
+  c("mcp_servers.boxyard.args", [process.argv[1], "mcp", taskDir])
+  c("mcp_servers.boxyard.default_tools_approval_mode", "approve")
+  c("mcp_servers.boxyard.startup_timeout_sec", 60)
+  c("mcp_servers.boxyard.tool_timeout_sec", 900)
+  c("web_search", "live")
+  if (effort) c("model_reasoning_effort", effort)
+  if (autoCompactTokens) c("model_auto_compact_token_limit", autoCompactTokens)
+  for (const f of CODEX_OFF) c(`features.${f}`, false)
+  if (model) args.push("--model", model)
+  if (resume) args.push("resume", resume)
+  args.push("-")
+  return args
+}
+
+/** server/codex.ts codexContext: the last token count in the thread's rollout file. */
+function codexContext(home, thread) {
+  const root = path.join(home, "sessions")
+  const desc = (dir) => {
+    try {
+      return fs.readdirSync(dir).sort().reverse()
+    } catch {
+      return []
+    }
+  }
+  let file = null
+  outer: for (const y of desc(root))
+    for (const m of desc(path.join(root, y)))
+      for (const d of desc(path.join(root, y, m))) {
+        const hit = desc(path.join(root, y, m, d)).find((f) => f.startsWith("rollout-") && f.endsWith(`-${thread}.jsonl`))
+        if (hit) {
+          file = path.join(root, y, m, d, hit)
+          break outer
+        }
+      }
+  if (!file) return null
+  let text = ""
+  try {
+    const fd = fs.openSync(file, "r")
+    try {
+      const size = fs.fstatSync(fd).size
+      const start = Math.max(0, size - (2 << 20))
+      const buf = Buffer.alloc(size - start)
+      fs.readSync(fd, buf, 0, buf.length, start)
+      text = buf.toString("utf8")
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+  const lines = text.split("\n")
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"token_count"')) continue
+    try {
+      const p = JSON.parse(lines[i])?.payload
+      const u = p?.type === "token_count" ? p.info?.last_token_usage : null
+      const tokens = u ? (Number(u.input_tokens) || 0) + (Number(u.output_tokens) || 0) : 0
+      if (tokens > 0) return { tokens, window: typeof p.info.model_context_window === "number" ? p.info.model_context_window : null }
+    } catch {}
+  }
+  return null
+}
+
+/** Codex's token counts in Claude's terms (server/codex.ts claudeUsageOf): its input_tokens include the cached ones. */
+function claudeUsageOf(u) {
+  if (!u) return null
+  const input = Number(u.input_tokens) || 0
+  const cached = Number(u.cached_input_tokens) || 0
+  const written = Number(u.cache_write_input_tokens) || 0
+  return { input_tokens: Math.max(0, input - cached - written), cache_creation_input_tokens: written, cache_read_input_tokens: cached, output_tokens: Number(u.output_tokens) || 0 }
+}
+
+/** Codex's stderr without its tracing lines (server/codex.ts codexErrorText). */
+const codexErrorText = (stderr) =>
+  stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !/^\d{4}-\d\d-\d\dT[\d:.]+Z\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s/.test(l))
+    .slice(-5)
+    .join("\n")
+
+const CODEX_TOOL_NAMES = { command_execution: "Bash", file_change: "Edit", web_search: "WebSearch", todo_list: "TodoWrite" }
+
+/** A Codex item that is a tool call, as the Box Yard `tool` event Claude's would be (null: not one, or Box Yard's own). */
+function codexTool(item) {
+  if (item.type === "mcp_tool_call") return item.server === "boxyard" ? null : { name: `mcp__${item.server}__${item.tool}`, input: item.arguments ?? {} }
+  if (item.type === "command_execution") return { name: "Bash", input: { command: String(item.command ?? "") } }
+  if (item.type === "file_change") return { name: "Edit", input: { changes: (item.changes ?? []).map((c) => `${c?.kind ?? "update"} ${c?.path ?? ""}`) } }
+  if (item.type === "web_search") return { name: "WebSearch", input: { query: String(item.query ?? "") } }
+  return null
+}
+
+/** A finished Codex tool item's error text, or null when it worked. */
+function codexToolError(item) {
+  if (item.type === "mcp_tool_call" && (item.status === "failed" || item.error)) return String(item.error?.message ?? "The tool call failed.")
+  if (item.type === "command_execution" && (item.status === "failed" || (typeof item.exit_code === "number" && item.exit_code !== 0))) return String(item.aggregated_output || `exit code ${item.exit_code}`)
+  if (item.type === "file_change" && item.status === "failed") return "The patch failed."
+  return null
+}
+
+function runCodex({ turn, sessionId, resume, prompt }) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const autocompact = Number(turn.autocompact) || null
+    const args = codexArgs({ resume: resume ? sessionId : null, model: turn.model || null, effort: turn.effort || null, instructions: turn.systemPrompt ?? "", autoCompactTokens: autocompact })
+    let child
+    try {
+      child = spawn(task.codexBin || "codex", [...(task.codexArgs ?? []), ...args], { cwd: path.join(taskDir, "work"), env: codexEnv(), stdio: ["pipe", "pipe", "pipe"] })
+    } catch (err) {
+      resolve({ exitCode: 1, startedAt, result: null, usage: null, sessionId: null, errorText: `Couldn't start codex: ${err.message}` })
+      return
+    }
+    activeChild = child
+    let thread = null
+    let completed = null
+    let failed = null
+    let lastError = null
+    let reply = ""
+    let stderr = ""
+    let buf = ""
+    const seen = new Set()
+    let pending = Promise.resolve()
+    const queue = (fn) => (pending = pending.then(fn).catch((e) => process.stderr.write(`${e.stack}\n`)))
+
+    const onLine = (line) => {
+      let ev
+      try {
+        ev = JSON.parse(line)
+      } catch {
+        queue(() => emit({ t: "log", text: clip(line, 1000) }))
+        return
+      }
+      const item = ev.item
+      if (ev.type === "thread.started" && typeof ev.thread_id === "string") thread = ev.thread_id
+      else if (ev.type === "item.started" && item) {
+        const tool = codexTool(item)
+        if (tool && item.type !== "web_search") {
+          seen.add(item.id)
+          queue(() => emit({ t: "tool", name: tool.name, input: clip(tool.input, 400) }))
+        }
+      } else if (ev.type === "item.completed" && item) {
+        if (item.type === "agent_message" && item.text?.trim()) {
+          reply = item.text
+          queue(() => emit({ t: "assistant", text: item.text }))
+          return
+        }
+        const tool = codexTool(item)
+        if (tool && !seen.has(item.id)) queue(() => emit({ t: "tool", name: tool.name, input: clip(tool.input, 400) }))
+        seen.delete(item.id)
+        const error = codexToolError(item)
+        if (error) queue(() => emit({ t: "tool_error", text: clip(error, 400) }))
+      } else if (ev.type === "turn.completed") completed = ev.usage ?? {}
+      else if (ev.type === "turn.failed") failed = String(ev.error?.message ?? "Codex failed")
+      else if (ev.type === "error") lastError = String(ev.message ?? "error")
+    }
+
+    child.stdout.on("data", (chunk) => {
+      buf += chunk.toString("utf8")
+      const lines = buf.split("\n")
+      buf = lines.pop() ?? ""
+      for (const line of lines) if (line.trim()) onLine(line)
+    })
+    child.stderr.on("data", (chunk) => {
+      stderr = (stderr + chunk.toString("utf8")).slice(-8000)
+    })
+    child.on("error", (err) => {
+      stderr += err.code === "ENOENT" ? `\nCodex isn't installed here (${task.codexBin || "codex"} wasn't found). Install it: npm i -g @openai/codex` : `\n${err.message}`
+    })
+    child.on("close", (code, signal) => {
+      if (buf.trim()) onLine(buf)
+      buf = ""
+      pending.then(async () => {
+        const ctx = thread ? codexContext(codexHomeInUse(), thread) : null
+        if (ctx) await emit({ t: "usage", tokens: ctx.tokens, window: ctx.window })
+        const killed = code === null && signal ? `codex was killed (${signal})` : ""
+        const exitCode = code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : 1)
+        const isError = Boolean(failed) || !completed
+        resolve({
+          exitCode,
+          startedAt,
+          sessionId: thread,
+          result: { result: reply, is_error: isError, duration_ms: Date.now() - startedAt, usage: claudeUsageOf(completed) },
+          usage: ctx,
+          errorText: [failed, codexErrorText(stderr), isError && !failed ? lastError : "", killed].filter(Boolean).join("\n"),
+        })
+      })
+    })
+
+    child.stdin.on("error", () => {})
+    child.stdin.end(prompt)
+  })
+}
+
 // TurnClock: a copy of server/turnTimings.ts's TurnClock (the box never calls the server, so the turn is timed here).
 // test/turn-timings.test.ts runs both on the same streams; change them together.
 

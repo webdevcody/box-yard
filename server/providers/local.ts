@@ -18,12 +18,15 @@ import { TURN_SH } from "../turnProcess.js"
 export class LocalProvider implements BoxProvider {
   readonly name: string = "local"
   readonly nodeBin = process.execPath
+  /** Its Codex: the stand-in beside a stand-in claude (scripts/fake-codex.mjs), so folder boxes never run the real one by accident. */
+  readonly codexBin: string
   constructor(
     private readonly baseDir: string,
     readonly claudeBin = "claude",
     makeDir = true,
   ) {
     if (makeDir) fs.mkdirSync(baseDir, { recursive: true })
+    this.codexBin = /fake-claude\.mjs/.test(claudeBin) ? claudeBin.replace(/fake-claude\.mjs/, "fake-codex.mjs") : "codex"
   }
 
   root(boxId: string) {
@@ -144,7 +147,7 @@ export class LocalProvider implements BoxProvider {
 
 /**
  * Box Yard's own settings and secrets in its environment. Local-runner agents don't inherit them: task.json hands each
- * turn what it should have (its project's env, the Claude and GitHub credentials), like on a box. The Claude Code
+ * turn what it should have (its project's env, the Claude, Codex and GitHub credentials), like on a box. The Claude Code
  * session markers go too, or a Box Yard started from a Claude Code terminal would make every agent a nested session.
  */
 const SERVER_ENV = /^(BOXYARD_|UPSTASH_|QSTASH_|BOX_|ELEVENLABS_|OPENAI_|CLAUDE_CODE_(SESSION|CHILD|ENTRYPOINT|MESSAGING))/
@@ -153,6 +156,9 @@ const SERVER_KEYS = new Set([
   "HOST",
   "CLAUDECODE",
   "CLAUDE_BIN",
+  "CODEX_BIN",
+  "CODEX_AUTH_JSON",
+  "CODEX_API_KEY",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -302,6 +308,9 @@ export class LocalRunnerRouter implements BoxProvider {
   }
   get claudeBin() {
     return this.base.claudeBin
+  }
+  get codexBin() {
+    return this.base.codexBin
   }
   get maxUploadBytes() {
     return this.base.maxUploadBytes
