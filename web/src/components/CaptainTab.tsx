@@ -446,7 +446,7 @@ function StatusPill({ state }: { state: CaptainState | undefined }) {
 function CaptainHeader({ projectId, state, lastActive }: { projectId: string; state: CaptainState | undefined; lastActive: number | null }) {
   const compact = useCompactCaptain(projectId)
   const settings = useAgentSettings().data?.settings
-  const model = settings ? `${settings.orchestratorModel} · ${settings.orchestratorEffort} effort` : null
+  const model = settings ? `${settings.captainModel} · ${settings.captainEffort} effort` : null
   // Captains compact on the Coordinator's auto-compact setting; with it on they show no meter or Compact.
   const autoCompact = useAutoCompact("coordinator")
   const headerMeter = spotClass(autoCompact, "header")
@@ -504,7 +504,7 @@ function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: strin
         >
           <div className="space-y-1 border-b border-zinc-800/80 px-2 pt-1.5 pb-2.5 text-xs text-zinc-500">
             {model && (
-              <p className="truncate" title="The Captain runs on the Coordinator's model and effort (Settings → Coordinator)">
+              <p className="truncate" title="Captains' model and effort (Settings → Coordinator → Project Captains)">
                 <span className="text-zinc-300">{model}</span>
               </p>
             )}

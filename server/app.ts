@@ -58,6 +58,8 @@ import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
+import { ClaudeModels } from "./claudeModels.js"
+import { serverClaudeEnv } from "./turnCredentials.js"
 import { projectDockerPatch } from "./docker/settings.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
@@ -510,6 +512,12 @@ export function createBoxYard(
       const [bin, ...pre] = c.claudeBin.split(" ")
       execFile(bin!, [...pre, "--version"], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : stdout.trim()))
     })
+  // The model/effort pickers' list, from the installed CLI (logged in like the Coordinator), over the built-in one.
+  const claudeModels = new ClaudeModels({
+    claudeBin: c.claudeBin,
+    env: () => serverClaudeEnv(null, settings.credentials.claudeEnv()),
+    version: async () => (claudeVersion === undefined ? (claudeVersion = await checkClaude()) : claudeVersion),
+  })
 
   const app = express()
   app.disable("x-powered-by")
@@ -1051,6 +1059,10 @@ export function createBoxYard(
   api.get("/settings", (_req, res) => {
     // Text-to-speech keys appear only as set/unset plus where they come from.
     res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys, localDir: tildePath(c.localDir) })
+  })
+  // Every model and effort picker's list (shared/models.ts); ?refresh=1 asks the CLI again now.
+  api.get("/models", async (req, res) => {
+    res.json(await claudeModels.get(req.query.refresh === "1"))
   })
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.
