@@ -75,6 +75,10 @@ describe("chatCards", () => {
     expect(fresh.cards.map((c) => [c.key, c.entries.length, c.origin])).toEqual([[LOGIN.id, 0, ask]])
     // A task first named by a notice came from no message here.
     expect(model([notice(LOGIN, "❓ **Fix login** needs input: which page?")]).cards[0]!.origin).toBeNull()
+    // Named in the same millisecond: still in chat order, not by id.
+    const same = { ...call, createdAt: call2.createdAt }
+    expect(model([ask, call2, same, answer]).cards.map((c) => c.key)).toEqual([CARDS.id, LOGIN.id])
+    expect(model([ask, same, call2, answer]).cards.map((c) => c.key)).toEqual([LOGIN.id, CARDS.id])
   })
 
   it("gives a reply the Coordinator wrote on its own to the cards of the updates it read", () => {

@@ -113,15 +113,15 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   /** Every entry for a card, in chat order, with its tasks. */
   const placed: CardEntry[] = []
   const coordinator: CardEntry[] = []
-  /** When the chat first named each task, and the message that started it. */
-  const named = new Map<string, { at: number; origin: ChatMessage | null }>()
+  /** When the chat first named each task (and in what order, for names in the same millisecond), and the message that started it. */
+  const named = new Map<string, { at: number; seq: number; origin: ChatMessage | null }>()
   const started = new Set<string>()
   const items = new Map<string, UpdateItem>()
   /** The newest user message since the last reply: a reply after one answers it. */
   let asked: ChatMessage | null = null
 
   const name = (m: ChatMessage, origin: ChatMessage | null) => {
-    for (const t of messageRefs(m, index).tasks) if (!named.has(t)) named.set(t, { at: m.createdAt, origin })
+    for (const t of messageRefs(m, index).tasks) if (!named.has(t)) named.set(t, { at: m.createdAt, seq: named.size, origin })
   }
   const place = (entry: EntryBody, about: readonly string[]) => {
     if (!about.length) return void coordinator.push({ ...entry, tasks: NO_TASKS })
@@ -180,6 +180,7 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     return b && batches.has(b) ? `batch:${b}` : id
   }
   const cards = new Map<string, ChatCard & { entries: CardEntry[] }>()
+  const seq = new Map<string, number>()
   const card = (id: string) => {
     const key = keyOf(id)
     let c = cards.get(key)
@@ -191,9 +192,10 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
       let origin: ChatMessage | null = null
       for (const t of taskIds) {
         const n = named.get(t)
-        if (n && n.at < first) {
+        if (n && (n.at < first || (n.at === first && n.seq < seq.get(key)!))) {
           first = n.at
           origin = n.origin
+          seq.set(key, n.seq)
         }
       }
       cards.set(key, (c = { key, taskIds, batchId, entries: [], first, last: first, origin }))
@@ -215,7 +217,8 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     if (!Number.isFinite(c.first)) c.first = c.entries[0]?.at ?? 0
     c.last = Math.max(c.first, ...c.entries.map((e) => e.at))
   }
-  out.sort((a, b) => a.first - b.first || a.key.localeCompare(b.key))
+  const rank = (c: ChatCard) => seq.get(c.key) ?? Infinity
+  out.sort((a, b) => a.first - b.first || rank(a) - rank(b) || a.key.localeCompare(b.key))
   return { cards: out, coordinator }
 }
 
