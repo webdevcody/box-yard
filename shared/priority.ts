@@ -20,3 +20,9 @@ export function queueOrder(a: QueueEntry, b: QueueEntry): number {
   const rank = (e: QueueEntry) => (e.priority === "high" ? 0 : 1)
   return rank(a) - rank(b) || a.queuedAt - b.queuedAt
 }
+
+/** Sort tasks (shared/types.ts Task) in queue order: their priority, and when they last joined the queue. */
+export const byQueueOrder = (a: TaskInQueue, b: TaskInQueue) => queueOrder(taskEntry(a), taskEntry(b))
+
+type TaskInQueue = { priority?: TaskPriority | null; lastActiveAt?: number; createdAt: number }
+const taskEntry = (t: TaskInQueue): QueueEntry => ({ priority: t.priority, queuedAt: t.lastActiveAt ?? t.createdAt })

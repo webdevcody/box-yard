@@ -36,7 +36,7 @@ import type { MachineStats } from "./machineStats.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
-import { TASK_PRIORITIES, queueOrder, type TaskPriority } from "../shared/priority.js"
+import { TASK_PRIORITIES, byQueueOrder, type TaskPriority } from "../shared/priority.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
@@ -2020,7 +2020,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         // In the order the scheduler pulls them: high priority first, then first in, first out.
         queued: store
           .listTasks({ projectId: scopeId ?? undefined, status: ["queued"] })
-          .sort((a, b) => queueOrder({ priority: a.priority, queuedAt: a.lastActiveAt ?? a.createdAt }, { priority: b.priority, queuedAt: b.lastActiveAt ?? b.createdAt }))
+          .sort(byQueueOrder)
           .map((t, i) => {
             // The tasks holding it back, by id (a Captain only gets its own project's).
             const by = t.waitFor.filter((w) => !scopeId || store.getTaskRow(w.taskId)?.project_id === scopeId).map((w) => w.taskId)
