@@ -52,7 +52,7 @@ These steps are for Ubuntu or Debian; [macOS](#macos-machines) differs only a li
    - Tasks running at once: 1 or 2, depending on its memory (about 2 GB per agent)
    - labels: `laptops`
 
-   Box Yard tests the connection when you add it. The test reports the OS, CPUs, memory, free disk, git, node, claude and whether it's logged in, and codex. **Test connection** runs it again after you fix something.
+   Box Yard tests the connection when you add it. The test reports the OS, CPUs, memory, free disk, git, node, claude and whether it's logged in, and codex (detected only: [Codex](#codex) tasks don't run on machines yet). **Test connection** runs it again after you fix something.
 
    You can also ask the Coordinator, for example: *"add my laptop thinkpad.local, user boxyard, key file:~/.ssh/boxyard_laptops, label it laptops"*.
 8. **Use it.** Any of these sends tasks to the laptop:
@@ -162,7 +162,7 @@ These steps are for Ubuntu or Debian; [macOS](#macos-machines) differs only a li
 
 Codex isn't supported on SSH machines yet. Tasks there run on Claude Code:
 
-- **Refused up front.** A Codex task (`agent: "codex"`, a `gpt-*` model, or a project whose Agent is Codex) asked to run on an SSH machine (`runs_on: "ssh"`, `"label:<label>"`, `machine_label`, or `"local"` while "Local means" names a label) is refused with "Codex isn't supported on SSH machines yet". Moving one there with `send_to_task` is refused the same way.
+- **Refused up front.** A Codex task (`agent: "codex"`, a `gpt-*` model, or a project whose Agent is Codex) asked to run on an SSH machine (`runs_on: "ssh"`, `"label:<label>"`, `machine_label`, or `"local"` while **When you say "locally"** names a label) is refused with "Codex isn't supported on SSH machines yet". Moving one there with `send_to_task` is refused the same way.
 - **Waits, never runs.** A Codex task that gets there anyway, because its project runs on SSH machines, waits with that reason and its Captain hears it once. Move it to another runner to run it. A project set to SSH machines with Codex as its Agent says so in its settings.
 - **Nothing is installed.** Box Yard never installs Codex on a machine, and never sends Box Yard's Codex login there.
 - **Still detected.** Test connection still reports whether `codex` is on the machine, and its version.
