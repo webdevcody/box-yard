@@ -30,8 +30,8 @@ const LOGIN = task("task_login001", YARD.id, "Fix login", "needs_input")
 const CARDS = task("task_cards001", YARD.id, "Coordinator cards", "pr_ready", { icon: "layers", prUrl: "https://github.com/o/r/pull/9", prState: "open" })
 const DOCS = task("task_docs0001", YARD.id, "Write the docs", "done")
 const B = "batch_aaaabbbbcccc"
-const HOLLOW = task("task_hollow01", MAP.id, "Map 3 PR #406: The Hollow cave", "working", { batchId: B, createdAt: 5 })
-const DAM = task("task_dam00001", MAP.id, "Map 3 PR #409: Dam powerhouse", "queued", { batchId: B, createdAt: 5 })
+const HOLLOW = task("task_hollow01", MAP.id, "Map 3 PR #406: The Hollow cave", "working", { batchId: B, createdAt: 5, turnStartedAt: Date.now() - 12 * 60_000 })
+const DAM = task("task_dam00001", MAP.id, "Map 3 PR #409: Dam powerhouse", "queued", { batchId: B, createdAt: 5, updatedAt: Date.now() - 3 * 60_000 })
 const CAMP = task("task_camp0001", MAP.id, "Map 3 PR #399: Dam Hamlet camp", "done", { batchId: B, createdAt: 5, prUrl: "https://github.com/o/r/pull/399", prState: "merged" })
 const TASKS = [LOGIN, CARDS, DOCS, HOLLOW, DAM, CAMP]
 
@@ -165,12 +165,13 @@ describe("Coordinator cards", () => {
     expect(card(LOGIN.id).dataset.open).toBe("true")
   })
 
-  it("opens a batch into its tasks, each with its own updates", () => {
+  it("opens a batch into its tasks, each with its own updates, and where and how long the running ones have run", () => {
     render()
     click(head(`batch:${B}`))
     const rows = [...card(`batch:${B}`).querySelectorAll('[data-testid="batch-task"]')] as HTMLElement[]
     expect(rows.map((r) => r.dataset.task)).toEqual([CAMP.id, HOLLOW.id, DAM.id])
-    expect(rows.map((r) => r.querySelector("button")!.textContent)).toEqual(["#399: Dam Hamlet campMerged", "#406: The Hollow caveWorking", "#409: Dam powerhouseQueued"])
+    expect(rows.map((r) => r.querySelector("button")!.textContent)).toEqual(["#399: Dam Hamlet campMerged", "#406: The Hollow cave12mWorking", "#409: Dam powerhouse3mQueued"])
+    expect(rows.map((r) => r.querySelector('[data-testid="card-placement"]')?.getAttribute("aria-label") ?? null)).toEqual([null, expect.stringMatching(/^Runs on: /), expect.stringMatching(/^Runs on: /)])
     click(rows[1]!.querySelector("button")!)
     expect(rows[1]!.textContent).toContain("the entrance is lit")
     expect(rows[1]!.querySelector(`a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()

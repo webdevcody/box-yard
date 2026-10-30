@@ -19,12 +19,14 @@ import { setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
+import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine } from "./ChatLine"
 import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
-import { AppLink, LineIcon, MERGED_BADGE, PrChip, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
+import { PlacementCardChip } from "./PlacementChip"
+import { AppLink, Elapsed, LineIcon, MERGED_BADGE, PrChip, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
 import type { Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
@@ -255,6 +257,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
             tasks[0] && (
               <>
                 <StatusBadge status={statuses[0]!} />
+                <Running task={tasks[0]} />
                 <PrChip task={tasks[0]} variant="link" className="text-[11.5px]" />
               </>
             )
@@ -265,12 +268,23 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
         {!open && <LatestLine card={card} batch={batch} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
       </div>
-      {open && <CardBody card={card} batch={batch} statuses={statuses} next={next} onFollowUp={onFollowUp} />}
+      {open && <CardBody card={card} batch={batch} tasks={tasks} next={next} onFollowUp={onFollowUp} />}
     </section>
   )
 })
 
 const NO_TASKS: Task[] = []
+
+/** A running task's place and time ("💻 12m"), which Zen's running-tasks badge showed before the cards replaced it. */
+function Running({ task }: { task: Task }) {
+  if (!isRunning(task)) return null
+  return (
+    <span className="inline-flex items-center gap-1">
+      <PlacementCardChip task={task} />
+      <Elapsed since={runningSince(task)} title={task.turnStartedAt ? "This turn started" : "In this state since"} className="tabular-nums" />
+    </span>
+  )
+}
 
 const countLabel = (updates: number, replies: number) =>
   [updates && `${updates} update${updates === 1 ? "" : "s"}`, replies && `${replies} repl${replies === 1 ? "y" : "ies"}`].filter(Boolean).join(" · ")
@@ -351,7 +365,7 @@ function LatestLine({ card, batch }: { card: ChatCard; batch: string | null }) {
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 
 /** An open card: where it came from, a batch's tasks, its newest entries, and the way to its timeline and page. */
-function CardBody({ card, batch, statuses, next, onFollowUp }: { card: ChatCard; batch: string | null; statuses: readonly BadgeStatus[]; next: string | null; onFollowUp: (text: string) => void }) {
+function CardBody({ card, batch, tasks, next, onFollowUp }: { card: ChatCard; batch: string | null; tasks: readonly Task[]; next: string | null; onFollowUp: (text: string) => void }) {
   // A batch's tasks keep their own entries under their rows; the card has what's about several, and replies.
   const own = useMemo(() => (card.batchId ? card.entries.filter((e) => e.type === "message" || e.tasks.length !== 1) : card.entries), [card])
   const showInTimelineCard = useCallback(() => showInTimeline({ key: card.key, taskIds: card.taskIds }), [card.key, card.taskIds])
@@ -372,8 +386,8 @@ function CardBody({ card, batch, statuses, next, onFollowUp }: { card: ChatCard;
       )}
       {card.batchId && (
         <div data-testid="batch-tasks" className="flex flex-col gap-0.5">
-          {card.taskIds.map((id, i) => (
-            <BatchTask key={id} id={id} status={statuses[i]} entries={card.entries} batch={batch} next={next} onFollowUp={onFollowUp} />
+          {card.taskIds.map((id) => (
+            <BatchTask key={id} id={id} task={tasks.find((t) => t.id === id)} entries={card.entries} batch={batch} next={next} onFollowUp={onFollowUp} />
           ))}
         </div>
       )}
@@ -396,14 +410,15 @@ function CardBody({ card, batch, statuses, next, onFollowUp }: { card: ChatCard;
 /** One of a batch's tasks: a row that opens into its own entries. */
 const BatchTask = memo(function BatchTask({
   id,
-  status,
+  task,
   entries,
   batch,
   next,
   onFollowUp,
 }: {
   id: string
-  status: BadgeStatus | undefined
+  /** Undefined once it's deleted. */
+  task: Task | undefined
   entries: readonly CardEntry[]
   batch: string | null
   next: string | null
@@ -411,6 +426,7 @@ const BatchTask = memo(function BatchTask({
 }) {
   const [open, toggle] = useChipOpen(`kid:${id}`)
   const tile = useTaskTile(id)
+  const status = task && badgeStatus(task)
   const own = useMemo(() => entries.filter((e) => e.tasks.includes(id)), [entries, id])
   return (
     <div data-testid="batch-task" data-task={id} className={cx("rounded-lg", open && "border border-zinc-800 bg-zinc-950/50", status === "needs_input" && "bg-amber-500/[0.07]")}>
@@ -422,6 +438,11 @@ const BatchTask = memo(function BatchTask({
       >
         <TaskTile id={id} />
         <span className="min-w-0 flex-1 truncate">{batchTaskName(tile?.title ?? id, batch)}</span>
+        {task && (
+          <span className="text-[11px] text-zinc-500 @max-[22rem]:hidden">
+            <Running task={task} />
+          </span>
+        )}
         {status && <StatusBadge status={status} />}
         <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
       </button>
