@@ -124,9 +124,9 @@ function safe<A>(fn: (args: A) => Promise<ToolResult> | ToolResult) {
 const STATUS_ONLY_FIELD = "(status only: ask the project's Captain)"
 
 const SEND_NOW_DESCRIPTION =
-  "true: deliver it now. If the agent is mid-turn, its current step is stopped (like stop_task: workspace, session and queue kept) and the next turn resumes the session with this and every other queued message, in send order. Use it only when the message changes what the agent is doing right now. No effect when it isn't mid-turn."
+  "true: deliver it now. A mid-turn agent's current step is stopped (like stop_task: workspace, session and queue kept) and the next turn resumes the session with every queued message, in send order. Only when the message changes what it's doing right now."
 const ALLOW_MERGE_INTERRUPT_DESCRIPTION =
-  "A turn that is carrying a merge request (the task shows mergeRequested with deliveredAt) is never interrupted unless you pass allow_merge_interrupt: true; without it the call fails and nothing changes."
+  "A turn carrying a merge request (mergeRequested with deliveredAt) is interrupted only with true; without it the call fails and nothing changes."
 
 /** What sendQueuedNow did, for the MCP reply. */
 function sendNowDelivery(r: SendNowResult): string {
@@ -136,12 +136,11 @@ function sendNowDelivery(r: SendNowResult): string {
   return "next turn: no turn had to be stopped; the queued messages go out with the agent's next turn"
 }
 
-const attachmentsSchema = z
-  .array(z.string())
-  .optional()
-  .describe(
-    "Files for the agent: ones Cody attached in this chat, as the ids (up_…) or paths shown in their message, or hosted artifacts, as ids (art_…) or /artifacts/ URLs. They are copied into the agent's task folder under attachments/ and named in its prompt, so the agent can open screenshots, briefs and other files.",
-  )
+/**
+ * The task tools' shared options (runs_on, priority, effort, model, agent, attachments) are explained once, in the
+ * system prompts' TASK_OPTIONS (server/prompts.ts), so each parameter's own text stays short and points there.
+ */
+const attachmentsSchema = z.array(z.string()).optional().describe("Files for the agent: up_… ids or paths Cody attached, or art_… artifact ids or URLs (Task options)")
 
 /** An artifact id, alone or inside an /artifacts/ URL. */
 const ARTIFACT_REF = /\b(art_[a-f0-9]{12})\b/
@@ -155,79 +154,41 @@ const IMAGE_MIME = /^image\/(png|jpeg|gif|webp)$/
 /** A compaction digest lists at most this many of its linked tasks. */
 const DIGEST_TASKS = 10
 
-const effortSchema = z
-  .enum(EFFORTS)
-  .optional()
-  .describe(
-    "How hard the agent should think (reasoning effort). Omit it to use the project route, Settings or routing defaults; pass one for a matching routing rule, an escalation, or when Settings leaves effort to the Coordinator, and then pick the lowest level that fits: " +
-      "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
-      "medium = small, well-specified edits or config changes; " +
-      "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. " +
-      "Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.",
-  )
-
-const modelSchema = z
+const effortBase = z.enum(EFFORTS).optional()
+const effortSchema = effortBase.describe("Reasoning effort; omit it for the defaults. Levels in Task options")
+const modelBase = z
   .string()
   .trim()
   .min(1)
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe(
-    "Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them. " +
-      "Any id `claude --model` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6.",
-  )
-const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
-const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
+const modelSchema = modelBase.describe("Any id or alias `claude --model` takes; omit it for the defaults (Task options)")
+const routingRuleBase = z.string().trim().min(1).max(120).optional()
+const routingReasonBase = z.string().trim().min(1).max(500).optional()
+const routingRuleSchema = routingRuleBase.describe("Routing rule name/id that selected this model and effort")
+const routingReasonSchema = routingReasonBase.describe("Short reason this request matches the rule")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
-const relatedTasksSchema = z
-  .array(z.string())
-  .optional()
-  .describe("Earlier tasks whose outcome this new agent should know about (their summary, branch and PR are added to its prompt)")
+const relatedTasksSchema = z.array(z.string()).optional().describe("Earlier tasks whose summary, branch and PR go into the new agent's prompt")
 /** The most tasks one create_tasks call starts. */
 export const MAX_TASK_BATCH = 100
 /** runs_on's short form for SSH machines with a label: "label:gpu" (shared/machines.ts resolveRunsOn). */
 const RUNS_ON_LABEL = /^(?:label|ssh):[A-Za-z0-9 ._-]{1,40}$/i
 const runsOnValue = z.union([z.enum([...RUNNERS, THIS_COMPUTER]), z.string().regex(RUNS_ON_LABEL, 'runs_on is a runner, this_computer or "label:<label>"')])
 type RunsOn = z.infer<typeof runsOnValue>
-/** How "local" and the SSH machines' labels map, said once for every runs_on. */
-const RUNS_ON_MAP =
-  '"local" = this computer (the one running Box Yard, unsandboxed), unless Cody set Settings › Machines › "Local means" to a machine label: then "local" goes to Cody\'s SSH machines with that label (list_machines shows local_means), and "this_computer" is how to say this computer anyway. ' +
-  '"ssh" = one of Cody\'s own computers over SSH (any of them, or the ones machine_label names); "label:<label>" = a free SSH machine with that label or name, e.g. "label:gpu" (the same as runs_on "ssh" with machine_label "gpu"). '
-const runsOnSchema = runsOnValue
-  .optional()
-  .describe(
-    'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): ' +
-      RUNS_ON_MAP +
-      '"box" = an Upstash box, "gpu" = the project\'s GPU pod on RunPod or Vast.ai (its gpu_provider; billed per hour; needs that cloud\'s key), "docker" = the project\'s own isolated Docker container on this computer (needs Docker running and a Claude key). Omit it to follow the project. ' +
-      'Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", "docker" for "in a container" or "isolated", and "label:<label>" when Cody names a group of their machines ("on a GPU machine", "on the laptops"; list_machines lists the labels). ' +
-      "If the runner can't run (e.g. claude missing or signed out on this computer, Docker stopped, or no SSH machine has the label), the call fails with the reason; it never falls back to another runner. Busy or offline SSH machines with the label are waited for.",
-  )
-const machineLabelSchema = z
-  .string()
-  .max(MACHINE_LIMITS.labelLength)
-  .optional()
-  .describe(
-    'An SSH machine label or machine name, e.g. "gpu" or "laptops" (list_machines lists them): the task runs on a free SSH machine with it, and waits while every one of them is busy. Goes with runs_on "ssh", or alone (it means runs_on "ssh"). A label no machine has fails the call.',
-  )
+const runsOnBase = runsOnValue.optional()
+const runsOnSchema = runsOnBase.describe('Where it runs, for later turns too: "local", "this_computer", "box", "gpu", "docker", "ssh" or "label:<label>"; omit it to follow the project (Task options)')
+const machineLabelBase = z.string().max(MACHINE_LIMITS.labelLength).optional()
+const machineLabelSchema = machineLabelBase.describe('An SSH machine label or name, e.g. "gpu" (list_machines lists them); alone it means runs_on "ssh" (Task options)')
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
-const agentSchema = z
-  .enum(AGENT_CLIS)
-  .optional()
-  .describe(
-    'The agent CLI it runs on, for good: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to follow the project\'s Agent (else Settings › Box agents); a gpt-* or o* model picks "codex" on its own. Pass "codex" when Cody asks for Codex, GPT or OpenAI.',
-  )
+const agentBase = z.enum(AGENT_CLIS).optional()
+const agentSchema = agentBase.describe('"claude" or "codex", for good; omit it to follow the project\'s Agent (Task options)')
 const iconSchema = z
   .enum(TASK_ICONS)
   .optional()
-  .describe("The task's icon in the Coordinator chat, drawn in its project's colour. Omit it to pick one from the title.")
+  .describe("Its icon in the Coordinator chat; omit it to pick one from the title")
 
-/** When a task's turns are pulled from the queue (shared/priority.ts). */
-const PRIORITY_HELP =
-  '"high" puts its turns at the front of the queue: when a slot frees up (Settings › Tasks running at once on this computer (localAgents), a box, a GPU pod, a Docker container or an SSH machine), it goes before every normal task waiting, first in, first out among the high ones. ' +
-  "Use it when Cody wants something to run before the work already queued, e.g. while the localAgents limit is full. It never stops a running agent, and its project's own limits (agents_per_box, whole_machine) still hold; a high task they hold back doesn't block other tasks. " +
-  "It stays on the task (its follow-ups go first too) until set_task_priority lowers it."
+/** When a task's turns are pulled from the queue (shared/priority.ts); TASK_OPTIONS explains it. */
 const prioritySchema = z.enum(TASK_PRIORITIES).optional()
 
 /**
@@ -246,6 +207,25 @@ function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
       : undefined
     return register(name, { ...config, description: named(config.description), ...(inputSchema ? { inputSchema } : {}) }, cb)
   }) as typeof server.registerTool
+}
+
+/**
+ * The tools a Coordinator or Captain loads up front. The CLI's tool search (ToolSearch in CHAT_TOOLS) defers every
+ * other one: the model sees its name and loads its schema when it needs it, so the rarely used tools' descriptions
+ * stay out of every turn's context. A new tool is deferred unless it's added here.
+ */
+export const CORE_TOOLS: Record<McpCaller["kind"], ReadonlySet<string>> = {
+  coordinator: new Set(["send_to_captain", "ask_captain", "list_projects", "list_tasks", "get_task", "send_to_task", "wait_for_tasks", "list_inbox", "search_history"]),
+  captain: new Set(["create_task", "create_tasks", "send_to_task", "reply_to_agent", "list_tasks", "get_task", "wait_for_tasks", "search_history"]),
+}
+/** The tool `_meta` key that keeps a tool out of the CLI's tool search (Claude Code 2.1+). */
+export const ALWAYS_LOAD = "anthropic/alwaysLoad"
+
+/** Mark the caller's core tools always loaded, so the CLI defers only the rest. */
+function alwaysLoadCore(server: McpServer, core: ReadonlySet<string>) {
+  const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: unknown) => RegisteredTool
+  server.registerTool = ((name: string, config: Record<string, unknown>, cb: unknown) =>
+    register(name, core.has(name) ? { ...config, _meta: { ...(config._meta as Record<string, unknown> | undefined), [ALWAYS_LOAD]: true } } : config, cb)) as typeof server.registerTool
 }
 
 /**
@@ -296,6 +276,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const ownerName = deps.settings?.get().ownerName
   const owner = (text: string) => withOwner(text, ownerName)
   nameOwnerInTools(server, ownerName)
+  alwaysLoadCore(server, CORE_TOOLS[caller.kind])
   if (caller.readOnly) readOnlyTools(server)
   const scopeId = caller.kind === "captain" ? caller.projectId : null
   const ownProject = (): Project => {
@@ -651,7 +632,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        "RunPod GPU only: the most this project's pods may cost together, $/hr. A task that would need a pod over it waits and says so. 0: no cap of its own (the total cap in Settings › RunPod GPU still applies). null: Settings › RunPod GPU › Max per project.",
+        "The most its pods may cost together, $/hr; a task that would need a pod over it waits and says so. 0: no cap of its own (the total cap still applies). null: Max per project",
       ),
     gpu_types: z
       .array(z.string().trim().min(1).max(100))
@@ -660,15 +641,15 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .nullable()
       .optional()
       .describe(
-        `RunPod GPU only: GPU types its new pods try, in order, as RunPod gpuTypeIds. Cheap ones for browser/WebGL game testing: ${Object.entries(RUNPOD_GPU_GUIDE)
+        `RunPod gpuTypeIds its new pods try, in order. Cheap ones for browser/WebGL game testing: ${Object.entries(RUNPOD_GPU_GUIDE)
           .map(([id, g]) => `"${id}" (${g.vramGb} GB, ${g.usd})`)
-          .join(", ")}. On Vast.ai, Vast's GPU names (${Object.keys(VAST_GPU_GUIDE).map((n) => `"${n}"`).join(", ")}); a RunPod id is read as its Vast name. null: its cloud's GPU types setting.`,
+          .join(", ")}. On Vast.ai, Vast's GPU names (${Object.keys(VAST_GPU_GUIDE).map((n) => `"${n}"`).join(", ")}); a RunPod id is read as its Vast name. null: its cloud's GPU types`,
       ),
     gpu_cloud: z
       .enum(["SECURE", "COMMUNITY"])
       .nullable()
       .optional()
-      .describe("RunPod GPU only: where its new pods run. COMMUNITY is cheaper and has more GPU types (RTX 3070) but no network volume, so caches start cold. null: Settings › RunPod GPU › Cloud."),
+      .describe("Where its new pods run. COMMUNITY is cheaper with more GPU types (RTX 3070) but no network volume, so caches start cold. null: Cloud"),
     gpu_min_ram_gb: z
       .number()
       .int()
@@ -676,7 +657,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .max(RUNPOD_MACHINE_LIMITS.minRamGb.max)
       .nullable()
       .optional()
-      .describe("RunPod GPU only: its new pods only go to hosts with at least this much RAM, GB (a game's browser needs ~12). null: Settings › RunPod GPU › Min RAM."),
+      .describe("Its new pods only go to hosts with at least this much RAM, GB (a game's browser needs ~12). null: Min RAM"),
     gpu_min_vcpus: z
       .number()
       .int()
@@ -684,13 +665,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       .max(RUNPOD_MACHINE_LIMITS.minVcpus.max)
       .nullable()
       .optional()
-      .describe("RunPod GPU only: …and at least this many vCPUs. null: Settings › RunPod GPU › Min vCPUs."),
+      .describe("…and at least this many vCPUs. null: Min vCPUs"),
     gpu_provider: z
       .enum(GPU_PROVIDERS)
       .nullable()
       .optional()
       .describe(
-        'Runs on GPU only: the cloud its pods come from. "runpod" (pods with a network volume that keeps caches) or "vast" (Vast.ai: a marketplace with more GPU types and stock, often cheaper, but no volume and hosts of varying reliability). gpu_max_hourly_usd, gpu_types, gpu_min_ram_gb and gpu_min_vcpus apply on either; gpu_cloud is RunPod only. null: Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that is on). A task resting on the old cloud moves once its workspace is archived.',
+        'The cloud its pods come from: "runpod" (pods with a network volume that keeps caches) or "vast" (Vast.ai: a marketplace with more GPU types and stock, often cheaper, but no volume and hosts of varying reliability). gpu_cloud is RunPod only. null: Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that is on). A task resting on the old cloud moves once its workspace is archived.',
       ),
   }
   const boxSettingsPatch = (a: BoxSettingsArgs) => ({
@@ -804,14 +785,14 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       "create_project",
       {
         description:
-          "Create a project. repo is optional (owner/name or git URL); leave it out for non-coding work. env vars are given to every task in the project.",
+          "Create a project. repo is optional (owner/name or git URL); leave it out for non-coding work. env vars are given to every task in the project. Box settings (gpu_*: GPU projects only) as in update_project; omit them for the global ones.",
         inputSchema: {
           name: z.string().min(1),
           description: z.string().optional(),
           repo: z.string().optional(),
           base_branch: z.string().optional(),
           env: envSchema,
-          agent: agentSchema.describe('The agent CLI its tasks run on: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to use Settings › Box agents.'),
+          agent: agentBase.describe('The agent CLI its tasks run on: "claude" or "codex"; omit it for Settings › Box agents'),
           ...boxSettingsInput,
         },
       },
@@ -829,8 +810,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "update_project",
     {
       description: scopeId
-        ? "Change your project's box settings, and on GPU its cloud (gpu_provider: runpod or vast), its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU / Vast.ai GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on GPU gpu_provider, gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget, or its colour in the chat and sidebar (color).",
+        ? "Change your project's box settings, and on GPU (gpu_*) its cloud (gpu_provider: runpod or vast), $/hr cap and the machine its new pods get. Each one left out stays as it is; null clears it, so the global setting of that name in Settings › Boxes & limits (gpu_*: Settings › RunPod GPU or Vast.ai GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and gpu_* on GPU only, with gpu_provider picking RunPod or Vast.ai: null clears one so the global setting of that name applies, gpu_* in Settings › RunPod GPU or Vast.ai GPU) or its own notes budget, or its colour in the chat and sidebar (color).",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -1195,8 +1176,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_task",
     {
       description:
-        "Start a NEW agent (a fresh Claude Code or Codex session, see agent) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
-        "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt. If Cody attached files (a screenshot of a bug, a spec) that the agent needs, pass them in attachments.",
+        "Start a NEW agent (a fresh session) on new, independent work in a project, in its own folder on the project's box (repo cloned). For follow-ups on work an agent already did, use send_to_task so it keeps its context. " +
+        "Write a self-contained prompt, and pass files it needs (a screenshot, a spec) in attachments. Two or more tasks at once: create_tasks.",
       inputSchema: {
         project: z.string().describe("Project id or name"),
         title: z.string().min(1).max(120),
@@ -1208,7 +1189,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         machine_label: machineLabelSchema,
         agent: agentSchema,
         icon: iconSchema,
-        priority: prioritySchema.describe(`"high" or "normal" (the default). ${PRIORITY_HELP}`),
+        priority: prioritySchema.describe('"high" or "normal" (the default): Task options'),
         ...routeParams,
       },
     },
@@ -1240,18 +1221,19 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
 
   const batchItem = z.object({
     title: z.string().min(1).max(120),
-    prompt: z.string().min(1).describe("This task's own instructions. common_prompt, when given, goes before it."),
-    attachments: z.array(z.string()).optional().describe("Files for this task only, added to the shared attachments (up_… or art_… ids or paths, as in create_task)"),
-    related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
-    env: envSchema,
-    runs_on: runsOnSchema.describe(
-      'Where this task runs, over the shared runs_on and the project\'s "Runs on": "local", "this_computer", "box", "gpu" (the project\'s GPU pod, on RunPod or Vast.ai), "docker", "ssh" or "label:<label>", as in create_task. An item\'s own runs_on and machine_label, when it gives either, replace the shared pair.',
-    ),
-    machine_label: machineLabelSchema,
-    agent: agentSchema.describe('"claude" or "codex" for this task, over the shared agent and the project\'s Agent'),
+    prompt: z.string().min(1).describe("This task's own instructions, after common_prompt"),
+    attachments: z.array(z.string()).optional(),
+    related_tasks: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+    runs_on: runsOnBase,
+    machine_label: machineLabelBase,
+    agent: agentBase,
     icon: iconSchema,
-    priority: prioritySchema.describe('"high" or "normal" for this task, over the shared priority. See create_task.'),
-    ...routeParams,
+    priority: prioritySchema,
+    model: modelBase,
+    effort: effortBase,
+    routing_rule: routingRuleBase,
+    routing_reason: routingReasonBase,
   })
   type BatchItem = z.infer<typeof batchItem>
 
@@ -1259,33 +1241,22 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_tasks",
     {
       description:
-        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh agent session exactly like create_task. ` +
-        "Use it instead of a series of create_task calls whenever you start two or more independent tasks at once: every create_task call costs you a whole step, so dozens of them take minutes before the last task even exists, while create_tasks queues them all at once and Box Yard creates the boxes they need in parallel. " +
-        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, agent, priority, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win. " +
-        "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids, and that a runs_on runner can run). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
-        "Returns the new tasks' ids in the order given.",
+        `Start 1 to ${MAX_TASK_BATCH} new agents in one project in one call (fan-out), each like create_task. Use it whenever you start two or more tasks at once: every create_task call costs a whole step, while this queues them all and Box Yard makes their boxes in parallel. ` +
+        "Write what they share once, in common_prompt. The top-level options apply to every task: an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win (an item's runs_on or machine_label replaces the shared pair). " +
+        "All or nothing: every item is checked first (scope, non-empty title and prompt, unique titles, attachment and task ids, runners). On any problem NO task is created and the error lists each by item number (#1 first): fix them and send the whole list again. " +
+        "Returns the new ids in order.",
       inputSchema: {
-        project: z.string().describe("Project id or name. Every task in the call goes there."),
-        tasks: z.array(batchItem).min(1).max(MAX_TASK_BATCH).describe(`The tasks to start, 1 to ${MAX_TASK_BATCH}, each with its own title and prompt`),
-        common_prompt: z
-          .string()
-          .optional()
-          .describe("The brief every task shares (goal, constraints, what done means, what to report back). It goes before each task's own prompt, so you write it once."),
-        attachments: attachmentsSchema.describe("Files every task gets: ids (up_…) or paths of files Cody attached in this chat, or artifact ids (art_…) or /artifacts/ URLs. Each is copied into every agent's task folder under attachments/."),
-        related_tasks: relatedTasksSchema.describe("Earlier tasks whose outcome every new agent should know about (their summary, branch and PR are added to each prompt)"),
-        env: envSchema.describe("Env vars for every task, as NAME: value; an item's own env wins for the same name"),
-        runs_on: runsOnSchema.describe(
-          'Where every task runs (an item\'s own runs_on or machine_label wins), over the project\'s "Runs on", for every later turn too. ' +
-            RUNS_ON_MAP +
-            '"box" = an Upstash box, "gpu" = the project\'s GPU pod (RunPod or Vast.ai), "docker" = the project\'s isolated Docker container on this computer. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", and "label:<label>" when Cody names a group of their machines.',
-        ),
-        machine_label: machineLabelSchema.describe("An SSH machine label or name for every task (with runs_on \"ssh\", or alone), as in create_task. Each task takes a free machine with it; the rest wait."),
-        agent: agentSchema.describe('The agent CLI every task runs on, "claude" or "codex" (an item\'s own agent wins). Omit it to follow the project\'s Agent.'),
-        model: modelSchema.describe("Model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
-        effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
-        priority: prioritySchema.describe(`"high" or "normal" (the default) for every task (an item's own priority wins). ${PRIORITY_HELP}`),
-        routing_rule: routingRuleSchema,
-        routing_reason: routingReasonSchema,
+        project: z.string().describe("Project id or name, for every task"),
+        tasks: z.array(batchItem).min(1).max(MAX_TASK_BATCH),
+        common_prompt: z.string().optional().describe("The brief every task shares (goal, constraints, what done means, what to report back), before each task's own prompt"),
+        attachments: attachmentsSchema,
+        related_tasks: relatedTasksSchema,
+        env: envSchema,
+        runs_on: runsOnSchema,
+        machine_label: machineLabelSchema,
+        agent: agentSchema,
+        priority: prioritySchema.describe('"high" or "normal" (the default): Task options'),
+        ...routeParams,
       },
     },
     safe(
@@ -1406,27 +1377,18 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "send_to_task",
     {
       description:
-        "Send a message to an existing task's agent: an answer, feedback, a correction, or follow-up work on the same topic. It continues the SAME Claude session, so the agent remembers everything it did. " +
-        "Optionally set model/effort/routing_* for this follow-up; they apply from the agent's next turn on, so a cheap task can be escalated when it struggles. " +
-        "If the agent is idle or done, its session resumes right away (restored from the archive if needed). If its archive has expired, a new session starts from a recap (summary, branch, PR, recent messages) on a fresh checkout of its branch; the delivery field says which. If it is mid-turn, the message is queued and delivered as soon as the current turn ends; pass interrupt: true to deliver it now instead (see interrupt). If the task shows mergeRequested, Cody already asked it to merge that PR with the Merge PR button: don't send merge instructions of your own until that settles. To pass along files Cody attached (a screenshot, a document), use attachments. " +
-        'To continue an existing task somewhere else (Cody: "continue it locally", "on my machine"), pass runs_on: it pins the task to that runner from its next turn on. Before its next turn (after any running turn ends) its workspace moves there when nothing would be lost: its turn-end archive and push hold all the work. If it can\'t move safely (no fresh archive, the archive is too big, or the push failed), it keeps running where its workspace is and the task\'s log says why. A runner that can\'t run fails the call with the reason, and nothing is sent.',
+        "Message an existing task's agent: an answer, feedback, a correction or follow-up work on the same topic. It continues the SAME session, so the agent remembers everything it did. " +
+        "Idle or done: the session resumes now (from its archive if needed; if that expired, a new session starts from a recap on a fresh checkout of its branch). Mid-turn: queued until the turn ends, or now with interrupt. The delivery field says which. " +
+        "model, effort and routing_* apply from its next turn on (escalate a task that struggles); runs_on moves it (Task options). If it shows mergeRequested, Cody already asked it to merge with the Merge PR button: send no merge instructions of your own until that settles.",
       inputSchema: {
         task: z.string(),
         message: z.string().min(1),
         attachments: attachmentsSchema,
-        runs_on: runsOnValue
-          .optional()
-          .describe(
-            'Pin the task to a runner from its next turn on, over the project\'s "Runs on": ' +
-              RUNS_ON_MAP +
-              '"box" = an Upstash box, "gpu" = the project\'s GPU pod (on RunPod or Vast.ai), "docker" = the project\'s Docker container on this computer. Omit it to leave it where it runs.',
-          ),
-        machine_label: machineLabelSchema.describe('Move the task to a free SSH machine with this label or name (with runs_on "ssh", or alone), from its next turn on, e.g. "gpu".'),
+        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "gpu", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
+        machine_label: machineLabelBase.describe("Move it to a free SSH machine with this label or name from its next turn on (Task options)"),
         interrupt: z.boolean().optional().describe(SEND_NOW_DESCRIPTION),
         allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION),
-        priority: prioritySchema.describe(
-          `"high" or "normal". When the task rests and has to wait for a slot, a high follow-up goes before every normal task waiting. Omit it to keep the task's priority (normal unless raised). ${PRIORITY_HELP}`,
-        ),
+        priority: prioritySchema.describe('"high" or "normal"; omit it to keep the task\'s (Task options)'),
         ...routeParams,
       },
     },
@@ -1487,8 +1449,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description:
         "Send now: deliver the messages queued for a task's next turn without waiting for its current turn to end. It stops the current step the way stop_task does (the workspace, session and queue are kept), then the next turn resumes the session with every queued message, in send order. " +
-        "Use it when a queued message changes or cancels what the agent is doing and waiting for the turn to end would waste work. If no turn is running, the messages simply go out with the next turn. " +
-        ALLOW_MERGE_INTERRUPT_DESCRIPTION,
+        "Use it when a queued message changes or cancels what the agent is doing and waiting for the turn to end would waste work. If no turn is running, the messages simply go out with the next turn.",
       inputSchema: { task: z.string(), allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION) },
     },
     safe(async (a: { task: string; allow_merge_interrupt?: boolean }) => {
@@ -1576,9 +1537,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "set_task_priority",
     {
       description:
-        "Raise or lower an existing task's priority without sending it a message, e.g. move a task that is already queued to the front of the queue. " +
-        PRIORITY_HELP +
-        " pool_status's queued list shows the queue in order, high first.",
+        "Raise or lower an existing task's priority without messaging it, e.g. move a queued task to the front of the queue (Task options). pool_status lists the queue in order, high first.",
       inputSchema: { task: z.string(), priority: z.enum(TASK_PRIORITIES).describe('"high" (front of the queue) or "normal"') },
     },
     safe(async (a: { task: string; priority: TaskPriority }) => {
@@ -3265,10 +3224,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "delete_idle_boxes",
     {
       description:
-        "Find idle boxes (and RunPod and Vast.ai GPU pods) and delete them, after the same safety check as delete_box on each. " +
+        "Find idle boxes (and RunPod and Vast.ai GPU pods) and delete them, after delete_box's safety check on each (no running agent, queued task, or uncommitted or unpushed work off a merged PR; workspaces archived first; you can't override it). " +
         "dry_run (the default) changes nothing: it lists each box it would delete with what happens to its tasks, and each box it skips with why. Show Cody that list before deleting when Cody hasn't asked for it outright. " +
         "With dry_run: false and a reason it deletes those boxes (each is checked again first) and says what it deleted, what failed and what it skipped. " +
-        SAFETY +
         (scopeId ? "As a Captain you only see boxes that hold nothing but your project's work." : "With project, only boxes holding nothing but that project's work; without it, every running box."),
       inputSchema: {
         project: z.string().optional().describe(scopeId ? "Your project (the default)" : "Project id or name: only boxes holding nothing but its work"),

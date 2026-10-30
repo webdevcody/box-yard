@@ -6,6 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { buildMcpServer } from "../server/mcp.js"
+import { TASK_OPTIONS } from "../server/prompts.js"
 import type { Config } from "../server/config.js"
 import type { ChatMessage, Effort, OrchestratorCompactionRecord, OrchestratorState, Project, SettingsInfo, Task, TaskCompactionRecord, TaskMessage } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
@@ -188,8 +189,10 @@ describe("settings reach the CLI", () => {
     expect(Object.keys(create.inputSchema.properties ?? {})).toContain("model")
     expect(Object.keys(create.inputSchema.properties ?? {})).toContain("effort")
     expect(Object.keys(create.inputSchema.properties ?? {})).toContain("routing_rule")
-    expect(JSON.stringify(create.inputSchema.properties)).toMatch(/one-command chores/)
-    expect(JSON.stringify(create.inputSchema.properties)).toMatch(/real coding/)
+    // The levels are explained once, in the system prompts' Task options, and the parameter points there.
+    expect(JSON.stringify(create.inputSchema.properties)).toMatch(/Levels in Task options/)
+    expect(TASK_OPTIONS).toMatch(/low = one-command chores/)
+    expect(TASK_OPTIONS).toMatch(/high = real coding/)
 
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const client = await connect()
@@ -354,7 +357,7 @@ describe("orchestrator usage, compaction and the durable log", () => {
       for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turnArgs, flag))
       expect(pass).not.toContain("--allowedTools")
     }
-    expect(argOf(turnArgs, "--tools")).toBe("Read,WebSearch,WebFetch")
+    expect(argOf(turnArgs, "--tools")).toBe("Read,WebSearch,WebFetch,ToolSearch")
     const state = await call<OrchestratorState>(r, "GET", "/api/orchestrator")
     expect(state.usage.tokens).toBe(2000)
     expect(state.lastCompaction).toMatchObject({ trigger: "button", tokensAfter: 2000 })

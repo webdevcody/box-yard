@@ -10,7 +10,7 @@ import { Artifacts } from "../server/artifacts.js"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
-import { captainCompactionsDir, compactCommand, compactionTime, recapBlock, summaryBody, summaryPrompt, summarySection, SUMMARY_PROMPT, writeCompaction } from "../server/compactions.js"
+import { afterCompactBlock, captainCompactionsDir, compactCommand, compactionTime, recapBlock, summaryBody, summaryPrompt, summarySection, SUMMARY_PROMPT, writeCompaction } from "../server/compactions.js"
 import { compactionTaskSnapshots, liveTaskLines } from "../server/compactionTasks.js"
 import { parseTerms, snippetOf } from "../server/history.js"
 import type { CompactionTaskSnapshot, Project, Task } from "../shared/types.js"
@@ -54,7 +54,8 @@ describe("compaction summaries carry forward", () => {
     const previous = { at, markdown: writeCompaction(tmpDir(), meta(at), SUMMARY).markdown }
     const prompt = summaryPrompt(SUMMARY_PROMPT, { previous, liveTasks: ['- task_aaaaaaaaaaaa "Runner" [demo] done · PR https://github.com/acme/demo/pull/7 (merged)'] })
     expect(prompt.startsWith(SUMMARY_PROMPT)).toBe(true)
-    expect(prompt).toContain("Your previous summary (2026-10-20T10:00:00Z) recorded these. Carry each one forward")
+    expect(prompt).toContain("Your previous summary (2026-10-20T10:00:00Z) recorded these. Carry each decision forward")
+    expect(prompt).toContain("drop resolved, stale or undecided ones")
     expect(prompt).toContain("- Spending is paused until Friday.")
     expect(prompt).toContain("- Ask Cody about the local runner brief.")
     // Ongoing work is rebuilt from live state, not copied.
@@ -65,12 +66,29 @@ describe("compaction summaries carry forward", () => {
     // A huge previous section is cut.
     const long = `## Decisions and preferences\n${"- a decision that goes on and on\n".repeat(400)}`
     expect(summaryPrompt(SUMMARY_PROMPT, { previous: { at, markdown: long } })).toContain("- …(cut)")
+    // Open threads are carried in far less room than decisions.
+    const threads = `## Open threads and next steps\n${"- a thread nobody picked up again\n".repeat(400)}`
+    const carried = summaryPrompt(SUMMARY_PROMPT, { previous: { at, markdown: threads } })
+    expect(carried.length - SUMMARY_PROMPT.length).toBeLessThan(2600)
+    expect(SUMMARY_PROMPT).toContain("At most 10 bullets, one line each")
   })
 
-  it("tells /compact not to repeat Box Yard's summary, naming the owner", () => {
-    expect(compactCommand()).toMatch(/^\/compact Box Yard saved the summary in your last reply/)
-    expect(compactCommand()).toContain("Don't repeat what it says")
+  it("tells /compact to carry Box Yard's summary, naming the owner", () => {
+    expect(compactCommand()).toMatch(/^\/compact Your last reply is the summary Box Yard saved/)
+    expect(compactCommand()).toContain("It isn't shown again after this compaction, so carry it into your summary")
     expect(compactCommand("Sam")).toContain("Sam's recent requests")
+  })
+
+  it("after a /compact, gives back only where the summary is and the live state of the tasks it names", () => {
+    const files = writeCompaction(tmpDir(), meta(Date.parse("2026-10-20T10:00:00Z")), SUMMARY)
+    const block = afterCompactBlock(files.markdownFile, files.markdown, ['- task_aaaaaaaaaaaa "Runner" [demo] done'])
+    expect(block).toBe(
+      `[Box Yard: Your context was just compacted. The summary above carries the one you saved right before it (2026-10-20T10:00:00.000Z, ${files.markdownFile}). Task states under "Live now" are current and beat both. For anything older, use search_history.]\n\nLive now, tasks it names:\n- task_aaaaaaaaaaaa "Runner" [demo] done`,
+    )
+    expect(block).not.toContain("## Decisions and preferences")
+    expect(afterCompactBlock("f.md", "## Decisions and preferences\n- none", [])).toBe(
+      "[Box Yard: Your context was just compacted. The summary above carries the one you saved right before it (f.md). For anything older, use search_history.]",
+    )
   })
 
   it("gives the saved summary back with the live state of the tasks it names", () => {

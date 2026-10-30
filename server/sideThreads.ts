@@ -33,7 +33,7 @@ import { listCompactions, readCompactionInfo, summaryBody } from "./compactions.
 import { resultUsageObject } from "./usage.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
-import { codexChatLaunch, type ChatLaunch } from "./chatAgent.js"
+import { CHAT_ALLOWED_TOOLS, CHAT_TOOLS, codexChatLaunch, type ChatLaunch } from "./chatAgent.js"
 import type { AgentCli } from "../shared/agentCli.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
@@ -657,7 +657,7 @@ export class SideThreads {
         instructions: host.systemPrompt(),
       })
     }
-    const allowed = [...[...THREAD_TOOLS].map((t) => `mcp__boxyard__${t}`), "WebSearch", "WebFetch", ...host.readRules()]
+    const allowed = [...[...THREAD_TOOLS].map((t) => `mcp__boxyard__${t}`), ...CHAT_ALLOWED_TOOLS, ...host.readRules()]
     const args = [
       "-p",
       "--output-format",
@@ -669,7 +669,7 @@ export class SideThreads {
       this.mcpConfigFor(host),
       // The chat's tools and system prompt, so the fork reuses its prompt cache; only the allowlist may run.
       "--tools",
-      "Read,WebSearch,WebFetch",
+      CHAT_TOOLS,
       "--allowedTools",
       allowed.join(","),
       "--permission-mode",
