@@ -43,6 +43,7 @@ import { NotesTab } from "./NotesTab"
 import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { useOpenSettings } from "./SettingsDialog"
 import { MachineLabelPicker } from "./MachineSettings"
+import { CODEX_ON_MACHINES } from "../../../shared/machines"
 import { IdentityBadge } from "./IdentityBadge"
 import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
@@ -1058,6 +1059,12 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
             ))}
           </Select>
         </Field>
+        {runner === "ssh" && (agentCli || defaultAgentCli) === "codex" && (
+          <p role="note" className="flex items-start gap-2 text-xs leading-relaxed text-amber-200/90" data-testid="project-codex-ssh">
+            <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+            <span>{CODEX_ON_MACHINES}: its tasks would wait. Pick Claude Code, or another Runs on.</span>
+          </p>
+        )}
         {(agentCli || defaultAgentCli) === "codex" && setup.data?.codex?.state === "unset" && (
           <p className="text-xs text-zinc-500" data-testid="project-codex-login">
             Codex needs a login first.{" "}

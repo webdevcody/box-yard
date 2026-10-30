@@ -4,6 +4,7 @@ import { ShieldAlert } from "lucide-react"
 import { newClientId, useAgentSettings, useCreateProject, useMachines, useSetup } from "../lib/queries"
 import { Modal } from "./Modal"
 import { MachineLabelPicker } from "./MachineSettings"
+import { CODEX_ON_MACHINES } from "../../../shared/machines"
 import { Button, Field, LineIcon, Select, inputClass, parseEnv } from "./ui"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
 import { AGENT_CLIS, AGENT_CLI_LABEL, DEFAULT_AGENT_CLI, type AgentCli } from "../../../shared/agentCli"
@@ -125,6 +126,12 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
           ))}
         </Select>
       </Field>
+      {runner === "ssh" && (agentCli || defaultAgentCli) === "codex" && (
+        <p role="note" className="flex items-start gap-2 text-xs leading-relaxed text-amber-200/90" data-testid="new-project-codex-ssh">
+          <LineIcon icon={ShieldAlert} className="h-3.5 w-3.5 text-amber-300" />
+          <span>{CODEX_ON_MACHINES}: its tasks would wait. Pick Claude Code, or another Runs on.</span>
+        </p>
+      )}
       <Field label="Env vars (optional)" hint="KEY=value, one per line. Every task in the project gets them.">
         <textarea className={`${inputClass} font-mono text-xs`} rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder="DATABASE_URL=..." />
       </Field>
