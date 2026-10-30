@@ -5,7 +5,7 @@ import { shortGithubLabel, type EntityIndex, type EntityRef } from "./linkify"
 import { stripTruncation } from "./truncated"
 import { groupPublished, type PublishedGroup } from "./publishedNotices"
 
-export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "warning" | "compaction" | "notes" | "settings" | "info"
+export type NoticeKind = "done" | "failed" | "needs_input" | "pr" | "merge" | "hook" | "artifact" | "message" | "sent" | "warning" | "compaction" | "notes" | "settings" | "info"
 
 /** A piece of a notice's one-line summary: plain text, or a link (artifact, PR, page). */
 export type NoticeSegment = { text: string } | { href: string; label: string }
@@ -29,6 +29,8 @@ const EMOJI_KIND: Record<string, NoticeKind> = {
   "🪝": "hook",
   "📎": "artifact",
   "💬": "message",
+  // Cody's message to a task from its card in the Coordinator chat (TaskManager.sentFromChat).
+  "✉": "sent",
   "⚠": "warning",
   // The notes retro and the notes budget (server/retro.ts, server/notes.ts).
   "📝": "notes",

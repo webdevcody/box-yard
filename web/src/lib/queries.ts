@@ -895,8 +895,9 @@ export function useCreateTask() {
 export function useSendTaskMessage(taskId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { content: string; attachments?: Attachment[] }) =>
-      api<Task>(`/api/tasks/${taskId}/messages`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
+    /** `inChat`: sent from the task's card in the Coordinator chat, which then shows it (TaskManager.sentFromChat). */
+    mutationFn: (input: { content: string; attachments?: Attachment[]; inChat?: boolean }) =>
+      api<Task>(`/api/tasks/${taskId}/messages`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id), ...(input.inChat ? { inChat: true } : {}) } }),
     onMutate: async ({ content, attachments }) => {
       const undoTasks = snapshot<Task[]>(qc, keys.tasks)
       const undoQueue = snapshot<QueuedMessage[]>(qc, keys.taskQueue(taskId))
@@ -1192,7 +1193,8 @@ export function useDeleteBox() {
 export function useSendChat() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; content: string; attachments?: Attachment[] }) =>
+    /** `about`: asked from these tasks' card, so it shows there and the Coordinator is told (Orchestrator.send). */
+    mutationFn: (input: { id: string; content: string; attachments?: Attachment[]; about?: readonly string[] }) =>
       api<ChatMessage>("/api/chat", { body: { ...input, attachments: input.attachments?.map((a) => a.id) } }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.chat })
@@ -1204,7 +1206,12 @@ export function useSendChat() {
           id: input.id,
           role: "user",
           content: input.content,
-          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}), ...(queued ? { queued: true } : {}) },
+          meta: {
+            pending: true,
+            ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+            ...(input.about?.length ? { about: input.about } : {}),
+            ...(queued ? { queued: true } : {}),
+          },
           createdAt: Date.now(),
         }),
       )

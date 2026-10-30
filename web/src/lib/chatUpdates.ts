@@ -13,6 +13,19 @@ export const ATTENTION_KINDS: ReadonlySet<NoticeKind> = new Set(["needs_input", 
 
 export const isAttention = (m: Pick<ChatMessage, "role" | "content" | "meta">) => m.role === "notice" && ATTENTION_KINDS.has(noticeKind(m.content, m.meta))
 
+/** Cody's message to a task from its card (TaskManager.sentFromChat): his words, so a bubble, never a chip. */
+export const isSent = (m: Pick<ChatMessage, "role" | "meta">) => m.role === "notice" && m.meta?.sent === true
+
+/**
+ * A task notice's own words, after "**Title** verb: ": what Cody wrote in a sent notice, or what the agent said at the
+ * end of its turn. Still markdown. `truncated`: the server shortened it (the task has the rest).
+ */
+export function noticeText(m: Pick<ChatMessage, "content" | "meta">): { text: string; truncated: boolean } {
+  const { event, truncated } = splitNotice(m.content, m.meta)
+  const colon = event.indexOf(": ")
+  return { text: colon >= 0 ? event.slice(colon + 2) : event, truncated }
+}
+
 /**
  * Whether the Coordinator reads this notice with its next updates. A task notice goes to the task's project Captain
  * instead (TaskManager.notice marks it seen at once), except hook fires and merge requests ({ coordinator: true }).
@@ -135,8 +148,9 @@ function sourceOf(item: UpdateItem, rowId: string): UpdateSource {
 
 /**
  * The chat's rows, oldest first. Published files fold per task first (lib/publishedNotices.ts). Every notice that
- * isn't a question, failure or merge request becomes an update; two or more updates with nothing between them form
- * one group. Only Box Yard's own words separate them: a Coordinator reply of "(no update)" is never stored.
+ * isn't a question, failure, merge request or Cody's own message to a task (isSent) becomes an update; two or more
+ * updates with nothing between them form one group. Only Box Yard's own words separate them: a Coordinator reply of
+ * "(no update)" is never stored.
  *
  * Which updates a reply covers: a turn reads every update that came in before it started, so a reply covers the
  * Coordinator-read updates (readByCoordinator) that arrived before its turn's first tool call or, with none, before
@@ -176,7 +190,7 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
     if (m.role === "notice") {
       const item: UpdateItem = { type: "notice", id: m.id, message: m }
       if (readByCoordinator(m)) waiting.push(item)
-      if (!isAttention(m)) {
+      if (!isAttention(m) && !isSent(m)) {
         run.push(item)
         continue
       }

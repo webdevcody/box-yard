@@ -101,6 +101,8 @@ describe("parseNotice", () => {
     expect(parseNotice("🙋 **A** needs you: which one?").kind).toBe("needs_input")
     expect(parseNotice("💬 **A** says: hi").summary).toEqual([{ text: "hi" }])
     expect(parseNotice("💬 **A** finished its turn: did it").summary).toEqual([{ text: "did it" }])
+    expect(parseNotice("✉️ **A** got a message from Cody: try again").kind).toBe("sent")
+    expect(parseNotice("✉️ **A** got a message from Cody: try again").summary).toEqual([{ text: "try again" }])
     expect(parseNotice("⚠️ Box create failed. Retrying in a minute.").kind).toBe("warning")
     expect(parseNotice("⚠️ Box create failed. Retrying in a minute.").title).toBeNull()
   })
