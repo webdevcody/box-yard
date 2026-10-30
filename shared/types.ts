@@ -13,6 +13,7 @@ import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
 import type { ProjectColor } from "./projectColors.js"
 import type { TaskIconName } from "./taskIcons.js"
+import type { TaskPriority } from "./priority.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -242,6 +243,10 @@ export interface Task {
   icon?: TaskIconName | null
   /** Shared by the tasks one create_tasks call started (the Coordinator's cards view shows them as one card); null when started on its own. */
   batchId?: string | null
+  /** "high": its next turn goes before every normal task waiting for a slot (shared/priority.ts). Sticky until changed. */
+  priority?: TaskPriority
+  /** When it last joined the queue (a new task, a message): FIFO within a priority (queueOrder). */
+  lastActiveAt?: number
   createdAt: number
   updatedAt: number
 }

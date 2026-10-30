@@ -912,6 +912,10 @@ export const MIGRATIONS: string[] = [
   -- view can show a fan-out as one card. NULL: started on its own.
   ALTER TABLE tasks ADD COLUMN batch_id TEXT;
   `,
+  `
+  -- Task priority (shared/priority.ts): 'high' tasks are pulled from the queue before normal ones. NULL: normal.
+  ALTER TABLE tasks ADD COLUMN priority TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

@@ -114,6 +114,8 @@ describe("Captain MCP scoping (#43)", () => {
       ["get_task", { task: tb.id }],
       ["send_to_task", { task: tb.id, message: "hi" }],
       ["set_task_model", { task: tb.id, effort: "low" }],
+      ["set_task_priority", { task: tb.id, priority: "high" }],
+      ["send_to_task", { task: tb.id, message: "hi", priority: "high" }],
       ["stop_task", { task: tb.id }],
       ["close_task", { task: tb.id }],
       ["retry_task", { task: tb.id }],
@@ -144,6 +146,7 @@ describe("Captain MCP scoping (#43)", () => {
     expect(r.yard.store.listNotes(b.id)).toHaveLength(0)
     expect(r.yard.store.getTask(tb.id)!.pendingCount).toBe(0)
     expect(r.yard.store.listSchedules()).toHaveLength(0)
+    expect(r.yard.store.getTask(tb.id)!.priority).toBe("normal")
 
     // A title from another project isn't even found.
     expect((await tool("get_task", { task: "Beta work" })).content[0]!.text).toMatch(/No task "Beta work" in this project/)
@@ -183,6 +186,7 @@ describe("Captain MCP scoping (#43)", () => {
     await ok("add_note", { content: "Captain note" })
     expect(r.yard.store.listNotes(a.id).map((n) => n.author)).toEqual(["captain"])
     await ok("set_task_model", { task: ta.id, effort: "low" })
+    expect(JSON.parse(await ok("set_task_priority", { task: ta.id, priority: "high" })).priority).toBe("high")
     // Schedules default to the Captain's project.
     const sched = JSON.parse(await ok("create_schedule", { name: "Alpha nightly", cron: "@daily", prompt: "x", enabled: false }))
     expect(sched.project).toBe("alpha")
