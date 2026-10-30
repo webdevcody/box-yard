@@ -102,8 +102,8 @@ describe("turn timing chip", () => {
     expect(chip()!.getAttribute("aria-expanded")).toBe("true")
     const p = popover()!
     const text = p.textContent!
-    expect(text).toContain("Captain turn · from coordinator · claude-opus-5-5 · medium effort")
-    for (const s of ["Queue4.1 s", "Start-up", "process 330 ms · MCP 60 ms · resumed", "First token2.6 s", "3 calls · API 6.0 s", "2 calls · slowest Bash 1.2 s", "Tail640 ms", "Total13 s"]) expect(text).toContain(s)
+    expect(text).toContain("Captain turn · from coordinator · claude-opus-5-5 · medium effort · resumed")
+    for (const s of ["Queue4.1 s", "Start-up", "process 330 ms · MCP 60 ms", "First token2.6 s", "3 calls · API 6.0 s", "2 calls", "Tail640 ms", "Total13 s", "Slowest toolsBash1.2 slist_tasks300 ms"]) expect(text).toContain(s)
     // No setup row for a Captain turn.
     expect(text).not.toContain("Setup")
     expect(p.querySelector("[data-testid=timing-tokens]")!.textContent).toBe("in 12out 900cache read 180kcache write 6kcontext 64k")

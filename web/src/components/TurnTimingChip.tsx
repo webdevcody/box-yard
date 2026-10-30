@@ -1,13 +1,13 @@
 // The small "⏱ 8.4 s" chip under a Coordinator or Captain reply and on a task's "Turn N finished" line: the turn's
 // total time. A click opens where it went (turn_timings, shared/turnTimings.ts): a stage bar, the stages, the model
 // and tool calls, and the tokens. The timing is fetched when it's opened, never with the transcript.
-import { memo, useEffect, useRef, useState } from "react"
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react"
 import { createPortal } from "react-dom"
 import { Timer } from "lucide-react"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "../lib/api"
 import { Modal } from "./Modal"
-import { trapKeys, useAnchor, useNarrow } from "./NewTask"
+import { trapKeys, useNarrow } from "./NewTask"
 import { cx } from "./ui"
 import { formatMs, TURN_STAGES, type TurnStageKey, type TurnTiming } from "../../../shared/turnTimings"
 
@@ -47,13 +47,46 @@ export const TurnTimingChip = memo(function TurnTimingChip({ id, ms, className }
   )
 })
 
-function TimingPopover({ id, trigger, onClose }: { id: string; trigger: React.RefObject<HTMLButtonElement | null>; onClose: (refocus?: boolean) => void }) {
+const WIDTH = 368
+
+/**
+ * Fixed-position style that hangs the panel from the trigger's left edge, inside the window, below it or above it when
+ * there's more room there. Placed again when `content` changes (the timing loads) and on scroll and resize.
+ */
+function usePlacement(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, content: unknown): CSSProperties {
+  const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden" })
+  useLayoutEffect(() => {
+    if (!on) return
+    const place = () => {
+      const t = trigger.current?.getBoundingClientRect()
+      const el = panel.current
+      if (!t || !el) return
+      const vw = document.documentElement.clientWidth || window.innerWidth
+      const vh = window.innerHeight
+      const width = Math.min(WIDTH, vw - 16)
+      const left = Math.max(8, Math.min(t.left, vw - 8 - width))
+      const below = vh - t.bottom - 14
+      const above = t.top - 14
+      setStyle(el.scrollHeight > below && above > below ? { left, width, bottom: vh - t.top + 6, maxHeight: above } : { left, width, top: t.bottom + 6, maxHeight: below })
+    }
+    place()
+    window.addEventListener("resize", place)
+    window.addEventListener("scroll", place, true)
+    return () => {
+      window.removeEventListener("resize", place)
+      window.removeEventListener("scroll", place, true)
+    }
+  }, [on, trigger, panel, content])
+  return style
+}
+
+function TimingPopover({ id, trigger, onClose }: { id: string; trigger: RefObject<HTMLButtonElement | null>; onClose: () => void }) {
   const narrow = useNarrow()
   const panel = useRef<HTMLDivElement>(null)
-  const pos = useAnchor(trigger, panel, !narrow, "end")
   const closeRef = useRef(onClose)
   closeRef.current = onClose
   const q = useQuery({ queryKey: ["turn-timing", id], queryFn: () => api<TurnTiming>(`/api/turn-timings/${encodeURIComponent(id)}`), staleTime: Infinity })
+  const pos = usePlacement(trigger, panel, !narrow, q.data ?? q.isError)
 
   useEffect(() => {
     if (narrow) return
@@ -85,7 +118,7 @@ function TimingPopover({ id, trigger, onClose }: { id: string; trigger: React.Re
       aria-label="Turn timing"
       data-testid="turn-timing-popover"
       tabIndex={-1}
-      style={{ ...pos, width: Math.min(352, Number(pos.width) || 352) }}
+      style={pos}
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) =>
         trapKeys(e, panel.current, () => {
@@ -109,7 +142,7 @@ const BAR: { key: TurnStageKey; color: string }[] = [
   { key: "startupMs", color: "bg-sky-400" },
   { key: "modelMs", color: "bg-yard-400" },
   { key: "toolMs", color: "bg-teal-400" },
-  { key: "tailMs", color: "bg-amber-400" },
+  { key: "tailMs", color: "bg-pink-400" },
 ]
 const COLOR = Object.fromEntries(BAR.map((b) => [b.key, b.color])) as Partial<Record<TurnStageKey, string>>
 const HINT = Object.fromEntries(TURN_STAGES.map((s) => [s.key, s.hint])) as Record<TurnStageKey, string>
@@ -121,12 +154,13 @@ export function TimingDetail({ t }: { t: TurnTiming }) {
   const total = Math.max(1, t.totalMs)
   const tools = t.steps.filter((s) => s.k === "tool").sort((a, b) => b.ms - a.ms)
   const detail: Partial<Record<TurnStageKey, string>> = {
-    startupMs: [t.processMs !== null && `process ${formatMs(t.processMs)}`, t.mcpMs !== null && `MCP ${formatMs(t.mcpMs)}`, t.resumed && "resumed"].filter(Boolean).join(" · "),
+    startupMs: [t.processMs !== null && `process ${formatMs(t.processMs)}`, t.mcpMs !== null && `MCP ${formatMs(t.mcpMs)}`].filter(Boolean).join(" · "),
     modelMs: `${t.modelCalls} call${t.modelCalls === 1 ? "" : "s"}${t.apiMs ? ` · API ${formatMs(t.apiMs)}` : ""}`,
-    toolMs: `${t.toolCalls} call${t.toolCalls === 1 ? "" : "s"}${tools[0] ? ` · slowest ${tools[0].name ?? "?"} ${formatMs(tools[0].ms)}` : ""}`,
+    // With more than one call, the Slowest tools list names them.
+    toolMs: `${t.toolCalls} call${t.toolCalls === 1 ? "" : "s"}${tools.length === 1 ? ` · ${tools[0]!.name ?? "?"}` : ""}`,
   }
   const rows = (["queueMs", "setupMs", "startupMs", "firstTokenMs", "modelMs", "toolMs", "tailMs"] as const).filter((k) => t[k] !== null && !(k === "toolMs" && !t.toolCalls))
-  const who = [t.role === "task" ? "Task turn" : t.role === "captain" ? "Captain turn" : "Coordinator turn", t.trigger && `from ${t.trigger}`, t.model, t.effort && `${t.effort} effort`].filter(Boolean).join(" · ")
+  const who = [t.role === "task" ? "Task turn" : t.role === "captain" ? "Captain turn" : "Coordinator turn", t.trigger && `from ${t.trigger}`, t.model, t.effort && `${t.effort} effort`, t.resumed && "resumed"].filter(Boolean).join(" · ")
   return (
     <div className="flex flex-col gap-2.5">
       <div className="text-zinc-500">{who}</div>
@@ -147,10 +181,11 @@ export function TimingDetail({ t }: { t: TurnTiming }) {
             <dd className="text-right text-zinc-200 tabular-nums">{formatMs(t[k])}</dd>
           </div>
         ))}
+        <div className="col-span-3 border-t border-zinc-800" />
         <div className="contents" title={HINT.totalMs}>
-          <dt className="border-t border-zinc-800 pt-1 font-medium text-zinc-300">Total</dt>
-          <dd className="border-t border-zinc-800 pt-1 text-zinc-500">{t.ok ? "" : "didn't finish cleanly"}</dd>
-          <dd className="border-t border-zinc-800 pt-1 text-right font-medium text-zinc-100 tabular-nums">{formatMs(t.totalMs)}</dd>
+          <dt className="font-medium text-zinc-300">Total</dt>
+          <dd className="min-w-0 truncate text-zinc-500">{t.ok ? "" : "didn't finish cleanly"}</dd>
+          <dd className="text-right font-medium text-zinc-100 tabular-nums">{formatMs(t.totalMs)}</dd>
         </div>
       </dl>
       <div data-testid="timing-tokens" className="flex flex-wrap gap-x-3 gap-y-0.5 text-zinc-500 tabular-nums">
