@@ -5006,7 +5006,7 @@ export class TaskManager {
       Object.assign(env, codex.env)
       unsetEnv = [...new Set([...unsetEnv, ...[...CLAUDE_CREDENTIAL_VARS, ...CODEX_CREDENTIAL_VARS].filter((v) => !(v in env))])]
     }
-    const [codexBin, ...codexArgs] = (local || this.c.mock ? this.c.codexBin : "codex").split(" ")
+    const [codexBin, ...codexArgs] = (local || this.c.mock ? this.c.codexBin : (provider.codexBin ?? "codex")).split(" ")
     return {
       taskId: row.id,
       projectId: project.id,
