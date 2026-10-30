@@ -1175,23 +1175,22 @@ class Captain {
     try {
       const reading = clock.finish(r.ok)
       const id = `tim_${randomUUID().slice(0, 12)}`
-      this.store.recordTurnTiming(
-        turnTiming(reading, {
-          id,
-          role: "captain",
-          kind: r.kind,
-          projectId: this.project.id,
-          sessionId: r.sessionId,
-          model: r.model ?? this.settings.get().captainModel,
-          effort: r.effort,
-          trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
-          resumed: r.resume,
-          requestedAt: r.ask.requestedAt ?? null,
-          handshake: this.handshakes?.since(`captain:${this.project.id}`, reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
-        }),
-      )
+      const timing = turnTiming(reading, {
+        id,
+        role: "captain",
+        kind: r.kind,
+        projectId: this.project.id,
+        sessionId: r.sessionId,
+        model: r.model ?? this.settings.get().captainModel,
+        effort: r.effort,
+        trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+        resumed: r.resume,
+        requestedAt: r.ask.requestedAt ?? null,
+        handshake: this.handshakes?.since(`captain:${this.project.id}`, reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+      })
+      this.store.recordTurnTiming(timing)
       if (r.kind === "turn" && r.reply) {
-        const updated = this.store.setCaptainMessageTiming(r.reply.id, id)
+        const updated = this.store.setCaptainMessageTiming(r.reply.id, id, timing.totalMs)
         if (updated) this.hub.broadcast({ type: "captain.message", message: updated })
       }
     } catch (err) {

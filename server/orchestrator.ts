@@ -667,22 +667,21 @@ export class Orchestrator {
     try {
       const reading = clock.finish(r.ok)
       const id = `tim_${randomUUID().slice(0, 12)}`
-      this.store.recordTurnTiming(
-        turnTiming(reading, {
-          id,
-          role: "coordinator",
-          kind: r.kind,
-          sessionId: r.sessionId,
-          model: r.model ?? this.settings.get().orchestratorModel,
-          effort: r.effort,
-          trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
-          resumed: r.resume,
-          requestedAt: r.ask.requestedAt ?? null,
-          handshake: this.handshakes?.since("coordinator", reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
-        }),
-      )
+      const timing = turnTiming(reading, {
+        id,
+        role: "coordinator",
+        kind: r.kind,
+        sessionId: r.sessionId,
+        model: r.model ?? this.settings.get().orchestratorModel,
+        effort: r.effort,
+        trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+        resumed: r.resume,
+        requestedAt: r.ask.requestedAt ?? null,
+        handshake: this.handshakes?.since("coordinator", reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+      })
+      this.store.recordTurnTiming(timing)
       if (r.kind === "turn" && r.reply) {
-        const updated = this.store.setChatTiming(r.reply.id, id)
+        const updated = this.store.setChatTiming(r.reply.id, id, timing.totalMs)
         if (updated) this.hub.broadcast({ type: "chat.message", message: updated })
       }
     } catch (err) {

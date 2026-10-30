@@ -5621,7 +5621,7 @@ export class TaskManager {
     this.store.releaseInputs(handoffClaim(row.current_turn_id))
     // Auto-sizing: what the turn used on its box, and whether it ran out of memory there.
     const measured = this.recordTurnPeak(row.current_turn_id, ev, !ev.ok && !ev.stopped && !this.stopRequested.has(row.id))
-    const timingId = this.recordTurnTiming(row, ev)
+    const timing = this.recordTurnTiming(row, ev)
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -5675,7 +5675,7 @@ export class TaskManager {
     if (row.box_id) this.store.touchBox(row.box_id)
 
     const cost = turnCost !== null ? ` · $${turnCost.toFixed(3)}` : ""
-    this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`, timingId ? { timingId } : null)
+    this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`, timing)
     // What the agent said at the end of the turn, for the orchestrator.
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
     const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
@@ -5707,7 +5707,7 @@ export class TaskManager {
    * plus the server's side, from the request through the launch to this poll seeing turn_end. Its id, or null when the
    * runner sent none (an older runner, a crash). Instrumentation only: it never fails the turn.
    */
-  private recordTurnTiming(row: TaskRow, ev: WorkerEvent): string | null {
+  private recordTurnTiming(row: TaskRow, ev: WorkerEvent): { timingId: string; timingMs: number } | null {
     const turnId = row.current_turn_id!
     const launch = this.turnLaunches.get(turnId) ?? null
     this.turnLaunches.delete(turnId)
@@ -5716,28 +5716,27 @@ export class TaskManager {
     try {
       const { preSpawnMs: _pre, runnerStartedAt: _runner, processMs, mcpMs, ...reading } = t as typeof t & { runnerStartedAt?: number }
       const id = `tim_${turnId.replace(/^[a-z]+_/, "")}`
-      this.store.recordTurnTiming(
-        turnTiming(reading, {
-          id,
-          role: "task",
-          kind: row.compacting ? "compact" : "turn",
-          projectId: row.project_id,
-          taskId: row.id,
-          sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
-          model: launch?.model ?? row.model ?? null,
-          effort: launch?.effort ?? null,
-          trigger: launch?.trigger ?? null,
-          resumed: typeof ev.resumed === "boolean" ? ev.resumed : (launch?.resumed ?? false),
-          requestedAt: launch?.requestedAt ?? null,
-          launchedAt: launch?.launchedAt ?? null,
-          // Server clock → box clock: on an Upstash box both keep NTP time.
-          setupMs: launch ? Math.max(0, reading.startedAt - launch.launchedAt) : null,
-          processMs: processMs ?? null,
-          mcpMs: mcpMs ?? null,
-          seenAt: Date.now(),
-        }),
-      )
-      return id
+      const timing = turnTiming(reading, {
+        id,
+        role: "task",
+        kind: row.compacting ? "compact" : "turn",
+        projectId: row.project_id,
+        taskId: row.id,
+        sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
+        model: launch?.model ?? row.model ?? null,
+        effort: launch?.effort ?? null,
+        trigger: launch?.trigger ?? null,
+        resumed: typeof ev.resumed === "boolean" ? ev.resumed : (launch?.resumed ?? false),
+        requestedAt: launch?.requestedAt ?? null,
+        launchedAt: launch?.launchedAt ?? null,
+        // Server clock → box clock: on an Upstash box both keep NTP time.
+        setupMs: launch ? Math.max(0, reading.startedAt - launch.launchedAt) : null,
+        processMs: processMs ?? null,
+        mcpMs: mcpMs ?? null,
+        seenAt: Date.now(),
+      })
+      this.store.recordTurnTiming(timing)
+      return { timingId: id, timingMs: timing.totalMs }
     } catch (err) {
       console.error(`[box-yard] couldn't record the timings of ${turnId}:`, err)
       return null

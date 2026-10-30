@@ -2080,8 +2080,8 @@ export class Store {
   }
 
   /** Add meta.timingId (turn_timings) to a Coordinator chat message: its turn's timing chip. */
-  setChatTiming(id: string, timingId: string): ChatMessage | null {
-    this.db.prepare("UPDATE chat_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?) WHERE id = ?").run(timingId, id)
+  setChatTiming(id: string, timingId: string, timingMs: number): ChatMessage | null {
+    this.db.prepare("UPDATE chat_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
     const r = this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(id) as
       | { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
       | undefined
@@ -2254,8 +2254,8 @@ export class Store {
   }
 
   /** Add meta.timingId (turn_timings) to a Captain chat message: its turn's timing chip. */
-  setCaptainMessageTiming(id: string, timingId: string): CaptainMessage | null {
-    this.db.prepare("UPDATE captain_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?) WHERE id = ?").run(timingId, id)
+  setCaptainMessageTiming(id: string, timingId: string, timingMs: number): CaptainMessage | null {
+    this.db.prepare("UPDATE captain_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
     const r = this.db.prepare("SELECT * FROM captain_messages WHERE id = ?").get(id) as
       | { id: string; project_id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
       | undefined
