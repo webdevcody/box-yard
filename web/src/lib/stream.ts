@@ -139,6 +139,9 @@ export function useServerEvents(enabled: boolean): Connection {
         case "identities":
           qc.setQueryData(keys.identities, ev.identities)
           break
+        case "machines":
+          qc.setQueryData(keys.machines, ev.status)
+          break
         case "note_suggestions":
           void qc.invalidateQueries({ queryKey: ["note-suggestions", ev.projectId] })
           break

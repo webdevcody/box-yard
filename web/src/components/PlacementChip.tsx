@@ -2,7 +2,7 @@
 // The wording is shared/placement.ts's; the icons are the Boxes page's and Settings' for each provider.
 import { memo } from "react"
 import { Link } from "wouter"
-import { Boxes, Container, Cpu, Laptop, Pin, ShieldAlert, type LucideIcon } from "lucide-react"
+import { Boxes, Container, Cpu, Laptop, Pin, Server, ShieldAlert, type LucideIcon } from "lucide-react"
 import type { Project, Task } from "../../../shared/types"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import { LOCAL_UNSANDBOXED } from "../../../shared/runner"
@@ -10,8 +10,8 @@ import { placementView, type PlaceKind, type PlacementView } from "../../../shar
 import { usePopover } from "./TaskHeader"
 import { LineIcon, META_CHIP, cx, timeAgo } from "./ui"
 
-/** Laptop for this computer (the Boxes page's), Boxes for worker boxes, Cpu for RunPod (Settings' RunPod GPU), Container for Docker. */
-export const PLACE_ICON: Record<PlaceKind, LucideIcon> = { local: Laptop, box: Boxes, gpu: Cpu, docker: Container }
+/** Laptop for this computer (the Boxes page's), Boxes for worker boxes, Cpu for RunPod (Settings' RunPod GPU), Container for Docker, Server for SSH machines. */
+export const PLACE_ICON: Record<PlaceKind, LucideIcon> = { local: Laptop, box: Boxes, gpu: Cpu, docker: Container, ssh: Server }
 
 /** Local is amber like the unsandboxed warning; the rest are calm. Muted while it's only where it will go or went. */
 export const placeTone = (v: PlacementView) => (v.state !== "here" ? "text-zinc-500" : v.kind === "local" ? "text-amber-200" : "text-zinc-300")

@@ -68,7 +68,6 @@ function provider(o: { settings?: Partial<RunPodSettings>; machine?: Partial<Pro
     settings: () => ({ ...DEFAULT_RUNPOD_SETTINGS, ...o.settings }),
     install: () => "inst1",
     scriptsDir: runpodDir(),
-    git: { name: "Box Yard", email: "boxyard@example.com" },
     projectCap: () => o.cap ?? null,
     projectMachine: () => ({ gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null, ...o.machine }),
   })
@@ -90,7 +89,7 @@ describe("the GPU types for browser and WebGL games", () => {
   it("are offered in the picker with both prices, Community-only ones too, cheapest first", async () => {
     const f = fakeRunPod()
     const credentials = { get: () => "k" } as unknown as CredentialStore
-    const svc = new RunPodService({ store: store(), credentials, dataDir: tmpDir(), install: () => "inst1", git: { name: "B", email: "b@example.com" }, fetch: f.impl })
+    const svc = new RunPodService({ store: store(), credentials, dataDir: tmpDir(), install: () => "inst1", fetch: f.impl })
     const options = await svc.gpuOptions()
     expect(options.map((g) => g.id)).toEqual([RTX3070, A5000, A4000, ADA, "NVIDIA A40"])
     expect(options[0]).toEqual({ id: RTX3070, name: "RTX 3070", memoryGb: 8, securePrice: null, communityPrice: 0.13, availability: "LOW", use: RUNPOD_GPU_GUIDE[RTX3070]!.use })

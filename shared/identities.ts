@@ -81,7 +81,7 @@ export interface Identity {
   /** Owners (users and orgs) whose repos it's for, e.g. ["acme-corp"]. */
   owners: string[]
   tokens: IdentityToken[]
-  /** null: the repo's git author from Settings (GIT_USER_NAME / GIT_USER_EMAIL). */
+  /** null: the author chain's next step (server/gitAuthor.ts): Settings › Credentials › Git author, and on. */
   author: { name: string; email: string; emailCheck: EmailCheck } | null
   signing: IdentitySigning | null
   /** null: Settings › Credentials' Claude login. */

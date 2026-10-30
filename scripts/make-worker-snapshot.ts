@@ -16,7 +16,7 @@ if (!config.upstashBoxApiKey) {
 const box = await Box.create({ apiKey: config.upstashBoxApiKey, runtime: "node", size: config.workerSize, labels: ["box-yard-snap"] })
 try {
   console.log(`Preparing ${box.id}…`)
-  const run = await box.exec.command(`bash -c ${JSON.stringify(workerSetupScript(config))}`)
+  const run = await box.exec.command(`bash -c ${JSON.stringify(workerSetupScript())}`)
   if (run.exitCode !== 0) throw new Error(run.stderr || run.result)
   console.log(run.stdout.trim())
   const snap = await box.snapshot({ name: `box-yard-worker-${Date.now()}` })

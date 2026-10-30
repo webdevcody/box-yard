@@ -1,6 +1,6 @@
 // Task priority: a "high" task's next turn goes before every "normal" one waiting for a slot (on this computer, an
-// Upstash box, a GPU pod or a Docker container). It only jumps the queue: running agents are never stopped, and the
-// projects' own limits (agents_per_box, whole_machine) still hold. The server's scheduler and the web app's queue
+// Upstash box, a GPU pod, a Docker container or an SSH machine). It only jumps the queue: running agents are never
+// stopped, and the projects' own limits (agents_per_box, whole_machine) still hold. The server's scheduler and the web app's queue
 // lists share this order, so they always agree on who goes next.
 
 export const TASK_PRIORITIES = ["high", "normal"] as const

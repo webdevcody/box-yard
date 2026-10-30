@@ -3,7 +3,7 @@
 import { useEffect, useId, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { Check, Cloud, Container, Copy, KeyRound, Laptop, Minus, Play, RefreshCw, ShieldAlert, Undo2, X } from "lucide-react"
 import { useAgentSettings, useCheckLocal, useSaveCredentials, useSaveRunnerChoice, useSaveSettings, useSettings, useSetup, useTestCredential } from "../lib/queries"
-import { Button, LineIcon, NewTabLink, cx, inputClass } from "./ui"
+import { AppLink, Button, LineIcon, NewTabLink, TimeAgo, cx, inputClass } from "./ui"
 import { localFlag } from "../lib/localFlag"
 import { Panel, Row, SourceHint } from "./SettingsDialog"
 import { useDraft, useInSettingsDraft } from "../lib/settingsDraft"
@@ -12,6 +12,7 @@ import {
   CODEX_AUTH_FILE,
   CODEX_LOGIN_COMMAND,
   CREDENTIAL_INFO,
+  FALLBACK_GIT_AUTHOR,
   GITHUB_TOKEN_SCOPES,
   LOCAL_TOOL_INFO,
   SETUP_TOKEN_COMMAND,
@@ -699,6 +700,68 @@ export function SetupReminder({ status, onFinish, className }: { status: SetupSt
 
 // ------------------------------------------------------------------ Settings › Credentials
 
+/** Settings › Credentials and Identities: projects whose last turn committed as the fallback author (SetupStatus.authorFallbacks). */
+export function AuthorFallbackNotice({ status }: { status: SetupStatus | undefined }) {
+  const list = status?.authorFallbacks ?? []
+  if (!list.length) return null
+  return (
+    <div role="alert" className="mb-4 rounded-lg border border-amber-900/40 bg-amber-950/30 px-3 py-2 text-xs leading-relaxed text-amber-200" data-testid="author-fallback">
+      <div className="flex items-start gap-2">
+        <LineIcon icon={ShieldAlert} className="h-4 w-4" />
+        <p>
+          Commits are going out as {FALLBACK_GIT_AUTHOR.name} &lt;{FALLBACK_GIT_AUTHOR.email}&gt;, unsigned: nothing gave {list.length === 1 ? "this project" : "these projects"} a git author. Set a Git author in Settings › Credentials, or an
+          author on the project's identity in Settings › Identities.
+        </p>
+      </div>
+      <ul className="mt-1.5 space-y-1 pl-6">
+        {list.map((f) => (
+          <li key={f.projectId} className="wrap-anywhere">
+            {f.project}: <AppLink href={`/tasks/${f.taskId}`}>{f.task}</AppLink> (<TimeAgo ts={f.at} />). {f.why}.
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Settings › Credentials › Git author: GIT_USER_NAME / GIT_USER_EMAIL, a draft until the dialog's Save. */
+function GitAuthorField({ id }: { id: string }) {
+  const info = useAgentSettings()
+  const save = useSaveSettings()
+  const saved = { name: info.data?.settings.gitUserName ?? "", email: info.data?.settings.gitUserEmail ?? "" }
+  const [value, set, dirty] = useDraft("git-author", "credentials", saved, (d) => {
+    const name = d.name.trim()
+    const email = d.email.trim()
+    if (Boolean(name) !== Boolean(email)) throw new Error("A git author needs both a name and an email, or neither.")
+    return save.mutateAsync({ gitUserName: name, gitUserEmail: email })
+  })
+  return (
+    <div className="space-y-2">
+      <input
+        id={id}
+        className={inputClass}
+        placeholder="Name"
+        value={value.name}
+        maxLength={200}
+        onChange={(e) => set((p) => ({ ...p, name: e.target.value }))}
+        aria-label="Git author name"
+        data-testid="git-author-name"
+      />
+      <input
+        type="email"
+        className={inputClass}
+        placeholder="Email"
+        value={value.email}
+        maxLength={320}
+        onChange={(e) => set((p) => ({ ...p, email: e.target.value }))}
+        aria-label="Git author email"
+        data-testid="git-author-email"
+      />
+      <SourceHint source={info.data?.sources.gitUserName} env="GIT_USER_NAME" changed={dirty} />
+    </div>
+  )
+}
+
 export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
   const setup = useSetup()
   const s = setup.data
@@ -708,6 +771,7 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : (
         <>
+          <AuthorFallbackNotice status={s} />
           {s.mock && <p className="mb-4 text-xs text-zinc-500">Mock mode: nothing here is needed, and nothing calls a real service.</p>}
           <Row
             id={fid("runner")}
@@ -747,6 +811,18 @@ export function CredentialsPanel({ fid }: { fid: (k: string) => string }) {
           {s.credentials.claudeOauthToken.state === "set" && s.credentials.anthropicApiKey.state === "set" && (
             <p className="mt-2 text-xs text-zinc-500">Both Claude credentials are set, so Claude Code uses the API key.</p>
           )}
+          <Row
+            id={fid("git-author")}
+            label="Git author"
+            help={
+              <>
+                Who commits are by when a project's identity names no author. Blank: on this computer, your own git config (user.name, user.email, and its signing when commit.gpgsign is on); on boxes and GPU pods, the
+                GitHub account behind the token, with its noreply email. Only when none of those is there do commits go out as {FALLBACK_GIT_AUTHOR.name}, and this page says so.
+              </>
+            }
+          >
+            <GitAuthorField id={fid("git-author")} />
+          </Row>
           <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Codex</h4>
           <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500" data-testid="codex-credentials-intro">
             {s.codex?.required

@@ -38,6 +38,8 @@ import type { MachineStats } from "./machineStats.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
+import { KEY_REF_HELP, labelPhrase, MACHINE_LIMITS, resolveRunsOn, THIS_COMPUTER, type MachineKeyRef, type MachineStatus } from "../shared/machines.js"
+import type { MachineActions } from "./machines/actions.js"
 import { AGENT_CLIS, type AgentCli } from "../shared/agentCli.js"
 import { TASK_PRIORITIES, byQueueOrder, type TaskPriority } from "../shared/priority.js"
 import fs from "node:fs"
@@ -89,6 +91,8 @@ export interface McpDeps {
   machine?: MachineStats
   /** Settings › Connectors (docs/connectors.md). Without it, list_connectors isn't offered. */
   connectors?: Connectors
+  /** Cody's SSH machines (docs/machines.md). Without it, the machine tools aren't offered. */
+  machines?: MachineActions
 }
 
 /**
@@ -168,8 +172,14 @@ const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: ro
 const relatedTasksSchema = z.array(z.string()).optional().describe("Earlier tasks whose summary, branch and PR go into the new agent's prompt")
 /** The most tasks one create_tasks call starts. */
 export const MAX_TASK_BATCH = 100
-const runsOnBase = z.enum(RUNNERS).optional()
-const runsOnSchema = runsOnBase.describe('Where it runs, for later turns too: "local" (this computer), "box", "gpu" or "docker"; omit it to follow the project (Task options)')
+/** runs_on's short form for SSH machines with a label: "label:gpu" (shared/machines.ts resolveRunsOn). */
+const RUNS_ON_LABEL = /^(?:label|ssh):[A-Za-z0-9 ._-]{1,40}$/i
+const runsOnValue = z.union([z.enum([...RUNNERS, THIS_COMPUTER]), z.string().regex(RUNS_ON_LABEL, 'runs_on is a runner, this_computer or "label:<label>"')])
+type RunsOn = z.infer<typeof runsOnValue>
+const runsOnBase = runsOnValue.optional()
+const runsOnSchema = runsOnBase.describe('Where it runs, for later turns too: "local", "this_computer", "box", "gpu", "docker", "ssh" or "label:<label>"; omit it to follow the project (Task options)')
+const machineLabelBase = z.string().max(MACHINE_LIMITS.labelLength).optional()
+const machineLabelSchema = machineLabelBase.describe('An SSH machine label or name, e.g. "gpu" (list_machines lists them); alone it means runs_on "ssh" (Task options)')
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
 const agentBase = z.enum(AGENT_CLIS).optional()
 const agentSchema = agentBase.describe('"claude" or "codex", for good; omit it to follow the project\'s Agent (Task options)')
@@ -381,6 +391,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   }
   /** How worker messages from this caller are labelled (#51). */
   const inputSource = scopeId ? (`captain:${scopeId}` as const) : ("orchestrator" as const)
+  /** runs_on and machine_label as the task tools take them: a runner (null: the project's) and an SSH machine label. */
+  const placementOf = (runsOn: RunsOn | undefined, machineLabel: string | undefined) => resolveRunsOn(runsOn, machineLabel, deps.machines?.settings().localLabel ?? null)
+  /** What a reply says when "local" went to SSH machines (Settings › Machines › Local means). */
+  const viaLocal = (p: { viaLocal: boolean; machineLabel: string | null }) =>
+    p.viaLocal ? { runs_on: owner(`${labelPhrase(p.machineLabel)}: that's what "local" means in Cody's Settings › Machines (runs_on "this_computer" is this computer)`) } : {}
   /** Who set a task's priority, for its log. */
   const prioritySetter = scopeId ? "its project's Captain" : "the Coordinator"
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
@@ -683,6 +698,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     ...(p.runner === "gpu" && tasks ? { gpu: await tasks.projectGpuSettings(p, true) } : {}),
     // Its Docker container, image and limits, when it runs in a Docker container.
     ...(p.runner === "docker" && tasks?.projectDockerSettings(p) ? { docker: tasks.projectDockerSettings(p) } : {}),
+    // Its SSH machines' label, when it runs on Cody's SSH machines (list_machines shows them).
+    ...(p.runner === "ssh" ? { sshMachines: labelPhrase(p.machineLabel ?? null) } : {}),
     ...(p.snapshot
       ? { snapshot: `${p.snapshot.id}, taken from box ${p.snapshot.boxId} (${p.snapshot.size}) ${ago(p.snapshot.takenAt)}: new boxes of ${p.snapshot.size} or bigger start from it` }
       : {}),
@@ -832,6 +849,14 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               .nullable()
               .optional()
               .describe("Its colour in the Coordinator chat (task icons, the project bar, cards) and the sidebar. null goes back to the one picked from its name."),
+            machine_label: z
+              .string()
+              .max(MACHINE_LIMITS.labelLength)
+              .nullable()
+              .optional()
+              .describe(
+                'For a project whose Runs on is "SSH machine": the label (or machine name) its tasks pick a machine by, e.g. "gpu"; null lets them take any SSH machine. Cody picks a project\'s Runs on in its settings; this only changes which machines.',
+              ),
           },
     },
     safe(
@@ -848,11 +873,17 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           notes_max?: number | null
           notes_max_tokens?: number | null
           color?: ProjectColor | null
+          machine_label?: string | null
         } & BoxSettingsArgs,
       ) => {
         if (!a.project && !scopeId) return fail("Name the project to update.")
         const id = a.project ? project(a.project).id : ownProject().id
         const box = boxSettingsPatch(a)
+        if (a.machine_label !== undefined && !scopeId) {
+          const current = store.getProject(id)!
+          if (current.runner !== "ssh") return fail(owner(`${current.name} doesn't run on SSH machines (its Runs on is ${current.runner ?? "box"}). Cody picks Runs on in the project's settings; for one task, pass runs_on "label:<label>" to create_task.`))
+          if (a.machine_label) await tasks.requireRunner("ssh", id, {}, { agentCli: a.agent, machineLabel: a.machine_label })
+        }
         const p = store.updateProject(
           id,
           scopeId
@@ -869,12 +900,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 notesMaxCount: a.notes_max,
                 notesMaxTokens: a.notes_max_tokens,
                 color: a.color,
+                ...(a.machine_label !== undefined ? { machineLabel: a.machine_label } : {}),
               },
         )
         hub.broadcast({ type: "project", project: p })
         notes.checkBudget(p.id)
-        // Waiting tasks may fit under the new limits.
-        if (Object.values(box).some((v) => v !== undefined)) tasks.schedule()
+        // Waiting tasks may fit under the new limits, or on other machines.
+        if (Object.values(box).some((v) => v !== undefined) || (a.machine_label !== undefined && !scopeId)) tasks.schedule()
         return ok(await projectView(p))
       },
     ),
@@ -1154,16 +1186,18 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema,
         attachments: attachmentsSchema,
         runs_on: runsOnSchema,
+        machine_label: machineLabelSchema,
         agent: agentSchema,
         icon: iconSchema,
         priority: prioritySchema.describe('"high" or "normal" (the default): Task options'),
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
-      await tasks.requireRunner(a.runs_on, projectId, a.env, { agentCli: a.agent, model: a.model })
+      const where = placementOf(a.runs_on, a.machine_label)
+      await tasks.requireRunner(where.runner, projectId, a.env, { agentCli: a.agent, model: a.model, machineLabel: where.machineLabel })
       const t = tasks.createTask({
         projectId,
         title: a.title,
@@ -1175,12 +1209,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingRule: a.routing_rule ?? null,
         routingReason: a.routing_reason ?? null,
         source: inputSource,
-        runsOn: a.runs_on ?? null,
+        runsOn: where.runner,
+        machineLabel: where.machineLabel,
         agentCli: a.agent ?? null,
         icon: a.icon ?? null,
         priority: a.priority ?? null,
       })
-      return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
+      return ok({ ...brief(t), ...viaLocal(where), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
   )
 
@@ -1191,6 +1226,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     related_tasks: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
     runs_on: runsOnBase,
+    machine_label: machineLabelBase,
     agent: agentBase,
     icon: iconSchema,
     priority: prioritySchema,
@@ -1206,7 +1242,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description:
         `Start 1 to ${MAX_TASK_BATCH} new agents in one project in one call (fan-out), each like create_task. Use it whenever you start two or more tasks at once: every create_task call costs a whole step, while this queues them all and Box Yard makes their boxes in parallel. ` +
-        "Write what they share once, in common_prompt. The top-level options apply to every task: an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win. " +
+        "Write what they share once, in common_prompt. The top-level options apply to every task: an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win (an item's runs_on or machine_label replaces the shared pair). " +
         "All or nothing: every item is checked first (scope, non-empty title and prompt, unique titles, attachment and task ids, runners). On any problem NO task is created and the error lists each by item number (#1 first): fix them and send the whole list again. " +
         "Returns the new ids in order.",
       inputSchema: {
@@ -1217,6 +1253,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema,
         env: envSchema,
         runs_on: runsOnSchema,
+        machine_label: machineLabelSchema,
         agent: agentSchema,
         priority: prioritySchema.describe('"high" or "normal" (the default): Task options'),
         ...routeParams,
@@ -1230,7 +1267,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         attachments?: string[]
         related_tasks?: string[]
         env?: Record<string, string>
-        runs_on?: Runner
+        runs_on?: RunsOn
+        machine_label?: string
         agent?: AgentCli
         priority?: TaskPriority
         model?: string
@@ -1262,21 +1300,32 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           for (const ref of new Set(item.attachments ?? [])) if (!a.attachments?.includes(ref)) check(`${where} attachments "${ref}"`, () => attachmentSource(ref))
           for (const ref of new Set(item.related_tasks ?? [])) if (!a.related_tasks?.includes(ref)) check(`${where} related_tasks "${ref}"`, () => task(ref))
         })
+        // Where each runs: an item's own runs_on/machine_label pair, else the shared one.
+        const places = a.tasks.map((item, i) => {
+          const own = item.runs_on !== undefined || item.machine_label !== undefined
+          try {
+            return own ? placementOf(item.runs_on, item.machine_label) : placementOf(a.runs_on, a.machine_label)
+          } catch (err) {
+            problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": ${errorMessage(err)}`)
+            return null
+          }
+        })
         // Each runner asked for is checked once per Claude login (an item's env can bring its own); every item that wants one that can't run is listed.
         const runners = new Map<string, Promise<string | null>>()
         const why = await Promise.all(
-          a.tasks.map((item) => {
-            const r = item.runs_on ?? a.runs_on
+          a.tasks.map((item, i) => {
+            const r = places[i]?.runner
             if (!r) return null
+            const label = places[i]!.machineLabel
             const env = { ...a.env, ...item.env }
             const agent = { agentCli: item.agent ?? a.agent, model: item.model ?? a.model }
-            const key = `${r} ${tasks.turnCredentials(p.id, env).claudeFrom} ${tasks.codexCredentials(p.id, env).kind} ${agent.agentCli ?? ""} ${agent.model ?? ""}`
-            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env, agent).then(() => null, (err: unknown) => errorMessage(err)))
+            const key = `${r} ${label ?? ""} ${tasks.turnCredentials(p.id, env).claudeFrom} ${tasks.codexCredentials(p.id, env).kind} ${agent.agentCli ?? ""} ${agent.model ?? ""}`
+            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env, { ...agent, machineLabel: label }).then(() => null, (err: unknown) => errorMessage(err)))
             return runners.get(key)!
           }),
         )
         a.tasks.forEach((item, i) => {
-          if (why[i]) problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": runs_on "${item.runs_on ?? a.runs_on}": ${why[i]}`)
+          if (why[i]) problems.push(`#${i + 1} "${clip(item.title.trim(), 60)}": runs_on "${places[i]!.runner}${places[i]!.machineLabel ? `:${places[i]!.machineLabel}` : ""}": ${why[i]}`)
         })
         if (problems.length) {
           const shown = problems.slice(0, 25)
@@ -1289,7 +1338,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         const common = a.common_prompt?.trim()
         const copies = new Map<string, StoredUpload>()
         // Files first (an artifact is copied once for the whole batch): if one can't be copied, no task exists yet.
-        const inputs = a.tasks.map((item) => {
+        const inputs = a.tasks.map((item, i) => {
           const related = [...new Set([...(a.related_tasks ?? []), ...(item.related_tasks ?? [])])]
           const prompt = [common, item.prompt, related.length ? relatedWork(related, p.id) : ""].filter(Boolean).join("\n\n")
           const env = a.env || item.env ? { ...a.env, ...item.env } : undefined
@@ -1304,15 +1353,18 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             routingRule: item.routing_rule ?? a.routing_rule ?? null,
             routingReason: item.routing_reason ?? a.routing_reason ?? null,
             source: inputSource,
-            runsOn: item.runs_on ?? a.runs_on ?? null,
+            runsOn: places[i]!.runner,
+            machineLabel: places[i]!.machineLabel,
             agentCli: item.agent ?? a.agent ?? null,
             icon: item.icon ?? null,
             priority: item.priority ?? a.priority ?? null,
           }
         })
         const created = tasks.createTasks(inputs)
+        const local = places.find((x) => x?.viaLocal)
         return okCompact({
           project: p.name,
+          ...(local ? viaLocal(local) : {}),
           created: created.length,
           tasks: created.map((t) => ({ id: t.id, title: t.title, status: t.status, ...(t.priority === "high" ? { priority: t.priority } : {}) })),
           next: "Every task is queued. Each agent starts as soon as a box slot is free, and Box Yard creates the boxes they need in parallel. Follow them with list_tasks, or wait_for_tasks when the work is quick.",
@@ -1332,20 +1384,22 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         task: z.string(),
         message: z.string().min(1),
         attachments: attachmentsSchema,
-        runs_on: runsOnBase.describe('Move it to "local", "box", "gpu" or "docker" from its next turn on; omit it to leave it where it runs (Task options)'),
+        runs_on: runsOnBase.describe('Move it ("local", "this_computer", "box", "gpu", "docker", "ssh" or "label:<label>") from its next turn on; omit it to leave it where it runs (Task options)'),
+        machine_label: machineLabelBase.describe("Move it to a free SSH machine with this label or name from its next turn on (Task options)"),
         interrupt: z.boolean().optional().describe(SEND_NOW_DESCRIPTION),
         allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION),
         priority: prioritySchema.describe('"high" or "normal"; omit it to keep the task\'s (Task options)'),
         ...routeParams,
       },
     },
-    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; interrupt?: boolean; allow_merge_interrupt?: boolean; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; interrupt?: boolean; allow_merge_interrupt?: boolean; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       // Refused before anything is sent, so a refusal leaves no message behind.
       const risk = a.interrupt && !a.allow_merge_interrupt ? tasks.mergeInterruptRisk(store.getTaskRow(before.id)!) : null
       if (risk) return fail(`${risk} Nothing was sent. Send it without interrupt (it goes out when the turn ends), or pass allow_merge_interrupt: true if it can't wait.`)
-      await tasks.requireRunner(a.runs_on, before.projectId, store.taskEnv(before.id), { agentCli: before.agentCli })
-      if (a.runs_on) tasks.setRunsOn(before.id, a.runs_on)
+      const where = placementOf(a.runs_on, a.machine_label)
+      await tasks.requireRunner(where.runner, before.projectId, store.taskEnv(before.id), { agentCli: before.agentCli, machineLabel: where.machineLabel })
+      if (where.runner) tasks.setRunsOn(before.id, where.runner, where.machineLabel)
       // Before the message: queuing it runs the scheduler, which must already see the new priority.
       if (a.priority) tasks.setTaskPriority(before.id, a.priority, prioritySetter)
       const how = delivery(before)
@@ -1357,11 +1411,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
       if (a.interrupt) {
         const now = await tasks.sendQueuedNow(t.id, { by: scopeId ? "captain" : "coordinator", allowMergeInterrupt: a.allow_merge_interrupt })
-        return ok({ ...brief(now.task), delivery: now.delivery === "interrupted" ? sendNowDelivery(now) : how })
+        return ok({ ...brief(now.task), ...viaLocal(where), delivery: now.delivery === "interrupted" ? sendNowDelivery(now) : how })
       }
       // Until a turn takes it, the message can still be changed or withdrawn by this id.
       const queued = store.getQueuedInput(t.id, inputId) ? inputId : undefined
-      return ok({ ...brief(t), delivery: how, queuedMessageId: queued })
+      return ok({ ...brief(t), ...viaLocal(where), delivery: how, queuedMessageId: queued })
     }),
   )
 
@@ -1989,7 +2043,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks, numbered in the order the scheduler pulls them (high priority first, marked [high priority]; then first in, first out). pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists GPU projects' cloud (RunPod or Vast.ai), pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks, numbered in the order the scheduler pulls them (high priority first, marked [high priority]; then first in, first out). pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists GPU projects' cloud (RunPod or Vast.ai), pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. ssh_machines lists Cody's SSH machines (list_machines has their labels and tests). The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -2036,6 +2090,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         ...(await gpuPools()),
         // Docker projects: their one container each (docker-<project>), image and limits.
         ...(await dockerPools()),
+        // Cody's SSH machines: state and tasks running at once (list_machines has the rest).
+        ...(deps.machines?.service.list().length
+          ? { ssh_machines: deps.machines.status().machines.map((m) => `${m.name}${m.labels.length ? ` [${m.labels.join(", ")}]` : ""}: ${m.state}, running ${m.running}/${m.maxTasks}${m.problem ? ` (${m.problem})` : ""}`) }
+          : {}),
         // In the order the scheduler pulls them: high priority first, then first in, first out.
         queued: store
           .listTasks({ projectId: scopeId ?? undefined, status: ["queued"] })
@@ -2067,6 +2125,182 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         return ok(await machine.report({ running: limits.localAgentsRunning, limit: limits.localAgents }))
       }),
     )
+
+  // Cody's SSH machines (docs/machines.md): every caller sees them, since runs_on and machine_label pick them by
+  // label; only the Coordinator adds, changes, tests or removes one.
+  const machines = deps.machines
+  if (machines) {
+    const gb = (bytes: number | null) => (bytes === null ? "?" : `${(bytes / 1024 ** 3).toFixed(bytes < 10 * 1024 ** 3 ? 1 : 0)} GB`)
+    const toolLine = (t: { found: boolean; version: string | null }) => (t.found ? (t.version ?? "found") : "not installed")
+    const machineView = (m: MachineStatus) => {
+      const t = m.lastTest
+      return {
+        id: m.id,
+        name: m.name,
+        address: `${m.user}@${m.host}${m.port === 22 ? "" : `:${m.port}`}`,
+        ssh_key: m.keyRef,
+        labels: m.labels,
+        state: m.state,
+        ...(m.problem ? { problem: m.problem } : {}),
+        running: `${m.running}/${m.maxTasks}`,
+        task_folders: m.tasks,
+        work_folder: m.dir,
+        last_test: !t
+          ? "never: test_machine tests it"
+          : !t.ok
+            ? { when: ago(t.at), ok: false, error: t.error }
+            : {
+                when: ago(t.at),
+                ok: true,
+                os: t.osName || t.os,
+                cpus: t.cpus,
+                memory: gb(t.memoryBytes),
+                disk: `${gb(t.diskFreeBytes)} free of ${gb(t.diskTotalBytes)}`,
+                git: toolLine(t.tools.git),
+                node: toolLine(t.tools.node),
+                claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${t.claudeLogin === true ? "logged in" : t.claudeLogin === false ? "not logged in" : "login unknown"}` : "not installed",
+                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)} (found; Codex tasks don't run on SSH machines yet)` : "not installed",
+                ...(t.problems.length ? { problems: t.problems } : {}),
+                ...(t.notes.length ? { notes: t.notes } : {}),
+              },
+      }
+    }
+    const localMeans = () => {
+      const label = machines.settings().localLabel
+      return owner(label ? `runs_on "local" goes to ${labelPhrase(label)} (Cody's Settings › Machines › Local means); "this_computer" is this computer` : `runs_on "local" is this computer (Cody can point it at a machine label in Settings › Machines)`)
+    }
+    const sshKeyInput = z
+      .string()
+      .trim()
+      .min(1)
+      .max(600)
+      .describe(
+        `How Box Yard logs in, as a reference, never a key itself: ${KEY_REF_HELP} The key stays on this computer (ssh reads it, or asks the SSH agent); Box Yard never copies or shows it.`,
+      )
+    const machineInput = {
+      name: z.string().trim().min(1).max(40).describe("A short name, like old-thinkpad (letters, digits, . _ -). It works as a label too."),
+      host: z.string().trim().min(1).max(253).describe("Its host name or IP address on Cody's network, e.g. thinkpad.local or 192.168.1.40"),
+      user: z.string().trim().min(1).max(32).describe("The user Box Yard logs in as. Agents run as that user."),
+      port: z.number().int().min(MACHINE_LIMITS.port.min).max(MACHINE_LIMITS.port.max).optional().describe("SSH port (22)"),
+      ssh_key: sshKeyInput,
+      max_tasks: z.number().int().min(MACHINE_LIMITS.maxTasks.min).max(MACHINE_LIMITS.maxTasks.max).optional().describe("Tasks running at once on it (1). A project's agents_per_box and whole_machine apply on it too."),
+      labels: z
+        .array(z.string().max(MACHINE_LIMITS.labelLength))
+        .max(MACHINE_LIMITS.labels)
+        .optional()
+        .describe('Groups it belongs to, e.g. ["laptops"] or ["gpu", "linux"]: runs_on "label:gpu" or machine_label "gpu" picks a free machine with that label. Lowercased; spaces become dashes.'),
+      dir: z.string().trim().max(300).optional().describe("Box Yard's work folder on it (~/boxyard): task folders go in <dir>/tasks."),
+    }
+    type MachineArgs = { name?: string; host?: string; user?: string; port?: number; ssh_key?: string; max_tasks?: number; labels?: string[]; dir?: string; enabled?: boolean }
+    const machinePatch = (a: MachineArgs) => ({
+      ...(a.name !== undefined ? { name: a.name } : {}),
+      ...(a.host !== undefined ? { host: a.host } : {}),
+      ...(a.user !== undefined ? { user: a.user } : {}),
+      ...(a.port !== undefined ? { port: a.port } : {}),
+      ...(a.ssh_key !== undefined ? { keyRef: a.ssh_key as MachineKeyRef } : {}),
+      ...(a.max_tasks !== undefined ? { maxTasks: a.max_tasks } : {}),
+      ...(a.labels !== undefined ? { labels: a.labels } : {}),
+      ...(a.dir !== undefined ? { dir: a.dir } : {}),
+      ...(a.enabled !== undefined ? { enabled: a.enabled } : {}),
+    })
+    const NEXT_TEST =
+      "state ready: tasks can run there (runs_on \"label:<label>\" or machine_label). Otherwise problem and last_test say what to fix on it (docs/machines.md has the setup), then test_machine again."
+
+    server.registerTool(
+      "list_machines",
+      {
+        description:
+          "Cody's SSH machines: computers of Cody's (old laptops, a GPU tower) that Box Yard reaches over SSH and runs agents on, like this computer but elsewhere. " +
+          "Each has labels; runs_on \"label:<label>\" (or machine_label) on create_task, create_tasks and send_to_task, or a project's Runs on: SSH machine, picks a free machine with that label, and tasks wait while every one is busy. " +
+          "Shows each machine's state (ready, busy, offline, problem, off, untested), tasks running at once, its labels and its last connection test (OS, CPUs, memory, disk, git, node, claude and whether it's logged in, codex), every label in use, and what runs_on \"local\" means.",
+        inputSchema: { machine: z.string().optional().describe("Only this machine (id or name)") },
+      },
+      safe(async (a: { machine?: string }) => {
+        if (a.machine) return ok(machineView(machines.one(a.machine)))
+        const st = machines.status()
+        return ok({
+          machines: st.machines.map(machineView),
+          labels: st.labels.map((l) => `${l.label}: ${l.machines.join(", ")}`),
+          local_means: localMeans(),
+          ...(st.machines.length ? {} : { none: owner("Cody has no SSH machine yet. Cody adds one in Settings › Machines, or you can with add_machine when Cody gives its address, user and key reference.") }),
+        })
+      }),
+    )
+
+    coordinatorOnly(
+      server.registerTool(
+        "add_machine",
+        {
+          description:
+            "Add one of Cody's own computers as an SSH machine agents can run on, when Cody asks to and gives its address, user and SSH key reference; then Box Yard tests the connection (OS, CPUs, memory, disk, git, node, claude and its login, codex) and the reply shows the result. " +
+            "Never ask Cody to paste a private key: ssh_key is a reference (file:~/.ssh/<key> or the SSH agent). The machine needs node 18+, git and Claude Code, and either a claude login on it or a Claude key Box Yard forwards (Settings › Credentials or the project's identity); docs/machines.md is the setup guide. Agents there are not sandboxed: they run as that user.",
+          inputSchema: { ...machineInput, test: z.boolean().optional().describe("false: add it without testing (default: test now)") },
+        },
+        safe(async (a: MachineArgs & { name: string; host: string; user: string; ssh_key: string; test?: boolean }) => {
+          const m = await machines.add({ ...machinePatch(a), name: a.name, host: a.host, user: a.user, keyRef: a.ssh_key as MachineKeyRef }, { kind: "coordinator" }, { test: a.test })
+          return ok({ ...machineView(m), next: a.test === false ? "test_machine tests it." : NEXT_TEST })
+        }),
+      ),
+    )
+
+    coordinatorOnly(
+      server.registerTool(
+        "update_machine",
+        {
+          description:
+            "Change an SSH machine: its name, address, user, port, ssh_key reference, tasks running at once (max_tasks), labels (labels replaces them; add_labels and remove_labels change some), work folder, or turn it off (enabled: false: running turns finish, no new ones start there, and its tasks move elsewhere when they safely can). A new address, user, port, key or work folder tests it again.",
+          inputSchema: {
+            machine: z.string().describe("Machine id or name"),
+            ...Object.fromEntries(Object.entries(machineInput).map(([k, v]) => [k, v.optional()])),
+            add_labels: z.array(z.string().max(MACHINE_LIMITS.labelLength)).optional().describe("Labels to add"),
+            remove_labels: z.array(z.string().max(MACHINE_LIMITS.labelLength)).optional().describe("Labels to remove"),
+            enabled: z.boolean().optional().describe("false turns it off for new turns; true back on"),
+          },
+        },
+        safe(async (a: MachineArgs & { machine: string; add_labels?: string[]; remove_labels?: string[] }) => {
+          const current = machines.one(a.machine)
+          let labels = a.labels
+          if (a.add_labels?.length || a.remove_labels?.length) {
+            const drop = new Set((a.remove_labels ?? []).map((l) => l.trim().toLowerCase().replace(/\s+/g, "-")))
+            labels = [...(labels ?? current.labels), ...(a.add_labels ?? [])].filter((l) => !drop.has(l.trim().toLowerCase().replace(/\s+/g, "-")))
+          }
+          const m = await machines.update(current.id, machinePatch({ ...a, labels }))
+          return ok(machineView(m))
+        }),
+      ),
+    )
+
+    coordinatorOnly(
+      server.registerTool(
+        "test_machine",
+        {
+          description:
+            "Test an SSH machine's connection now: log in, make Box Yard's work folder, and report its OS, CPUs, memory, disk, git, node, claude (and whether it's logged in) and codex. Use it after Cody fixes something there, or when a machine shows offline. It takes a few seconds (up to a minute and a half on a slow one).",
+          inputSchema: { machine: z.string().describe("Machine id or name") },
+        },
+        safe(async (a: { machine: string }) => {
+          const m = await machines.test(a.machine)
+          return ok({ ...machineView(m), next: NEXT_TEST })
+        }),
+      ),
+    )
+
+    coordinatorOnly(
+      server.registerTool(
+        "remove_machine",
+        {
+          description:
+            "Remove an SSH machine from Box Yard, only when Cody asks. Refused while an agent runs on it (stop it, or turn the machine off with update_machine and wait). Each task folder on it is archived first and its task picks up elsewhere on its next turn; if the machine can't be reached to archive them, it's refused, and Cody can remove it anyway from Settings › Machines. Nothing on the machine itself is uninstalled.",
+          inputSchema: { machine: z.string().describe("Machine id or name") },
+        },
+        safe(async (a: { machine: string }) => {
+          const m = machines.one(a.machine)
+          const r = await machines.remove(m.id, { kind: "coordinator" })
+          return ok({ removed: m.name, tasks_moved: r.moved.length, ...(r.lost.length ? { tasks_from_archive: r.lost } : {}) })
+        }),
+      ),
+    )
+  }
 
   coordinatorOnly(
     server.registerTool(
@@ -2254,12 +2488,12 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     /** detect_identities and import_detected_identity: a Captain maps its own project only. */
     const detect = async (online: boolean) =>
       detectFor(identities, detector, scopeId ? [ownProject()] : store.listProjects(), { online, scope: scopeId ?? "", defaultIsGh: deps.settings?.credentials.source("githubToken") === "gh" })
-    const runnersInput = z.array(z.enum(RUNNERS)).min(1).nullable().optional().describe("Where its projects may run: box (Upstash), local (this computer), gpu (RunPod or Vast.ai), docker. null: every runner.")
+    const runnersInput = z.array(z.enum(RUNNERS)).min(1).nullable().optional().describe("Where its projects may run: box (Upstash), local (this computer), gpu (RunPod or Vast.ai), docker, ssh (Cody's SSH machines). null: every runner.")
     const authorInput = z
       .object({ name: z.string(), email: z.string() })
       .nullable()
       .optional()
-      .describe("The git author its commits get, e.g. {name: \"Ada Lovelace\", email: \"ada@acme.dev\"}. Use one of the account's verified emails, or GitHub won't link the commits to it. null: Settings' GIT_USER_NAME / GIT_USER_EMAIL.")
+      .describe("The git author its commits get, e.g. {name: \"Ada Lovelace\", email: \"ada@acme.dev\"}. Use one of the account's verified emails, or GitHub won't link the commits to it. null: Settings › Credentials › Git author (GIT_USER_NAME / GIT_USER_EMAIL), else this computer's git config (Default identity, on this computer), else the GitHub account behind its token.")
     const fieldsInput = {
       color: z.enum(IDENTITY_COLORS).optional(),
       owners: z.array(z.string()).optional().describe('GitHub owners (users and orgs) whose repos it\'s for, e.g. ["acme-corp"].'),

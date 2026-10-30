@@ -13,10 +13,12 @@ import { codexExecArgs, CodexStream, isRefreshOf, seedCodexAuth } from "./codex.
 import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
+import { authorFallbacks } from "./gitAuthor.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import type { GpuProvider } from "../shared/gpu.js"
 import { DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY } from "../shared/docker.js"
+import { CODEX_ON_MACHINES } from "../shared/machines.js"
 import type { AgentCli } from "../shared/agentCli.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
@@ -42,6 +44,8 @@ export interface SetupDeps {
   localCheck?: () => Promise<LocalCheckResult>
   /** Why Docker containers can't start now (Docker missing or stopped), or null (DockerService.problem). */
   dockerProblem?: () => Promise<string | null>
+  /** Why tasks can't be sent to SSH machines at all (none is set up), or null. Which one a task takes is placement's. */
+  machinesProblem?: () => string | null
 }
 
 /** The setup choice of where agents run, in its own kv entry. */
@@ -122,6 +126,11 @@ export class Setup {
    */
   async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider): Promise<string | null> {
     const { c, credentials } = this.d
+    // SSH machines say for themselves whether they have a Claude login (placement waits for one with the reason).
+    if (runner === "ssh") {
+      if (cli === "codex") return `${CODEX_ON_MACHINES}: run it with Claude Code there, or with Codex on another runner`
+      return this.d.machinesProblem ? this.d.machinesProblem() : "SSH machines aren't available on this Box Yard"
+    }
     // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
     const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
     if (c.mock || docker) return docker
@@ -205,6 +214,11 @@ export class Setup {
       upstash: { available: mock || c.boxProvider === "local" || set("upstashBoxApiKey") },
       local,
       restart,
+      authorFallbacks: authorFallbacks(this.d.store).flatMap((r) => {
+        const project = this.d.store.getProject(r.projectId)
+        if (!project) return []
+        return [{ ...r, project: project.name, task: this.d.store.getTaskRow(r.taskId)?.title ?? r.taskId }]
+      }),
     }
   }
 

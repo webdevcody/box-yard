@@ -137,7 +137,13 @@ describe("reusing idle boxes", () => {
       .listTaskMessages(id)
       .filter((m) => m.role === "event")
       .map((m) => m.content)
-  const archived = (r: Running, id: string) => waitFor(() => r.yard.store.getTaskRow(id)?.last_archived_at ?? null, `task ${id}'s archive`)
+  // Done, not just stamped: last_archived_at is set before the archive clears its staging folders, and a box with a
+  // task still archiving isn't reused.
+  const archived = (r: Running, id: string) =>
+    waitFor(
+      () => Boolean(r.yard.store.getTaskRow(id)?.last_archived_at) && !(r.yard.tasks as unknown as { archiving: Set<string> }).archiving.has(id),
+      `task ${id}'s archive`,
+    )
 
   it("gives another project's idle box to a project that needs one, parking its workspaces in the archive", async () => {
     const r = await start({ maxBoxes: 3, slotsPerBox: 2 })

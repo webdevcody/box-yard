@@ -60,9 +60,11 @@ import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuB
 import { POD_HTTP_PORTS, shortGpu } from "./providers/runpod.js"
 import { GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, gpuBoxIdOn, gpuBoxProvider, type GpuProvider } from "../shared/gpu.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
+import { CODEX_ON_MACHINES, isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, normalizeLabel, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
-import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
+import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GIT_AUTHOR_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
+import { authorEnv, chooseAuthor, fallbackWarning, GithubAuthors, hostGitScript, parseHostGit, readHostGit, recordAuthorSource, type HostGit, type TurnAuthor } from "./gitAuthor.js"
 import { AGENT_CLI_LABEL, cliForModel, codexModel, isOpenAiModel, type AgentCli } from "../shared/agentCli.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
@@ -176,9 +178,14 @@ const gpuCapHow = (kind: GpuProvider) => `raise it in Project › Settings › B
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
 const DOCKER_SLOT_WAIT = "Waiting for a free slot in its project's Docker container (its Tasks running at once, or Settings › Docker › Tasks running at once per container)"
+/** How often maintain() asks an SSH machine that didn't answer whether it's back. */
+const MACHINE_RECHECK_MS = 60_000
 
-/** The runners whose boxes are a project's own: RunPod GPU pods (`runpod-<projectId>[-<n>]`) and its Docker container. */
-type OwnRunner = "gpu" | "docker"
+/**
+ * The runners whose boxes aren't pool boxes: a project's own RunPod GPU pods (`runpod-<projectId>[-<n>]`) and Docker
+ * container, and Cody's SSH machines (`ssh-<machineId>`, shared by every project that runs there).
+ */
+type OwnRunner = "gpu" | "docker" | "ssh"
 /** How placement's log lines name a project's own boxes (toOwnBox, fromOwnBox). */
 const OWN_BOX: Record<OwnRunner, { asked: string; projectNow: string; to: string; from: string; stays: string; at: (boxId: string) => string }> = {
   gpu: {
@@ -197,8 +204,18 @@ const OWN_BOX: Record<OwnRunner, { asked: string; projectNow: string; to: string
     stays: "in its project's Docker container",
     at: () => "its project's Docker container",
   },
+  // TaskManager.ownAt names the machine.
+  ssh: {
+    asked: "It was asked to run on an SSH machine",
+    projectNow: "Its project runs on SSH machines now",
+    to: "an SSH machine",
+    from: "on its SSH machine",
+    stays: "on its SSH machine",
+    at: (boxId) => `SSH machine ${machineOfBox(boxId)}`,
+  },
 }
-const ownRunnerOf = (boxId: string | null | undefined): OwnRunner | null => (isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : null)
+const ownRunnerOf = (boxId: string | null | undefined): OwnRunner | null =>
+  isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : isMachineBox(boxId) ? "ssh" : null
 const AGENT_MSG_LIMIT = 20 // per sender, per 10 minutes
 /** Note suggestions one task can leave for its retro; past that the agent is logging, not suggesting. */
 const MAX_SUGGESTIONS_PER_TASK = 20
@@ -236,13 +253,27 @@ export interface TaskManagerDeps {
   uploads: Uploads
   /** Tests: a fake GitHub for the PR tracker, and the token it gets (even in mock mode). */
   github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
+  /** Tests: this computer's global git config as a Docker turn's author reads it (default: the server's own). */
+  hostGit?: () => Promise<HostGit | null>
   /** RunPod GPU pods (Runs on: GPU), when this install has the runner. */
   gpu?: GpuRunner | null
   /** Vast.ai GPU instances (Runs on: GPU, for projects on Vast.ai), when this install has the runner. */
   vast?: GpuRunner | null
   /** Docker containers on this computer (Runs on: Docker container), when this install has the runner. */
   docker?: DockerRunner | null
+  /** Cody's SSH machines (Runs on: SSH machine), when this install has the runner. */
+  machines?: MachineRunner | null
   identities: Identities
+}
+
+/** What TaskManager needs of the SSH machines (server/machines/service.ts). */
+export interface MachineRunner {
+  list(): Machine[]
+  get(id: string): Machine | null
+  /** Why tasks can't run on it now (off, untested, failed test, didn't answer lately), or null. */
+  problem(m: Machine): string | null
+  /** Ask the machines that didn't answer lately again; resolves true when one is back. */
+  recheck(olderThanMs: number): Promise<boolean>
 }
 
 /** What TaskManager uses of the Docker containers' provider: DockerProvider, or FolderDockerProvider (mock mode, tests). */
@@ -314,9 +345,20 @@ interface PreparedWorkspace {
   fallback?: { reason: string; wip: boolean }
 }
 
-/** "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. */
-const onBox = (boxId: string) =>
-  isLocalRunnerBox(boxId) ? "on this computer" : isGpuBox(boxId) ? `on its project's GPU pod #${gpuBoxIndex(boxId)}` : isDockerBox(boxId) ? "in its project's Docker container" : `on box ${boxId}`
+/**
+ * "on box local-1a2b", or "on this computer" for the local runner: where a task's log says its workspace is. An SSH
+ * machine's name comes from TaskManager.onBox.
+ */
+const onBox = (boxId: string, machine?: string) =>
+  isLocalRunnerBox(boxId)
+    ? "on this computer"
+    : isGpuBox(boxId)
+      ? `on its project's GPU pod #${gpuBoxIndex(boxId)}`
+      : isDockerBox(boxId)
+        ? "in its project's Docker container"
+        : isMachineBox(boxId)
+          ? `on SSH machine ${machine ?? machineOfBox(boxId)}`
+          : `on box ${boxId}`
 
 /** What clients see of an upload: no server paths. */
 const publicFiles = (files: StoredUpload[]): Attachment[] => files.map(({ id, name, size, mime }) => ({ id, name, size, mime }))
@@ -344,6 +386,8 @@ export interface NewTask {
   source?: InputSource
   /** Its own runner over the project's "Runs on", for every turn (Task.runsOn). Check it first with requireRunner. */
   runsOn?: Runner | null
+  /** With runsOn "ssh": the SSH machines it runs on, by label or machine name; null: any machine. */
+  machineLabel?: string | null
   /** The CLI it runs on for good (Task.agentCli); omitted: what its model names, else its project's Agent, else Settings. */
   agentCli?: AgentCli | null
   /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
@@ -599,6 +643,13 @@ export class TaskManager {
   private lastSnapshotRetryAt = 0
   /** `<task>:<box>` pairs already told they run on a box smaller than their project's size (no fresh archive), and noteOnce keys. */
   private smallBoxNoted = new Set<string>()
+  /** The GitHub account behind each token, as a turn's author (null: mock mode with no fake GitHub). */
+  private readonly githubAuthors: GithubAuthors | null
+  private readonly hostGit: () => Promise<HostGit | null>
+  /** Tests: the token a fake GitHub gets when a turn has none of its own. */
+  private readonly githubTokenSeam: ((projectId: string) => string | null) | undefined
+  /** Tasks whose log already says their commits go out under the fallback author. */
+  private authorWarned = new Set<string>()
   /** Tasks whose setup already hit a full disk once; the next one fails for good. */
   private diskRetried = new Set<string>()
   /** Tasks holding for a cleanup on the box their workspace lives on, after running out of space there. */
@@ -637,6 +688,11 @@ export class TaskManager {
   private lastDockerSweepAt = 0
   /** Tasks whose Captain heard why they wait for Docker (missing or stopped), by the reason: a notice once. */
   private dockerWaitNoticed = new Map<string, string>()
+  /** Cody's SSH machines, or null when this install has no SSH runner. */
+  private readonly machines: MachineRunner | null
+  /** Tasks whose Captain heard why they wait for an SSH machine, by the kind of wait: a notice once. */
+  private machineWaitNoticed = new Map<string, string>()
+  private lastMachineRecheckAt = 0
   /** The task event bus hooks listen on (see subscribe). */
   private readonly listeners = new Set<TaskEventListener>()
 
@@ -644,6 +700,7 @@ export class TaskManager {
     this.gpu = deps.gpu ?? null
     this.vast = deps.vast ?? null
     this.docker = deps.docker ?? null
+    this.machines = deps.machines ?? null
     this.identities = deps.identities
     this.c = deps.config
     this.store = deps.store
@@ -655,6 +712,10 @@ export class TaskManager {
     this.uploads = deps.uploads
     this.reader = new EventReader(deps.provider, deps.redis)
     this.sleep = new SleepWatch()
+    const githubFetch = deps.github?.fetch ?? (this.c.mock ? null : fetch)
+    this.githubAuthors = githubFetch ? new GithubAuthors(githubFetch) : null
+    this.hostGit = deps.hostGit ?? (() => readHostGit())
+    this.githubTokenSeam = deps.github?.token
     this.prs = new PrTracker({
       store: deps.store,
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
@@ -856,7 +917,12 @@ export class TaskManager {
    * sign-in, or there are no Upstash boxes. Nothing falls back to the other runner. No runner asked for: no check.
    * With the task's project (and its own env), a Claude key its turns would get counts (a Docker container needs one).
    */
-  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}, agent?: { agentCli?: AgentCli | null; model?: string | null }): Promise<void> {
+  async requireRunner(
+    runner: Runner | null | undefined,
+    projectId?: string,
+    taskEnv: Record<string, string> = {},
+    agent?: { agentCli?: AgentCli | null; model?: string | null; machineLabel?: string | null },
+  ): Promise<void> {
     if (!runner || !this.runnerProblem) return
     const project = projectId ? this.store.getProject(projectId) : null
     // The CLI the task runs on decides which key counts: a Codex task needs a Codex login, not a Claude one.
@@ -864,6 +930,15 @@ export class TaskManager {
     const key = !project ? undefined : cli === "codex" ? this.codexCredentials(project.id, taskEnv).kind !== null : this.turnCredentials(project.id, taskEnv).claudeFrom !== null
     const problem = await this.runnerProblem(runner, key, cli, project && runner === "gpu" ? this.gpuCloudOf(project.id) : undefined)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
+    // A label no machine has is a typo, not a wait: busy, offline or switched-off machines with it are waited for.
+    const label = agent?.machineLabel ?? null
+    const machines = this.machines?.list() ?? []
+    if (runner === "ssh" && label && this.machines && !machines.some((m) => machineMatches(m, label))) {
+      const labels = [...new Set(machines.flatMap((m) => m.labels))].sort()
+      throw new BadRequestError(
+        `Can't run it on ${labelPhrase(normalizeLabel(label))}: no SSH machine has that label or name (${labels.length ? `labels: ${labels.join(", ")}` : "none has a label yet"}). Label one in Settings › Machines, or with update_machine.`,
+      )
+    }
   }
 
   /** Throws a clear 400 when the project's identity doesn't allow `runner` (Identity.runners). */
@@ -877,12 +952,14 @@ export class TaskManager {
    * nothing would be lost (toLocal / fromLocal), else it stays where it is and its log says why. Check with
    * requireRunner first.
    */
-  setRunsOn(taskId: string, runner: Runner) {
+  setRunsOn(taskId: string, runner: Runner, machineLabel: string | null = null) {
     const row = this.requireRow(taskId)
-    if (row.runs_on === runner) return
+    const label = runner === "ssh" ? normalizeLabel(machineLabel) : null
+    if (row.runs_on === runner && (row.machine_label ?? null) === label) return
     this.requireIdentityRunner(row.project_id, runner)
-    this.store.updateTask(row.id, { runsOn: runner })
-    this.addEvent(row.id, `Runs on ${RUNNER_PHRASE[runner]} from its next turn on (this task only, over its project's "Runs on").`)
+    this.store.updateTask(row.id, { runsOn: runner, machineLabel: label })
+    const where = runner === "ssh" ? labelPhrase(label) : RUNNER_PHRASE[runner]
+    this.addEvent(row.id, `Runs on ${where} from its next turn on (this task only, over its project's "Runs on").`)
     this.emitTask(row.id)
   }
 
@@ -915,6 +992,7 @@ export class TaskManager {
           routingRule: route.routingRule,
           routingReason: route.routingReason,
           runsOn: input.runsOn ?? null,
+          machineLabel: input.runsOn === "ssh" ? (input.machineLabel ?? null) : null,
           branch: projects[i]!.repo ? `boxyard/${slugify(input.title)}-${randomUUID().slice(0, 4)}` : null,
         })
         const files = input.attachments ?? []
@@ -1220,8 +1298,8 @@ export class TaskManager {
 
   /**
    * Raise or lower a task's priority (set_task_priority, send_to_task's and create_task's `priority`). A high task's
-   * turns are pulled from the queue before every normal task's, here, on a box, a GPU pod or a Docker container; it
-   * never stops a running agent, and its project's limits still hold. It stays until changed.
+   * turns are pulled from the queue before every normal task's, here, on a box, a GPU pod, a Docker container or an
+   * SSH machine; it never stops a running agent, and its project's limits still hold. It stays until changed.
    */
   setTaskPriority(taskId: string, priority: TaskPriority, by: string): Task {
     const row = this.requireRow(taskId)
@@ -1463,6 +1541,8 @@ export class TaskManager {
     if (isLocalRunnerBox(boxId)) return this.settings.get().localAgents
     if (isGpuBox(boxId)) return this.store.projectBoxLimits(gpuBoxProject(boxId)).agentsPerBox ?? this.gpuFor(boxId)?.settings().agentsPerPod ?? 1
     if (isDockerBox(boxId)) return this.store.projectBoxLimits(dockerBoxProject(boxId)).agentsPerBox ?? this.docker?.settings().agentsPerContainer ?? 1
+    // A removed machine takes no turns.
+    if (isMachineBox(boxId)) return this.machineOf(boxId)?.maxTasks ?? 0
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
   }
 
@@ -1510,10 +1590,10 @@ export class TaskManager {
 
   /**
    * Agents (running turns) across all boxes. Local-runner turns have their own limit (Settings › Tasks running at once
-   * on this computer), and GPU pods' and Docker containers' their own slots.
+   * on this computer), and GPU pods', Docker containers' and SSH machines' their own slots.
    */
   runningTotal() {
-    return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id) && !isGpuBox(r.box_id) && !isDockerBox(r.box_id)).length
+    return this.store.listTaskRows().filter((r) => holdsSlot(r) && !isLocalRunnerBox(r.box_id) && !ownRunnerOf(r.box_id)).length
   }
 
   /**
@@ -1714,6 +1794,7 @@ export class TaskManager {
    * verdict in the delete safety check (server/boxDelete.ts), and the disk in use. One exec reads every workspace.
    */
   async boxContents(boxId: string): Promise<BoxContents> {
+    if (isMachineBox(boxId)) throw new BadRequestError(`SSH machine ${this.machineName(boxId)} is one of your own computers: Box Yard never clears or deletes it.`)
     const pod = isGpuBox(boxId)
     const container = isDockerBox(boxId)
     const box = pod || container ? null : this.store.getBox(boxId)
@@ -1841,6 +1922,7 @@ export class TaskManager {
     const owner = actor.kind === "owner"
     const stopAgents = owner && Boolean(opts.stopAgents)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("That's this computer, not a box: local tasks keep their folders until each task is deleted.")
+    if (isMachineBox(boxId)) throw new BadRequestError(`That's SSH machine ${this.machineName(boxId)}, one of your own computers, not a box: Box Yard never deletes it. Remove it from Box Yard in Settings › Machines (remove_machine).`)
     const pod = isGpuBox(boxId)
     const container = isDockerBox(boxId)
     const kind = pod ? "pod" : container ? "container" : "box"
@@ -2459,6 +2541,7 @@ export class TaskManager {
     if (!project) throw new NotFoundError(`Project ${projectId} not found`)
     if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
+    if (project.runner === "ssh" || isMachineBox(boxId)) throw new BadRequestError(`${project.name} runs on SSH machines: they're your own computers, so they're never snapshotted.`)
     if (project.runner === "gpu" || isGpuBox(boxId)) {
       if (this.gpuCloudOf(projectId) === "vast") throw new BadRequestError(`${project.name} runs on Vast.ai GPU instances, which start fresh each time, so it has no box snapshot.`)
       throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
@@ -2904,7 +2987,19 @@ export class TaskManager {
       if (!claimed) {
         if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
         const local = isLocalRunnerBox(boxId) ? (this.localWait(row) ?? { text: LOCAL_SLOT_WAIT, by: [] }) : null
-        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? gpuSlotWait(gpuBoxProvider(boxId)!) : isDockerBox(boxId) ? DOCKER_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
+        this.setWaitReason(
+          row.id,
+          local?.text ??
+            (isGpuBox(boxId)
+              ? gpuSlotWait(gpuBoxProvider(boxId)!)
+              : isDockerBox(boxId)
+                ? DOCKER_SLOT_WAIT
+                : isMachineBox(boxId)
+                  ? `Waiting for a free slot on SSH machine ${this.machineName(boxId)}`
+                  : `Waiting for a free slot on ${boxId}`),
+          null,
+          local?.by,
+        )
         this.emitTask(row.id)
         continue
       }
@@ -3140,7 +3235,7 @@ export class TaskManager {
       const moved = await this.fromOwnBox(row, runner)
       return moved === "stay" ? this.ownSlot(row, on) : moved
     }
-    if (runner === "gpu" || runner === "docker") {
+    if (runner === "gpu" || runner === "docker" || runner === "ssh") {
       const here = await this.toOwnBox(row, runner)
       if (here !== "stay") return here
     } else if (runner === "local") {
@@ -3308,6 +3403,46 @@ export class TaskManager {
     return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
   }
 
+  /**
+   * Who a turn's commits are by (server/gitAuthor.ts): the project's or identity's author, else Settings' Git author,
+   * else (on this computer, Default identity) this computer's own git config, else the GitHub account behind the
+   * turn's token, else the fallback author, which the task's log and Settings › Credentials / Identities warn about.
+   */
+  private async turnAuthor(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, dir: string): Promise<TurnAuthor> {
+    const taskEnv = this.store.taskEnv(row.id)
+    const own = { ...this.store.projectEnv(project.id), ...taskEnv }
+    const { env } = this.turnCredentials(project.id, taskEnv)
+    const isDefault = this.identities.idOf(project.id) === DEFAULT_IDENTITY_ID
+    const settings = this.settings.get()
+    const onComputer = isLocalRunnerBox(boxId) || isDockerBox(boxId)
+    const token = env.GITHUB_TOKEN || this.githubTokenSeam?.(project.id) || ""
+    const author = await chooseAuthor({
+      env,
+      identityAuthor: !GIT_AUTHOR_VARS.some((v) => own[v]),
+      settings: { name: settings.gitUserName, email: settings.gitUserEmail },
+      host: !onComputer
+        ? null
+        : !isDefault
+          ? { skipped: "its identity keeps off this computer's git config" }
+          : isLocalRunnerBox(boxId)
+            ? { mode: "native", read: async () => parseHostGit((await this.provider.exec(boxId, hostGitScript(`${dir}/work`))).stdout) }
+            : { mode: "env", read: this.hostGit },
+      github: !token
+        ? { skipped: "the turn has no GitHub token" }
+        : this.githubAuthors
+          ? () => this.githubAuthors!.author(token)
+          : { skipped: "mock mode doesn't ask GitHub whose token it is" },
+    })
+    recordAuthorSource(this.store, project.id, row.id, author)
+    if (author.source === "fallback") {
+      if (!this.authorWarned.has(row.id)) this.addEvent(row.id, fallbackWarning(author.skipped), { kind: "author" })
+      this.authorWarned.add(row.id)
+      console.warn(`[box-yard] ${row.id}: commits go out under the fallback author (${author.skipped.join("; ")})`)
+    } else this.authorWarned.delete(row.id)
+    if (author.note) this.noteOnce(row.id, `${row.id}:author-note`, author.note)
+    return author
+  }
+
   /** What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login. */
   codexCredentials(projectId: string, taskEnv: Record<string, string> = {}): CodexTurnLogin {
     return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, this.settings.credentials.codexLogin())
@@ -3410,16 +3545,33 @@ export class TaskManager {
     return !wait
   }
 
-  /** Its workspace is on its project's own box for `runner`: its GPU pod, or its Docker container. */
+  /**
+   * Its workspace is on its project's own box for `runner`: its GPU pod, or its Docker container; or on an SSH machine
+   * that has the label it runs on (its own machine_label, else its project's).
+   */
   private onOwnBox(row: TaskRow, runner: Runner): boolean {
     if (runner === "gpu") return isGpuBox(row.box_id) && gpuBoxProject(row.box_id!) === row.project_id
     if (runner === "docker") return isDockerBox(row.box_id) && dockerBoxProject(row.box_id!) === row.project_id
+    if (runner === "ssh") {
+      const m = isMachineBox(row.box_id) ? this.machineOf(row.box_id) : null
+      return Boolean(m && machineMatches(m, this.store.taskMachineLabel(row)))
+    }
     return false
   }
 
-  /** A pod of its project's (`gpuSlot`) or its project's container (`dockerSlot`) for its next turn, or null to wait. */
+  /** A pod of its project's (`gpuSlot`), its project's container (`dockerSlot`) or an SSH machine (`machineSlot`) for its next turn, or null to wait. */
   private ownSlot(row: TaskRow, runner: OwnRunner): Promise<string | null> {
-    return runner === "gpu" ? this.gpuSlot(row) : this.dockerSlot(row)
+    return runner === "gpu" ? this.gpuSlot(row) : runner === "docker" ? this.dockerSlot(row) : this.machineSlot(row)
+  }
+
+  /** Where placement's log lines say a task went: "its project's Docker container", "SSH machine old-thinkpad". */
+  private ownAt(runner: OwnRunner, boxId: string): string {
+    return runner === "ssh" ? `SSH machine ${this.machineName(boxId)}` : OWN_BOX[runner].at(boxId)
+  }
+
+  /** "one of your SSH machines", `SSH machines labelled "gpu"`, "this computer": where a task should run, for its log. */
+  private runnerPhrase(row: TaskRow, runner: Runner): string {
+    return runner === "ssh" ? labelPhrase(this.store.taskMachineLabel(row)) : RUNNER_PHRASE[runner]
   }
 
   /**
@@ -3446,12 +3598,12 @@ export class TaskManager {
         this.noteOnce(row.id, `${row.id}:${LOCAL_BOX_ID}:${runner}`, `${said}, but its workspace stays on this computer: it can't move safely (${block}).`)
         return this.localSlot(row)
       }
-      const target = runner === "docker" ? await this.dockerTarget(row) : null
-      if (runner === "docker" && !target) return null
+      const target = runner === "docker" ? await this.dockerTarget(row) : runner === "ssh" ? await this.machineTarget(row) : null
+      if (runner !== "gpu" && !target) return null
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       void this.removeTaskDir(LOCAL_BOX_ID, row.id).catch(() => {})
-      this.addEvent(row.id, `Moved from this computer to ${runner === "gpu" ? "its project's GPU pod" : own.at(target!)}: ${why}.`)
-      return target ? this.dockerAssign(row, target) : this.ownSlot(row, runner)
+      this.addEvent(row.id, `Moved from this computer to ${runner === "gpu" ? "its project's GPU pod" : this.ownAt(runner, target!)}: ${why}.`)
+      return !target ? this.ownSlot(row, runner) : runner === "ssh" ? this.machineAssign(row, target) : this.dockerAssign(row, target)
     }
     if (row.box_id && !ownRunnerOf(row.box_id)) {
       const box = this.store.getBox(row.box_id)
@@ -3463,12 +3615,12 @@ export class TaskManager {
           this.noteOnce(row.id, `${row.id}:${box.id}:${runner}`, `${said}, but its workspace stays on box ${box.id}: it can't move safely (${block}).`)
           return "stay"
         }
-        const target = runner === "gpu" ? await this.gpuTarget(row) : await this.dockerTarget(row)
+        const target = runner === "gpu" ? await this.gpuTarget(row) : runner === "docker" ? await this.dockerTarget(row) : await this.machineTarget(row)
         if (!target) return null
         this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
         void this.removeTaskDir(box.id, row.id).catch(() => {})
-        this.addEvent(row.id, `Moved from box ${box.id} to ${own.at(target)}: ${why}.`)
-        return runner === "gpu" ? this.gpuAssign(row, target) : this.dockerAssign(row, target)
+        this.addEvent(row.id, `Moved from box ${box.id} to ${this.ownAt(runner, target)}: ${why}.`)
+        return runner === "gpu" ? this.gpuAssign(row, target) : runner === "docker" ? this.dockerAssign(row, target) : this.machineAssign(row, target)
       }
       // Box is gone or lost; the workspace comes back from the archive, on the pod or in the container.
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
@@ -3492,7 +3644,8 @@ export class TaskManager {
       return null
     }
     if (block) {
-      this.noteOnce(row.id, `${row.id}:${from}:${runner}`, `It should run on ${RUNNER_PHRASE[runner]} now, but its workspace stays ${own.stays}: it can't move safely (${block}).`)
+      const stays = isMachineBox(from) ? `on SSH machine ${this.machineName(from)}` : own.stays
+      this.noteOnce(row.id, `${row.id}:${from}:${runner}`, `It should run on ${this.runnerPhrase(row, runner)} now, but its workspace stays ${stays}: it can't move safely (${block}).`)
       return "stay"
     }
     let to: string | null
@@ -3505,14 +3658,19 @@ export class TaskManager {
     } else if (runner === "docker") {
       to = await this.dockerTarget(row)
       if (!to) return null
+    } else if (runner === "ssh") {
+      to = await this.machineTarget(row)
+      if (!to) return null
     } else {
       to = await this.pickBox(row.id)
       if (!to) return null
     }
     this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
     void this.removeTaskDir(from, row.id).catch(() => {})
-    this.addEvent(row.id, `Moved from ${own.stays.replace(/^(on|in) /, "")} to ${runner === "box" ? `box ${to}` : RUNNER_PHRASE[runner]}.`)
-    return runner === "gpu" ? this.gpuAssign(row, to) : runner === "docker" ? this.dockerAssign(row, to) : this.assign(row.id, to)
+    const fromText = isMachineBox(from) ? `SSH machine ${this.machineName(from)}` : own.stays.replace(/^(on|in) /, "")
+    const toText = runner === "box" ? `box ${to}` : runner === "ssh" ? `SSH machine ${this.machineName(to)}` : RUNNER_PHRASE[runner]
+    this.addEvent(row.id, `Moved from ${fromText} to ${toText}${runner === "ssh" && isMachineBox(from) ? `: it should run on ${this.runnerPhrase(row, runner)}` : ""}.`)
+    return runner === "gpu" ? this.gpuAssign(row, to) : runner === "docker" ? this.dockerAssign(row, to) : runner === "ssh" ? this.machineAssign(row, to) : this.assign(row.id, to)
   }
 
   /** One of the project's GPU pods for a task's next turn, or null (with the reason) while it must wait. */
@@ -3760,6 +3918,134 @@ export class TaskManager {
     if (this.dockerWaitNoticed.get(row.id) === reason) return
     this.dockerWaitNoticed.set(row.id, reason)
     this.notice(`⚠️ **${row.title}** waits: ${reason}.`, { taskId: row.id, projectIds: [row.project_id] })
+  }
+
+  // ------------------------------------------------------------------ SSH machines (docs/machines.md)
+
+  /** A machine by its box id, `ssh-<machineId>`; null when it was removed (or this install has no SSH runner). */
+  private machineOf(boxId: string | null | undefined): Machine | null {
+    return isMachineBox(boxId) && this.machines ? this.machines.get(machineOfBox(boxId)) : null
+  }
+
+  /** "old-thinkpad", or the machine's id when it was removed. */
+  machineName(boxId: string): string {
+    return this.machineOf(boxId)?.name ?? machineOfBox(boxId)
+  }
+
+  /** An SSH machine for a task's next turn (`machineTarget`), or null (with the reason) while it must wait. */
+  private async machineSlot(row: TaskRow): Promise<string | null> {
+    const target = await this.machineTarget(row)
+    return target ? this.machineAssign(row, target) : null
+  }
+
+  /**
+   * Which SSH machine a task's next turn takes (`pickMachine`, shared/machines.ts), or null with the reason: one with
+   * the label it runs on (its own machine_label, else its project's; none: any machine), that works (enabled, tested,
+   * answered lately), has a Claude login to use (a Claude key Box Yard forwards, else the machine's own login) and a
+   * free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole machine (`limitBlock`).
+   * Its workspace's machine first; it moves to another only when nothing would be lost (`moveBlock`, no upload limit).
+   * A Codex task never gets one: it waits with CODEX_ON_MACHINES.
+   */
+  private async machineTarget(row: TaskRow): Promise<string | null> {
+    if (!this.machines) {
+      this.setWaitReason(row.id, "Waiting: SSH machines aren't available on this Box Yard")
+      return null
+    }
+    const current = isMachineBox(row.box_id) ? machineOfBox(row.box_id) : null
+    // A turn-end archive being written right now: it can move in a moment, so it doesn't count as stuck there.
+    const canMove = !current || !row.session_started || (!this.archiving.has(row.id) && this.moveBlock(row, Infinity) === null)
+    const machines = this.machines.list().map((m): MachineCandidate => {
+      const boxId = machineBoxId(m.id)
+      const limit = this.limitBlock(row, boxId)
+      return {
+        id: m.id,
+        name: m.name,
+        labels: m.labels,
+        enabled: m.enabled,
+        problem: m.enabled ? this.machines!.problem(m) : null,
+        claudeLogin: m.lastTest?.claudeLogin ?? null,
+        maxTasks: m.maxTasks,
+        running: this.runningOn(boxId),
+        blocked: limit ? limit.text : null,
+      }
+    })
+    const claudeKey = this.c.mock || this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom !== null
+    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, claudeKey, cli: taskAgentCli(row) })
+    if ("wait" in pick) {
+      this.machineWait(row, pick)
+      return null
+    }
+    return machineBoxId(pick.machineId)
+  }
+
+  /** Put a task on the machine `machineTarget` picked. One moving off another machine restores there from its archive. */
+  private machineAssign(row: TaskRow, target: string): string {
+    this.machineWaitNoticed.delete(row.id)
+    const from = this.store.getTaskRow(row.id)?.box_id ?? null
+    if (from === target) return target
+    if (isMachineBox(from)) {
+      this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
+      void this.removeTaskDir(from, row.id).catch(() => {})
+      if (row.session_started) this.addEvent(row.id, `Moved from SSH machine ${this.machineName(from)} to ${this.machineName(target)}: ${this.machineOf(from) ? "the first has no free slot" : "its machine was removed"}.`)
+    }
+    return this.assign(row.id, target)
+  }
+
+  /**
+   * A task waits for an SSH machine: the reason on the task, and its Captain hears it once per kind of wait when no
+   * machine can take it (none has the label, none works, no Claude login, a Codex task). A busy one is only a queue:
+   * no notice.
+   */
+  private machineWait(row: TaskRow, pick: Extract<MachinePick, { wait: string }>) {
+    this.setWaitReason(row.id, pick.wait)
+    if (pick.kind === "busy" || this.machineWaitNoticed.get(row.id) === pick.kind) return
+    this.machineWaitNoticed.set(row.id, pick.kind)
+    this.notice(`⚠️ **${row.title}** waits: ${pick.wait.replace(/^Waiting:? /, "")}.`, { taskId: row.id, projectIds: [row.project_id] })
+  }
+
+  /** A machine was added or removed (Settings › Machines, add_machine, remove_machine), for the box history. */
+  machineEvent(e: { machine: Pick<Machine, "id" | "name" | "host" | "user" | "port">; kind: "created" | "deleted" | "lost"; actor: BoxActor; reason: string; detail?: string }) {
+    const boxId = machineBoxId(e.machine.id)
+    this.recordBoxEvent({
+      boxId,
+      boxName: machineLabel(e.machine.name, boxId),
+      type: e.kind,
+      actor: e.actor,
+      reason: e.reason,
+      detail: e.detail ?? `${e.machine.user}@${e.machine.host}${e.machine.port === 22 ? "" : `:${e.machine.port}`}`,
+      size: null,
+    })
+  }
+
+  /**
+   * Before a machine is removed from Box Yard: refused while an agent runs there; otherwise each task folder on it is
+   * archived (unless its archive already holds it) and let go, so its task restores elsewhere on its next turn. One
+   * that can't be archived (the machine is offline) stops it, unless `force` (Cody only): those tasks then restart
+   * from their last archive, or a recap. The folders on the machine are removed when it can be reached.
+   */
+  async releaseMachine(machineId: string, opts: { force?: boolean } = {}): Promise<{ moved: string[]; lost: string[] }> {
+    const boxId = machineBoxId(machineId)
+    const rows = this.store.listTaskRows({ boxId })
+    const busy = rows.filter((r) => r.current_turn_id || r.status === "starting")
+    if (busy.length) throw new ConflictError(`An agent is running on it (${busy.map((r) => r.title).join(", ")}): stop it first, or turn the machine off so no new turns start there.`)
+    const lost: string[] = []
+    for (const r of rows) {
+      if (!r.session_started) continue
+      await this.archiveUnlessHeld(r.id).catch(() => {})
+      const fresh = this.store.getTaskRow(r.id)
+      if (fresh && !this.archiveHoldsWorkspace(fresh)) lost.push(r.id)
+    }
+    if (lost.length && !opts.force) {
+      const titles = lost.map((id) => this.store.getTaskRow(id)?.title ?? id)
+      throw new ConflictError(`Its workspaces couldn't all be archived first (${titles.join(", ")}): test the connection and try again, or remove it anyway (they restart from their last archive or a recap).`)
+    }
+    for (const r of rows) {
+      this.store.updateTask(r.id, { boxId: null, portBase: null, previews: [] })
+      void this.removeTaskDir(boxId, r.id).catch(() => {})
+      this.addEvent(r.id, `Its SSH machine ${this.machineName(boxId)} was removed from Box Yard; ${lost.includes(r.id) ? "its workspace there couldn't be archived, so it restarts from its last archive or a recap" : "its workspace comes back from the archive"} on its next turn.`)
+      this.emitTask(r.id)
+    }
+    return { moved: rows.filter((r) => !lost.includes(r.id)).map((r) => r.id), lost }
   }
 
   /** A Docker container was made or started (DockerProvider), or stopped, deleted or lost (here), for the box history. */
@@ -4285,6 +4571,11 @@ export class TaskManager {
       const d = this.docker?.settings()
       return { memoryBytes: d ? d.memoryMb * 1024 * 1024 : null, slots, alone, docker: { cpus: d?.cpus ?? null } }
     }
+    if (isMachineBox(boxId)) {
+      const m = this.machineOf(boxId)
+      const t = m?.lastTest
+      return { memoryBytes: t?.memoryBytes ?? null, slots, alone, machine: { name: m?.name ?? machineOfBox(boxId), os: t?.osName || t?.os || null, cpus: t?.cpus ?? null } }
+    }
     return { memoryBytes: this.store.getBox(boxId)?.mem_total_bytes ?? null, slots, alone }
   }
 
@@ -4317,7 +4608,7 @@ export class TaskManager {
     const agent = this.store.boxAgent(row.id)
     const block = agent ? limitBlock(agent, this.store.boxAgents(boxId, row.id)) : null
     if (!agent || !block) return null
-    const where = isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : isDockerBox(boxId) ? "its Docker container" : `box ${boxId}`
+    const where = isGpuBox(boxId) ? `GPU pod #${gpuBoxIndex(boxId)}` : isDockerBox(boxId) ? "its Docker container" : isMachineBox(boxId) ? `SSH machine ${this.machineName(boxId)}` : `box ${boxId}`
     return { text: boxBlockReason(agent, block, where), by: waitFor(block.by) }
   }
 
@@ -4833,9 +5124,13 @@ export class TaskManager {
     let fresh = false
     /** signing.key is on the box and no runner has taken it yet. */
     let keyWaiting = false
+    /** task.json (the turn's credentials) is on an SSH machine and no runner has started to remove it after the turn. */
+    let credsWaiting = false
     /** And codex-auth.json, the Codex login for this turn. */
     let codexWaiting = false
     try {
+      // Placement doesn't send Codex tasks to SSH machines (pickMachine waits); never reach one with nothing written.
+      if (isMachineBox(boxId) && taskAgentCli(row) === "codex") throw new Error(CODEX_ON_MACHINES)
       await this.provider.wake(boxId)
       const project = this.store.getProject(row.project_id)
       if (!project) throw new Error("Project was deleted")
@@ -4899,7 +5194,8 @@ export class TaskManager {
         keyWaiting = true
         await this.provider.writeFile(boxId, `${dir}/signing.key`, signing.privateKey)
       }
-      const taskJson = this.taskJson(row, project, boxId, signing)
+      const author = await this.turnAuthor(row, project, boxId, dir)
+      const taskJson = this.taskJson(row, project, boxId, signing, author)
       if (taskJson.agent === "codex") {
         await this.ensureCodex(boxId)
         // The ChatGPT login goes to the box for this turn; the runner keeps whichever copy is newer, and Box Yard reads
@@ -4910,6 +5206,7 @@ export class TaskManager {
           await this.provider.writeFile(boxId, `${dir}/codex-auth.json`, auth)
         }
       }
+      credsWaiting = isMachineBox(boxId)
       await this.provider.writeFile(boxId, `${dir}/task.json`, JSON.stringify(taskJson, null, 2))
       const { route, ...agent } = this.agentSettings(row, project)
       await this.provider.writeFile(
@@ -4968,6 +5265,7 @@ export class TaskManager {
       )
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       keyWaiting = false
+      credsWaiting = false
       codexWaiting = false
       // A turn that never reported its end (lost with its box) is forgotten after a day.
       for (const [id, l] of this.turnLaunches) if (l.launchedAt < Date.now() - 86_400_000) this.turnLaunches.delete(id)
@@ -5017,6 +5315,11 @@ export class TaskManager {
       if (keyWaiting && !this.stopped) {
         await this.provider.writeFile(boxId, `${dir}/signing.key`, "").catch(() => {})
         await this.provider.exec(boxId, `rm -f ${q(`${dir}/signing.key`)}`).catch(() => {})
+      }
+      // Nor the turn's credentials on an SSH machine (in its tmpfs, or on its disk).
+      if (credsWaiting && !this.stopped) {
+        await this.provider.writeFile(boxId, `${dir}/task.json`, "").catch(() => {})
+        await this.provider.exec(boxId, `rm -f ${q(`${dir}/task.json`)}`).catch(() => {})
       }
       if (codexWaiting && !this.stopped) {
         await this.provider.writeFile(boxId, `${dir}/codex-auth.json`, "").catch(() => {})
@@ -5167,9 +5470,11 @@ export class TaskManager {
 
   /**
    * Codex on the box, installed the first time a Codex task lands on one that lacks it (Upstash and RunPod boxes start
-   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install.
+   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install, and on an
+   * SSH machine nothing is ever installed: Codex tasks don't run there (CODEX_ON_MACHINES).
    */
   private async ensureCodex(boxId: string) {
+    if (isMachineBox(boxId)) throw new Error(CODEX_ON_MACHINES)
     const provider = providerOf(this.provider, boxId)
     if (this.codexReady.has(boxId) || provider.name === "local" || this.c.mock) return
     const install = "npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1"
@@ -5249,13 +5554,15 @@ export class TaskManager {
     else console.warn(`[box-yard] couldn't reset the git credential on ${boxId}: ${errorTail(res?.stderr ?? "") || "no result"}`)
   }
 
-  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null) {
+  private taskJson(row: TaskRow, project: NonNullable<ReturnType<Store["getProject"]>>, boxId: string, signing: TurnSigning | null, author: TurnAuthor) {
     // Read on every turn, so a credential saved in Settings › Credentials or on an identity reaches the next turn without a restart.
     const creds = this.turnCredentials(project.id, this.store.taskEnv(row.id))
     const { env, claudeFrom } = creds
+    if (author.author) Object.assign(env, authorEnv(author.author))
     let { unsetEnv } = creds
     const provider = providerOf(this.provider, boxId)
     const local = provider.name === "local"
+    const machine = provider.name === "ssh"
     // On this computer, an identity other than Default doesn't get the owner's git config or gh login.
     const home = this.identityHome(boxId, project.id)
     if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in env)) env[k] = v
@@ -5278,22 +5585,26 @@ export class TaskManager {
       agent,
       claudeBin,
       claudeArgs,
-      // A local `claude` login lives in the default config dir, so only
+      // A local `claude` login (or an SSH machine's own) lives in the default config dir, so only
       // isolate when we have a token to log in with.
-      isolateConfig: !local || claudeFrom !== null,
+      isolateConfig: !(local || machine) || claudeFrom !== null,
+      // An SSH machine keeps no turn credentials between turns: the runner removes task.json as the turn ends.
+      ...(machine ? { dropAfterTurn: true } : {}),
       ...(codex
         ? {
             codexBin,
             codexArgs,
             // "chatgpt": the login file comes as codex-auth.json for the turn (box-runner.mjs prepareCodexHome).
             codexLogin: codex.kind,
-            // The same rule for Codex: on this computer with no Codex login set, its own `codex login` (~/.codex).
-            isolateCodex: !local || this.c.mock || codex.kind !== null,
+            // The same rule for Codex: on this computer (or an SSH machine) with no Codex login set, its own `codex login` (~/.codex).
+            isolateCodex: !(local || machine) || this.c.mock || codex.kind !== null,
           }
         : {}),
       port: row.port_base ?? PORT_BASE,
       // The runner puts it into its MCP tool descriptions and replies.
       ownerName: this.owner(),
+      // Where its commits' author came from (server/gitAuthor.ts); the author itself is in env.
+      authorSource: author.source,
       baseBranch: project.baseBranch,
       github: { slug: githubSlug(project.repo) },
       // How its commits are signed: never the private key, which comes as signing.key for one turn.
@@ -5376,7 +5687,7 @@ export class TaskManager {
     const cursor = parseCursor(row.event_cursor)
     const size = await this.provider.exec(boxId, `wc -c < ${q(dir + "/events.jsonl")} 2>/dev/null || echo 0`)
     this.store.updateTask(row.id, { eventCursor: JSON.stringify({ ...cursor, offset: Number.parseInt(size.stdout.trim(), 10) || 0, ino: null }) })
-    this.addEvent(row.id, from === "git" ? `Workspace restored ${onBox(boxId)}: its session from the archive, its code from git.` : `Workspace restored ${onBox(boxId)}.`)
+    this.addEvent(row.id, from === "git" ? `Workspace restored ${onBox(boxId, this.machineName(boxId))}: its session from the archive, its code from git.` : `Workspace restored ${onBox(boxId, this.machineName(boxId))}.`)
     return { restored: true }
   }
 
@@ -5407,8 +5718,8 @@ export class TaskManager {
     const checkout = !row.branch ? "a fresh workspace" : prepared.branch === "base" ? `branch ${row.branch} recreated from ${project.baseBranch}` : `a fresh checkout of branch ${row.branch}`
     const work = wip ? ", with the uncommitted work its last turn pushed" : ""
     const where = kept ? ` The archive is kept on the server as ${kept} (removed after ${this.settings.get().archiveRetentionDays || "no"} days).` : ""
-    this.addEvent(row.id, `Couldn't restore the workspace archive ${onBox(boxId)} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
-    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored ${onBox(boxId)} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
+    this.addEvent(row.id, `Couldn't restore the workspace archive ${onBox(boxId, this.machineName(boxId))} (${reason}), so the task restarts from a recap on ${checkout}${work}.${where}`)
+    this.notice(`⚠️ **${row.title}** restarts from a recap: its workspace archive couldn't be restored ${onBox(boxId, this.machineName(boxId))} (${reason}). A new Claude session starts on ${checkout}${work}; anything else that wasn't pushed is only in the old archive.${where}`, { taskId: row.id })
     return { ...prepared, fallback: { reason, wip } }
   }
 
@@ -5475,8 +5786,6 @@ export class TaskManager {
         withMirrorLock(spec.mirror, [syncMirrorScript(spec), hydrateMirrorScript(spec, refs), `cd ${q(dir)}`, cloneTaskScript(spec)].join("\n")),
         `cd work`,
         setHelperScript(helper, only),
-        `git config user.name ${q(this.c.gitUserName)}`,
-        `git config user.email ${q(this.c.gitUserEmail)}`,
         // The clone has no checkout yet (so it never fetches the default branch's files for nothing).
         `(git checkout -q -f ${q(project.baseBranch)} 2>/dev/null || git checkout -q -f 2>/dev/null || true)`,
       )
@@ -5498,7 +5807,7 @@ export class TaskManager {
     if (res.stdout.includes(`${MIRROR_MARK}recreate`)) {
       this.addEvent(row.id, `Re-created the box's mirror of ${project.repo} as a ${mirror!.spec.partial ? "partial (blob:none)" : "full"} clone to match the project's partial clone setting.`)
     }
-    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} ${onBox(boxId)}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready ${onBox(boxId)}.`)
+    this.addEvent(row.id, project.repo ? `Cloned ${project.repo} ${onBox(boxId, this.machineName(boxId))}${row.branch ? `, branch ${row.branch}` : ""}.` : `Workspace ready ${onBox(boxId, this.machineName(boxId))}.`)
     const mark = res.stdout.match(new RegExp(`${BRANCH_MARK}(origin|base)`))?.[1] as "origin" | "base" | undefined
     return { restored: false, branch: mark }
   }
@@ -5554,7 +5863,7 @@ export class TaskManager {
   private async restoreThinGit(boxId: string, dir: string, { spec, env, helper, only }: { spec: MirrorSpec; env: string; helper: string; only: boolean }) {
     const check = await this.provider.exec(boxId, `[ -d ${q(`${dir}/${THIN_DIR}`)} ] && echo thin`)
     if (!check.stdout.includes("thin")) return
-    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, only, userName: this.c.gitUserName, userEmail: this.c.gitUserEmail })}`)
+    const res = await this.provider.exec(boxId, `${env}\n${thinRestoreScript(dir, spec, { helper, only })}`)
     const mark = res.stdout.split("\n").find((l) => l.startsWith(THIN_MARK))?.slice(THIN_MARK.length)
     if (mark !== "ok") {
       const why = mark?.replace(/^fail /, "") || errorTail(res.stderr || res.stdout) || `exit ${res.exitCode}`
@@ -5592,8 +5901,6 @@ export class TaskManager {
       dir,
       taskId: row.id,
       baseBranch: project.baseBranch,
-      gitUserName: this.c.gitUserName,
-      gitUserEmail: this.c.gitUserEmail,
       clone,
       git: mirror?.spec.git ?? "git",
       env: mirror?.env ?? "true",
@@ -5628,9 +5935,10 @@ export class TaskManager {
     const dir = this.taskDir(boxId, taskId)
     // Only while it's the turn's own process (its run record), never a process that took its pid after a restart.
     const wait = whileTurnRuns(dir, "sleep 15; echo .")
-    // On this computer it keeps a Mac out of idle sleep while the turn runs (caffeinate; -s holds off system sleep on
-    // AC power too), as the stream keeps a box awake. Closing the lid still sleeps it: the turn resumes on wake.
-    const command = isLocalRunnerBox(boxId) ? `${TURN_SH}\nif command -v caffeinate >/dev/null 2>&1 && by_turn_alive ${q(dir)}; then exec caffeinate -is -w "$p"; fi\n${wait}` : wait
+    // On this computer (or a Mac SSH machine) it keeps a Mac out of idle sleep while the turn runs (caffeinate; -s holds
+    // off system sleep on AC power too), as the stream keeps a box awake. Closing the lid still sleeps it: the turn
+    // resumes on wake.
+    const command = isLocalRunnerBox(boxId) || isMachineBox(boxId) ? `${TURN_SH}\nif command -v caffeinate >/dev/null 2>&1 && by_turn_alive ${q(dir)}; then exec caffeinate -is -w "$p"; fi\n${wait}` : wait
     const loop = async () => {
       let quickExits = 0
       while (!ctrl.signal.aborted && !this.stopped) {
@@ -6623,8 +6931,12 @@ export class TaskManager {
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
       fs.rmSync(part, { force: true })
-      const stages = [...keepPackStages(this.provider.root(boxId), taskId), ...gitStages(this.provider.root(boxId), taskId)]
-      await this.provider.exec(boxId, `rm -rf ${stages.map(q).join(" ")}`).catch(() => {})
+      // An SSH machine's root comes from its record, which may be gone by now (removed, or Box Yard stopping).
+      try {
+        const root = this.provider.root(boxId)
+        const stages = [...keepPackStages(root, taskId), ...gitStages(root, taskId)]
+        await this.provider.exec(boxId, `rm -rf ${stages.map(q).join(" ")}`).catch(() => {})
+      } catch {}
       this.archiving.delete(taskId)
     }
   }
@@ -6752,17 +7064,23 @@ export class TaskManager {
 
   private async removeTaskDir(boxId: string, taskId: string) {
     const dir = this.taskDir(boxId, taskId)
-    await this.provider.exec(boxId, `${turnKillScript(dir)}; rm -rf ${q(dir)}`)
+    // The copies a tmpfs for secrets keeps (an SSH machine's lives as long as the machine, not the turn).
+    const secrets = providerOf(this.provider, boxId).secretsDir
+    const held = secrets ? ` ${q(`${secrets}/${taskId}.json`)} ${q(`${secrets}/${taskId}.signing.key`)}` : ""
+    await this.provider.exec(boxId, `${turnKillScript(dir)}; rm -rf ${q(dir)}${held}`)
   }
 
   private async evictWhenSettled(taskId: string) {
     for (let i = 0; i < 30; i++) {
+      if (this.stopped) return
       const row = this.store.getTaskRow(taskId)
       if (!row) return
       if (!row.current_turn_id) break
       await new Promise((r) => setTimeout(r, 2000))
     }
     await this.archive(taskId, { closing: true })
+    // Box Yard may have stopped (and closed the database) while it archived.
+    if (this.stopped) return
     const row = this.store.getTaskRow(taskId)
     if (!row?.box_id || row.current_turn_id || row.status !== "done") return
     if (isLocalRunnerBox(row.box_id)) return // no archive on this computer: its folder stays until the task is deleted
@@ -7125,6 +7443,17 @@ export class TaskManager {
         this.interrupt(this.requireRow(row.id), h === "paused" ? "its Docker container stopped" : h === "gone" ? "its Docker container and volume are gone" : `Docker stopped (${why})`)
         continue
       }
+      if (isMachineBox(row.box_id) && h !== "running") {
+        // Removed from Box Yard under a running turn: nothing can reach it to read the turn's end.
+        if (h === "gone" || !this.machineOf(row.box_id)) {
+          this.interrupt(this.requireRow(row.id), `its SSH machine ${this.machineName(row.box_id)} was removed from Box Yard`)
+          continue
+        }
+        // Offline (asleep, off the network): the turn may still be running there. Check again soon; placement skips
+        // the machine meanwhile, and the turn's end is read once it answers.
+        this.lastEventAt.set(row.id, now - STALL_MS / 2)
+        continue
+      }
       if (h === "gone" || h === "error") {
         await this.loseBox(row.box_id, `Box ${row.box_id} is ${h}.`, false, { type: "lost", actor: { kind: "provider" }, reason: `The provider reports the box ${h} (a running turn went quiet).` })
         continue
@@ -7140,6 +7469,12 @@ export class TaskManager {
         continue
       }
       await this.turnGone(row, "the worker process stopped without finishing")
+    }
+
+    // SSH machines that didn't answer lately: placement skips them until one answers again.
+    if (this.machines && now - this.lastMachineRecheckAt >= MACHINE_RECHECK_MS) {
+      this.lastMachineRecheckAt = now
+      if (await this.machines.recheck(MACHINE_RECHECK_MS).catch(() => false)) this.schedule()
     }
 
     // Idle boxes too: one deleted in the provider's console has no turn to notice it. After the stalled turns, so

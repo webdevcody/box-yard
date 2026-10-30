@@ -61,6 +61,25 @@ export interface SetupStatus {
   local: LocalCheck | null
   /** What a saved value can't change until the server restarts, in plain words. Empty when everything is live. */
   restart: string[]
+  /**
+   * Projects whose last turn committed as the fallback author ("Box Yard Agent", unsigned): nothing earlier in the
+   * author chain (server/gitAuthor.ts) gave one. Settings › Credentials and Identities warn while any are listed.
+   */
+  authorFallbacks: AuthorFallback[]
+}
+
+/** The git author of last resort (server/gitAuthor.ts): a turn gets it only when nothing else names one. */
+export const FALLBACK_GIT_AUTHOR = { name: "Box Yard Agent", email: "box-yard@users.noreply.github.com" } as const
+
+/** A project whose last turn's commits went out under the fallback author (SetupStatus.authorFallbacks). */
+export interface AuthorFallback {
+  projectId: string
+  project: string
+  taskId: string
+  task: string
+  at: number
+  /** Why each step of the author chain gave none. */
+  why: string
 }
 
 /** One thing local agents use on this computer. */

@@ -56,6 +56,8 @@ const CLOUD_LIMIT_UPGRADE_KEY = "settings_upgrade_cloud_limit"
 
 export const DEFAULT_SETTINGS: Settings = {
   ownerName: DEFAULT_OWNER_NAME,
+  gitUserName: "",
+  gitUserEmail: "",
   startInZen: true,
   // Off: not every install uses boxes. The Boxes page always shows the same reading.
   showCloudMeter: false,
@@ -162,6 +164,8 @@ const BOX_ENV: Partial<Record<keyof Settings, string>> = {
 /** Every env var that can supply a setting. Saved settings still win over it (the Settings UI's "from env"). */
 export const SETTING_ENV_VARS: Partial<Record<keyof Settings, string>> = {
   ownerName: "BOXYARD_OWNER_NAME",
+  gitUserName: "GIT_USER_NAME",
+  gitUserEmail: "GIT_USER_EMAIL",
   orchestratorModel: "ORCHESTRATOR_MODEL",
   agentModel: "WORKER_MODEL",
   captainModel: "CAPTAIN_MODEL",
@@ -194,6 +198,8 @@ const budget = z.object({ dailyUsd: usd, monthlyUsd: usd }).strict()
 export const settingsPatch = z
   .object({
     ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
+    gitUserName: z.string().trim().max(200).regex(/^[^\n<>]*$/, "A git author name has no line breaks or < >"),
+    gitUserEmail: z.union([z.literal(""), z.string().trim().max(320).email("That isn't an email address")]),
     startInZen: z.boolean(),
     showCloudMeter: z.boolean(),
     cardsIdleHours: z.number().min(CARDS_IDLE_HOURS.min).max(CARDS_IDLE_HOURS.max),
@@ -262,6 +268,8 @@ export class SettingsStore {
       Pick<
       Config,
       | "ownerName"
+      | "gitUserName"
+      | "gitUserEmail"
       | "orchestratorModel"
       | "workerModel"
       | "captainModel"
@@ -333,6 +341,8 @@ export class SettingsStore {
     const saved = this.saved()
     const env: Partial<Settings> = {}
     if (this.c.ownerName) env.ownerName = this.c.ownerName
+    if (this.c.gitUserName) env.gitUserName = this.c.gitUserName
+    if (this.c.gitUserEmail) env.gitUserEmail = this.c.gitUserEmail
     if (this.c.orchestratorModel) env.orchestratorModel = this.c.orchestratorModel
     if (this.c.workerModel) env.agentModel = this.c.workerModel
     if (this.c.captainModel) env.captainModel = this.c.captainModel

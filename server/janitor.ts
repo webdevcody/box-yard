@@ -53,6 +53,12 @@ export function staleTmpScript(root: string, sharedTmp: boolean): string {
   ].join("\n")
 }
 
+/**
+ * A box that is a folder on a computer of Cody's (this one, or an SSH machine): its /tmp and caches are the computer's,
+ * so cleanups touch only Box Yard's own folder there.
+ */
+const ownComputer = (p: BoxProvider) => p.name === "local" || p.name === "ssh"
+
 /** The box's dependency cache (box-runner.mjs depsSave), under the provider root: on the work disk, beside tasks/. */
 export const DEPS_DIR = ".boxyard/deps"
 
@@ -393,12 +399,12 @@ export class BoxJanitor {
 
     switch (key) {
       case "tmp": {
-        const out = await exec(staleTmpScript(root, provider.name === "local"))
+        const out = await exec(staleTmpScript(root, ownComputer(provider)))
         const gone = out
           .split("\n")
           .map((l) => l.match(/^(\d+) (.+)$/))
           .filter((m): m is RegExpMatchArray => Boolean(m))
-        if (!gone.length) return provider.name === "local" ? "no stale temp folders (a local box's /tmp is this machine's, so it's left alone)" : "no stale temp folders"
+        if (!gone.length) return ownComputer(provider) ? `no stale temp folders (${provider.name === "ssh" ? "an SSH machine's /tmp is its own" : "a local box's /tmp is this machine's"}, so it's left alone)` : "no stale temp folders"
         const kb = gone.reduce((n, m) => n + Number(m[1]), 0)
         entry.removed.push(`${gone.length} stale temp ${gone.length === 1 ? "folder" : "folders"} (${formatBytes(kb * 1024)})`)
         return null
@@ -497,8 +503,9 @@ export class BoxJanitor {
       }
 
       case "caches": {
-        // Local boxes are folders on this machine: its caches and /tmp belong to the host, not the box.
+        // Local boxes are folders on this machine, and an SSH machine is Cody's own: caches and /tmp belong to the host.
         if (provider.name === "local") return "local boxes share this machine's caches"
+        if (provider.name === "ssh") return "an SSH machine's caches and /tmp are its own: Box Yard cleans only its folder there"
         const agents = onBox().some((r) => r.current_turn_id)
         const parts = [
           // Files nobody has written for two days; a running agent's temp files are newer.

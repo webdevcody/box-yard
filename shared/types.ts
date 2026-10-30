@@ -11,6 +11,7 @@ import type { GpuProvider } from "./gpu.js"
 import type { AgentCli } from "./agentCli.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
+import type { MachinesStatus } from "./machines.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
 import type { ProjectColor } from "./projectColors.js"
@@ -69,6 +70,8 @@ export interface Project {
   depCache: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
+  /** Runs on: SSH machine: the machines it runs on, by label or machine name (shared/machines.ts); null: any machine. */
+  machineLabel: string | null
   /** The CLI its new tasks run on (Claude Code or Codex); null uses Settings › Box agents › Agent. */
   agentCli: AgentCli | null
   /**
@@ -238,6 +241,8 @@ export interface Task {
    * later message. It wins over the project's setting for every turn; null follows the project.
    */
   runsOn: Runner | null
+  /** With its own runs_on "ssh": the SSH machines it runs on, by label or name (shared/machines.ts); null: any. */
+  machineLabel: string | null
   /**
    * Where it actually runs (shared/placement.ts): the box its workspace is on now, where it last ran once that box
    * let it go, and where its next turn goes and which setting chose that. Always set by the server.
@@ -638,6 +643,8 @@ export type UiEvent =
   | { type: "runpod.build"; build: RunPodImageBuild }
   /** Settings › Docker's image build moved on (state and the log's tail; never a secret). */
   | { type: "docker.build"; build: DockerImageBuild }
+  /** Settings › Machines changed: a machine, its last test, its state or tasks (never a key). */
+  | { type: "machines"; status: MachinesStatus }
   /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
   | { type: "identities"; identities: Identity[] }
   /** Settings › Connectors changed: a connector, its status, or its secrets' fingerprints (never a value). */
@@ -759,6 +766,12 @@ export interface BudgetSettings {
 export interface Settings {
   /** What Box Yard calls its human in prompts and labels (default "Cody"). */
   ownerName: string
+  /**
+   * Settings › Credentials › Git author: the author of turns whose identity names none, before this computer's git
+   * config and the GitHub account behind the token (server/gitAuthor.ts). "" = unset; GIT_USER_NAME / GIT_USER_EMAIL.
+   */
+  gitUserName: string
+  gitUserEmail: string
   /** A plain visit to / opens Zen (the Coordinator alone, full screen) unless Zen was left on purpose last time. */
   startInZen: boolean
   /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
