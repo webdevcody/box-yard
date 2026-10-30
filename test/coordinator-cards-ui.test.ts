@@ -716,8 +716,6 @@ describe("The bottom panel with a project picked", () => {
     expect(host.querySelector('[data-testid="context-menu-button"]')!.getAttribute("title")).toBe(`Context ${contextLabel(50_000, 200_000)}`)
     expect(textarea().placeholder).toBe("Message the Map 3 Captain…")
     expect(host.querySelector('[data-testid="composer-to"]')!.textContent).toBe("To the Map 3 Captain")
-    // No Coordinator card to hide.
-    expect(host.querySelector('[data-testid="tasks-only"]')).toBeNull()
     await send("Shoot the dam at dusk")
     expect(posts).toHaveLength(1)
     expect(posts[0]!.url).toBe(`/api/projects/${MAP.id}/captain/messages`)
@@ -734,6 +732,41 @@ describe("The bottom panel with a project picked", () => {
     expect(host.querySelector('[data-testid="tasks-only"]')).not.toBeNull()
     await send("What's left?")
     expect(posts[1]!.url).toBe("/api/chat")
+  })
+
+  it("Tasks only hides the Captain card for every project, remembers it apart from All, and sending to the Captain shows it again", async () => {
+    render()
+    const toggle = () => host.querySelector('[data-testid="tasks-only"]') as HTMLElement
+    act(() => setChatProjectFilter(MAP.id))
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+    expect(toggle().getAttribute("aria-label")).toBe("Tasks only: hide the Captain card")
+    expect(toggle().title).toBe("Tasks only: hide the Captain card under the task cards")
+    click(toggle())
+    expect(toggle().getAttribute("aria-pressed")).toBe("true")
+    expect(toggle().title).toBe("Tasks only: the Captain card is hidden. Click to show it")
+    expect(captainCard()).toBeNull()
+    expect(host.querySelector('[data-testid="captain-hidden"]')!.textContent).toContain("Map 3 Captain card hidden (Tasks only)")
+    expect(localStorage.getItem("boxyard:cards-tasks-only-project")).toBe("1")
+    expect(localStorage.getItem("boxyard:cards-tasks-only")).toBeNull()
+
+    // "All" keeps its own choice: the Coordinator card is still there.
+    act(() => setChatProjectFilter(null))
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+    expect(toggle().getAttribute("aria-label")).toBe("Tasks only: hide the Coordinator card")
+    expect(host.querySelector('[data-testid="coordinator-card"]')).not.toBeNull()
+
+    // Back on a project (any project): still hidden; its stand-in shows it again.
+    act(() => setChatProjectFilter(MAP.id))
+    expect(captainCard()).toBeNull()
+    click(host.querySelector('[data-testid="captain-hidden"]')!)
+    expect(captainCard()).not.toBeNull()
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+
+    // Sending to the Captain shows its card, so its answer is in view.
+    click(toggle())
+    await send("Shoot the dam at dusk")
+    expect(captainCard()!.textContent).toContain("Shoot the dam at dusk")
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
   })
 
   it("shows the Captain's conversation in its card, not task notices or tool calls, and its next steps go to it", async () => {
@@ -1017,8 +1050,11 @@ describe("Finding your way in the cards", () => {
     act(() => void textarea.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
     await act(async () => await new Promise((r) => setTimeout(r, 0)))
     expect(coordinator()).not.toBeNull()
-    // With a project picked there's no Coordinator card to hide.
+    // A project keeps its own choice: hiding the Coordinator card doesn't hide its Captain's.
+    click(toggle())
     act(() => setChatProjectFilter(MAP.id))
-    expect(toggle()).toBeNull()
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+    expect(toggle().getAttribute("aria-label")).toBe("Tasks only: hide the Captain card")
+    expect(host.querySelector('[data-testid="captain-card"]')).not.toBeNull()
   })
 })

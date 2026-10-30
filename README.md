@@ -185,7 +185,11 @@ A project whose box has all its slots busy gets a second box while there's room.
 - **Limits.** `BOXYARD_LOCAL_AGENTS` (Settings › Boxes & limits › Tasks running at once on this computer, default 2) caps how many tasks run at once here. They have their own queue and never take a box slot or count toward `BOX_MAX_AGENTS`.
 - **Previews.** Previews are on `http://localhost:<port>`.
 - **Sleep.** While a turn runs, `caffeinate` keeps a Mac out of idle sleep (and out of system sleep on AC power), but a closed lid still sleeps. A turn that sleep cut off carries on once the Mac wakes instead of failing.
-- **Archives and folders.** Local tasks keep no archives: the push at turn end covers them. Their folders stay until the task is deleted, even after Close.
+- **Archives and folders.** Local tasks keep no archives: the push at turn end covers them. Their folders stay on this computer, cleaned by Settings › Boxes & limits › This computer and SSH machines (the box settings don't apply here):
+  - *Free a finished task's build output* (`BOXYARD_LOCAL_BUILD_CLEANUP`, default on): once everything in a folder is pushed, its git-ignored dependency and build output (`node_modules`, `dist`, `build`, `.next`, caches) goes: a done task's within a couple of minutes, another resting one's after `BOXYARD_LOCAL_BUILD_CLEANUP_IDLE_HOURS` idle hours (default 6). Scratch and captures (`tmp`, `shots`, `perf`, reports) stay.
+  - *Task folders kept* (`BOXYARD_LOCAL_FOLDERS_KEPT`, default 10, 0 = no limit): past it, the oldest finished folders (done first) are archived and removed; they come back on their next message.
+  - *Low-disk cleanup* (`BOXYARD_LOCAL_DISK_MIN_FREE_GB`, default 30, 0 = off): below that much free disk, build output and then the oldest finished folders go until there's room again.
+  - None of them touches a running, queued or starting task, one waiting for an answer, or a folder with anything uncommitted, stashed or unpushed. The same settings apply to each SSH machine.
 - **Switching back.** Switching a project between boxes and this computer moves each task at its next turn, but only when its work is safe (pushed and archived first). Otherwise the task stays where it is and its log says why.
 - **Claude login.** Without a token in Settings › Credentials, local agents use the computer's own `claude` login. `CLAUDE_BIN` picks the binary. When setup chose This computer, that login also counts as the Claude sign-in setup asks for, and `gh auth token` stands in for a missing GitHub token (read on the server, never sent to the browser).
 

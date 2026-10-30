@@ -207,9 +207,9 @@ describe("local runner", () => {
     expect((await done(r, a.id, 2)).boxId).toBe(LOCAL_BOX_ID)
     expect(r.boxes.created).toBe(1)
 
-    // Closing keeps the folder: there's no archive to come back from. Deleting the task removes it.
+    // Closing keeps the folder (this computer's cleanup is off in tests). Deleting the task removes it.
     await call(r, "POST", `/api/tasks/${a.id}/close`)
-    expect(events(r, a.id)).toContain("Closed. Its folder on this computer stays until the task is deleted.")
+    expect(events(r, a.id)).toContain("Closed. Its folder stays on this computer until the task is deleted or this computer's cleanup archives it (Settings › Boxes & limits › This computer and SSH machines).")
     await new Promise((res) => setTimeout(res, 1500))
     expect(fs.existsSync(path.join(localDir(r, a.id), "work"))).toBe(true)
     expect(getTask(r, a.id).boxId).toBe(LOCAL_BOX_ID)

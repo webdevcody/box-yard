@@ -6,7 +6,7 @@ import { act, createElement, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ChatPanel } from "../web/src/components/ChatPanel.js"
-import { PINS_KEY, pickProject, readPins, setChatProjectFilter } from "../web/src/lib/projectBar.js"
+import { PINS_KEY, centredScrollLeft, pickProject, readPins, setChatProjectFilter } from "../web/src/lib/projectBar.js"
 import { keys } from "../web/src/lib/queries.js"
 import { projectColors } from "../shared/projectColors.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
@@ -136,6 +136,100 @@ describe("project bar", () => {
     qc.setQueryData(keys.chat, [])
     render(createElement(ChatPanel))
     expect(host.querySelector('[data-testid="project-bar"]')).toBeNull()
+  })
+})
+
+describe("centring the picked chip", () => {
+  it("centredScrollLeft puts the chip in the bar's middle, clamped to what the bar can scroll", () => {
+    // Bar 300 wide at x=20 (middle 170); chip 100 wide, 400 into the content, bar scrolled 0.
+    expect(centredScrollLeft({ left: 20, width: 300 }, { left: 420, width: 100 }, 0, 300, 1200)).toBe(300)
+    // Already scrolled 250: the same chip is now at x=170 on screen.
+    expect(centredScrollLeft({ left: 20, width: 300 }, { left: 170, width: 100 }, 250, 300, 1200)).toBe(300)
+    // Zen's column: a 10px gutter on each edge, so the scroll area (clientWidth 280) shares the box's middle.
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 400, width: 100 }, 0, 280, 1200)).toBe(300)
+    // Near the start: can't go below 0. Near the end: can't pass scrollWidth - clientWidth.
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 10, width: 60 }, 0, 300, 1200)).toBe(0)
+    expect(centredScrollLeft({ left: 0, width: 300 }, { left: 1150, width: 50 }, 0, 300, 1200)).toBe(900)
+  })
+
+  describe("in the bar", () => {
+    const PROJECTS = Array.from({ length: 8 }, (_, i) => project(`prj_many000${i}`, `project-${i}`, i + 1))
+    let calls: { left: number; behavior: string }[]
+    let intoView: number
+    let reduced: boolean
+    const proto = HTMLElement.prototype as unknown as Record<string, unknown>
+    const saved: Record<string, PropertyDescriptor | undefined> = {}
+    const bar = () => host.querySelector<HTMLElement>('[data-testid="project-bar"]')!
+
+    beforeEach(() => {
+      calls = []
+      intoView = 0
+      reduced = false
+      for (const k of ["getBoundingClientRect", "clientWidth", "scrollWidth", "scrollTo", "scrollIntoView"]) saved[k] = Object.getOwnPropertyDescriptor(Element.prototype, k) ?? Object.getOwnPropertyDescriptor(HTMLElement.prototype, k)
+      // A 300px bar at x=0; chip i (All is 0) is 150px apart and 120 wide.
+      Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+        configurable: true,
+        value(this: HTMLElement) {
+          const b = this.closest<HTMLElement>('[data-testid="project-bar"]')
+          if (!b) return { left: 0, width: 0, top: 0, height: 0, right: 0, bottom: 0 }
+          if (this === b) return { left: 0, width: 300, top: 0, height: 36, right: 300, bottom: 36 }
+          const left = [...b.children].indexOf(this) * 150 - b.scrollLeft
+          return { left, width: 120, top: 0, height: 28, right: left + 120, bottom: 28 }
+        },
+      })
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 300 })
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", { configurable: true, get: () => 150 * 9 })
+      Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+        configurable: true,
+        value(this: HTMLElement, o: ScrollToOptions) {
+          calls.push({ left: o.left!, behavior: o.behavior! })
+          this.scrollLeft = o.left!
+        },
+      })
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: () => intoView++ })
+      vi.stubGlobal("matchMedia", (q: string) => ({ matches: q.includes("reduced-motion") && reduced, addEventListener() {}, removeEventListener() {} }))
+      qc.setQueryData(keys.projects, PROJECTS)
+      qc.setQueryData(keys.tasks, [])
+      qc.setQueryData(keys.chat, [])
+      localStorage.setItem(PINS_KEY, JSON.stringify(Object.fromEntries(PROJECTS.map((p) => [p.id, "pinned"]))))
+    })
+    afterEach(() => {
+      for (const k of Object.keys(saved)) {
+        delete proto[k]
+        if (saved[k]) Object.defineProperty(Element.prototype, k, saved[k]!)
+      }
+    })
+
+    it("a pick scrolls only the bar, smoothly, so the picked chip is centred", () => {
+      render(createElement(ChatPanel))
+      expect(calls).toEqual([])
+      // project-5 is the bar's 7th child (All first): 6 * 150 + 60 - 150 = 810.
+      act(() => pickProject("prj_many0005"))
+      expect(calls).toEqual([{ left: 810, behavior: "smooth" }])
+      expect(bar().scrollLeft).toBe(810)
+      expect(intoView).toBe(0)
+      // A chip near the end goes as far as the bar scrolls (1350 - 300).
+      act(() => pickProject("prj_many0007"))
+      expect(calls.at(-1)).toEqual({ left: 1050, behavior: "smooth" })
+      // Clicking a chip does it too; All goes back to the start.
+      click(chip("project-2"))
+      expect(calls.at(-1)).toEqual({ left: 360, behavior: "smooth" })
+      click(allChip())
+      expect(calls.at(-1)).toEqual({ left: 0, behavior: "smooth" })
+    })
+
+    it("jumps instead of gliding when motion is reduced", () => {
+      reduced = true
+      render(createElement(ChatPanel))
+      act(() => pickProject("prj_many0004"))
+      expect(calls).toEqual([{ left: 660, behavior: "auto" }])
+    })
+
+    it("centres a chip that's already picked when the bar first shows, without gliding", () => {
+      act(() => setChatProjectFilter("prj_many0006"))
+      render(createElement(ChatPanel))
+      expect(calls).toEqual([{ left: 960, behavior: "auto" }])
+    })
   })
 })
 

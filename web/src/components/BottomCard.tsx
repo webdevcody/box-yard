@@ -3,9 +3,10 @@
 // Captain (CaptainCard here), so Cody talks to the Captain directly and the Coordinator never sees it. Either folds
 // to its one-line header, with its newest line beside the title; this browser remembers which (one setting for both).
 import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
-import { Bot, ChevronRight, ChevronUp, Maximize2 } from "lucide-react"
+import { Bot, ChevronRight, ChevronUp, EyeOff, Maximize2 } from "lucide-react"
 import { newClientId, useCaptainMessages, useCaptainState, useProjects, useSendCaptainMessage } from "../lib/queries"
 import { localFlag } from "../lib/localFlag"
+import { setTasksOnly, useTasksOnly } from "../lib/coordinatorView"
 import { splitQueued } from "../lib/queued"
 import { captainRows, plainText } from "../lib/captainTranscript"
 import { useTiles } from "../lib/taskTiles"
@@ -19,6 +20,20 @@ import type { CaptainMessage } from "../../../shared/types"
 
 /** The bottom card folded to its header. */
 export const bottomCardFolded = localFlag("boxyard:bottom-card-folded")
+
+const HIDDEN =
+  "flex w-full min-w-0 items-center gap-2 rounded-[10px] border border-dashed border-zinc-800 px-2 py-1.5 text-left text-xs text-zinc-500 hover:text-zinc-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-10"
+
+/** In place of the bottom card while "Tasks only" hides it: what's hidden, and the way back. */
+export function HiddenCard({ label, onShow, testId }: { label: string; onShow: () => void; testId: string }) {
+  return (
+    <button type="button" onClick={onShow} data-testid={testId} className={HIDDEN}>
+      <EyeOff className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1 truncate">{label} hidden (Tasks only)</span>
+      <span className="shrink-0 text-zinc-500">show</span>
+    </button>
+  )
+}
 
 const CARD = "scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px]"
 const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
@@ -124,9 +139,17 @@ function latestLine(m: CaptainMessage | undefined): string | null {
 
 /**
  * A project's Captain at the bottom of the chat, while the project bar shows that project: its newest lines with the
- * messages queued for its next turn, who's working, and the way to its whole chat (its Captain tab).
+ * messages queued for its next turn, who's working, and the way to its whole chat (its Captain tab). "Tasks only"
+ * (lib/coordinatorView.ts) leaves a one-line stand-in.
  */
 export const CaptainCard = memo(function CaptainCard({ projectId }: { projectId: string }) {
+  const hidden = useTasksOnly(true)
+  const name = useProjects().data?.find((p) => p.id === projectId)?.name ?? projectId
+  if (hidden) return <HiddenCard label={`${name} Captain card`} onShow={() => setTasksOnly(false, true)} testId="captain-hidden" />
+  return <CaptainCardBody projectId={projectId} />
+})
+
+function CaptainCardBody({ projectId }: { projectId: string }) {
   const project = useProjects().data?.find((p) => p.id === projectId)
   const color = useTiles().colors.get(projectId)
   const state = useCaptainState(projectId).data
@@ -205,4 +228,4 @@ export const CaptainCard = memo(function CaptainCard({ projectId }: { projectId:
       )}
     </section>
   )
-})
+}

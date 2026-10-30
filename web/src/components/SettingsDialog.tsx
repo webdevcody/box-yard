@@ -856,7 +856,24 @@ function LimitsPanel({
   const health = useHealth()
   const server = useSettings()
   const int =
-    (k: "maxBoxes" | "boxCreateConcurrency" | "maxAgents" | "localAgents" | "boxIdleDeleteMinutes" | "workspaceRetentionDays" | "archiveRetentionDays" | "archiveKeepTouchedDays" | "diskMinFreeMb" | "memoryMaxUsedPercent" | "memoryMinFreeMb" | "buildCleanupIdleMinutes") =>
+    (
+      k:
+        | "maxBoxes"
+        | "boxCreateConcurrency"
+        | "maxAgents"
+        | "localAgents"
+        | "localFoldersKept"
+        | "localBuildCleanupIdleHours"
+        | "localDiskMinFreeGb"
+        | "boxIdleDeleteMinutes"
+        | "workspaceRetentionDays"
+        | "archiveRetentionDays"
+        | "archiveKeepTouchedDays"
+        | "diskMinFreeMb"
+        | "memoryMaxUsedPercent"
+        | "memoryMinFreeMb"
+        | "buildCleanupIdleMinutes",
+    ) =>
     (e: React.ChangeEvent<HTMLInputElement>) =>
       set(k, Math.trunc(Number(e.target.value)))
   const capacity = agentCapacity(s)
@@ -983,23 +1000,6 @@ function LimitsPanel({
         <input id={fid("ma")} type="number" min={0} max={1000} className={inputClass} value={s.maxAgents} onChange={int("maxAgents")} />
       </Row>
       <Row
-        id={fid("la")}
-        label="Tasks running at once on this computer"
-        help={`Tasks of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Tasks running at once limits only its own tasks within this. They have their own queue: they never take a box slot or count toward Max tasks running at once. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
-        hint={hint("localAgents")}
-      >
-        <input
-          id={fid("la")}
-          type="number"
-          min={LOCAL_AGENTS_LIMITS.min}
-          max={LOCAL_AGENTS_LIMITS.max}
-          className={inputClass}
-          value={s.localAgents}
-          onChange={int("localAgents")}
-          data-testid="local-agents"
-        />
-      </Row>
-      <Row
         id={fid("mr")}
         label="Task folders kept per box"
         help={`Task folders kept on one box (running or not) before older archived workspaces are parked. Unless set here, each box uses its own size's default: ${WORKER_SIZES.map((z) => `${z} ${SIZE_DEFAULTS[z].maxResidentPerBox}`).join(", ")}.`}
@@ -1090,7 +1090,7 @@ function LimitsPanel({
       <Row
         id={fid("bci")}
         label="Build output cleanup (idle minutes)"
-        help="Once a task's turn has ended and it has sat idle this long, its git-ignored build output (node_modules, dist, .cache, tmp, perf captures) is removed from the box. Only folders git ignores and doesn't track; uncommitted work is never touched. 0 = off (low-disk cleanup still runs)."
+        help="Once a task's turn has ended and it has sat idle this long, its git-ignored build output (node_modules, dist, .cache, tmp, perf captures) is removed from its Upstash box (this computer and SSH machines have their own settings below). Only folders git ignores and doesn't track; uncommitted work is never touched. 0 = off (low-disk cleanup still runs)."
         hint={hint("buildCleanupIdleMinutes")}
       >
         <input id={fid("bci")} type="number" min={0} max={43_200} className={inputClass} value={s.buildCleanupIdleMinutes} onChange={int("buildCleanupIdleMinutes")} />
@@ -1135,6 +1135,75 @@ function LimitsPanel({
           <input id={fid("gpt")} type="checkbox" checked={s.gitPushAtTurnEnd} onChange={(e) => set("gitPushAtTurnEnd", e.target.checked)} data-testid="git-push-at-turn-end" />
           {s.gitPushAtTurnEnd ? "On: branch and WIP pushed, small archives" : "Off: full archives"}
         </label>
+      </Row>
+      <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100" data-testid="limits-own-computers">
+        This computer and SSH machines
+      </h4>
+      <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+        Task folders on your own computers aren't boxes, so the box cleanup above doesn't reach them. These settings do. They never touch a running, queued or starting task,
+        one waiting for an answer, or a folder with anything uncommitted, stashed or unpushed. A folder that leaves is archived first and comes back on its next message.
+      </p>
+      <Row
+        id={fid("la")}
+        label="Tasks running at once on this computer"
+        help={`Tasks of projects that run on this computer (project settings › Runs on) that may run at once here, every project's together; a project's own Tasks running at once limits only its own tasks within this. They have their own queue: they never take a box slot or count toward Max tasks running at once. Each task works in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"} (BOXYARD_LOCAL_DIR). ${LOCAL_UNSANDBOXED}`}
+        hint={hint("localAgents")}
+      >
+        <input
+          id={fid("la")}
+          type="number"
+          min={LOCAL_AGENTS_LIMITS.min}
+          max={LOCAL_AGENTS_LIMITS.max}
+          className={inputClass}
+          value={s.localAgents}
+          onChange={int("localAgents")}
+          data-testid="local-agents"
+        />
+      </Row>
+      <Row
+        id={fid("lfk")}
+        label="Task folders kept on this computer"
+        help={`Most task folders in ${server.data?.localDir ?? "~/boxyard-workspaces"}, and on each SSH machine. Past it, the oldest finished folders (done tasks first) are archived and removed, but only when all their work is pushed. 0 = no limit.`}
+        hint={hint("localFoldersKept")}
+      >
+        <input id={fid("lfk")} type="number" min={0} max={1000} className={inputClass} value={s.localFoldersKept} onChange={int("localFoldersKept")} data-testid="local-folders-kept" />
+      </Row>
+      <Row
+        id={fid("lbc")}
+        label="Free a finished task's build output"
+        help="Once all of a task's work is pushed, remove the dependency and build output git ignores (node_modules, dist, build, .next, caches) from its folder: a done or closed task's within a couple of minutes, another resting task's after the idle hours below. Scratch folders and captures (tmp, shots, perf, reports) stay. The agent's next prompt says what went, so it reinstalls first."
+        hint={hint("localBuildCleanup")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("lbc")} type="checkbox" checked={s.localBuildCleanup} onChange={(e) => set("localBuildCleanup", e.target.checked)} data-testid="local-build-cleanup" />
+          {s.localBuildCleanup ? "On: freed once the work is pushed" : "Off: only low-disk cleanup frees it"}
+        </label>
+      </Row>
+      <Row
+        id={fid("lbh")}
+        label="...of a task that isn't done (idle hours)"
+        help="A resting task that isn't done (idle, PR ready, failed) loses its build output after this many idle hours. 0 = only done tasks."
+        hint={hint("localBuildCleanupIdleHours")}
+      >
+        <input
+          id={fid("lbh")}
+          type="number"
+          min={0}
+          max={24 * 365}
+          className={inputClass}
+          value={s.localBuildCleanupIdleHours}
+          disabled={!s.localBuildCleanup}
+          onChange={int("localBuildCleanupIdleHours")}
+          data-testid="local-build-cleanup-hours"
+        />
+      </Row>
+      <Row
+        id={fid("ldf")}
+        label="Low-disk cleanup (GB free)"
+        help="When the disk holding the task folders has less free space than this, Box Yard frees build output and then removes the oldest finished folders, until there's this much free again. It checks every couple of minutes. 0 = off."
+        hint={hint("localDiskMinFreeGb")}
+      >
+        <input id={fid("ldf")} type="number" min={0} max={100_000} step={5} className={inputClass} value={s.localDiskMinFreeGb} onChange={int("localDiskMinFreeGb")} data-testid="local-disk-min-free" />
       </Row>
       <div className="mt-2 space-y-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
         <p>
