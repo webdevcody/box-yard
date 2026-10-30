@@ -913,6 +913,10 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN batch_id TEXT;
   `,
   `
+  -- Task priority (shared/priority.ts): 'high' tasks are pulled from the queue before normal ones. NULL: normal.
+  ALTER TABLE tasks ADD COLUMN priority TEXT;
+  `,
+  `
   -- Which GPU cloud a "Runs on: GPU" project's boxes come from (shared/gpu.ts): 'runpod' or 'vast'. NULL follows
   -- Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that's on).
   ALTER TABLE projects ADD COLUMN gpu_provider TEXT;
