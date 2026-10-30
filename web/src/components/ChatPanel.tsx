@@ -1,7 +1,22 @@
 import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import { useLocation } from "wouter"
 import { Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
-import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCompactOrchestrator, useOrchestratorState, useProjects, useSendChat, useTasks } from "../lib/queries"
+import {
+  newClientId,
+  useCaptainMessages,
+  useCaptainState,
+  useChat,
+  useChatBusy,
+  useChatControl,
+  useChatStream,
+  useCompactCaptain,
+  useCompactOrchestrator,
+  useOrchestratorState,
+  useProjects,
+  useSendCaptainMessage,
+  useSendChat,
+  useTasks,
+} from "../lib/queries"
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
@@ -26,6 +41,9 @@ import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
 import { chatProvenance, filterByProject, filterByTasks, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { CardPanel, CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
+import { CaptainCard } from "./BottomCard"
+import { projectColorStyle } from "./TaskIcon"
+import { useTiles } from "../lib/taskTiles"
 import { setCoordinatorView, setTasksOnly, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
 import { COORDINATOR_CHAT, useOpenCard } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
@@ -33,7 +51,7 @@ import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
 import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
 import { TryFirst, markTryFirstDone, useTryFirstDone } from "./TryFirst"
-import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
+import type { Attachment, ChatMessage, ContextUsage } from "../../../shared/types"
 
 const SUGGESTIONS = [
   "What's everyone working on?",
@@ -60,6 +78,8 @@ function useRecentProjects(all: ChatMessage[], prov: Provenance): ReadonlySet<st
  * `onClose` adds a close button to the header; App passes it only while the panel is a drawer. `zen` lays the same
  * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css), and the
  * context meter moves into the header (CoordinatorContext). With auto-compact on there's no meter or Compact at all.
+ * With a project picked in the project bar, the panel talks to that project's Captain instead: the header names it
+ * and shows its context, the box sends to it, and its card (BottomCard.tsx) takes the Coordinator card's place.
  */
 export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onClose?: () => void; zen?: boolean }) {
   const chat = useChat()
@@ -76,6 +96,15 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const meterRow = spotClass(autoCompact, "header")
   const projects = useProjects()
   const tasks = useTasks()
+  // The project bar's pick: the box below talks to its Captain.
+  const projectFilter = useChatProjectFilter()
+  const captainId = projectFilter
+  const captainState = useCaptainState(captainId ?? "", { enabled: captainId !== null })
+  const captainMessages = useCaptainMessages(captainId ?? "", { enabled: captainId !== null })
+  const sendCaptain = useSendCaptainMessage(captainId ?? "")
+  const compactCaptain = useCompactCaptain(captainId ?? "")
+  const captainName = captainId ? (projects.data?.find((p) => p.id === captainId)?.name ?? captainId) : null
+  const captainColor = useTiles().colors.get(captainId ?? "")
   const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
   const composer = useRef<ComposerHandle>(null)
@@ -111,11 +140,18 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   )
   const submit = useCallback(
     (text: string, attachments: Attachment[] = []) => {
-      const sending = followUp(text, attachments)
+      let sending: Promise<unknown> | undefined
+      if (captainId) {
+        const content = text.trim()
+        if (!content && !attachments.length) return
+        sending = sendCaptain.mutateAsync({ id: newClientId("chat"), content, attachments })
+        sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+        scroller.current?.scrollToEnd()
+      } else sending = followUp(text, attachments)
       box.current?.focus()
       return sending
     },
-    [followUp],
+    [followUp, captainId, sendCaptain.mutateAsync],
   )
 
   const messages = chat.data ?? NO_MESSAGES
@@ -124,7 +160,6 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const all = useMemo(() => splitQueued(messages).settled, [messages])
   const allRows = useCoordinatorRows(all)
   // The project bar: which projects each message is about, and the one the chat shows only (lib/chatProvenance.ts).
-  const projectFilter = useChatProjectFilter()
   const prov = useMemo(() => chatProvenance(all, index, allRows), [all, index, allRows])
   const recent = useRecentProjects(all, prov)
   // Cards, one per task, or the Timeline: every message, or one card's ("Show in timeline").
@@ -158,7 +193,20 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     const task = taskId ? tasks.data?.find((t) => t.id === taskId) : null
     return task ? (projects.data?.find((p) => p.id === task.projectId) ?? null) : null
   }, [location, projects.data, tasks.data])
-  const selectionSource: SelectionTaskSource = useMemo(() => ({ kind: "orchestrator", project: projectContext(currentProject) }), [currentProject])
+  const selectionSource: SelectionTaskSource = useMemo(
+    () => (captainId ? { kind: "captain", project: { id: captainId, name: captainName ?? captainId } } : { kind: "orchestrator", project: projectContext(currentProject) }),
+    [captainId, captainName, currentProject],
+  )
+  // Who the header, its context reading and the box are about: the Coordinator, or the picked project's Captain.
+  const talking = captainId
+    ? { busy: Boolean(captainState.data?.busy), state: captainState.data, queued: compactCaptain.isPending, compact: compactCaptain.mutate, who: "the Captain's" }
+    : { busy: Boolean(busy.data), state: orch.data, queued: compact.isPending, compact: compactNow, who: "the Coordinator's" }
+  // Back to the Coordinator from a Captain: the whole chat again.
+  const pickHere = useCallback((chat: string) => {
+    if (chat !== COORDINATOR_CHAT) return false
+    setChatProjectFilter(null)
+    return true
+  }, [])
 
   // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
@@ -220,23 +268,30 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             )}
           >
             <div className="flex min-w-0 items-center gap-2">
-              <AgentIcon busy={Boolean(busy.data)} />
+              <AgentIcon busy={talking.busy} />
               {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
               {/* The title opens the chat switcher: the Coordinator, then every project's Captain. Too narrow for the word
                   beside the view toggle (a 320px phone), the icon says it alone and the switcher keeps its chevron. */}
               <div className="flex min-w-0 flex-1">
-                <ChatSwitcher current={COORDINATOR_CHAT} onLeave={onClose}>
-                  <span className="@max-[23rem]:sr-only">
-                    {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-                    {zen && <span className="max-sm:hidden">Box Yard </span>}
-                    Coordinator
-                  </span>
+                <ChatSwitcher current={captainId ?? COORDINATOR_CHAT} onLeave={onClose} onPick={pickHere}>
+                  {captainId ? (
+                    <span data-testid="chat-title" style={projectColorStyle(captainColor)} className="flex min-w-0 items-center gap-1.5 @max-[23rem]:sr-only">
+                      <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-(--pc)" />
+                      <span className="min-w-0 truncate">{captainName} Captain</span>
+                    </span>
+                  ) : (
+                    <span data-testid="chat-title" className="@max-[23rem]:sr-only">
+                      {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+                      {zen && <span className="max-sm:hidden">Box Yard </span>}
+                      Coordinator
+                    </span>
+                  )}
                 </ChatSwitcher>
               </div>
               <ViewToggle />
               {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">
-                {!autoCompact && <CoordinatorContext zen={zen} state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
+                {!autoCompact && <CoordinatorContext zen={zen} state={talking.state} queued={talking.queued} onCompact={talking.compact} who={talking.who} />}
                 <VoiceControl />
                 {!zen && (
                   <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
@@ -246,7 +301,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 <Button size="sm" variant="ghost" title="Settings" aria-label="Settings" onClick={() => openSettings("orchestrator")}>
                   <SettingsIcon className="h-3.5 w-3.5" />
                 </Button>
-                {busy.data && (
+                {/* A Captain's turn has no Stop. */}
+                {!captainId && busy.data && (
                   <Button size="sm" variant="ghost" onClick={() => control.stop()} title="Stop">
                     <Square className="h-3.5 w-3.5" />
                   </Button>
@@ -274,11 +330,11 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           {!zen && meterRow !== null && (
             <ContextMeter
               className={cx("border-b border-zinc-900 px-4 py-2", meterRow)}
-              tokens={orch.data?.usage.tokens ?? null}
-              window={orch.data?.usage.window ?? null}
-              compacting={orch.data?.compacting ?? false}
-              queued={Boolean(orch.data?.compactQueued) || compact.isPending}
-              onCompact={() => compact.mutate()}
+              tokens={talking.state?.usage.tokens ?? null}
+              window={talking.state?.usage.window ?? null}
+              compacting={talking.state?.compacting ?? false}
+              queued={Boolean(talking.state?.compactQueued) || talking.queued}
+              onCompact={() => talking.compact()}
             />
           )}
           </div>
@@ -291,7 +347,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             <SelectionToTask source={selectionSource} onPrompt={submit}>
               <StickyScroll
                 handle={scroller}
-                count={cards ? cards.live.length + cards.idle.length + cards.done.length + cards.coordinator.length : list.length}
+                count={(cards ? cards.live.length + cards.idle.length + cards.done.length + cards.coordinator.length : list.length) + (captainId ? (captainMessages.data?.length ?? 0) + (talking.busy ? 1 : 0) : 0)}
                 resetKey={view}
                 restoreKey={cardsOn ? "chat:cards" : "chat"}
                 hidden={cards ? 0 : tail.hidden}
@@ -344,16 +400,31 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </>
                   )}
                 </InRepo>
+                {/* Under the cards, or the project's part of the Timeline: the Captain the box below talks to. */}
+                {captainId && <CaptainCard projectId={captainId} />}
               </StickyScroll>
             </SelectionToTask>
 
             <Composer
               onSubmit={submit}
-              placeholder={busy.data ? "Queue another message…" : "Ask the Coordinator…"}
+              placeholder={captainId ? (talking.busy ? "Queue another message for the Captain…" : `Message the ${captainName} Captain…`) : busy.data ? "Queue another message…" : "Ask the Coordinator…"}
               textareaRef={box}
               handleRef={composer}
               panelRef={panel}
-              historyKey="coordinator"
+              historyKey={captainId ? `captain:${captainId}` : "coordinator"}
+              tools={
+                captainId && (
+                  <span
+                    data-testid="composer-to"
+                    title={`Goes to the ${captainName} Captain, not the Coordinator. Pick "All" in the project bar for the Coordinator.`}
+                    style={projectColorStyle(captainColor)}
+                    className="flex min-w-0 items-center gap-1.5 px-1 text-[11px] text-zinc-500"
+                  >
+                    <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-(--pc)" />
+                    <span className="min-w-0 truncate">To the {captainName} Captain</span>
+                  </span>
+                )
+              }
               className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
             />
           </div>
@@ -367,7 +438,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   )
 })
 
-const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
+const contextHint = (who: string) => `How much of ${who} context window is used. Compact when it gets high.`
 
 /**
  * The Coordinator's context reading in its header, left of the voice button, while auto-compact is off. A wide Zen
@@ -376,7 +447,21 @@ const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. 
  * The docked panel has its meter row under the header instead. A narrow header (a phone, a slim panel) has neither:
  * one ⋯ button, amber from CONTEXT_WARN_PCT, opens a menu with the full reading and Compact.
  */
-function CoordinatorContext({ zen, state, queued, onCompact }: { zen: boolean; state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
+function CoordinatorContext({
+  zen,
+  state,
+  queued,
+  onCompact,
+  who,
+}: {
+  zen: boolean
+  /** The Coordinator's state, or the Captain's the panel talks to. */
+  state: { usage: ContextUsage; compacting: boolean; compactQueued: boolean } | undefined
+  queued: boolean
+  onCompact: () => void
+  /** Whose context it is, for the hint: "the Coordinator's". */
+  who: string
+}) {
   const { open, setOpen, root, trigger } = usePopover()
   const tokens = state?.usage.tokens ?? null
   const window = state?.usage.window ?? null
@@ -387,7 +472,7 @@ function CoordinatorContext({ zen, state, queued, onCompact }: { zen: boolean; s
   const status = compacting ? "Compacting…" : waiting ? "Compact queued" : null
   const title = status ?? "Compact: summarise the conversation to free up context. If a turn is running, it compacts right after."
   const icon = waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Minimize2 className="h-3 w-3" />
-  const bar = pct === null ? <span className="text-xs text-zinc-500">Context</span> : <ContextMiniBar tokens={tokens} window={window} hint={ZEN_CONTEXT_HINT} />
+  const bar = pct === null ? <span className="text-xs text-zinc-500">Context</span> : <ContextMiniBar tokens={tokens} window={window} hint={contextHint(who)} />
   const reading = `Context ${contextLabel(tokens, window)}`
   const menu = spotClass(false, "menu")
   return (
