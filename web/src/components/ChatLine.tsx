@@ -439,7 +439,7 @@ function SentFrom({ taskId, inCard }: { taskId: string; inCard: boolean }) {
   )
 }
 
-/** Cody's message to a task from its card (a sent notice, TaskManager.sentFromChat): his bubble, saying where it went. */
+/** Cody's message to a task from its card (a sent notice, TaskManager.sentFromChat): Cody's bubble, saying where it went. */
 const SentLine = memo(function SentLine({ m, inCard }: { m: ChatMessage; inCard: boolean }) {
   const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
   const text = useMemo(() => noticeText(m).text, [m])

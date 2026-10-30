@@ -83,7 +83,7 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
   return useMemo(() => {
     if (!cards) return null
     // A card open in the list when its task finishes (Cody replied in it and is reading the answer) stays put: it
-    // folds into "done today" at a later update once he has closed it, not under his eyes.
+    // folds into "done today" at a later update once Cody has closed it, not while it's being read.
     const shown = last.current?.live
     const stay = (c: ChatCard) => Boolean(shown?.some((s) => s.key === c.key)) && isOpen(cardOpenKey(c.key))
     const { live, done } = arrangeCards(cards.cards, (id) => statuses?.[id], (id) => tiles.get(id)?.projectId, Date.now(), project, stay)
@@ -568,7 +568,7 @@ function rowsOf(entries: readonly CardEntry[], thread: readonly SideThreadMessag
 /**
  * The newest `show` entries, with "N earlier" for more, and the card's side thread's lines among them. `own`: a task's
  * card, whose chips needn't name it. The update that ends the turn Cody's message started shows as the agent's reply,
- * not a chip: it answers him.
+ * not a chip: it answers Cody.
  */
 function CardEntries({
   entries,

@@ -146,7 +146,7 @@ describe("chatCards", () => {
     // "This task": a sent notice, a message of its own (not a chip), in the task's card.
     const sent = msg("notice", "✉️ **Fix login** got a message from Cody: use the new form", { taskId: LOGIN.id, projectId: YARD.id, sent: true })
     const turn = notice(LOGIN, "💬 **Fix login** finished its turn: switched to the new form")
-    // His questions to the Coordinator from a card are its side thread, not the chat: what's here is the main chat's.
+    // Cody's questions to the Coordinator from a card are its side thread, not the chat: what's here is the main chat's.
     const later = user("thanks")
     const answer2 = reply("Any time.")
     const rows = coordinatorRows([ask, call, answer, sent, turn, later, answer2])
