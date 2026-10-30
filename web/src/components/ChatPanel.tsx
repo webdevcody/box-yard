@@ -21,13 +21,13 @@ import { ChatLine } from "./ChatLine"
 import { ChatRows, useCoordinatorRows } from "./UpdateChips"
 import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
-import { SideThreadPane, ThreadChatProvider } from "./SideThread"
+import { SideThreadPane, ThreadChatProvider, type CardPanelProps } from "./SideThread"
 import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
 import { chatProvenance, filterByProject, filterByTasks, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
-import { CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
+import { CardPanel, CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
 import { setCoordinatorView, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
-import { COORDINATOR_CHAT } from "../lib/threads"
+import { COORDINATOR_CHAT, useOpenCard } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
 import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
@@ -141,15 +141,19 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const filteredRows = useCoordinatorRows(filteredAll)
   const rows = filtered ? filteredRows : allRows
   const tail = useTail(list, filtered ? `chat:${projectFilter ?? ""}:${onlyTasks ? only!.key : ""}` : "chat")
-  const cards = useCards(allRows, prov, cardsOn && messages.length > 0, projectFilter)
+  // A card in the side panel (⤢) needs the cards even while the Timeline shows.
+  const cardInPanel = useOpenCard(COORDINATOR_CHAT) !== null
+  const layout = useCards(allRows, prov, (cardsOn || cardInPanel) && messages.length > 0, projectFilter)
+  const cards = cardsOn ? layout : null
   // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
   const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
   // In the cards, a question asked from a card waits in that card; the rest wait in the Coordinator card.
   const [asked, queuedHere] = useMemo(() => {
-    if (!cards || !queued.length) return [NO_MESSAGES, queued]
+    if (!layout || !queued.length) return [NO_MESSAGES, queued]
     const about = (m: ChatMessage) => Array.isArray(m.meta?.about) && m.meta.about.length > 0
     return [queued.filter(about), queued.filter((m) => !about(m))]
-  }, [cards, queued])
+  }, [layout, queued])
+  const renderCard = (p: CardPanelProps) => <CardPanel {...p} layout={layout} asked={asked} onFollowUp={followUp} />
   const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
@@ -359,7 +363,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         </div>
         {/* Its header as tall as the chat's: 3.5rem in Zen and the drawer, the docked header's 47px (py-3, a 22px row, the border). */}
         <InRepo mentions>
-          <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+          <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} renderCard={renderCard} />
         </InRepo>
       </section>
     </ThreadChatProvider>
