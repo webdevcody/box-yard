@@ -165,11 +165,14 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    quote: z.string().trim().min(1).max(MAX_QUOTE_CHARS),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
+    kind: z.enum(["ask", "reply"]).optional(),
+    quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
   }),
   sideThreadMessage: z.object({ id: idSchema, content: z.string().trim().min(1).max(MAX_QUESTION_CHARS) }),
+  sideThreadResolve: z.object({ resolved: z.boolean().default(true) }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
@@ -1191,6 +1194,13 @@ export function createBoxYard(
   api.post("/threads/:id/messages", (req, res) => {
     const body = parse(schemas.sideThreadMessage, req.body)
     res.status(201).json(threads.send(req.params.id!, body.content, body.id))
+  })
+  api.post("/threads/:id/resolve", (req, res) => {
+    const body = parse(schemas.sideThreadResolve, req.body ?? {})
+    res.json(threads.resolve(req.params.id!, body.resolved))
+  })
+  api.post("/threads/:id/seen", (req, res) => {
+    res.json(threads.seen(req.params.id!))
   })
   api.post("/threads/:id/stop", (req, res) => {
     threads.get(req.params.id!)

@@ -829,6 +829,15 @@ export const MIGRATIONS: string[] = [
     VALUES ('idn_default', 'Default', 'slate', 1, CAST(strftime('%s', 'now') AS INTEGER) * 1000, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
   ALTER TABLE projects ADD COLUMN identity_id TEXT NOT NULL DEFAULT 'idn_default';
   `,
+  `
+  -- Threaded replies (server/sideThreads.ts): kind 'reply' is a thread of replies to a whole chat message (one per
+  -- message), shown as "N replies" under it; 'ask' is a question about a highlighted passage. resolved_at: Cody
+  -- resolved it (folded away; a new message reopens it). seen_at: when Cody last had it open, so a later answer is unread.
+  ALTER TABLE side_threads ADD COLUMN kind TEXT NOT NULL DEFAULT 'ask';
+  ALTER TABLE side_threads ADD COLUMN resolved_at INTEGER;
+  ALTER TABLE side_threads ADD COLUMN seen_at INTEGER;
+  CREATE INDEX side_threads_anchor ON side_threads(anchor_id, kind);
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
