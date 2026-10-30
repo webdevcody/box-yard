@@ -961,6 +961,39 @@ export function useSendTaskMessage(taskId: string) {
   })
 }
 
+/**
+ * Send a task-chat message to the task's project's Captain instead of its agent (TaskManager.forwardToCaptain). Shows
+ * at once as a pending "→ Captain" line; the server's task.message replaces it (stream.ts matches tmp- by content).
+ */
+export function useForwardToCaptain(taskId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { content: string; attachments?: Attachment[] }) =>
+      api<TaskMessage>(`/api/tasks/${taskId}/captain`, { body: { content: input.content, attachments: input.attachments?.map((a) => a.id) } }),
+    onMutate: async ({ content, attachments }) => {
+      const undo = snapshot<TaskMessage[]>(qc, keys.taskMessages(taskId))
+      const now = Date.now()
+      const meta = { kind: "to_captain", pending: true, ...(attachments?.length ? { attachments } : {}) }
+      const line: TaskMessage = { id: `tmp-${now}`, taskId, role: "event", content: content.trim(), meta, createdAt: now }
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => (list ? [...list, line] : list))
+      return { undo, tmp: line.id }
+    },
+    onError: (err, _v, ctx) => {
+      ctx?.undo()
+      playSendSound("failed")
+      fail("Couldn't send it to the Captain")(err)
+    },
+    onSuccess: (msg, _v, ctx) => {
+      playSendSound()
+      qc.setQueryData<TaskMessage[]>(keys.taskMessages(taskId), (list) => {
+        if (!list) return list
+        const rest = list.filter((m) => m.id !== ctx?.tmp)
+        return rest.some((m) => m.id === msg.id) ? rest : [...rest, msg]
+      })
+    },
+  })
+}
+
 function useTaskAction(action: "stop" | "close" | "retry", optimistic: (t: Task) => Partial<Task>, label: string) {
   const qc = useQueryClient()
   return useMutation({

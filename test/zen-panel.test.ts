@@ -59,7 +59,11 @@ const REPLY = [
   "[the project](/projects/prj_demo01), [boxes](/boxes), [a report](/artifacts/art_report01/report.md),",
   "[GitHub](https://github.com/webdevcody/box-yard).",
 ].join(" ")
-const CHAT: ChatMessage[] = [{ id: "msg_1", role: "assistant", content: REPLY, meta: null, createdAt: now - 1000 }]
+// A reply to Cody, so the Cards view keeps it in the Coordinator card (an unprompted one goes on the cards it links).
+const CHAT: ChatMessage[] = [
+  { id: "msg_0", role: "user", content: "Where is everything?", meta: null, createdAt: now - 2000 },
+  { id: "msg_1", role: "assistant", content: REPLY, meta: null, createdAt: now - 1000 },
+]
 
 class FakeEventSource {
   onmessage: unknown = null

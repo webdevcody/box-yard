@@ -18,7 +18,7 @@ import { attachmentNote } from "./orchestrator.js"
 import { DEFAULT_OWNER_NAME, withOwner } from "../shared/owner.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
-import { agentCaptainLabel, captainSourceOf } from "../shared/captain.js"
+import { agentCaptainLabel, captainSourceOf, forwardedFromTask } from "../shared/captain.js"
 import { budgetLine, budgetNotes, noteLine, pruneAdvice, shortTokens } from "../shared/notes.js"
 import {
   SUMMARY_PROMPT,
@@ -126,7 +126,22 @@ function sourceLabel(m: CaptainMessage, ownerName: string) {
   const source = captainSourceOf(m)
   if (source === "hook" && typeof m.meta?.hookName === "string") return `From the hook "${m.meta.hookName}" ${withOwner("(an automation, not a new message from Cody)", ownerName)}`
   if (source === "agent") return `${agentCaptainLabel(m.meta)}${withOwner(agentLabelTail(m), ownerName)}`
+  const via = source === "cody" ? forwardedFromTask(m.meta) : null
+  if (via)
+    return withOwner(
+      `From Cody, sent from the chat of task "${via.taskTitle}" (${via.taskId}) to you instead of its busy agent: task management for you to act on. Your reply shows in that task's chat`,
+      ownerName,
+    )
   return withOwner(SOURCE_LABEL[source], ownerName)
+}
+
+/** The task's queue under a message Cody forwarded from its chat, so the Captain can split, edit or cancel them by id. */
+function forwardedQueueNote(m: CaptainMessage): string {
+  const via = forwardedFromTask(m.meta)
+  if (!via) return ""
+  if (!via.queue.length) return `\n\n(Task ${via.taskId} had no queued messages.)`
+  const items = via.queue.map((q) => `- ${q.id} (${q.sender}): ${q.text.replace(/\s+/g, " ").slice(0, 600)}`)
+  return `\n\nTask ${via.taskId}'s queued messages, oldest first (edit_queued_message and cancel_queued_message take these ids):\n${items.join("\n")}`
 }
 
 /** What the Captain should do about an agent's message_captain: answer fast when it is waiting. */
@@ -191,6 +206,8 @@ export class CaptainManager {
    * An agent still waiting on one without a reply_to_agent/send_to_task hears that, so it stops waiting.
    */
   onAgentMessagesHandled: ((projectId: string, messages: CaptainMessage[], reply: string) => void) | null = null
+  /** A Captain turn read these messages Cody sent from a task's chat; `reply` (what it said) goes back to that chat. */
+  onForwardsHandled: ((projectId: string, messages: CaptainMessage[], reply: string) => void) | null = null
   /** A Captain turn that read these notices ended; the notes retro settles the suggestions its retros held. */
   onNoticesHandled: ((projectId: string, notices: CaptainNoticeEntry[], ok: boolean) => void) | null = null
   /** The Claude login a project's Captain runs on when its identity has one of its own (app.ts: Identities.ownClaude). */
@@ -232,6 +249,7 @@ export class CaptainManager {
         () => this.claudeLogin?.(project.id) ?? null,
         () => this.statusOnly?.(project.id) ?? false,
         () => this.prs,
+        (messages, reply) => this.onForwardsHandled?.(project.id, messages, reply),
       )
       this.captains.set(project.id, captain)
     }
@@ -474,6 +492,7 @@ class Captain {
     /** Its identity shows the Coordinator status only, so its replies to the Coordinator report state, not content. */
     private readonly statusOnly: () => boolean = () => false,
     private readonly prs: () => PrLookup | null = () => null,
+    private readonly forwardsHandled: (messages: CaptainMessage[], reply: string) => void = () => {},
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.mcp = mcp
@@ -754,7 +773,7 @@ class Captain {
     const codex = this.cli() === "codex"
     const note = codex ? codexAttachmentNote : attachmentNote
     const messages = answering
-      .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${note(m.meta?.attachments, this.owner())}`)
+      .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${forwardedQueueNote(m)}${note(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
     if (!messages.length) return
     // Codex sees attached images with the message itself; Claude Code opens them with Read.
@@ -781,12 +800,21 @@ class Captain {
     const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)), images }
     const result = await this.runPrompt(prompt, false, ask, (reply) => this.replyUpward(answering, reply))
     this.handled(entries, result.ok)
+    const said = result.ok ? result.text.trim() : `The Captain hit an error: ${result.error.slice(0, 500)}`
     const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
     if (fromAgents.length) {
       try {
-        this.agentMessagesHandled(fromAgents, result.ok ? result.text.trim() : `The Captain hit an error: ${result.error.slice(0, 500)}`)
+        this.agentMessagesHandled(fromAgents, said)
       } catch (err) {
         console.error(`[captain ${this.project.id}] after-turn agent message handling failed:`, err)
+      }
+    }
+    const forwards = answering.filter((m) => captainSourceOf(m) === "cody" && forwardedFromTask(m.meta))
+    if (forwards.length) {
+      try {
+        this.forwardsHandled(forwards, said === NO_UPDATE ? "" : said)
+      } catch (err) {
+        console.error(`[captain ${this.project.id}] after-turn forward handling failed:`, err)
       }
     }
   }
