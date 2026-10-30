@@ -247,14 +247,28 @@ export function stableCards(prev: CardsModel | null, next: CardsModel): CardsMod
   }
 }
 
-/** Statuses that keep a card up however long the chat has been quiet about it: work going on, or waiting on Cody. */
-const OPEN: ReadonlySet<BadgeStatus> = new Set<TaskStatus>(["queued", "starting", "working", "needs_input", "waiting", "pr_ready"])
+/** Statuses that keep a card in the list however long it's been quiet: work going on, or waiting on Cody or other agents. */
+const ACTIVE: ReadonlySet<BadgeStatus> = new Set<TaskStatus>(["queued", "starting", "working", "needs_input", "waiting"])
+/** ...and a PR open for review keeps it up past CARD_WINDOW_MS, though it goes idle like any resting card. */
+const OPEN: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>([...ACTIVE, "pr_ready"])
 const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged"])
+
+/** Statuses Mark done may close in bulk: the turn is over and nothing waits on Cody (not running, queued or asking). */
+export const CLEARABLE: ReadonlySet<TaskStatus> = new Set<TaskStatus>(["idle", "pr_ready", "failed"])
+
+export interface CardsArrangement {
+  live: ChatCard[]
+  /** Resting cards quiet for `idleMs` or more: "N idle". */
+  idle: ChatCard[]
+  /** Finished in the last CARD_WINDOW_MS: "N done today". */
+  done: ChatCard[]
+}
 
 /**
  * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
- * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top. `project` keeps one project's.
- * `stay` keeps a card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
+ * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top, and with `idleMs` set, resting
+ * ones (nothing running, queued or waiting) quiet that long into "N idle". `project` keeps one project's. `stay` keeps a
+ * card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
  */
 export function arrangeCards(
   cards: readonly ChatCard[],
@@ -263,19 +277,22 @@ export function arrangeCards(
   now: number,
   project: string | null,
   stay: (card: ChatCard) => boolean = () => false,
-): { live: ChatCard[]; done: ChatCard[] } {
+  idleMs = 0,
+): CardsArrangement {
   const live: ChatCard[] = []
+  const idle: ChatCard[] = []
   const done: ChatCard[] = []
   for (const c of cards) {
     if (project && projectOf(c.taskIds[0]!) !== project) continue
     const statuses = c.taskIds.map(statusOf).filter((s): s is BadgeStatus => s !== undefined)
     if (!statuses.length) continue
-    if (statuses.some((s) => OPEN.has(s)) || stay(c)) live.push(c)
-    else if (c.last < now - CARD_WINDOW_MS) continue
+    if (stay(c) || statuses.some((s) => ACTIVE.has(s))) live.push(c)
+    else if (c.last < now - CARD_WINDOW_MS && !statuses.some((s) => OPEN.has(s))) continue
     else if (statuses.every((s) => FINISHED.has(s))) done.push(c)
+    else if (idleMs > 0 && c.last < now - idleMs) idle.push(c)
     else live.push(c)
   }
-  return { live, done }
+  return { live, idle, done }
 }
 
 /** The entries that came in after `since`: a card's "N new". */

@@ -32,6 +32,7 @@ const project = (over: Partial<Project> = {}) =>
     identityId: DEFAULT_IDENTITY_ID,
     boxSize: null,
     gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
+    gpuProvider: null,
     docker: { image: null, dockerfile: null },
     createdAt: now,
     updatedAt: now,

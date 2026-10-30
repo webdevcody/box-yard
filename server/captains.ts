@@ -45,6 +45,7 @@ import { MISSING_SESSION, codexErrorText } from "./codex.js"
 import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
+import { captainReplyWakes, takeFyiMarker } from "./captainWake.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -61,6 +62,8 @@ type RunKind = "turn" | "summary" | "compact" | "context"
 interface RunAsk {
   trigger?: string | null
   requestedAt?: number | null
+  /** The turn's `result` line came without an error: its reply is final, though the CLI takes a while longer to exit. */
+  onResult?: (reply: { text: string; fyi: boolean }) => void
   /** Images attached to the messages it answers: a Codex run gets them with the prompt (Claude Code opens them with Read). */
   images?: string[]
 }
@@ -72,7 +75,11 @@ interface RunResult {
   text: string
   raw: string
   sessionId: string | null
+  /** The Captain marked its reply FYI (captainWake.ts): the Coordinator needn't act on it. */
+  fyi?: boolean
 }
+/** A turn's reply, as it goes up to the Coordinator. */
+type TurnReply = Pick<RunResult, "ok" | "error" | "text" | "fyi">
 
 const sessionKey = (projectId: string) => `captain_session:${projectId}`
 const startedKey = (projectId: string) => `captain_session_started:${projectId}`
@@ -101,6 +108,8 @@ export interface CaptainSendOptions {
   tool?: string
   /** Extra meta to keep on the message (a hook's id and name). */
   meta?: Record<string, unknown>
+  /** The Coordinator acts on the reply itself (send_to_captain's act_on_reply), so the reply always wakes it. */
+  actOnReply?: boolean
 }
 
 const SOURCE_LABEL: Record<CaptainSource, string> = {
@@ -149,6 +158,8 @@ const TOOL_REPLY_MAX = 20_000
 export interface CaptainReport {
   /** The Coordinator messages (send_to_captain) this reply answers; absent for automatic reports. */
   replyTo?: string[]
+  /** Only for Cody's information: it shows on the Coordinator chat without waking the Coordinator (captainWake.ts). */
+  fyi?: boolean
 }
 
 /** An ask_captain/wait_for_captain call waiting for a reply. */
@@ -185,6 +196,8 @@ export class CaptainManager {
   claudeLogin: ((projectId: string) => Record<string, string> | null) | null = null
   /** Whether a project's identity shows the Coordinator its status only (app.ts: Identities.statusOnly). */
   statusOnly: ((projectId: string) => boolean) | null = null
+  /** The Coordinator turn running now (Orchestrator.turnKey): messages it sends carry it, so a fan-out is known by it. */
+  coordinatorTurn: (() => string | null) | null = null
   /** GitHub's PR states for the named-tasks block in front of a message (app.ts: TaskManager.prs). */
   prs: PrLookup | null = null
   /** Read when a Captain is created; tests shorten these. */
@@ -256,7 +269,14 @@ export class CaptainManager {
   }
 
   send(projectRef: string, content: string, opts: CaptainSendOptions = {}) {
-    return this.find(projectRef).send(content, opts)
+    return this.find(projectRef).send(content, { ...opts, meta: this.coordinatorMeta(opts) })
+  }
+
+  /** What a Coordinator message carries for the wake on its reply (captainWake.ts): its turn, and act_on_reply. */
+  private coordinatorMeta(opts: CaptainSendOptions): Record<string, unknown> | undefined {
+    if ((opts.source ?? "coordinator") !== "coordinator") return opts.meta
+    const turn = this.coordinatorTurn?.() ?? null
+    return { ...opts.meta, ...(turn ? { coordinatorTurn: turn } : {}), ...(opts.actOnReply ? { actOnReply: true } : {}) }
   }
 
   /** An agent's message_captain, to the Captain of the agent's own project (the server picks it, never the agent). */
@@ -270,7 +290,9 @@ export class CaptainManager {
    */
   async ask(projectRef: string, content: string, timeoutSeconds = CAPTAIN_WAIT_DEFAULT_SECONDS) {
     const captain = this.find(projectRef)
-    const sent = captain.send(content, { source: "coordinator", tool: "ask_captain" })
+    // It wanted the answer now: if the wait runs out, the reply still wakes it.
+    const opts: CaptainSendOptions = { source: "coordinator", tool: "ask_captain", actOnReply: true }
+    const sent = captain.send(content, { ...opts, meta: this.coordinatorMeta(opts) })
     const answered = await captain.waitForReply([sent.id], waitMs(timeoutSeconds))
     const messages = this.store.listCaptainMessages(captain.projectId, 60)
     // Only what the Captain said after this question, not an older reply.
@@ -756,9 +778,8 @@ class Captain {
       .join("\n\n")
     const sources = new Set(answering.map(captainSourceOf))
     const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)), images }
-    const result = await this.runPrompt(prompt, false, ask)
+    const result = await this.runPrompt(prompt, false, ask, (reply) => this.replyUpward(answering, reply))
     this.handled(entries, result.ok)
-    this.replyUpward(answering, result)
     const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
     if (fromAgents.length) {
       try {
@@ -773,8 +794,9 @@ class Captain {
    * The Coordinator hears the Captain's reply to its messages as a pushed update, like a task notice, so
    * send_to_captain needs no blocking wait. An ask/wait_for_captain still waiting gets it in its tool result instead.
    */
-  private replyUpward(answered: CaptainMessage[], result: { ok: boolean; error: string; text: string }) {
-    const asked = answered.filter((m) => captainSourceOf(m) === "coordinator").map((m) => m.id)
+  private replyUpward(answered: CaptainMessage[], result: TurnReply) {
+    const fromCoordinator = answered.filter((m) => captainSourceOf(m) === "coordinator")
+    const asked = fromCoordinator.map((m) => m.id)
     if (!asked.length) return
     const text = result.ok ? result.text.trim() : `I hit an error: ${result.error.slice(0, 500)}`
     this.lastCoordinatorReply = { ids: asked, text: text === NO_UPDATE ? "" : text.slice(0, TOOL_REPLY_MAX) }
@@ -784,7 +806,34 @@ class Captain {
     const replyTo = asked.filter((id) => !taken.has(id))
     if (!replyTo.length) return
     if (!text || text === NO_UPDATE) return
-    this.report(text.slice(0, TOOL_REPLY_MAX), { replyTo })
+    const { wake } = captainReplyWakes({
+      ok: result.ok,
+      text,
+      fyi: Boolean(result.fyi),
+      coordinatorWaits: this.coordinatorWaits(fromCoordinator.filter((m) => replyTo.includes(m.id))),
+      ownerName: this.owner(),
+    })
+    this.report(text.slice(0, TOOL_REPLY_MAX), { replyTo, ...(wake ? {} : { fyi: true }) })
+  }
+
+  /**
+   * The Coordinator acts on the reply to these messages itself: it said so (act_on_reply), or it sent the same turn's
+   * request to other Captains too, a fan-out whose answers it combines.
+   */
+  private coordinatorWaits(messages: CaptainMessage[]): boolean {
+    return messages.some((m) => {
+      if (m.meta?.actOnReply === true) return true
+      const turn = m.meta?.coordinatorTurn
+      return typeof turn === "string" && this.store.coordinatorTurnProjects(turn, m.createdAt).length > 1
+    })
+  }
+
+  /** An automatic wake-up's report to the Coordinator, unless the Captain had nothing to say. */
+  private reportAuto(reply: TurnReply) {
+    const text = reply.text.trim()
+    if (!reply.ok || !text || text === NO_UPDATE) return
+    const { wake } = captainReplyWakes({ ok: true, text, fyi: Boolean(reply.fyi), ownerName: this.owner() })
+    this.report(text, wake ? {} : { fyi: true })
   }
 
   /** Tell the manager which notices this turn covered (a notes retro's leftovers are settled then). */
@@ -882,7 +931,19 @@ class Captain {
     return { text: lines.join("\n"), hash }
   }
 
-  private async runPrompt(body: string, auto = false, ask: RunAsk = {}): Promise<{ ok: boolean; error: string; text: string }> {
+  /**
+   * Run a turn. Its reply goes up once, as soon as it's final: an automatic wake-up's report to the Coordinator, or
+   * `upward` for a turn answering messages.
+   */
+  private async runPrompt(body: string, auto = false, ask: RunAsk = {}, upward?: (reply: TurnReply) => void): Promise<RunResult> {
+    let relayed = false
+    const relay = (reply: TurnReply) => {
+      if (relayed) return
+      relayed = true
+      if (auto) this.reportAuto(reply)
+      else upward?.(reply)
+    }
+    ask = { ...ask, onResult: (r) => relay({ ok: true, error: "", ...r }) }
     let now = this.projectNow()
     const recapFile = this.store.getKv(recapKey(this.project.id))
     const compacted = recapFile ? this.recap(recapFile) : null
@@ -913,7 +974,7 @@ class Captain {
       const msg = this.store.addCaptainMessage(this.project.id, "error", `The Captain hit an error: ${result.error.slice(0, 1500)}`)
       this.hub.broadcast({ type: "captain.message", message: msg })
     }
-    if (auto && result.ok && result.text.trim() && result.text.trim() !== NO_UPDATE) this.report(result.text.trim())
+    relay(result)
     this.checkAutoCompact()
     return result
   }
@@ -1121,6 +1182,7 @@ class Captain {
       let buf = ""
       let raw = ""
       let said = ""
+      let fyi = false
       let sawResult = false
       let resultError: string | null = null
       let settled = false
@@ -1165,14 +1227,17 @@ class Captain {
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
           const tokens = msg.message.model === "<synthetic>" || kind !== "turn" ? null : contextTokens(msg.message.usage)
           if (tokens) this.setUsage(tokens)
-          // The hidden next-step block becomes chips under the reply; reports upward don't carry it.
-          const parsed = parseNextSteps(
+          // The hidden FYI line says whether the Coordinator must wake for this reply; nobody sees it.
+          const marked = takeFyiMarker(
             msg.message.content
               .filter((b: any) => b.type === "text")
               .map((b: any) => b.text)
               .join("")
               .trim(),
           )
+          if (marked.fyi) fyi = true
+          // The hidden next-step block becomes chips under the reply; reports upward don't carry it.
+          const parsed = parseNextSteps(marked.text)
           const text = parsed.content.trim()
           if (text) said = said ? `${said}\n\n${text}` : text
           if (quiet) return
@@ -1203,6 +1268,14 @@ class Captain {
             if (window) this.setUsage(this.usage().tokens, window)
           }
           if (msg.is_error) resultError = String(msg.result ?? msg.subtype ?? "error")
+          // The reply is final at the result line; the CLI takes another 0.4–1 s to exit, so it goes up now.
+          else if (kind === "turn") {
+            try {
+              ask.onResult?.({ text: said, fyi })
+            } catch (err) {
+              console.error(`[captain ${this.project.id}] couldn't relay the reply at its result:`, err)
+            }
+          }
         }
       }
 
@@ -1241,7 +1314,7 @@ class Captain {
           })
         }
         if (kind !== "context") this.recordTiming(clock, { kind, sessionId: seenSession ?? sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
-        const base = { text: said, raw, sessionId: seenSession }
+        const base = { text: said, raw, sessionId: seenSession, fyi }
         if (err) return resolve({ ...base, ok: false, error: `Couldn't run ${cliName}: ${err.message}` })
         if (code === 0 && !resultError && (sawResult || launch.cli === "claude")) return resolve({ ...base, ok: true, error: "" })
         resolve({ ...base, ok: false, error: resultError ?? ((launch.cli === "codex" ? codexErrorText(stderr) : stderr.trim()) || `${launch.cli} exited with code ${code}${sawResult ? "" : " before answering"}`) })

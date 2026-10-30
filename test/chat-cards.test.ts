@@ -256,6 +256,16 @@ describe("arrangeCards", () => {
     expect(arrange(cards, null, (c) => c.key !== "s3")).toEqual({ live: ["s1", "s2"], done: ["s3"] })
   })
 
+  it("folds resting cards with no news for idleMs into idle, never ones at work, waiting on Cody, finished or kept", () => {
+    Object.assign(statuses, { i1: "idle", i2: "pr_ready", i3: "failed", i4: "needs_input", i5: "working", i6: "done", i7: "idle" })
+    const quiet = now - 3 * 3600_000 - 1
+    const cards = ["i1", "i2", "i3", "i4", "i5", "i6"].map((id) => card(id, [id], quiet)).concat(card("i7", ["i7"], now - 60_000))
+    const r = arrangeCards(cards, (id) => statuses[id], () => YARD.id, now, null, (c) => c.key === "i3", 3 * 3600_000)
+    expect({ live: r.live.map((c) => c.key), idle: r.idle.map((c) => c.key), done: r.done.map((c) => c.key) }).toEqual({ live: ["i3", "i4", "i5", "i7"], idle: ["i1", "i2"], done: ["i6"] })
+    // 0 is never.
+    expect(arrangeCards(cards, (id) => statuses[id], () => YARD.id, now, null, undefined, 0).idle).toEqual([])
+  })
+
   it("keeps one project's cards", () => {
     Object.assign(statuses, { p1: "working", p2: "working" })
     Object.assign(projects, { p1: YARD.id, p2: MAP.id })
