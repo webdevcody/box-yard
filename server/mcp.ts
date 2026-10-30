@@ -48,6 +48,8 @@ import { scopeLine, type Connectors } from "./connectors/connectors.js"
 import type { Connector } from "../shared/connectors.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
+import { timingReport, type McpHandshakes } from "./turnTimings.js"
+import { formatMs, TURN_ROLES, TURN_STAGES, type Quantiles, type TurnRole } from "../shared/turnTimings.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -2668,6 +2670,68 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   )
 
   server.registerTool(
+    "turn_timings",
+    {
+      description:
+        "Where the time of Coordinator, Captain and task turns goes: p50/p95/max per role and per stage (queue wait, task setup, CLI start-up with process start and MCP connect, " +
+        "time to first token, model steps, tool calls, the tail after the result, CLI wall and total), the share of prompt tokens read from cache, the slowest tools, and the newest turns with their stages and tokens. " +
+        "Turns are kept 30 days. Use it before and after a speed change, or to answer \"why was that reply slow\"." +
+        (scopeId ? " As a Captain you see your own turns and your project's tasks." : " A status-only project's turns count in the percentiles but stay out of the tool list and the recent turns."),
+      inputSchema: {
+        role: z.enum(TURN_ROLES as [TurnRole, ...TurnRole[]]).optional().describe("Only coordinator, captain or task turns"),
+        project: z.string().optional().describe("Project name or id"),
+        task: z.string().optional().describe("Task id or title: only that task's turns"),
+        days: z.number().min(0.05).max(30).optional().describe("How far back (default 7)"),
+        recent: z.number().int().min(0).max(50).optional().describe("How many of the newest turns to list (default 10)"),
+        kind: z.string().optional().describe("turn (default), compact, summary or context: compaction passes are runs of their own"),
+      },
+    },
+    safe(async (a: { role?: TurnRole; project?: string; task?: string; days?: number; recent?: number; kind?: string }) => {
+      const t = a.task ? task(a.task) : null
+      // A Captain sees its own turns and its tasks', never the Coordinator's.
+      if (scopeId && a.role === "coordinator") throw outOfScope("the Coordinator's turns")
+      const projectId = t?.projectId ?? projectFilter(a.project)
+      const report = timingReport((f) => store.listTurnTimings(f), { role: a.role, projectId, taskId: t?.id, kind: a.kind?.trim() || undefined, days: a.days, recent: a.recent, hidden: (r) => statusOnly(r.projectId) })
+      const projectName = (id: string | null) => (id ? (store.getProject(id)?.name ?? id) : undefined)
+      const q = (x: Quantiles | null | undefined) => (x ? `p50 ${formatMs(x.p50)} · p95 ${formatMs(x.p95)} · max ${formatMs(x.max)} (n ${x.n})` : undefined)
+      const ms = (n: number | null) => (n === null ? undefined : formatMs(n))
+      return ok({
+        days: report.days,
+        turns: report.summary.turns,
+        by_role: Object.fromEntries(
+          Object.entries(report.summary.byRole).map(([role, r]) => [
+            role,
+            {
+              turns: r.turns,
+              cache_read_share: r.cacheReadShare ?? undefined,
+              model_step: q(r.modelStepMs),
+              ...Object.fromEntries(TURN_STAGES.filter((s) => r.stages[s.key]).map((s) => [s.label, q(r.stages[s.key])])),
+            },
+          ]),
+        ),
+        slowest_tools: report.summary.tools.map((x) => `${x.name}: ${formatMs(x.totalMs)} in ${x.n} calls, ${q(x)}`),
+        recent: report.recent.map((r) => ({
+          id: r.id,
+          ended: ago(r.endedAt),
+          role: r.role,
+          project: projectName(r.projectId),
+          task: r.taskId ?? undefined,
+          trigger: r.trigger ?? undefined,
+          effort: r.effort ?? undefined,
+          ok: r.ok,
+          total: formatMs(r.totalMs),
+          stages: Object.fromEntries(
+            (["queueMs", "setupMs", "startupMs", "mcpMs", "firstTokenMs", "modelMs", "toolMs", "tailMs"] as const).filter((k) => r[k] !== null).map((k) => [k.replace(/Ms$/, ""), ms(r[k])]),
+          ),
+          calls: `${r.modelCalls} model, ${r.toolCalls} tool${r.slowestTool ? ` (slowest ${r.slowestTool.name} ${formatMs(r.slowestTool.ms)})` : ""}`,
+          tokens: r.tokens,
+        })),
+        ...(report.hiddenTurns ? { status_only_turns: report.hiddenTurns } : {}),
+      })
+    }),
+  )
+
+  server.registerTool(
     "box_history",
     {
       description:
@@ -2919,9 +2983,13 @@ function callerFor(deps: McpDeps, token: string, auth: string | undefined): McpC
   return projectId ? { kind: "captain", projectId } : null
 }
 
-/** Stateless Streamable HTTP endpoint: a fresh server per request. */
-export function mcpHandler(deps: McpDeps, token: string) {
+/**
+ * Stateless Streamable HTTP endpoint: a fresh server per request. `handshakes` hears each Coordinator and Captain
+ * request's JSON-RPC methods and times, for their turns' start-up timings.
+ */
+export function mcpHandler(deps: McpDeps, token: string, handshakes?: McpHandshakes) {
   return async (req: Request, res: Response) => {
+    const at = Date.now()
     const caller = callerFor(deps, token, req.headers.authorization)
     if (!caller) {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized" }, id: null })
@@ -2930,6 +2998,13 @@ export function mcpHandler(deps: McpDeps, token: string) {
     if (req.method !== "POST") {
       res.status(405).set("Allow", "POST").end()
       return
+    }
+    // Side threads (readOnly callers) run beside the chat's turns: their handshakes aren't the turn's.
+    const key = caller.readOnly ? null : caller.kind === "coordinator" ? "coordinator" : `captain:${caller.projectId}`
+    if (handshakes && key) {
+      const body = req.body as unknown
+      const methods = (Array.isArray(body) ? body : [body]).map((m) => (m && typeof m === "object" ? String((m as { method?: unknown }).method ?? "") : ""))
+      if (methods.some((m) => m === "initialize" || m === "server/discover" || m === "tools/list")) res.on("finish", () => handshakes.saw(key, methods, at, Date.now()))
     }
     const server = buildMcpServer(deps, caller)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })

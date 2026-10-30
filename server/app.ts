@@ -20,6 +20,8 @@ import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { MachineStats, type MachineReaders } from "./machineStats.js"
+import { McpHandshakes, timingReport } from "./turnTimings.js"
+import { TURN_ROLES, type TurnRole } from "../shared/turnTimings.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -432,8 +434,10 @@ export function createBoxYard(
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
   const mcpUrl = `${selfUrl(c.host, c.port)}/mcp`
-  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
-  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken }, settings)
+  // The MCP handshakes /mcp sees, so a Coordinator or Captain run's timings split its start-up (server/turnTimings.ts).
+  const handshakes = new McpHandshakes()
+  const captains = new CaptainManager(c, store, hub, { url: mcpUrl, token: mcpToken, handshakes }, settings)
+  const orchestrator = new Orchestrator(c, store, hub, { url: mcpUrl, token: mcpToken, handshakes }, settings)
   const scheduler = new Scheduler({ config: c, store, tasks, hub, orchestrator, qstash, now: opts.now })
   const threads = new SideThreads(c, store, hub, settings, mcpUrl, (projectId) => (projectId ? captains.threadHost(projectId) : orchestrator.threadHost()))
   tasks.onNotice = (content, meta, opts) => {
@@ -566,6 +570,7 @@ export function createBoxYard(
     mcpHandler(
       { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads, machine, connectors: connectors.store },
       mcpToken,
+      handshakes,
     ),
   )
 
@@ -1408,6 +1413,30 @@ export function createBoxYard(
     tasks.allowMoreBoxes("user")
     res.json(await tasks.cloudStatus())
   })
+  // Per-turn timings (shared/turnTimings.ts): one run's stages and steps (the chat's timing popover), and the summary.
+  api.get("/turn-timings/:id", (req, res) => {
+    const t = store.getTurnTiming(String(req.params.id))
+    if (!t) throw new NotFoundError("No timings for that turn (they're kept 30 days).")
+    res.json(t)
+  })
+  api.get("/turn-timings", (req, res) => {
+    const str = (v: unknown) => (typeof v === "string" && v ? v : undefined)
+    const role = str(req.query.role)
+    if (role && !TURN_ROLES.includes(role as TurnRole)) throw new BadRequestError(`role must be one of ${TURN_ROLES.join(", ")}`)
+    const days = req.query.days === undefined ? undefined : Number(req.query.days)
+    if (days !== undefined && !(days > 0)) throw new BadRequestError("days must be a positive number")
+    res.json(
+      timingReport((f) => store.listTurnTimings(f), {
+        role: role as TurnRole | undefined,
+        projectId: str(req.query.projectId),
+        taskId: str(req.query.taskId),
+        kind: str(req.query.kind),
+        days,
+        recent: req.query.recent === undefined ? undefined : Number(req.query.recent),
+      }),
+    )
+  })
+
   api.get("/boxes", (_req, res) => {
     // Boxes deleted outside Box Yard drop out in the background (throttled); the SSE "boxes" update follows.
     void tasks.reconcileBoxes()

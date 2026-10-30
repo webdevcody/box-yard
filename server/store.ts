@@ -15,6 +15,7 @@ import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
 import { AUTO_SIZE_WINDOW_MS, type TurnPeak } from "../shared/autoSize.js"
+import { TURN_TIMINGS_WINDOW_MS, type TurnRole, type TurnTiming } from "../shared/turnTimings.js"
 import type {
   AppNotification,
   Artifact,
@@ -292,6 +293,7 @@ export interface CaptainNoticeEntry {
   content: string
   loopKey: string
   meta: Record<string, unknown> | null
+  createdAt: number
 }
 
 /** A project's own box settings; null uses the global one (shared/types.ts Project). */
@@ -695,6 +697,8 @@ export interface PendingInput {
   source: string
   content: string
   attachments: string[]
+  /** When it was sent: a task turn's timings measure its queue wait from the oldest. */
+  createdAt: number
 }
 
 /** A queued input as stored, for the queue list and its edits. `content` is the editable text (no prefix). */
@@ -727,7 +731,7 @@ export interface QueuedChatRow {
 export type QueuedChatChange = { ok: true; row: QueuedChatRow } | { ok: false; reason: "delivered" | "deleted" | "missing" }
 
 const inputAttachments = (r: InputRow) => (r.attachments ? (JSON.parse(r.attachments) as string[]) : [])
-const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r) })
+const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r), createdAt: r.created_at })
 const queuedInputRow = (r: InputRow): QueuedInputRow => ({
   id: r.id,
   taskId: r.task_id,
@@ -2091,6 +2095,15 @@ export class Store {
     return r ? { id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
   }
 
+  /** Add meta.timingId (turn_timings) to a Coordinator chat message: its turn's timing chip. */
+  setChatTiming(id: string, timingId: string, timingMs: number): ChatMessage | null {
+    this.db.prepare("UPDATE chat_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
+    const r = this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(id) as
+      | { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
+      | undefined
+    return r ? { id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
+  }
+
   listChat(limit = 300): ChatMessage[] {
     const rows = this.db
       .prepare(
@@ -2117,6 +2130,12 @@ export class Store {
       meta: json(r.meta_json, null),
       createdAt: r.created_at,
     }))
+  }
+
+  /** When the oldest notice the orchestrator hasn't been told about was written, or null when there is none. */
+  oldestUnseenNoticeAt(): number | null {
+    const r = this.db.prepare("SELECT MIN(created_at) AS at FROM chat_messages WHERE seen_by_orchestrator = 0").get() as { at: number | null }
+    return r.at
   }
 
   /** Notices the orchestrator has not been told about yet; marks them seen. */
@@ -2270,6 +2289,15 @@ export class Store {
     return msg
   }
 
+  /** Add meta.timingId (turn_timings) to a Captain chat message: its turn's timing chip. */
+  setCaptainMessageTiming(id: string, timingId: string, timingMs: number): CaptainMessage | null {
+    this.db.prepare("UPDATE captain_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
+    const r = this.db.prepare("SELECT * FROM captain_messages WHERE id = ?").get(id) as
+      | { id: string; project_id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
+      | undefined
+    return r ? { id: r.id, projectId: r.project_id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
+  }
+
   listCaptainMessages(projectId: string, limit = 300): CaptainMessage[] {
     const rows = this.db
       .prepare(
@@ -2309,12 +2337,12 @@ export class Store {
 
   peekUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
     const rows = this.db
-      .prepare("SELECT content, meta_json FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
-      .all(projectId) as { content: string; meta_json: string | null }[]
+      .prepare("SELECT content, meta_json, created_at FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
+      .all(projectId) as { content: string; meta_json: string | null; created_at: number }[]
     return rows.map((r) => {
       const meta = json<Record<string, unknown> | null>(r.meta_json, null)
       const loopKey = typeof meta?.loopKey === "string" && meta.loopKey ? meta.loopKey : r.content
-      return { content: r.content, loopKey, meta }
+      return { content: r.content, loopKey, meta, createdAt: r.created_at }
     })
   }
 
@@ -2926,6 +2954,45 @@ export class Store {
     }))
   }
 
+  // ---------- turn timings ----------
+
+  private timingsPrunedAt = 0
+
+  /** One run's timings (shared/turnTimings.ts). Drops rows past the 30-day window, at most every 10 minutes. */
+  recordTurnTiming(t: TurnTiming) {
+    const { id, role, kind, projectId, taskId, sessionId, model, effort, trigger, resumed, ok, requestedAt, startedAt, endedAt, totalMs, steps, ...stages } = t
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO turn_timings (id, role, kind, project_id, task_id, session_id, model, effort, trigger, resumed, ok, requested_at, started_at, ended_at, total_ms, stages_json, steps_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, role, kind, projectId, taskId, sessionId, model, effort, trigger, resumed ? 1 : 0, ok ? 1 : 0, requestedAt, startedAt, endedAt, Math.round(totalMs), JSON.stringify(stages), JSON.stringify(steps))
+    const now = Date.now()
+    if (now - this.timingsPrunedAt > 10 * 60_000) {
+      this.timingsPrunedAt = now
+      this.db.prepare("DELETE FROM turn_timings WHERE ended_at < ?").run(now - TURN_TIMINGS_WINDOW_MS)
+    }
+  }
+
+  getTurnTiming(id: string): TurnTiming | null {
+    const r = this.db.prepare("SELECT * FROM turn_timings WHERE id = ?").get(id) as TurnTimingRow | undefined
+    return r ? timingFromRow(r) : null
+  }
+
+  /** Runs that ended since `since`, newest first. */
+  listTurnTimings(filter: { since: number; role?: TurnRole; projectId?: string; taskId?: string; kind?: string; limit?: number }): TurnTiming[] {
+    const where = ["ended_at >= ?"]
+    const args: (string | number)[] = [filter.since]
+    if (filter.role) where.push("role = ?"), args.push(filter.role)
+    if (filter.projectId) where.push("project_id = ?"), args.push(filter.projectId)
+    if (filter.taskId) where.push("task_id = ?"), args.push(filter.taskId)
+    if (filter.kind) where.push("kind = ?"), args.push(filter.kind)
+    const rows = this.db
+      .prepare(`SELECT * FROM turn_timings WHERE ${where.join(" AND ")} ORDER BY ended_at DESC LIMIT ?`)
+      .all(...args, filter.limit ?? 5000) as TurnTimingRow[]
+    return rows.map(timingFromRow)
+  }
+
   // ---------- schedules ----------
 
   private scheduleFromRow(r: ScheduleRow): Schedule {
@@ -3400,4 +3467,53 @@ export function githubSlug(repo: string | null): string | null {
   if (/^[\w.-]+\/[\w.-]+$/.test(repo)) return repo
   const m = repo.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i)
   return m ? `${m[1]}/${m[2]}` : null
+}
+
+interface TurnTimingRow {
+  id: string
+  role: string
+  kind: string
+  project_id: string | null
+  task_id: string | null
+  session_id: string | null
+  model: string | null
+  effort: string | null
+  trigger: string | null
+  resumed: number
+  ok: number
+  requested_at: number | null
+  started_at: number
+  ended_at: number
+  total_ms: number
+  stages_json: string
+  steps_json: string
+}
+
+function timingFromRow(r: TurnTimingRow): TurnTiming {
+  const parse = <T>(text: string, fallback: T): T => {
+    try {
+      return JSON.parse(text) as T
+    } catch {
+      return fallback
+    }
+  }
+  return {
+    ...parse<Partial<TurnTiming>>(r.stages_json, {}),
+    id: r.id,
+    role: r.role as TurnRole,
+    kind: r.kind,
+    projectId: r.project_id,
+    taskId: r.task_id,
+    sessionId: r.session_id,
+    model: r.model,
+    effort: r.effort,
+    trigger: r.trigger,
+    resumed: Boolean(r.resumed),
+    ok: Boolean(r.ok),
+    requestedAt: r.requested_at,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    totalMs: r.total_ms,
+    steps: parse(r.steps_json, []),
+  } as TurnTiming
 }
