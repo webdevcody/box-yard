@@ -45,6 +45,8 @@ Project identities (docs/identities.md) have no Codex login of their own yet: a 
 
 Codex is installed the first time a Codex task lands on an Upstash box or RunPod pod (`npm install -g @openai/codex`); Box Yard's Docker image and server image already have it. On This computer it's yours to install.
 
+Codex isn't supported on SSH machines yet ([Machines › Codex](machines.md#codex)): a Codex task asked to run on one is refused, and nothing is installed there.
+
 **The Coordinator and Captains** run `codex exec` on the server with Box Yard's MCP tools over HTTP (the token comes through an env var, never the command line), a read-only sandbox, and no shell: they act through Box Yard's tools, and a shell could read Box Yard's data folder past what a status-only project allows. Images you attach are attached to the message; small text files come inline.
 
 **Side threads** on a Codex chat start from the chat's summary and its messages up to the highlight (Codex can't fork a session at a message), and stay read-only through their own MCP token.

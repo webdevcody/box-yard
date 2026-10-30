@@ -160,11 +160,11 @@ These steps are for Ubuntu or Debian; [macOS](#macos-machines) differs only a li
 
 ## Codex
 
-The connection test detects Codex (`codex --version`) and shows it, but Box Yard runs Claude Code only. A Codex engine would need:
+Codex isn't supported on SSH machines yet. Tasks there run on Claude Code:
 
-- **Output.** A runner path that starts `codex exec --json` and maps its JSONL events (messages, tool calls, usage) onto Box Yard's event log.
-- **The MCP bridge.** Box Yard's MCP server registered in Codex's config (`[mcp_servers.boxyard]` in a per-task `CODEX_HOME/config.toml`) so the agent can ask, publish and mark done.
-- **Resume.** Turns resume through Codex's session id (`codex exec resume <id>`), and compaction and recaps are mapped to it.
-- **Login.** An `OPENAI_API_KEY` forwarded per turn like the Claude key, or the machine's own `codex login` (`~/.codex/auth.json`).
-- **Permissions.** Its non-interactive flags (`--ask-for-approval never`, `--sandbox workspace-write` or `danger-full-access`) as the counterpart of Claude Code's permission mode.
-- **Usage and models.** Token usage and pricing, and model and effort choices per task.
+- **Refused up front.** A Codex task (`agent: "codex"`, a `gpt-*` model, or a project whose Agent is Codex) asked to run on an SSH machine (`runs_on: "ssh"`, `"label:<label>"`, `machine_label`, or `"local"` while "Local means" names a label) is refused with "Codex isn't supported on SSH machines yet". Moving one there with `send_to_task` is refused the same way.
+- **Waits, never runs.** A Codex task that gets there anyway, because its project runs on SSH machines, waits with that reason and its Captain hears it once. Move it to another runner to run it. A project set to SSH machines with Codex as its Agent says so in its settings.
+- **Nothing is installed.** Box Yard never installs Codex on a machine, and never sends Box Yard's Codex login there.
+- **Still detected.** Test connection still reports whether `codex` is on the machine, and its version.
+
+Running Codex there needs a decision on its login first. Box Yard's ChatGPT login refreshes itself and has to come back after every turn ([Codex › Logging in](codex.md#logging-in)), so handing it to a computer with a disk is a credentials change of its own.
