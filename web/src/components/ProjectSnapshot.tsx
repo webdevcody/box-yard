@@ -28,7 +28,7 @@ export function ProjectSnapshotPanel({ project }: { project: Project }) {
         <h3 className="text-xs font-medium tracking-wide text-zinc-400 uppercase">Box snapshot</h3>
         <p className="text-sm text-zinc-400">
           {project.runner === "gpu"
-            ? "This project runs on RunPod GPU pods, so it doesn't use box snapshots: pod #1's network volume keeps caches between its runs."
+            ? "This project runs on GPU pods, so it doesn't use box snapshots: on RunPod, pod #1's network volume keeps caches between its runs."
             : project.runner === "docker"
               ? "This project runs in a Docker container, so it doesn't use box snapshots: its volume keeps workspaces and caches between runs, and a Dockerfile of its own (Runs on) bakes in what it needs."
               : "This project runs on this computer, so it doesn't use box snapshots."}

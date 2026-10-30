@@ -14,6 +14,7 @@ import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type Iden
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
+import type { VastGpuOption, VastStatus } from "../../../shared/vast"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
 import type { AgentCli } from "../../../shared/agentCli"
@@ -93,6 +94,8 @@ export const keys = {
   setup: ["setup"] as const,
   runpod: ["runpod"] as const,
   runpodGpus: ["runpod-gpus"] as const,
+  vast: ["vast"] as const,
+  vastGpus: ["vast-gpus"] as const,
   docker: ["docker"] as const,
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
@@ -506,6 +509,24 @@ export function useRunPodAction<T>(title: string, call: (input: T) => Promise<Ru
   })
 }
 
+// ------------------------------------------------------------------ Vast.ai GPU (Settings › Vast.ai GPU)
+
+/** Settings, instances and the account's credit. Polled while open: instances change at Vast.ai, not here. */
+export const useVast = (o: { enabled?: boolean; poll?: boolean } = {}) =>
+  useQuery({ queryKey: keys.vast, queryFn: () => api<VastStatus>("/api/vast"), enabled: o.enabled, refetchInterval: o.poll ? 15_000 : false, staleTime: 5_000 })
+/** GPU types with offers on Vast.ai's marketplace now (under the global filters), cheapest first. Each call is one search of Vast's daily quota, so it's kept a while. */
+export const useVastGpus = (o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.vastGpus, queryFn: () => api<VastGpuOption[]>("/api/vast/gpus"), enabled: o.enabled, staleTime: 5 * 60_000, retry: false })
+/** A Vast.ai action: save settings, keep an instance warm. */
+export function useVastAction<T>(title: string, call: (input: T) => Promise<VastStatus>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => qc.setQueryData(keys.vast, r),
+    onError: fail(title),
+  })
+}
+
 // ------------------------------------------------------------------ Docker (Settings › Docker)
 
 /** Docker on this computer, the settings, the image and its build, and Box Yard's containers. Polled while open: containers change in Docker, not here. */
@@ -635,6 +656,7 @@ export function useCreateProject() {
           maxBoxes: null,
           gpuMaxHourlyUsd: null,
           gpuMachine: { gpuTypes: null, cloud: null, minRamGb: null, minVcpus: null },
+          gpuProvider: null,
           docker: { image: null, dockerfile: null },
           identityId: DEFAULT_IDENTITY_ID,
           snapshot: null,
@@ -1009,16 +1031,28 @@ export const useStopTask = () =>
 export const useCloseTask = () => useTaskAction("close", () => ({ status: "done" as TaskStatus, question: null }), "close the task")
 export const useRetryTask = () => useTaskAction("retry", () => ({ status: "queued" as TaskStatus, error: null }), "retry the task")
 
-/** Inbox card "Mark done": the same close as the task view's, sent after a short undo window. */
-export function useMarkDoneFromInbox() {
+/**
+ * "Mark done" for one task or several (the Cards view's selection, "Mark all idle as done"): the same close as the task
+ * view's and close_task's, each sent after a short undo window. One toast, whose Undo takes them all back.
+ */
+export function useMarkTasksDone() {
   const { mutateAsync } = useCloseTask()
   return useCallback(
-    (task: Task) => {
-      if (!deferClose(task.id, () => mutateAsync(task.id))) return
-      toast.info("Marked done", task.title, { action: { label: "Undo", onClick: () => undoClose(task.id) }, duration: UNDO_MS })
+    (tasks: readonly Pick<Task, "id" | "title">[]) => {
+      const marked = tasks.filter((t) => deferClose(t.id, () => mutateAsync(t.id)))
+      if (!marked.length) return
+      const undo = () => marked.forEach((t) => undoClose(t.id))
+      const body = marked.length === 1 ? marked[0]!.title : "Messaging one picks it back up."
+      toast.info(marked.length === 1 ? "Marked done" : `Marked ${marked.length} tasks done`, body, { action: { label: "Undo", onClick: undo }, duration: UNDO_MS })
     },
     [mutateAsync],
   )
+}
+
+/** Inbox card "Mark done": the same close as the task view's, sent after a short undo window. */
+export function useMarkDoneFromInbox() {
+  const mark = useMarkTasksDone()
+  return useCallback((task: Task) => mark([task]), [mark])
 }
 
 export function useDeleteTask() {
@@ -1232,6 +1266,7 @@ export function useDeleteBox() {
       void qc.invalidateQueries({ queryKey: keys.boxes })
       void qc.invalidateQueries({ queryKey: keys.tasks })
       void qc.invalidateQueries({ queryKey: keys.runpod })
+      void qc.invalidateQueries({ queryKey: keys.vast })
       void qc.invalidateQueries({ queryKey: keys.docker })
     },
   })
