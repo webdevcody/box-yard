@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { jumpDirection, nextJump } from "../web/src/lib/cardJump.js"
 import { arrangeCards, batchTaskName, batchTitle, batchesOf, chatCards, newSince, stableCards, CARD_WINDOW_MS, type CardTask, type ChatCard } from "../web/src/lib/chatCards.js"
 import { chatProvenance, filterByTasks } from "../web/src/lib/chatProvenance.js"
 import { coordinatorRows } from "../web/src/lib/chatUpdates.js"
@@ -263,5 +264,27 @@ describe("filterByTasks", () => {
     const prov = chatProvenance(all, index)
     expect(ids(filterByTasks(all, prov, [LOGIN.id]))).toEqual([ask.id, call.id, answer.id, own.id, waiting.id])
     expect(filterByTasks(all, prov, null)).toBe(all)
+  })
+})
+
+describe("the new-cards pill's next card and arrow", () => {
+  const order = ["a", "b", "c", "d"]
+  it("goes top to bottom through the cards with news, after the one it went to, round to the first", () => {
+    expect(nextJump(order, [], null)).toBeNull()
+    expect(nextJump(order, ["b", "d"], null)).toBe("b")
+    expect(nextJump(order, ["b", "d"], "b")).toBe("d")
+    expect(nextJump(order, ["b", "d"], "d")).toBe("b")
+    // The one it went to was opened (no news now): on from where it was.
+    expect(nextJump(order, ["b", "d"], "c")).toBe("d")
+    expect(nextJump(order, ["b"], "b")).toBe("b")
+  })
+
+  it("points up at a card above the screen, down at one below or under the pill, and says here for one on screen", () => {
+    const view = { top: 100, bottom: 600 }
+    expect(jumpDirection({ top: 0, bottom: 100 }, view)).toBe("up")
+    expect(jumpDirection({ top: 50, bottom: 150 }, view)).toBe("here")
+    expect(jumpDirection({ top: 600, bottom: 700 }, view)).toBe("down")
+    expect(jumpDirection({ top: 570, bottom: 700 }, view, 48)).toBe("down")
+    expect(jumpDirection({ top: 540, bottom: 700 }, view, 48)).toBe("here")
   })
 })
