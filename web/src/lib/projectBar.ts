@@ -87,6 +87,8 @@ export function setChatProjectFilter(projectId: string | null) {
   for (const l of listeners) l()
 }
 
+export const chatProjectFilter = () => filter
+
 export const useChatProjectFilter = () => useSyncExternalStore(subscribe, () => filter, () => filter)
 
 // The pins, in this browser's localStorage and in sync across its tabs.
