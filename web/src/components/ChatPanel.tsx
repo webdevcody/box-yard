@@ -144,12 +144,6 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const cards = useCards(allRows, prov, cardsOn && messages.length > 0, projectFilter)
   // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
   const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
-  // In the cards, a question asked from a card waits in that card; the rest wait in the Coordinator card.
-  const [asked, queuedHere] = useMemo(() => {
-    if (!cards || !queued.length) return [NO_MESSAGES, queued]
-    const about = (m: ChatMessage) => Array.isArray(m.meta?.about) && m.meta.about.length > 0
-    return [queued.filter(about), queued.filter((m) => !about(m))]
-  }, [cards, queued])
   const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
@@ -331,9 +325,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>
                   {cards ? (
-                    <CardsView layout={cards} onFollowUp={followUp} active={Boolean(busy.data) || queuedHere.length > 0} asked={asked}>
+                    <CardsView layout={cards} onFollowUp={followUp} active={Boolean(busy.data) || queued.length > 0}>
                       <StreamingReply busy={Boolean(busy.data)} />
-                      {queuedHere.length > 0 && <ChatLines messages={queuedHere} onFollowUp={followUp} />}
+                      {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
                     </CardsView>
                   ) : (
                     <>

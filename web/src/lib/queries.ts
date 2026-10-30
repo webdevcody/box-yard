@@ -1199,8 +1199,7 @@ export function useDeleteBox() {
 export function useSendChat() {
   const qc = useQueryClient()
   return useMutation({
-    /** `about`: asked from these tasks' card, so it shows there and the Coordinator is told (Orchestrator.send). */
-    mutationFn: (input: { id: string; content: string; attachments?: Attachment[]; about?: readonly string[] }) =>
+    mutationFn: (input: { id: string; content: string; attachments?: Attachment[] }) =>
       api<ChatMessage>("/api/chat", { body: { ...input, attachments: input.attachments?.map((a) => a.id) } }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.chat })
@@ -1212,12 +1211,7 @@ export function useSendChat() {
           id: input.id,
           role: "user",
           content: input.content,
-          meta: {
-            pending: true,
-            ...(input.attachments?.length ? { attachments: input.attachments } : {}),
-            ...(input.about?.length ? { about: input.about } : {}),
-            ...(queued ? { queued: true } : {}),
-          },
+          meta: { pending: true, ...(input.attachments?.length ? { attachments: input.attachments } : {}), ...(queued ? { queued: true } : {}) },
           createdAt: Date.now(),
         }),
       )

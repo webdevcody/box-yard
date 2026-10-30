@@ -4,8 +4,7 @@
 // A notice is about its task and project (meta). A Captain's report is about its project and the tasks it names.
 // A Coordinator turn (the messages that asked, its tool calls, its reply) is one unit: every message in it is about
 // every project any of them names (a tool's task or project, the task it created, task links, ids and bold titles in
-// the text, the task whose card a question came from) and every project of the updates its reply read (the "from:"
-// line, lib/chatUpdates.ts).
+// the text) and every project of the updates its reply read (the "from:" line, lib/chatUpdates.ts).
 import type { ChatMessage } from "../../../shared/types"
 import type { EntityIndex } from "./linkify"
 import { itemMessages, type CoordinatorRow } from "./chatUpdates"
@@ -77,8 +76,6 @@ export function messageRefs(m: ChatMessage, index: EntityIndex): Refs {
     project(str(captain?.projectId))
   } else {
     textRefs(m.content, index, { tasks, projects })
-    // Asked from a task's card: about that task (Orchestrator.send's meta.about).
-    if (Array.isArray(meta.about)) for (const id of meta.about) task(str(id))
   }
   for (const id of tasks) {
     const p = index.byId.get(id)?.projectId
