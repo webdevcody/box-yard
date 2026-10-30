@@ -117,6 +117,13 @@ export class FolderTransport implements MachineTransport {
   }
 }
 
+/**
+ * A task's files that hold secrets, and their names in the machine's tmpfs (`<task id>.<name>`). The Codex login
+ * isn't kept as `.codex-auth.json`: that's where the runner parks the copy Codex refreshed (box-runner.mjs
+ * parkCodexAuth), which it compares with the one Box Yard hands over.
+ */
+const HELD_IN_MEMORY: Record<string, string> = { "task.json": "json", "signing.key": "signing.key", "codex-auth.json": "codex-login.json" }
+
 /** Whether a machine answered lately: placement skips one that didn't, until maintain() reaches it again. */
 export interface Reach {
   ok: boolean
@@ -138,8 +145,9 @@ export class MachineProvider implements BoxProvider {
     private readonly o: {
       machines: (id: string) => Machine | null
       transport: MachineTransport
-      /** Mock mode and tests: the claude command agents run (CLAUDE_BIN), and node is this process's. */
+      /** Mock mode and tests: the claude (and codex) command agents run (CLAUDE_BIN), and node is this process's. */
       claudeBin?: string
+      codexBin?: string
       nodeBin?: string
     },
   ) {}
@@ -174,9 +182,10 @@ export class MachineProvider implements BoxProvider {
   of(boxId: string): BoxProvider {
     const m = this.machine(boxId)
     const t = m.lastTest
-    const view = Object.create(this) as MachineProvider & { secretsDir?: string; nodeBin: string; claudeBin: string }
+    const view = Object.create(this) as MachineProvider & { secretsDir?: string; nodeBin: string; claudeBin: string; codexBin: string }
     Object.defineProperty(view, "nodeBin", { value: this.o.nodeBin ?? t?.tools.node.path ?? "node" })
     Object.defineProperty(view, "claudeBin", { value: this.o.claudeBin ?? t?.tools.claude.path ?? "claude" })
+    Object.defineProperty(view, "codexBin", { value: this.o.codexBin ?? t?.tools.codex.path ?? "codex" })
     if (t?.secretsDir && this.o.transport.kind === "ssh") Object.defineProperty(view, "secretsDir", { value: t.secretsDir })
     return view
   }
@@ -238,17 +247,22 @@ export class MachineProvider implements BoxProvider {
   }
 
   /**
-   * Write a file, readable by the machine's user only. A task's task.json and signing.key go to the machine's tmpfs
-   * when it has one (`secretsDir`), linked from the task folder: they never touch its disk.
+   * Write a file, readable by the machine's user only. A task's task.json, signing.key and codex-auth.json go to the
+   * machine's tmpfs when it has one (`secretsDir`), linked from the task folder: they never touch its disk. Without
+   * one, Box Yard's Codex login isn't written at all (TaskManager.codexHandOver keeps it off such machines).
    */
   async writeFile(boxId: string, filePath: string, content: string | Buffer): Promise<void> {
     const m = this.machine(boxId)
     const secrets = (this.of(boxId) as BoxProvider).secretsDir
     const dir = path.posix.dirname(filePath)
     const name = path.posix.basename(filePath)
+    const inTask = path.posix.dirname(dir) === `${this.root(boxId)}/tasks`
+    if (name === "codex-auth.json" && inTask && !secrets && this.o.transport.kind === "ssh" && content.length) {
+      throw new Error(`${m.name} has no folder in memory for secrets, so Box Yard's Codex login isn't written to its disk`)
+    }
     let script: string
-    if (secrets && (name === "task.json" || name === "signing.key") && path.posix.dirname(dir) === `${this.root(boxId)}/tasks`) {
-      const held = `${secrets}/${path.posix.basename(dir)}.${name === "task.json" ? "json" : "signing.key"}`
+    if (secrets && HELD_IN_MEMORY[name] && inTask) {
+      const held = `${secrets}/${path.posix.basename(dir)}.${HELD_IN_MEMORY[name]}`
       // The secrets folder must be this user's own, and a folder: never one someone else made or linked.
       script = [
         `umask 077 && mkdir -p ${q(secrets)}`,

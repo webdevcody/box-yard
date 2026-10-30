@@ -3727,14 +3727,13 @@ export class TaskManager {
         labels: m.labels,
         enabled: m.enabled,
         problem: m.enabled ? this.machines!.problem(m) : null,
-        claudeLogin: m.lastTest?.claudeLogin ?? null,
+        ...agent(m),
         maxTasks: m.maxTasks,
         running: this.runningOn(boxId),
         blocked: limit ? limit.text : null,
       }
     })
-    const claudeKey = this.c.mock || this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom !== null
-    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, claudeKey })
+    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, cli })
     if ("wait" in pick) {
       this.machineWait(row, pick)
       return null
@@ -5243,11 +5242,13 @@ export class TaskManager {
 
   /**
    * Codex on the box, installed the first time a Codex task lands on one that lacks it (Upstash and RunPod boxes start
-   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install.
+   * with Claude Code only; Box Yard's Docker image has both). On this computer and SSH machines it's the owner's to install.
    */
   private async ensureCodex(boxId: string) {
     const provider = providerOf(this.provider, boxId)
     if (this.codexReady.has(boxId) || provider.name === "local" || this.c.mock) return
+    // An SSH machine is the owner's own computer: Box Yard never installs on it. Placement only picks one whose test found codex.
+    if (provider.name === "ssh") return
     const install = "npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1"
     const res = await this.provider.exec(boxId, `command -v codex >/dev/null 2>&1 || ${install} || sudo -n ${install}; command -v codex >/dev/null 2>&1 && codex --version`)
     if (res.exitCode !== 0) throw failedStep("installing Codex on the box (npm install -g @openai/codex)", new Error(errorTail(res.stderr || res.stdout) || `exit code ${res.exitCode}`))
@@ -5367,7 +5368,8 @@ export class TaskManager {
             // "chatgpt": the login file comes as codex-auth.json for the turn (box-runner.mjs prepareCodexHome).
             codexLogin: codex.kind,
             // The same rule for Codex: on this computer (or an SSH machine) with no Codex login set, its own `codex login` (~/.codex).
-            isolateCodex: !(local || machine) || this.c.mock || codex.kind !== null,
+            // An SSH machine gets Box Yard's ChatGPT login only when it keeps it in memory (`codexHandOver`); else its own.
+            isolateCodex: !(local || machine) || this.c.mock || codex.kind === "api_key" || (codex.kind === "chatgpt" && (!machine || this.codexHandOver(boxId))),
           }
         : {}),
       port: row.port_base ?? PORT_BASE,
@@ -6837,7 +6839,7 @@ export class TaskManager {
     const dir = this.taskDir(boxId, taskId)
     // The copies a tmpfs for secrets keeps (an SSH machine's lives as long as the machine, not the turn).
     const secrets = providerOf(this.provider, boxId).secretsDir
-    const held = secrets ? ` ${q(`${secrets}/${taskId}.json`)} ${q(`${secrets}/${taskId}.signing.key`)}` : ""
+    const held = secrets ? ["json", "signing.key", "codex-auth.json", "codex-login.json"].map((x) => ` ${q(`${secrets}/${taskId}.${x}`)}`).join("") : ""
     await this.provider.exec(boxId, `${turnKillScript(dir)}; rm -rf ${q(dir)}${held}`)
   }
 
