@@ -129,6 +129,7 @@ export class TurnClock {
       outputTokens: num(u.output_tokens) ?? 0,
       cacheReadTokens: num(u.cache_read_input_tokens) ?? 0,
       cacheWriteTokens: num(u.cache_creation_input_tokens) ?? 0,
+      cacheWrite1hTokens: num((u.cache_creation as Record<string, unknown> | undefined)?.ephemeral_1h_input_tokens) ?? 0,
       contextTokens: this.contextTokens,
       ok,
       steps,
@@ -267,7 +268,7 @@ export function briefTiming(t: TurnTiming) {
     modelCalls: t.modelCalls,
     toolCalls: t.toolCalls,
     slowestTool: slowest ? { name: slowest.name ?? "?", ms: slowest.ms } : null,
-    tokens: { input: t.inputTokens, output: t.outputTokens, cacheRead: t.cacheReadTokens, cacheWrite: t.cacheWriteTokens, context: t.contextTokens },
+    tokens: { input: t.inputTokens, output: t.outputTokens, cacheRead: t.cacheReadTokens, cacheWrite: t.cacheWriteTokens, cacheWrite1h: t.cacheWrite1hTokens ?? 0, context: t.contextTokens },
   }
 }
 

@@ -57,5 +57,12 @@ export function resultUsageObject(u: unknown) {
     cache_read_input_tokens: typeof x.cache_read_input_tokens === "number" ? x.cache_read_input_tokens : 0,
     output_tokens: typeof x.output_tokens === "number" ? x.output_tokens : 0,
   }
-  return Object.values(out).some((n) => n > 0) ? out : null
+  if (!Object.values(out).some((n) => n > 0)) return null
+  // How the cache writes split by TTL (5 minutes or 1 hour), kept in claude_usage.raw_usage_json.
+  const cc = x.cache_creation as Record<string, unknown> | undefined
+  const ttl = (k: string) => {
+    const v = cc?.[k]
+    return typeof v === "number" ? v : 0
+  }
+  return cc ? { ...out, cache_creation: { ephemeral_5m_input_tokens: ttl("ephemeral_5m_input_tokens"), ephemeral_1h_input_tokens: ttl("ephemeral_1h_input_tokens") } } : out
 }

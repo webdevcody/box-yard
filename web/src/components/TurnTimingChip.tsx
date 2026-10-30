@@ -192,7 +192,10 @@ export function TimingDetail({ t }: { t: TurnTiming }) {
         <span>in {tokens(t.inputTokens)}</span>
         <span>out {tokens(t.outputTokens)}</span>
         <span title="Prompt tokens read from the prompt cache">cache read {tokens(t.cacheReadTokens)}</span>
-        <span title="Prompt tokens written to the prompt cache">cache write {tokens(t.cacheWriteTokens)}</span>
+        <span title="Prompt tokens written to the prompt cache, and how many of them for 1 hour rather than 5 minutes">
+          cache write {tokens(t.cacheWriteTokens)}
+          {(t.cacheWrite1hTokens ?? 0) > 0 && ` (${t.cacheWrite1hTokens === t.cacheWriteTokens ? "" : `${tokens(t.cacheWrite1hTokens!)} `}1h)`}
+        </span>
         {t.contextTokens !== null && <span>context {tokens(t.contextTokens)}</span>}
       </div>
       {tools.length > 1 && (

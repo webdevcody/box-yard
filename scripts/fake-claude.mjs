@@ -107,7 +107,24 @@ if (resumeAt) {
 if (fork) Object.assign(session, { id: sessionId, forkedFrom: resumeId, forkedAt: resumeAt ?? null })
 /** The uuids of the assistant lines this run prints (a later fork can cut there). */
 const uuids = []
-const usageNow = () => ({ input_tokens: session.tokens, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 10 })
+// The prompt cache TTL the real CLI (2.1.293) picks from its env: FORCE_PROMPT_CACHING_5M beats
+// CLAUDE_CODE_PROMPT_CACHE_TTL, which beats ENABLE_PROMPT_CACHING_1H; else 1h on a subscription login, 5m on an API key.
+const cacheTtl = process.env.FORCE_PROMPT_CACHING_5M
+  ? "5m"
+  : /^(5m|1h)$/.test(process.env.CLAUDE_CODE_PROMPT_CACHE_TTL ?? "")
+    ? process.env.CLAUDE_CODE_PROMPT_CACHE_TTL
+    : process.env.ENABLE_PROMPT_CACHING_1H || !process.env.ANTHROPIC_API_KEY
+      ? "1h"
+      : "5m"
+// FAKE_CLAUDE_CACHE_WRITE=<n>: every API call writes n prompt-cache tokens, split by that TTL like the real usage.
+const cacheWrite = Number(process.env.FAKE_CLAUDE_CACHE_WRITE || 0)
+const usageNow = () => ({
+  input_tokens: session.tokens,
+  cache_creation_input_tokens: cacheWrite,
+  cache_read_input_tokens: 0,
+  output_tokens: 10,
+  ...(cacheWrite ? { cache_creation: { ephemeral_5m_input_tokens: cacheTtl === "5m" ? cacheWrite : 0, ephemeral_1h_input_tokens: cacheTtl === "1h" ? cacheWrite : 0 } } : {}),
+})
 const out = (obj) => {
   // Every assistant message carries the usage of its API call, like the real CLI.
   if (obj.type === "assistant") {
@@ -435,7 +452,7 @@ process.stdin.on("end", async () => {
   if (sessionFile && (!resumeId || fork)) fs.writeFileSync(sessionFile, JSON.stringify(session))
   let result = ""
   let mcp = null
-  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")
+  if (process.env.FAKE_CLAUDE_LOG) fs.appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ args, cacheTtl, prompt: process.env.FAKE_CLAUDE_LOG_FULL ? prompt : prompt.slice(0, 120) }) + "\n")
   // The prompt and the reply grow the context.
   if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   try {

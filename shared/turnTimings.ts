@@ -46,6 +46,8 @@ export interface TurnClockReading {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  /** Of those, written for 1 hour rather than 5 minutes (Settings › 1-hour prompt cache). Missing on older rows. */
+  cacheWrite1hTokens?: number
   /** The context after the last API call (its prompt side plus what it wrote). */
   contextTokens: number | null
   ok: boolean
