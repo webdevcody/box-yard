@@ -2,15 +2,15 @@
 // (lib/chatUpdates.ts coordinatorRows). A click opens their chips and scrolls to the first; again folds them.
 import { memo, useMemo } from "react"
 import { CornerLeftUp } from "lucide-react"
-import { groupKey, setOpen, useAllOpen } from "../lib/chipState"
+import { setOpen, useAllOpen } from "../lib/chipState"
 import { revealChatMessage } from "../lib/reveal"
 import { sourceNames, type UpdateSource } from "../lib/chatUpdates"
 import { NOTICE_ICON } from "./noticeIcons"
 import { TaskTile } from "./TaskIcon"
 
-/** The chip keys a reply's sources open: each update, and the group it sits in. */
+/** The chip keys a reply's sources open: each update's. */
 export function sourceKeys(sources: readonly UpdateSource[]): string[] {
-  return [...new Set(sources.flatMap((s) => (s.rowId === s.id ? [s.id] : [groupKey(s.rowId), s.id])))]
+  return [...new Set(sources.map((s) => s.id))]
 }
 
 export const ReplySources = memo(function ReplySources({ sources }: { sources: UpdateSource[] }) {
@@ -19,7 +19,7 @@ export const ReplySources = memo(function ReplySources({ sources }: { sources: U
   const open = useAllOpen(keys)
   const toggle = () => {
     setOpen(keys, !open)
-    if (!open) revealChatMessage(sources[0]!.rowId)
+    if (!open) revealChatMessage(sources[0]!.id)
   }
   const count = sources.length
   return (

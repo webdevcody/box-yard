@@ -33,12 +33,9 @@ function subscribe(fn: () => void) {
   return () => void listeners.delete(fn)
 }
 
-/** The key a "N updates" group's own open state is kept under (a group's id is its first update's). */
-export const groupKey = (id: string) => `group:${id}`
-
 export const isOpen = (key: string) => open.has(key)
 
-/** Open or close these chips (and groups, by groupKey). */
+/** Open or close these chips. */
 export function setOpen(keys: readonly string[], value: boolean) {
   const next = new Set(open)
   for (const key of keys) {
@@ -63,20 +60,6 @@ export function resetChipState() {
 export function useChipOpen(key: string): [boolean, () => void] {
   const value = useSyncExternalStore(subscribe, () => open.has(key))
   const toggle = useCallback(() => setOpen([key], !open.has(key)), [key])
-  return [value, toggle]
-}
-
-/**
- * Whether a group is open: its own state, or any of its updates opened (one read on its own before more joined
- * it, or from a reply's "from:" line), so a chip being read never folds away when another update arrives.
- */
-export function useGroupOpen(id: string, ids: readonly string[]): [boolean, () => void] {
-  const key = groupKey(id)
-  const value = useSyncExternalStore(subscribe, () => open.has(key) || ids.some((i) => open.has(i)))
-  const toggle = useCallback(() => {
-    const now = open.has(key) || ids.some((i) => open.has(i))
-    setOpen(now ? [key, ...ids] : [key], !now)
-  }, [key, ids])
   return [value, toggle]
 }
 

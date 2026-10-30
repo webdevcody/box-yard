@@ -9,7 +9,7 @@
 // - What Cody sends to a task from its card stays in it (a sent notice). One its task refused goes to the Coordinator
 //   as Cody's message (lib/reroute.ts), so it's in the Coordinator card.
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
-//   Tool calls show only in the timeline.
+//   Tool calls aren't shown.
 // - A card's place is where the chat first named its task, so new activity never moves it.
 // - The tasks one create_tasks call started (Task.batchId) share one card when there are BATCH_MIN or more.
 import type { ChatMessage, TaskStatus } from "../../../shared/types"
@@ -111,7 +111,7 @@ export function batchesOf(tasks: ReadonlyMap<string, CardTask>): Map<string, str
 
 /**
  * The cards and the Coordinator card, from coordinatorRows over the settled chat. `tasks` are the tasks the app knows:
- * an update about tasks it doesn't (deleted ones) shows only in the timeline.
+ * an update about tasks it doesn't (deleted ones) isn't shown.
  */
 export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, tasks: ReadonlyMap<string, CardTask>): CardsModel {
   /** Every entry for a card, in chat order, with its tasks. */
@@ -129,7 +129,7 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   const place = (entry: EntryBody, about: readonly string[]) => {
     if (!about.length) return void coordinator.push({ ...entry, tasks: NO_TASKS })
     const known = about.filter((t) => tasks.has(t))
-    // About tasks that are gone: the timeline still has it.
+    // About tasks that are gone: no card shows it.
     if (known.length) placed.push({ ...entry, tasks: known })
   }
   const update = (item: UpdateItem) => {
