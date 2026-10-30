@@ -3,7 +3,7 @@ import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowUpRight, Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
+import { ArrowUpRight, Bot, Box, Check, ChevronsUp, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
 import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
@@ -113,6 +113,30 @@ export function QuietPill({ className }: { className?: string }) {
       className={cx("inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400", className)}
     >
       Quiet
+    </span>
+  )
+}
+
+/** A queued task that jumps the queue (shared/priority.ts): it goes before every normal task waiting for a slot. */
+export const waitsHighPriority = (task: Pick<Task, "priority" | "status">) => task.priority === "high" && task.status === "queued"
+
+const PRIORITY_TITLE = "High priority: it goes before every normal task waiting for a slot. Running tasks are never stopped for it."
+
+/**
+ * The "High priority" pill on a queued task (nothing otherwise). `compact`: the icon alone, for tight rows; the title
+ * and label still say it.
+ */
+export function PriorityPill({ task, compact, className }: { task: Pick<Task, "priority" | "status">; compact?: boolean; className?: string }) {
+  if (!waitsHighPriority(task)) return null
+  return (
+    <span
+      data-testid="priority-pill"
+      title={PRIORITY_TITLE}
+      aria-label={compact ? "High priority" : undefined}
+      className={cx("inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-orange-500/15 text-xs font-medium text-orange-300", compact ? "p-0.5" : "py-0.5 pr-2 pl-1.5", className)}
+    >
+      <ChevronsUp className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      {!compact && "High priority"}
     </span>
   )
 }

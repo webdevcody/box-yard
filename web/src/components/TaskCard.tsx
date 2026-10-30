@@ -5,7 +5,7 @@ import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { AgentCliChip, InRepo, LinkedText, NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
+import { AgentCliChip, InRepo, LinkedText, NewTabLink, PrChip, PriorityPill, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
@@ -52,6 +52,7 @@ export const TaskCard = memo(function TaskCard({
         </div>
         <span className="mt-0.5 flex shrink-0 gap-1">
           {quiet && <QuietPill />}
+          <PriorityPill task={task} />
           <StatusBadge status={badgeStatus(task)} />
         </span>
       </div>

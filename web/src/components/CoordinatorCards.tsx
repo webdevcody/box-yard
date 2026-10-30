@@ -58,7 +58,7 @@ import { StickyScroll } from "./StickyScroll"
 import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
-import { AppLink, Elapsed, InRepo, LineIcon, MERGED_BADGE, Markdown, PrChip, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
+import { AppLink, Elapsed, InRepo, LineIcon, MERGED_BADGE, Markdown, PrChip, PriorityPill, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
 import type { ChatMessage, SideThread, SideThreadMessage, Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
@@ -292,6 +292,7 @@ function CardMeta({ card, head }: { card: ChatCard; head: CardHead }) {
         tasks[0] && (
           <>
             <StatusBadge status={statuses[0]!} />
+            <PriorityPill task={tasks[0]} />
             <Running task={tasks[0]} />
             <PrChip task={tasks[0]} variant="link" className="text-[11.5px]" />
           </>
@@ -783,6 +784,7 @@ const BatchTask = memo(function BatchTask({
             <Running task={task} />
           </span>
         )}
+        {task && <PriorityPill task={task} compact />}
         {status && <StatusBadge status={status} />}
         <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
       </button>

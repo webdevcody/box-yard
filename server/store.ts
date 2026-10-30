@@ -5,6 +5,7 @@ import { BOX_SIZES, WAIT_FIXES, shouldNotify, weakerSource } from "../shared/typ
 import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
+import { parsePriority, type TaskPriority } from "../shared/priority.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { DEFAULT_AGENT_CLI, isAgentCli, type AgentCli } from "../shared/agentCli.js"
@@ -206,6 +207,8 @@ export interface TaskRow {
   icon?: string | null
   /** Shared by the tasks one create_tasks call started; null when started on its own. */
   batch_id?: string | null
+  /** 'high' jumps the queue (shared/priority.ts); null (and old rows) are normal. */
+  priority?: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -516,6 +519,7 @@ type TaskPatch = Partial<{
   mergeRequest: StoredMergeRequest | null
   pushState: PushState | null
   placedHow: BoxPick | null
+  priority: TaskPriority
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -561,6 +565,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   mergeRequest: "merge_request_json",
   pushState: "push_state_json",
   placedHow: "placed_how",
+  priority: "priority",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -1267,6 +1272,8 @@ export class Store {
       pushState: json<PushState | null>(row.push_state_json, null),
       icon: isTaskIcon(row.icon) ? row.icon : null,
       batchId: row.batch_id ?? null,
+      priority: parsePriority(row.priority),
+      lastActiveAt: row.last_active_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -1384,6 +1391,8 @@ export class Store {
     icon?: TaskIconName | null
     /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
     batchId?: string | null
+    /** "high" jumps the queue (shared/priority.ts); omitted is normal. */
+    priority?: TaskPriority | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1415,6 +1424,7 @@ export class Store {
     if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
+    if (input.priority === "high") this.db.prepare("UPDATE tasks SET priority = 'high' WHERE id = ?").run(id)
     return this.getTask(id)!
   }
 
@@ -1519,6 +1529,7 @@ export class Store {
       else if (key === "waitFor") args.push((value as WaitFor[]).length ? JSON.stringify(value) : null)
       else if (key === "mergeRequest" || key === "pushState") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
+      else if (key === "priority") args.push(value === "high" ? "high" : null)
       else args.push(value)
     }
     if (opts.touch !== false) {

@@ -912,6 +912,10 @@ export const MIGRATIONS: string[] = [
   -- view can show a fan-out as one card. NULL: started on its own.
   ALTER TABLE tasks ADD COLUMN batch_id TEXT;
   `,
+  `
+  -- Task priority (shared/priority.ts): 'high' tasks are pulled from the queue before normal ones. NULL: normal.
+  ALTER TABLE tasks ADD COLUMN priority TEXT;
+  `,
   // Which CLI an agent runs on (shared/agentCli.ts, docs/codex.md): a project's choice for its new tasks (null:
   // Settings › Box agents), and the one each task started on (null on older rows: Claude Code).
   `

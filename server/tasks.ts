@@ -55,6 +55,7 @@ import { GITHUB_HELPER, GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, 
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
 import type { TaskIconName } from "../shared/taskIcons.js"
+import { parsePriority, queueOrder, type QueueEntry, type TaskPriority } from "../shared/priority.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
@@ -122,6 +123,9 @@ const RUNNER_FALLBACK = path.resolve(process.cwd(), "runner/box-runner.mjs")
 /** Statuses a task can sit in between turns. */
 const RESTING: TaskStatus[] = [...RESTING_STATUSES]
 /** A task that takes one of its box's agent slots: a turn id, or starting/working (the same rule as Store.slotsInUse). */
+/** A task row's place in the queue (shared/priority.ts): its priority, and when it last joined (last_active_at). */
+const queueEntry = (r: TaskRow): QueueEntry => ({ priority: parsePriority(r.priority), queuedAt: r.last_active_at })
+
 const holdsSlot = (r: TaskRow) => Boolean(r.current_turn_id) || r.status === "starting" || r.status === "working"
 /** "1 box", "3 boxes". */
 const boxCount = (n: number) => `${n} ${n === 1 ? "box" : "boxes"}`
@@ -311,6 +315,8 @@ export interface NewTask {
   agentCli?: AgentCli | null
   /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
   icon?: TaskIconName | null
+  /** "high" pulls its turns from the queue before normal tasks' (shared/priority.ts); omitted is normal. */
+  priority?: TaskPriority | null
 }
 
 /**
@@ -1130,6 +1136,27 @@ export class TaskManager {
     this.store.updateTask(row.id, patch)
     this.addEvent(row.id, `Routing updated for subsequent turns: ${this.routeLabel({ model: route.model ?? row.model, effort: route.effort ?? row.effort, routingRule: route.routingRule ?? row.routing_rule, routingReason: route.routingReason ?? row.routing_reason })}.`)
     this.emitTask(row.id)
+    return this.store.getTask(row.id)!
+  }
+
+  /**
+   * Raise or lower a task's priority (set_task_priority, send_to_task's and create_task's `priority`). A high task's
+   * turns are pulled from the queue before every normal task's, here, on a box, a GPU pod or a Docker container; it
+   * never stops a running agent, and its project's limits still hold. It stays until changed.
+   */
+  setTaskPriority(taskId: string, priority: TaskPriority, by: string): Task {
+    const row = this.requireRow(taskId)
+    if (parsePriority(row.priority) === priority) return this.store.getTask(row.id)!
+    this.store.updateTask(row.id, { priority })
+    this.addEvent(
+      row.id,
+      priority === "high"
+        ? `High priority (set by ${by}): its turns go before normal tasks waiting for a slot.`
+        : `Normal priority (set by ${by}): its turns wait in line with the other tasks again.`,
+    )
+    this.emitTask(row.id)
+    // A queued task moves up (or down) the queue at once.
+    this.schedule()
     return this.store.getTask(row.id)!
   }
 
@@ -2691,10 +2718,12 @@ export class TaskManager {
   private async schedulePass() {
     this.meterBoxes()
     this.noticeCloudSpend()
+    // High priority first, then first in, first out (shared/priority.ts). Each is placed in turn, so a task its own
+    // project's limits hold back is skipped and the tasks behind it still get the free slots.
     const waiting = this.store
       .listTaskRows()
       .filter((r) => this.wantsTurn(r))
-      .sort((a, b) => a.last_active_at - b.last_active_at)
+      .sort((a, b) => queueOrder(queueEntry(a), queueEntry(b)))
 
     this.wantsBox.clear()
     const live = new Set(this.store.listTaskRows().map((r) => r.current_turn_id).filter(Boolean))
@@ -2751,8 +2780,11 @@ export class TaskManager {
     // Grow the pool: one new box per project per `slotsPerBox` tasks waiting for one, less the boxes already on
     // their way, so a batch never gets more boxes than it needs.
     const perProject = new Map<string, number>()
+    const urgent = new Set<string>()
     for (const row of waiting) {
-      if (this.wantsBox.has(row.id)) perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
+      if (!this.wantsBox.has(row.id)) continue
+      perProject.set(row.project_id, (perProject.get(row.project_id) ?? 0) + 1)
+      if (parsePriority(row.priority) === "high") urgent.add(row.project_id)
     }
     const need = new Map<string, number>()
     for (const [projectId, n] of perProject) {
@@ -2763,12 +2795,13 @@ export class TaskManager {
       if (more > 0) need.set(projectId, more)
     }
     // Several at once, up to Settings › Boxes created at once and the pace (each finished create runs another pass),
-    // and up to the hour's free ones unless Cody allowed more. The project with the fewest boxes on their way goes
-    // next, so one project's big fan-out doesn't hold up another's single task. createBox counts itself in
-    // `creatingFor` and `createStarts` before its first await.
+    // and up to the hour's free ones unless Cody allowed more. A project with a high-priority task waiting goes
+    // first; then the one with the fewest boxes on their way, so one project's big fan-out doesn't hold up another's
+    // single task. createBox counts itself in `creatingFor` and `createStarts` before its first await.
     const cap = this.createConcurrency()
+    const createRank = (projectId: string) => (urgent.has(projectId) ? 0 : 1_000_000) + (this.creatingFor.get(projectId) ?? 0)
     while (need.size && this.fanoutRoom() > 0 && this.canCreateBox(cap)) {
-      const [projectId, more] = [...need].reduce((best, next) => ((this.creatingFor.get(next[0]) ?? 0) < (this.creatingFor.get(best[0]) ?? 0) ? next : best))
+      const [projectId, more] = [...need].reduce((best, next) => (createRank(next[0]) < createRank(best[0]) ? next : best))
       void this.createBox(projectId)
       if (more > 1) need.set(projectId, more - 1)
       else need.delete(projectId)

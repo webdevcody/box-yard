@@ -22,7 +22,7 @@ import { useCloseTask, useCompactTask, useDeleteTask, useIdentities, useRetryTas
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
-import { AgentCliChip, Button, META_CHIP, NewTabLink, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
+import { AgentCliChip, Button, META_CHIP, NewTabLink, PriorityPill, StatusDot, TimeAgo, cx, timeAgo } from "./ui"
 import { FilesChip } from "./TaskFiles"
 import { MergePrButton, MergePrChip, MergePrMenuItem } from "./MergePr"
 import { badgeStatus } from "../lib/prState"
@@ -123,6 +123,7 @@ export function TaskMetaRow({ task, project, files }: { task: Task; project: Pro
             · <QueuedLink taskId={task.id} count={task.pendingCount} />
           </span>
         )}
+        <PriorityPill task={task} />
       </StatusDot>
       <AgentCliChip cli={task.agentCli} className={cx(META_CHIP, "border-zinc-800 bg-zinc-900/60 text-zinc-300")} />
       {hasChips && (
