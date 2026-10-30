@@ -504,6 +504,42 @@ export function SettingsDialog({
                 tokens={DEFAULT_AUTOCOMPACT_TOKENS}
               />
             </Row>
+            <Row
+              id={fid("orl")}
+              label="Relay turns"
+              help="Runs the Coordinator's relay-only turns (woken by task updates and Captain replies, with no message from you) on this model and effort. Off by default: another model or effort can't reuse the last turn's prompt cache, so each relay turn sends the whole context again. That's quick and cheap on a small model, slow and costly on a big one. Your own messages always use the model above."
+              hint={hint("orchestratorRelay")}
+            >
+              <div className="space-y-2">
+                <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                  <input
+                    id={fid("orl")}
+                    type="checkbox"
+                    checked={s.orchestratorRelay.enabled}
+                    onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, enabled: e.target.checked })}
+                    data-testid="orchestrator-relay"
+                  />
+                  {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
+                </label>
+                <input
+                  className={cx(inputClass, "disabled:opacity-50")}
+                  list="boxyard-models"
+                  disabled={!s.orchestratorRelay.enabled}
+                  aria-label="Relay turn model"
+                  value={s.orchestratorRelay.model}
+                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, model: e.target.value })}
+                />
+                <Select
+                  className="w-full"
+                  disabled={!s.orchestratorRelay.enabled}
+                  aria-label="Relay turn effort"
+                  value={s.orchestratorRelay.effort}
+                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: e.target.value as Settings["orchestratorEffort"] })}
+                >
+                  <EffortOptions />
+                </Select>
+              </div>
+            </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
               Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
