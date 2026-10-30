@@ -878,8 +878,10 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const setup = useSetup()
   // Without an Upstash key there's nowhere to make a box: "Upstash box" waits until one is added (unless it's already set).
   const noUpstash = setup.data?.upstash.available === false
-  // RunPod GPU waits for a RunPod key (Settings › RunPod GPU).
-  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
+  // GPU waits for a RunPod or a Vast.ai key (Settings › RunPod GPU, Settings › Vast.ai GPU).
+  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset" && setup.data?.credentials.vastApiKey?.state !== "set"
+  const vastStatus = useVast({ enabled: runner === "gpu" })
+  const gpuCloud = effectiveGpuProvider(machine.provider || null, Boolean(vastStatus.data?.settings.defaultForGpu))
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
@@ -970,7 +972,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
                   : r === "box" && noUpstash && project.runner === "local"
                     ? " (add an Upstash key in Settings first)"
                     : r === "gpu" && noRunPod && project.runner !== "gpu"
-                      ? " (add a RunPod key in Settings first)"
+                      ? " (add a RunPod or Vast.ai key in Settings first)"
                       : ""}
               </option>
             ))}
@@ -983,11 +985,13 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         )}
         {(runner === "gpu" || noRunPod) && (
           <p className="text-xs text-zinc-500" data-testid="runner-gpu-note">
-            {runner === "gpu"
-              ? "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."
-              : "Need a GPU (a WebGL game, ML work)? Add a RunPod key to run this project on a RunPod GPU pod."}{" "}
-            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("runpod")}>
-              Settings › RunPod GPU
+            {runner !== "gpu"
+              ? "Need a GPU (a WebGL game, ML work)? Add a RunPod or Vast.ai key to run this project on a GPU pod."
+              : gpuCloud === "vast"
+                ? "Billed by Vast.ai per hour while each instance runs, within the project's GPU cap and Settings › Vast.ai GPU. Instances are destroyed when idle and start fresh each time (no volume)."
+                : "Billed by RunPod per hour while each pod runs, within the project's GPU cap and Settings › RunPod GPU. Pods stop when idle; pod #1's network volume keeps caches between its runs (more pods start from their own disk)."}{" "}
+            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings(runner === "gpu" ? gpuCloud : "runpod")}>
+              {runner === "gpu" ? GPU_SETTINGS_PATH[gpuCloud] : "Settings › RunPod GPU"}
             </button>
           </p>
         )}
