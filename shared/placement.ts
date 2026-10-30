@@ -5,7 +5,7 @@ import type { BoxSize } from "./types.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, type Runner } from "./runner.js"
 import { gpuBoxIndex, isGpuBox } from "./runpod.js"
 import { isDockerBox } from "./docker.js"
-import { isMachineBox, machineOfBox } from "./machines.js"
+import { isMachineBox, labelPhrase, machineOfBox } from "./machines.js"
 
 /**
  * The kinds of place a workspace can be: this computer, a worker box (Upstash, or a folder box in mock mode), a
@@ -63,6 +63,8 @@ export interface TaskPlacement {
   chosenBy: RunnerSource
   /** The project's Runs on, so a task pinned off it shows a "pinned" mark. */
   projectRunner: Runner
+  /** SSH machines: the label (or machine name) its next turn picks a machine by; null: any machine. */
+  machineLabel?: string | null
 }
 
 /** The kind of place a box id is. Worker boxes are everything that isn't one of the runners' virtual boxes. */
@@ -160,7 +162,9 @@ const HEADING_OUT = new Set(["queued", "starting"])
 export function placementView(t: PlacementTask, projectRunner?: Runner): PlacementView {
   const p = t.placement ?? fallback(t, projectRunner)
   const pinned = p.chosenBy === "task" && p.runner !== p.projectRunner
-  const setting = `${p.chosenBy === "task" ? "This task's" : "Project's"} Runs on: ${RUNNER_PHRASE[p.runner]}`
+  // SSH machines say which: 'SSH machines labelled "laptops"'.
+  const phrase = p.runner === "ssh" ? labelPhrase(p.machineLabel ?? null) : RUNNER_PHRASE[p.runner]
+  const setting = `${p.chosenBy === "task" ? "This task's" : "Project's"} Runs on: ${phrase}`
   const base = { pinned, chosenBy: p.chosenBy, setting }
   const wanted = RUNNER_PLACE[p.runner]
   if (p.now) {
@@ -172,7 +176,7 @@ export function placementView(t: PlacementTask, projectRunner?: Runner): Placeme
       label: placeLabel(p.now),
       short: placeShort(p.now),
       reason: moving
-        ? `It's set to run on ${RUNNER_PHRASE[p.runner]}, but its workspace is still here: it moves before a turn once its archive and push hold all the work.`
+        ? `It's set to run on ${phrase}, but its workspace is still here: it moves before a turn once its archive and push hold all the work.`
         : p.now.how
           ? BOX_PICK_WHY[p.now.how]
           : null,
@@ -186,11 +190,11 @@ export function placementView(t: PlacementTask, projectRunner?: Runner): Placeme
       kind: p.last.kind,
       label: `${placeLabel(p.last)} · archived`,
       short: `${placeShort(p.last)} · archived`,
-      reason: `Its workspace is archived; the next turn restores it on ${RUNNER_PHRASE[p.runner]}.`,
+      reason: `Its workspace is archived; the next turn restores it on ${phrase}.`,
       place: p.last,
     }
   }
-  const name = PLACE_NAME[wanted]
+  const name = p.runner === "ssh" && p.machineLabel ? `${PLACE_NAME.ssh} · ${p.machineLabel}` : PLACE_NAME[wanted]
   const archived = Boolean(t.lastArchivedAt) && !HEADING_OUT.has(t.status)
   return {
     ...base,
@@ -198,7 +202,7 @@ export function placementView(t: PlacementTask, projectRunner?: Runner): Placeme
     kind: wanted,
     label: archived ? `${name} · archived` : `→ ${name}`,
     short: archived ? `${name} · archived` : `→ ${name}`,
-    reason: archived ? `Its workspace is archived; the next turn restores it on ${RUNNER_PHRASE[p.runner]}.` : HEADING_OUT.has(t.status) ? `Not placed yet: its next turn goes to ${RUNNER_PHRASE[p.runner]}.` : null,
+    reason: archived ? `Its workspace is archived; the next turn restores it on ${phrase}.` : HEADING_OUT.has(t.status) ? `Not placed yet: its next turn goes to ${phrase}.` : null,
     place: null,
   }
 }

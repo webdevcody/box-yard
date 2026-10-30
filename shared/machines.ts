@@ -61,6 +61,10 @@ export interface MachineTest {
   diskTotalBytes: number | null
   /** The login user's home, which a `~/…` work folder resolves against. */
   home: string | null
+  /** The work folder (Machine.dir) as an absolute path on the machine: task folders, mirrors and the runner live in it. */
+  workDir: string | null
+  /** Folders the machine's login shell has node, claude or git in (nvm and the like), put first on PATH for agents. */
+  pathDirs: string[]
   tools: { git: MachineTool; node: MachineTool; claude: MachineTool; codex: MachineTool }
   /** `claude auth status` on the machine: its own Claude login. Null: claude isn't there, or it didn't say. */
   claudeLogin: boolean | null

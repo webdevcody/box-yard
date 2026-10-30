@@ -66,6 +66,8 @@ export interface Project {
   depCache: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
+  /** Runs on: SSH machine: the machines it runs on, by label or machine name (shared/machines.ts); null: any machine. */
+  machineLabel: string | null
   /**
    * Tasks running at once: how many of its own tasks may run at the same time on one box, GPU pod or this computer.
    * Other projects' tasks never wait for it; the box's own limit (Settings › Tasks running at once per box, or › on this
@@ -229,6 +231,8 @@ export interface Task {
    * later message. It wins over the project's setting for every turn; null follows the project.
    */
   runsOn: Runner | null
+  /** With its own runs_on "ssh": the SSH machines it runs on, by label or name (shared/machines.ts); null: any. */
+  machineLabel: string | null
   /**
    * Where it actually runs (shared/placement.ts): the box its workspace is on now, where it last ran once that box
    * let it go, and where its next turn goes and which setting chose that. Always set by the server.

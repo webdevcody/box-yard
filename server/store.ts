@@ -190,6 +190,8 @@ export interface TaskRow {
   routing_reason: string | null
   /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
   runs_on?: string | null
+  /** With its own runs_on 'ssh': the SSH machines it runs on, by label or name; null: any machine. */
+  machine_label?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
   placed_how?: string | null
@@ -343,6 +345,7 @@ interface ProjectRow {
   push_at_turn_end: number | null
   dep_cache?: number | null
   runner?: string | null
+  machine_label?: string | null
   heavy_tasks: string | null
   agents_per_box?: number | null
   whole_machine?: number | null
@@ -507,6 +510,7 @@ type TaskPatch = Partial<{
   routingRule: string | null
   routingReason: string | null
   runsOn: Runner | null
+  machineLabel: string | null
   prHeadSha: string | null
   prLabels: string[]
   mergeRequest: StoredMergeRequest | null
@@ -552,6 +556,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   routingRule: "routing_rule",
   routingReason: "routing_reason",
   runsOn: "runs_on",
+  machineLabel: "machine_label",
   prHeadSha: "pr_head_sha",
   prLabels: "pr_labels_json",
   mergeRequest: "merge_request_json",
@@ -810,6 +815,7 @@ export class Store {
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
+      machineLabel: row.machine_label || null,
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
       wholeMachine: row.whole_machine === 1,
       tasksPerBox: row.tasks_per_box ?? null,
@@ -880,6 +886,15 @@ export class Store {
     return normalizeRunner((this.db.prepare("SELECT runner FROM projects WHERE id = ?").get(id) as { runner: string | null } | undefined)?.runner)
   }
 
+  /**
+   * The SSH machines a task's turns run on (shared/machines.ts), by label or machine name; null: any machine. Its own
+   * label goes with its own runs_on; a task that follows its project takes the project's.
+   */
+  taskMachineLabel(row: Pick<TaskRow, "project_id" | "runs_on" | "machine_label">): string | null {
+    if (taskRunsOn(row)) return row.machine_label || null
+    return (this.db.prepare("SELECT machine_label FROM projects WHERE id = ?").get(row.project_id) as { machine_label: string | null } | undefined)?.machine_label || null
+  }
+
   findProject(idOrName: string): Project | null {
     const row = this.db
       .prepare("SELECT * FROM projects WHERE id = ? OR name = ? COLLATE NOCASE")
@@ -904,6 +919,8 @@ export class Store {
     pushAtTurnEnd?: boolean | null
     depCache?: boolean | null
     runner?: Runner
+    /** Runs on: SSH machine: the machines' label or name (Project.machineLabel). */
+    machineLabel?: string | null
     agentsPerBox?: number | null
     wholeMachine?: boolean
     tasksPerBox?: number | null
@@ -937,7 +954,7 @@ export class Store {
     if (typeof input.partialClone === "boolean") this.db.prepare("UPDATE projects SET partial_clone = ? WHERE id = ?").run(input.partialClone ? 1 : 0, id)
     if (typeof input.pushAtTurnEnd === "boolean") this.db.prepare("UPDATE projects SET push_at_turn_end = ? WHERE id = ?").run(input.pushAtTurnEnd ? 1 : 0, id)
     if (typeof input.depCache === "boolean") this.db.prepare("UPDATE projects SET dep_cache = ? WHERE id = ?").run(input.depCache ? 1 : 0, id)
-    this.setRunner(id, input.runner)
+    this.setRunner(id, input.runner, input.machineLabel)
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
@@ -970,6 +987,8 @@ export class Store {
       depCache?: boolean | null
       /** Where its agents run: Upstash boxes or this computer (shared/runner.ts). */
       runner?: Runner
+      /** Runs on: SSH machine: the machines' label or name; null: any machine. Cleared when it runs elsewhere. */
+      machineLabel?: string | null
       /** null clears it (the box's own Agents per box applies). */
       agentsPerBox?: number | null
       /** Run alone on this computer (server/agentLimits.ts). */
@@ -1016,7 +1035,7 @@ export class Store {
         Date.now(),
         id,
       )
-    this.setRunner(id, patch.runner)
+    this.setRunner(id, patch.runner, patch.machineLabel)
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
@@ -1035,11 +1054,18 @@ export class Store {
     return this.getProject(id)
   }
 
-  /** undefined leaves it as it is; "box" is stored as NULL, like a project from before the setting. */
-  private setRunner(id: string, v: Runner | undefined) {
-    if (v === undefined) return
-    const runner = normalizeRunner(v)
-    this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(runner === "box" ? null : runner, id)
+  /**
+   * undefined leaves it as it is; "box" is stored as NULL, like a project from before the setting. The SSH machines'
+   * label only means something while it runs on SSH machines, so another runner clears it.
+   */
+  private setRunner(id: string, v: Runner | undefined, machineLabel?: string | null) {
+    if (v !== undefined) {
+      const runner = normalizeRunner(v)
+      this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(runner === "box" ? null : runner, id)
+    }
+    const ssh = this.projectRunner(id) === "ssh"
+    if (!ssh) this.db.prepare("UPDATE projects SET machine_label = NULL WHERE id = ?").run(id)
+    else if (machineLabel !== undefined) this.db.prepare("UPDATE projects SET machine_label = ? WHERE id = ?").run(machineLabel || null, id)
   }
 
   /**
@@ -1248,6 +1274,7 @@ export class Store {
       routingRule: row.routing_rule ?? null,
       routingReason: row.routing_reason ?? null,
       runsOn: taskRunsOn(row),
+      machineLabel: row.machine_label || null,
       placement: this.taskPlacement(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
@@ -1282,6 +1309,7 @@ export class Store {
       runner: own ?? projectRunner,
       chosenBy: own ? "task" : "project",
       projectRunner,
+      ...((own ?? projectRunner) === "ssh" ? { machineLabel: this.taskMachineLabel(row) } : {}),
     }
   }
 
@@ -1364,6 +1392,8 @@ export class Store {
     startedBy?: string | null
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
+    /** With runsOn "ssh": the SSH machines it runs on, by label or name (TaskRow.machine_label). */
+    machineLabel?: string | null
     /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
     icon?: TaskIconName | null
     /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
@@ -1396,6 +1426,7 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
+    if (input.runsOn === "ssh" && input.machineLabel) this.db.prepare("UPDATE tasks SET machine_label = ? WHERE id = ?").run(input.machineLabel, id)
     if (input.icon) this.setTaskIcon(id, input.icon)
     if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     return this.getTask(id)!

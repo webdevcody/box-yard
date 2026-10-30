@@ -627,6 +627,7 @@ export function useCreateProject() {
           depCache: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
+          machineLabel: null,
           agentsPerBox: null,
           wholeMachine: false,
           tasksPerBox: null,
@@ -837,6 +838,8 @@ export function useCreateTask() {
       attachments?: string[]
       /** Run on this computer (or a box) over the project's "Runs on". */
       runsOn?: Runner
+      /** With runsOn "ssh": the SSH machines' label or name. */
+      machineLabel?: string | null
     }) =>
       api<Task>("/api/tasks", { body: input }),
     onMutate: async (input) => {
@@ -880,6 +883,7 @@ export function useCreateTask() {
           routingRule: null,
           routingReason: null,
           runsOn: input.runsOn ?? null,
+          machineLabel: input.runsOn === "ssh" ? (input.machineLabel ?? null) : null,
           createdAt: now,
           updatedAt: now,
         }),
