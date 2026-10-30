@@ -619,7 +619,7 @@ function ProjectBoxSettings(p: {
               global={g ? `${g.minRamGb} GB (${where})` : `${where} › Min RAM`}
               set={m.minRamGb.trim() !== ""}
               onClear={() => setM({ minRamGb: "" })}
-              hint="Its new pods only go to hosts with at least this much RAM. A game's browser needs about 12 GB; cheap Community hosts can have less."
+              hint={`Its new ${onVast ? "instances" : "pods"} only go to hosts with at least this much RAM. A game's browser needs about 12 GB; cheap ${onVast ? "marketplace" : "Community"} hosts can have less.`}
             >
               <LimitInput id="project-gpu-min-ram" range={RUNPOD_MACHINE_LIMITS.minRamGb} value={m.minRamGb} onChange={(minRamGb) => setM({ minRamGb })} placeholder={g ? `Global: ${g.minRamGb}` : "Global"} />
             </OverrideField>
@@ -629,7 +629,7 @@ function ProjectBoxSettings(p: {
               global={g ? `${g.minVcpus} (${where})` : `${where} › Min vCPUs`}
               set={m.minVcpus.trim() !== ""}
               onClear={() => setM({ minVcpus: "" })}
-              hint="…and at least this many vCPUs. Running pods keep what they have; these apply to new ones."
+              hint={`…and at least this many vCPUs. Running ${onVast ? "instances" : "pods"} keep what they have; these apply to new ones.`}
             >
               <LimitInput id="project-gpu-min-vcpus" range={RUNPOD_MACHINE_LIMITS.minVcpus} value={m.minVcpus} onChange={(minVcpus) => setM({ minVcpus })} placeholder={g ? `Global: ${g.minVcpus}` : "Global"} />
             </OverrideField>
