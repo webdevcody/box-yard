@@ -193,8 +193,9 @@ const list = (items: string[]) => (items.length <= 1 ? (items[0] ?? "") : `${ite
 export function issueCloseEvent(prUrl: string, r: IssueCloseResult): string | null {
   const n = prNumber(prUrl) ?? "?"
   if (r.defaultBranch || (!r.closed.length && !r.skipped.length)) return null
+  const it = r.closed.length === 1 ? "it" : "them"
   const closed = r.closed.length
-    ? `Closed issue${r.closed.length === 1 ? "" : "s"} ${list(r.closed.map((i) => `#${i}`))}: PR #${n} names ${r.closed.length === 1 ? "it" : "them"} and merged into ${r.base}, where GitHub doesn't close them itself.`
+    ? `Closed issue${r.closed.length === 1 ? "" : "s"} ${list(r.closed.map((i) => `#${i}`))}: PR #${n} names ${it} and merged into ${r.base}, where GitHub doesn't close ${it} itself.`
     : `PR #${n} merged into ${r.base}, and closed no issues.`
   return r.skipped.length ? `${closed} Left alone: ${list(r.skipped)}.` : closed
 }
