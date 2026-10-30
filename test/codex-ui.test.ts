@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { SettingsDialog } from "../web/src/components/SettingsDialog.js"
 import { ProjectView } from "../web/src/components/ProjectView.js"
 import { NewTaskDialog } from "../web/src/components/NewTask.js"
+import { NewProjectDialog } from "../web/src/components/NewProjectDialog.js"
 import { TaskCard } from "../web/src/components/TaskCard.js"
 import { TaskHeader } from "../web/src/components/TaskHeader.js"
 import { SetupCard } from "../web/src/components/Setup.js"
@@ -152,6 +153,7 @@ beforeEach(() => {
     if (method === "PUT" && url === "/api/setup/credentials") return json(setup({ codexAuthJson: saved }))
     if (method === "POST" && url.startsWith("/api/setup/test/")) return json({ ok: true, message: "Codex answered", ms: 900 })
     if (method === "PATCH" && url.startsWith("/api/projects/")) return json({ ...project(), ...body })
+    if (method === "POST" && url === "/api/projects") return json({ ...project(), ...body })
     return new Promise(() => {})
   })
   host = document.createElement("div")
@@ -374,6 +376,20 @@ describe("New task › Agent", () => {
     act(() => button("Start agent")!.click())
     await settle()
     expect(sent("POST", "/api/tasks")[0]).toMatchObject({ projectId: "prj_codex1", agentCli: "claude" })
+  })
+})
+
+describe("New project › Agent", () => {
+  it("follows Settings until picked, and sends the pick", async () => {
+    qc.setQueryData(keys.agentSettings, info({ agentCli: "codex" }))
+    show(createElement(NewProjectDialog, { onClose: () => {} }))
+    const agent = $<HTMLSelectElement>("new-project-agent-cli")!
+    expect(agent.options[0]!.textContent).toBe("Settings default (Codex)")
+    type(document.querySelector<HTMLInputElement>("input[placeholder=marketing-site]")!, "parser")
+    await choose(agent, "claude")
+    act(() => button("Create project")!.click())
+    await settle()
+    expect(sent("POST", "/api/projects")[0]).toMatchObject({ name: "parser", agentCli: "claude" })
   })
 })
 
