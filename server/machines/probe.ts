@@ -122,7 +122,7 @@ export function testFromProbe(i: { first: Map<string, string[]>; tools: Map<stri
   const missing = first.get("missing") ?? []
   if (missing.length) problems.push(`${missing.join(", ")} ${missing.length === 1 ? "isn't" : "aren't"} installed`)
   if (all.claude.found && claudeLogin === false) notes.push("claude isn't logged in on it: its tasks need a Claude key from Box Yard (Settings › Credentials or the project's identity), or run claude there once and /login")
-  if (all.codex.found) notes.push(`codex is installed (${all.codex.version ?? "version unknown"}); Box Yard runs Claude Code only, so it isn't used`)
+  if (all.codex.found) notes.push(`codex is installed (${all.codex.version ?? "version unknown"}), but Codex tasks don't run on SSH machines yet, so it isn't used`)
   const free = num(disk[0] ?? null)
   if (free !== null && free < 2 * 1024 ** 3) notes.push("under 2 GB free in its work folder's disk")
   return {

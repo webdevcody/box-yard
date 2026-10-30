@@ -243,6 +243,45 @@ describe("SSH machines (mock mode: machines are folders)", () => {
     expect(await coordinator("remove_machine", { machine: "gpu-tower" })).toMatchObject({ removed: "gpu-tower", tasks_moved: 2 })
     expect(history(r, box)).toEqual(["created by coordinator", "deleted by coordinator"])
   })
+
+  it("refuses Codex tasks on SSH machines, and one that gets there through its project waits with nothing sent there", { timeout: 200_000 }, async () => {
+    const r = await start()
+    const coordinator = await mcpAs(r, { kind: "coordinator" })
+    const { machine } = await addMachine(r, { name: "old-thinkpad", host: "thinkpad.lan", user: "cody", labels: ["laptops"] })
+    const tasksDir = path.join(r.dataDir, "ssh-machines", machine.id, "home", "boxyard", "tasks")
+    const refused = /Can't run it on .*: Codex isn't supported on SSH machines yet/
+
+    // Asked for up front: refused, whether Codex is named or picked by a model or the project's Agent.
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "anywhere", runner: "box" })
+    await expect(coordinator("create_task", { project: p.id, title: "x", prompt: "y", agent: "codex", runs_on: "label:laptops" })).rejects.toThrow(refused)
+    await expect(coordinator("create_task", { project: p.id, title: "x", prompt: "y", model: "gpt-5.5", machine_label: "laptops" })).rejects.toThrow(refused)
+    await expect(coordinator("create_tasks", { project: p.id, agent: "codex", tasks: [{ title: "x", prompt: "y", runs_on: "ssh" }] })).rejects.toThrow(/Codex isn't supported on SSH machines yet/)
+    await expect(call(r, "POST", "/api/tasks", { projectId: p.id, title: "x", prompt: "y", agentCli: "codex", runsOn: "ssh" })).rejects.toThrow(refused)
+    const codexProject = await call<Project>(r, "POST", "/api/projects", { name: "codex-one", runner: "box", agentCli: "codex" })
+    await expect(coordinator("create_task", { project: codexProject.id, title: "x", prompt: "y", runs_on: "label:laptops" })).rejects.toThrow(refused)
+
+    // Its project runs on SSH machines: it waits, says why once, and never reaches the machine.
+    const onSsh = await call<Project>(r, "POST", "/api/projects", { name: "on-laptops", runner: "ssh", machineLabel: "laptops" })
+    const t = r.yard.tasks.createTask({ projectId: onSsh.id, title: "codex here", prompt: "write a haiku", agentCli: "codex" })
+    const waiting = await until(r, t.id, (x) => Boolean(x.waitReason), "to wait")
+    expect(waiting).toMatchObject({ status: "queued", boxId: null, agentCli: "codex" })
+    expect(waiting.waitReason).toBe("Waiting: Codex isn't supported on SSH machines yet: move it to another runner (Runs on)")
+    // Moving it to (another of) the machines is refused the same way.
+    await expect(coordinator("send_to_task", { task: t.id, message: "go", runs_on: "label:laptops" })).rejects.toThrow(refused)
+    r.yard.tasks.schedule()
+    await new Promise((res) => setTimeout(res, 500))
+    const notices = (r.yard.store.db.prepare("SELECT content FROM chat_messages WHERE role = 'notice' ORDER BY rowid").all() as { content: string }[]).map((n) => n.content)
+    expect(notices.filter((n) => n.includes("**codex here** waits"))).toEqual(["⚠️ **codex here** waits: Codex isn't supported on SSH machines yet: move it to another runner (Runs on)."])
+    expect(fs.readdirSync(tasksDir)).toEqual([])
+    expect(r.boxes.created).toBe(0)
+    expect((await machinesStatus(r)).machines[0]).toMatchObject({ running: 0, tasks: 0 })
+
+    // A Claude Code task of the same project runs there.
+    const claude = r.yard.tasks.createTask({ projectId: onSsh.id, title: "claude here", prompt: "write a haiku" })
+    await done(r, claude.id)
+    expect(getTask(r, claude.id).boxId).toBe(machineBoxId(machine.id))
+    expect(getTask(r, t.id)).toMatchObject({ status: "queued", boxId: null })
+  })
 })
 
 /**

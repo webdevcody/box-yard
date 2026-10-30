@@ -121,7 +121,7 @@ export function toolList(t: MachineTest): { name: string; text: string; ok: bool
       text: !claude.found ? "missing" : `${version("claude", claude)}${t.claudeLogin === true ? ", logged in" : t.claudeLogin === false ? ", not logged in" : ""}`,
       ok: !claude.found ? false : t.claudeLogin === false ? null : true,
     },
-    // Codex is only detected: Box Yard runs Claude Code.
+    // Codex is only detected: Codex tasks don't run on SSH machines yet (CODEX_ON_MACHINES).
     { name: "codex", text: codex.found ? `${version("codex", codex)} (not used)` : "not installed", ok: null },
   ]
 }

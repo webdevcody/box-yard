@@ -901,7 +901,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (a.machine_label !== undefined && !scopeId) {
           const current = store.getProject(id)!
           if (current.runner !== "ssh") return fail(owner(`${current.name} doesn't run on SSH machines (its Runs on is ${current.runner ?? "box"}). Cody picks Runs on in the project's settings; for one task, pass runs_on "label:<label>" to create_task.`))
-          if (a.machine_label) await tasks.requireRunner("ssh", id, {}, { machineLabel: a.machine_label })
+          if (a.machine_label) await tasks.requireRunner("ssh", id, {}, { agentCli: a.agent, machineLabel: a.machine_label })
         }
         const p = store.updateProject(
           id,
@@ -2200,7 +2200,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 git: toolLine(t.tools.git),
                 node: toolLine(t.tools.node),
                 claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${t.claudeLogin === true ? "logged in" : t.claudeLogin === false ? "not logged in" : "login unknown"}` : "not installed",
-                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)} (found; Box Yard runs Claude Code only)` : "not installed",
+                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)} (found; Codex tasks don't run on SSH machines yet)` : "not installed",
                 ...(t.problems.length ? { problems: t.problems } : {}),
                 ...(t.notes.length ? { notes: t.notes } : {}),
               },

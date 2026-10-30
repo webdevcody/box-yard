@@ -131,6 +131,13 @@ describe("pickMachine", () => {
     expect(pick([m("a", { claudeLogin: false })])).toMatchObject({ kind: "claude" })
   })
 
+  it("never gives a Codex task a machine: it waits, saying Codex isn't supported there yet", () => {
+    const codex = { kind: "codex", wait: "Waiting: Codex isn't supported on SSH machines yet: move it to another runner (Runs on)" }
+    expect(pick([m("a")], { cli: "codex", claudeKey: true })).toEqual(codex)
+    expect(pick([m("a")], { cli: "codex", current: "a", canMove: false })).toEqual(codex)
+    expect(pick([m("a")], { cli: "claude" })).toEqual({ machineId: "a", moved: false })
+  })
+
   it("stays on its machine while it has room, and moves when it's busy and nothing would be lost", () => {
     const machines = [m("a", { running: 1 }), m("b")]
     expect(pick(machines, { current: "a" })).toEqual({ machineId: "a", moved: false })

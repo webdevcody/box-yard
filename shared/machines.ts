@@ -3,6 +3,7 @@
 // Each machine has labels ("laptops", "gpu"); a task or project picks machines by label, and the scheduler takes a
 // free one of those (docs/machines.md).
 
+import type { AgentCli } from "./agentCli.js"
 import { parseRunsOn, RUNNERS, type Runner } from "./runner.js"
 
 /**
@@ -178,6 +179,13 @@ export function resolveRunsOn(runsOn: string | null | undefined, machineLabel: s
   return { runner, machineLabel: null, viaLocal: false }
 }
 
+/**
+ * Codex tasks don't run on SSH machines (yet): nothing is installed on them, and Box Yard's Codex login isn't handed
+ * to them. Creating or moving one there is refused with this, and one that gets there anyway (its project's Runs on
+ * changed) waits with it. Test connection still says whether codex is on a machine.
+ */
+export const CODEX_ON_MACHINES = "Codex isn't supported on SSH machines yet"
+
 /** "laptops", or "any SSH machine" when there's no label: for wait reasons and placement lines. */
 export const labelPhrase = (label: string | null) => (label ? `SSH machines labelled "${label}"` : "your SSH machines")
 
@@ -241,7 +249,7 @@ export interface MachineCandidate {
 
 export type MachinePick =
   | { machineId: string; moved: boolean }
-  | { wait: string; kind: "none" | "unusable" | "claude" | "busy" }
+  | { wait: string; kind: "codex" | "none" | "unusable" | "claude" | "busy" }
 
 /**
  * Which machine a task's next turn takes (pure, so it's unit-tested):
@@ -251,8 +259,10 @@ export type MachinePick =
  * 3. the matching working machine with the fewest agents running that has room (ties: by name);
  * 4. else a wait, with the reason as the task shows it ("Waiting for …", "Waiting: …"): no machine has that label, none of them works now, none has a Claude login to
  *    use (`claudeKey` false), or every one is busy.
+ * A Codex task (`cli` "codex") always waits: CODEX_ON_MACHINES.
  */
-export function pickMachine(i: { machines: MachineCandidate[]; label: string | null; current: string | null; canMove: boolean; claudeKey: boolean }): MachinePick {
+export function pickMachine(i: { machines: MachineCandidate[]; label: string | null; current: string | null; canMove: boolean; claudeKey: boolean; cli?: AgentCli }): MachinePick {
+  if (i.cli === "codex") return { kind: "codex", wait: `Waiting: ${CODEX_ON_MACHINES}: move it to another runner (Runs on)` }
   const room = (m: MachineCandidate) => m.running < m.maxTasks && !m.blocked
   const slots = (m: MachineCandidate) => m.blocked ?? `${m.running} of ${m.maxTasks} running`
   const cur = i.current ? i.machines.find((m) => m.id === i.current) : undefined

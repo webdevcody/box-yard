@@ -60,7 +60,7 @@ import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuB
 import { POD_HTTP_PORTS, shortGpu } from "./providers/runpod.js"
 import { GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, gpuBoxIdOn, gpuBoxProvider, type GpuProvider } from "../shared/gpu.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
-import { isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, normalizeLabel, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
+import { CODEX_ON_MACHINES, isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, normalizeLabel, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
@@ -3890,6 +3890,7 @@ export class TaskManager {
    * answered lately), has a Claude login to use (a Claude key Box Yard forwards, else the machine's own login) and a
    * free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole machine (`limitBlock`).
    * Its workspace's machine first; it moves to another only when nothing would be lost (`moveBlock`, no upload limit).
+   * A Codex task never gets one: it waits with CODEX_ON_MACHINES.
    */
   private async machineTarget(row: TaskRow): Promise<string | null> {
     if (!this.machines) {
@@ -3915,7 +3916,7 @@ export class TaskManager {
       }
     })
     const claudeKey = this.c.mock || this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom !== null
-    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, claudeKey })
+    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, claudeKey, cli: taskAgentCli(row) })
     if ("wait" in pick) {
       this.machineWait(row, pick)
       return null
@@ -3938,7 +3939,8 @@ export class TaskManager {
 
   /**
    * A task waits for an SSH machine: the reason on the task, and its Captain hears it once per kind of wait when no
-   * machine can take it (none has the label, none works, no Claude login). A busy one is only a queue: no notice.
+   * machine can take it (none has the label, none works, no Claude login, a Codex task). A busy one is only a queue:
+   * no notice.
    */
   private machineWait(row: TaskRow, pick: Extract<MachinePick, { wait: string }>) {
     this.setWaitReason(row.id, pick.wait)
@@ -5073,6 +5075,8 @@ export class TaskManager {
     /** And codex-auth.json, the Codex login for this turn. */
     let codexWaiting = false
     try {
+      // Placement doesn't send Codex tasks to SSH machines (pickMachine waits); never reach one with nothing written.
+      if (isMachineBox(boxId) && taskAgentCli(row) === "codex") throw new Error(CODEX_ON_MACHINES)
       await this.provider.wake(boxId)
       const project = this.store.getProject(row.project_id)
       if (!project) throw new Error("Project was deleted")
@@ -5411,9 +5415,11 @@ export class TaskManager {
 
   /**
    * Codex on the box, installed the first time a Codex task lands on one that lacks it (Upstash and RunPod boxes start
-   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install.
+   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install, and on an
+   * SSH machine nothing is ever installed: Codex tasks don't run there (CODEX_ON_MACHINES).
    */
   private async ensureCodex(boxId: string) {
+    if (isMachineBox(boxId)) throw new Error(CODEX_ON_MACHINES)
     const provider = providerOf(this.provider, boxId)
     if (this.codexReady.has(boxId) || provider.name === "local" || this.c.mock) return
     const install = "npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1"
