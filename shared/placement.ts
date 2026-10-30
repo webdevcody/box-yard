@@ -5,12 +5,14 @@ import type { BoxSize } from "./types.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, type Runner } from "./runner.js"
 import { gpuBoxIndex, isGpuBox } from "./runpod.js"
 import { isDockerBox } from "./docker.js"
+import { isMachineBox, machineOfBox } from "./machines.js"
 
 /**
  * The kinds of place a workspace can be: this computer, a worker box (Upstash, or a folder box in mock mode), a
- * RunPod GPU pod, or a Docker container on this computer (the Docker runner fills that one in).
+ * RunPod GPU pod, a Docker container on this computer (the Docker runner fills that one in), or one of Cody's
+ * SSH machines.
  */
-export const PLACE_KINDS = ["local", "box", "gpu", "docker"] as const
+export const PLACE_KINDS = ["local", "box", "gpu", "docker", "ssh"] as const
 export type PlaceKind = (typeof PLACE_KINDS)[number]
 
 export interface Place {
@@ -25,6 +27,8 @@ export interface Place {
   podId?: string | null
   /** Docker: the container's name. */
   container?: string | null
+  /** SSH machines: the machine's name. */
+  machine?: string | null
   /** Worker boxes, where its workspace is now: how placement picked the box (null: its project's own box). */
   how?: BoxPick | null
 }
@@ -62,13 +66,14 @@ export interface TaskPlacement {
 }
 
 /** The kind of place a box id is. Worker boxes are everything that isn't one of the runners' virtual boxes. */
-export const placeKindOf = (boxId: string): PlaceKind => (boxId === LOCAL_BOX_ID ? "local" : isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : "box")
+export const placeKindOf = (boxId: string): PlaceKind =>
+  boxId === LOCAL_BOX_ID ? "local" : isGpuBox(boxId) ? "gpu" : isDockerBox(boxId) ? "docker" : isMachineBox(boxId) ? "ssh" : "box"
 
 /** The place a runner's turns go to. */
-export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "box", gpu: "gpu", docker: "docker" }
+export const RUNNER_PLACE: Record<Runner, PlaceKind> = { local: "local", box: "box", gpu: "gpu", docker: "docker", ssh: "ssh" }
 
 /** The provider's name, as the chip leads with it. */
-export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", box: "Upstash", gpu: "RunPod", docker: "Docker" }
+export const PLACE_NAME: Record<PlaceKind, string> = { local: "This computer", box: "Upstash", gpu: "RunPod", docker: "Docker", ssh: "SSH" }
 
 /** "Upstash" for Upstash boxes, "Local box" for mock mode's folder boxes. */
 const boxProviderName = (p: Place) => (p.provider && p.provider !== "upstash" ? (p.provider === "local" ? "Local box" : p.provider) : PLACE_NAME.box)
@@ -81,7 +86,7 @@ const podName = (p: Place) => (p.podId ? `pod ${shortPodId(p.podId)}` : `pod #${
 
 const join = (parts: (string | null | undefined)[]) => parts.filter(Boolean).join(" · ")
 
-/** The full form: "This computer", "Upstash · pure-lobster · small" (" · reused idle box"), "RunPod · RTX A5000 · pod 3x9k2a", "Docker · boxyard-task-1". */
+/** The full form: "This computer", "Upstash · pure-lobster · small" (" · reused idle box"), "RunPod · RTX A5000 · pod 3x9k2a", "Docker · boxyard-task-1", "SSH · laptop-1". */
 export function placeLabel(p: Place): string {
   switch (p.kind) {
     case "local":
@@ -92,6 +97,8 @@ export function placeLabel(p: Place): string {
       return join([PLACE_NAME.gpu, p.gpu, podName(p)])
     case "docker":
       return join([PLACE_NAME.docker, p.container ?? p.boxId])
+    case "ssh":
+      return join([PLACE_NAME.ssh, p.machine ?? machineOfBox(p.boxId)])
   }
 }
 
@@ -106,6 +113,8 @@ export function placeShort(p: Place): string {
       return join([PLACE_NAME.gpu, p.gpu ?? podName(p)])
     case "docker":
       return join([PLACE_NAME.docker, p.container ?? p.boxId])
+    case "ssh":
+      return join([PLACE_NAME.ssh, p.machine ?? machineOfBox(p.boxId)])
   }
 }
 
