@@ -8,17 +8,21 @@ import path from "node:path"
 import { Box } from "@upstash/box"
 import type { Config } from "./config.js"
 import { BadRequestError, type Store } from "./store.js"
-import { credentialValue, redact, type CredentialStore } from "./credentials.js"
+import { credentialValueFor, redact, type CodexLogin, type CredentialStore } from "./credentials.js"
+import { codexExecArgs, CodexStream, isRefreshOf, seedCodexAuth } from "./codex.js"
 import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
-import { DOCKER_NEEDS_CLAUDE_KEY } from "../shared/docker.js"
+import { DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY } from "../shared/docker.js"
+import type { AgentCli } from "../shared/agentCli.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
 export const CLAUDE_CHECK_TIMEOUT_MS = 60_000
+/** And a `codex exec` one a little longer: it loads its model list first. */
+export const CODEX_CHECK_TIMEOUT_MS = 90_000
 
 export interface SetupDeps {
   c: Config
@@ -93,7 +97,7 @@ export class Setup {
   refreshLocal(force = false): Promise<boolean> {
     if (!force && this.local && Date.now() - this.local.at < LOCAL_CHECK_TTL_MS) return Promise.resolve(false)
     if (this.checking) return this.checking
-    const look = this.d.localCheck ?? (() => checkLocal({ claudeBin: this.d.c.claudeBin, fakeClaude: isMockRun(this.d.c) }))
+    const look = this.d.localCheck ?? (() => checkLocal({ claudeBin: this.d.c.claudeBin, codexBin: this.d.c.codexBin, fakeClaude: isMockRun(this.d.c) }))
     this.checking = look()
       .then((result) => {
         const before = this.local
@@ -114,7 +118,7 @@ export class Setup {
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
    * whether Settings › Credentials has one.
    */
-  async runnerProblem(runner: Runner, claudeKey?: boolean): Promise<string | null> {
+  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude"): Promise<string | null> {
     const { c, credentials } = this.d
     // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
     const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
@@ -125,6 +129,16 @@ export class Setup {
     }
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
+    }
+    if (cli === "codex") {
+      const codexKey = claudeKey ?? (creds.codexAuthJson.state === "set" || creds.codexApiKey.state === "set")
+      if (runner === "docker") return codexKey ? null : DOCKER_NEEDS_CODEX_KEY
+      await this.refreshLocal()
+      const local = this.local?.result.check
+      if (!local) return "Box Yard couldn't check this computer's tools (codex --version didn't answer)"
+      if (!local.tools.find((t) => t.key === "codex")?.found) return `Codex isn't installed on this computer (\`${c.codexBin} --version\` failed). Install it (npm i -g @openai/codex), then try again`
+      if (local.codexLogin === false && !codexKey) return "Codex on this computer isn't signed in: run `codex login`, or add a Codex login in Settings › Credentials"
+      return null
     }
     const keySet = claudeKey ?? (creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set")
     if (runner === "docker") return keySet ? null : DOCKER_NEEDS_CLAUDE_KEY
@@ -148,11 +162,16 @@ export class Setup {
     const boxesRequired = !mock && c.boxProvider !== "local" && !onComputer && choice !== "docker"
     // A container can't use this computer's `claude` login: Docker needs a key.
     const claudeSet = set("claudeOauthToken") || set("anthropicApiKey") || (onComputer && local?.claudeLogin === true)
+    // The Coordinator runs on this server, so the server's own `codex login` works for it wherever agents run.
+    const codexSet = set("codexAuthJson") || set("codexApiKey") || local?.codexLogin === true
+    // The Coordinator needs a sign-in for the CLI it runs on; agents set to the other one say so when they start.
+    const coordinatorCli = this.d.settings.get().orchestratorCli
     const missing: string[] = []
     // Before the choice, a box key isn't the only way: "This computer" needs none.
     if (boxesRequired && !set("upstashBoxApiKey")) missing.push(choice === null ? NO_RUNNER_CHOICE : CREDENTIAL_INFO.upstashBoxApiKey.label)
-    if (onComputer && !mock && local && !local.tools.find((t) => t.key === "claude")?.found) missing.push("Claude Code on this computer")
-    if (!mock && !claudeSet) missing.push("Claude sign-in")
+    if (onComputer && !mock && local && coordinatorCli === "claude" && !local.tools.find((t) => t.key === "claude")?.found) missing.push("Claude Code on this computer")
+    if (!mock && coordinatorCli === "claude" && !claudeSet) missing.push("Claude sign-in")
+    if (!mock && coordinatorCli === "codex" && !codexSet) missing.push("Codex sign-in")
     const restart: string[] = []
     if (c.boxProvider === "local" && !mock && set("upstashBoxApiKey")) {
       restart.push("BOX_PROVIDER=local keeps every box on the server's machine. Unset it and restart Box Yard to use Upstash boxes.")
@@ -168,6 +187,11 @@ export class Setup {
         required: !mock,
         state: claudeSet ? "set" : "unset",
         using: set("anthropicApiKey") ? "anthropicApiKey" : set("claudeOauthToken") ? "claudeOauthToken" : null,
+      },
+      codex: {
+        required: !mock && coordinatorCli === "codex",
+        state: codexSet ? "set" : "unset",
+        using: set("codexAuthJson") ? "codexAuthJson" : set("codexApiKey") ? "codexApiKey" : null,
       },
       github: { state: creds.githubToken.state },
       owner: { name: info.settings.ownerName, source: info.sources.ownerName },
@@ -204,7 +228,7 @@ export class Setup {
   async test(key: CredentialKey, typed?: string): Promise<CredentialTest> {
     let value = this.d.credentials.get(key)
     if (typed !== undefined && typed.trim()) {
-      const parsed = credentialValue.safeParse(typed)
+      const parsed = credentialValueFor(key).safeParse(typed)
       if (!parsed.success) throw new BadRequestError(parsed.error.issues.map((i) => i.message).join("; "))
       value = parsed.data
     }
@@ -224,6 +248,8 @@ export class Setup {
     if (key === "upstashBoxApiKey") return this.checkBoxes(value)
     if (key === "anthropicApiKey") return this.checkAnthropic(value)
     if (key === "claudeOauthToken") return this.checkClaude({ CLAUDE_CODE_OAUTH_TOKEN: value })
+    if (key === "codexAuthJson") return this.checkCodex({ kind: "chatgpt", auth: value })
+    if (key === "codexApiKey") return this.checkCodex({ kind: "api_key", key: value })
     if (key === "runpodApiKey") return this.checkRunPod(value)
     return this.checkGitHub(value)
   }
@@ -301,6 +327,15 @@ export class Setup {
     }
   }
 
+  /** A one-word reply from the same `codex` agents run, logged in with only `login`. */
+  private async checkCodex(login: CodexLogin): Promise<string> {
+    const r = await codexLoginCheck(this.d.c.codexBin, login, this.d.timeoutMs ?? CODEX_CHECK_TIMEOUT_MS)
+    // The check may have refreshed the ChatGPT tokens: keep the new ones, the old refresh token is spent.
+    if (r.refreshed) this.d.credentials.adoptCodexAuth(r.refreshed)
+    if (!r.ok) throw new Error(r.text)
+    return login.kind === "chatgpt" ? "Works: Codex answered using this ChatGPT login." : "Works: Codex answered using this API key."
+  }
+
   /** A one-word reply from the same `claude` the Coordinator runs, logged in with only `login`. */
   private async checkClaude(login: Record<string, string>): Promise<string> {
     const r = await claudeLoginCheck(this.d.c.claudeBin, login, this.d.timeoutMs ?? CLAUDE_CHECK_TIMEOUT_MS)
@@ -370,6 +405,76 @@ export function claudeLoginCheck(claudeBin: string, login: Record<string, string
       if (result && !result.is_error) return finish(true, String(result.result ?? ""))
       const text = (result?.result || err.trim().split("\n").slice(-3).join(" ") || `claude exited with code ${code}`).trim()
       finish(false, `Claude said: ${text}`)
+    })
+    child.stdin!.on("error", () => {})
+    child.stdin!.end("Reply with the single word OK.")
+  })
+}
+
+/** Env vars that would log `codex` in some other way and hide whether `login` works. */
+const OTHER_CODEX_LOGINS = ["CODEX_API_KEY", "OPENAI_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_HOME"]
+
+/**
+ * Run `codex exec` once with a tiny prompt, logged in only with `login`, in a throwaway CODEX_HOME (so this machine's
+ * own `codex login` can't make a bad one pass). Resolves with Codex's own error text when it fails, and with the login
+ * file as Codex left it when it refreshed the tokens (the caller keeps that copy: the old refresh token is spent).
+ */
+export function codexLoginCheck(codexBin: string, login: CodexLogin, timeoutMs = CODEX_CHECK_TIMEOUT_MS): Promise<{ ok: boolean; text: string; refreshed: string | null }> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "box-yard-codex-check-"))
+  const env: NodeJS.ProcessEnv = { ...process.env }
+  for (const k of OTHER_CODEX_LOGINS) delete env[k]
+  env.CODEX_HOME = home
+  if (login.kind === "chatgpt") seedCodexAuth(home, login.auth)
+  else env.CODEX_API_KEY = login.key
+  const [bin, ...pre] = codexBin.split(" ")
+  const args = [...pre, ...codexExecArgs({ resume: null, model: null, effort: "low", instructions: "", manager: true, webSearch: false })]
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = (ok: boolean, text: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      let refreshed: string | null = null
+      try {
+        const after = fs.readFileSync(path.join(home, "auth.json"), "utf8")
+        if (login.kind === "chatgpt" && isRefreshOf(login.auth, after)) refreshed = after
+      } catch {}
+      fs.rmSync(home, { recursive: true, force: true })
+      resolve({ ok, text, refreshed })
+    }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(bin!, args, { cwd: home, env, stdio: ["pipe", "pipe", "pipe"] })
+    } catch (err) {
+      return finish(false, `Couldn't start codex (${codexBin}): ${(err as Error).message}`)
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      finish(false, `Codex didn't answer within ${Math.round(timeoutMs / 1000)} s.`)
+    }, timeoutMs)
+    const stream = new CodexStream()
+    let out = ""
+    let err = ""
+    let said = ""
+    let failure: string | null = null
+    child.stdout!.setEncoding("utf8").on("data", (d: string) => {
+      out += d
+      let nl: number
+      while ((nl = out.indexOf("\n")) >= 0) {
+        const line = out.slice(0, nl).trim()
+        out = out.slice(nl + 1)
+        for (const m of stream.push(line)) {
+          if (m.type === "assistant") said += (m.message?.content ?? []).map((b: any) => (b.type === "text" ? b.text : "")).join("")
+          if (m.type === "result" && m.is_error) failure = String(m.result)
+        }
+      }
+    })
+    child.stderr!.setEncoding("utf8").on("data", (d: string) => (err = (err + d).slice(-2000)))
+    child.on("error", (e) => finish(false, `Couldn't start codex (${codexBin}): ${e.message}. Install it on the server: npm i -g @openai/codex`))
+    child.on("close", (code) => {
+      if (code === 0 && stream.sawResult && !failure) return finish(true, said.trim())
+      const last = err.trim().split("\n").filter((l) => !/models_manager|WARN|INFO/.test(l)).slice(-3).join(" ")
+      finish(false, `Codex said: ${(failure || stream.lastError || last || `codex exited with code ${code}`).trim()}`)
     })
     child.stdin!.on("error", () => {})
     child.stdin!.end("Reply with the single word OK.")

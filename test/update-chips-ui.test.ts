@@ -169,11 +169,24 @@ describe("the reply's from: line", () => {
   })
 })
 
+describe("next steps", () => {
+  it("shows only under the newest reply", () => {
+    const next = (id: string, step: string) => msg(id, "assistant", "Done.", { nextSteps: [step] })
+    render([next("r1", "Open the PR"), captain("c1", "a"), next("r2", "Check Map 3")])
+    const steps = () => $$('[aria-label="Recommended next steps"]').map((s) => s.closest('[data-testid="chat-reply"]')!.id)
+    expect(steps()).toEqual(["chat-r2"])
+    act(() => setThread([next("r1", "Open the PR"), captain("c1", "a"), next("r2", "Check Map 3"), next("r3", "Ship it")]))
+    expect(steps()).toEqual(["chat-r3"])
+  })
+})
+
 describe("re-renders", () => {
   it("opening a chip or a new message re-renders only what changed", async () => {
     const thread = [captain("c1", "a"), msg("r1", "assistant", "Sent."), captain("c2", "b"), msg("r2", "assistant", "Done.")]
     render(thread)
-    expect(renders.replies).toBe(2)
+    // Only the newest reply reads its next steps (the older one's are for a moment that has passed), so the counter
+    // sees r2's renders: a thread-wide re-render would re-render it too.
+    expect(renders.replies).toBe(1)
     renders.chips.clear()
     renders.replies = 0
     await act(async () => void $("#chat-c2 [data-testid='update-chip-line']")!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })))

@@ -50,10 +50,11 @@ export const TurnTimingChip = memo(function TurnTimingChip({ id, ms, className }
 const WIDTH = 368
 
 /**
- * Fixed-position style that hangs the panel from the trigger's left edge, inside the window, below it or above it when
- * there's more room there. Placed again when `content` changes (the timing loads) and on scroll and resize.
+ * Fixed-position style that hangs the panel (`width` wide at most) from the trigger's left edge, inside the window,
+ * below it or above it when there's more room there. Placed again when `content` changes (the timing loads) and on
+ * scroll and resize. The chat switcher's menu uses it too.
  */
-function usePlacement(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, content: unknown): CSSProperties {
+export function usePlacement(trigger: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>, on: boolean, content: unknown, width = WIDTH): CSSProperties {
   const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden" })
   useLayoutEffect(() => {
     if (!on) return
@@ -63,11 +64,11 @@ function usePlacement(trigger: RefObject<HTMLElement | null>, panel: RefObject<H
       if (!t || !el) return
       const vw = document.documentElement.clientWidth || window.innerWidth
       const vh = window.innerHeight
-      const width = Math.min(WIDTH, vw - 16)
-      const left = Math.max(8, Math.min(t.left, vw - 8 - width))
+      const w = Math.min(width, vw - 16)
+      const left = Math.max(8, Math.min(t.left, vw - 8 - w))
       const below = vh - t.bottom - 14
       const above = t.top - 14
-      setStyle(el.scrollHeight > below && above > below ? { left, width, bottom: vh - t.top + 6, maxHeight: above } : { left, width, top: t.bottom + 6, maxHeight: below })
+      setStyle(el.scrollHeight > below && above > below ? { left, width: w, bottom: vh - t.top + 6, maxHeight: above } : { left, width: w, top: t.bottom + 6, maxHeight: below })
     }
     place()
     window.addEventListener("resize", place)
@@ -76,7 +77,7 @@ function usePlacement(trigger: RefObject<HTMLElement | null>, panel: RefObject<H
       window.removeEventListener("resize", place)
       window.removeEventListener("scroll", place, true)
     }
-  }, [on, trigger, panel, content])
+  }, [on, trigger, panel, content, width])
   return style
 }
 

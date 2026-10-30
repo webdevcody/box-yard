@@ -130,8 +130,10 @@ describe("Zen mode", () => {
     expect(chat()!.querySelector("[aria-label='Leave Zen mode']")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Zen mode']")).toBeNull()
     expect(chat()!.querySelector("header")!.textContent).toContain("Box Yard Coordinator")
-    // Every row pads in to the one centered column.
-    expect(chat()!.querySelectorAll(".zen-column").length).toBe(3)
+    // Every row pads in to the one centered column: the header, the project bar (a task is running), the thread
+    // and the composer.
+    expect(chat()!.querySelectorAll(".zen-column").length).toBe(4)
+    expect(chat()!.querySelector('[data-testid="project-bar"]')!.classList.contains("zen-column")).toBe(true)
   })
 
   it("puts the context reading and Compact in the header, left of the other controls, and nowhere else", async () => {
@@ -160,7 +162,7 @@ describe("Zen mode", () => {
     expect(ctx.querySelector("button[aria-label=Compact]")!.className).toContain("amber")
     // Container queries on the header, not the viewport: the reading is wide-only, the ⋯ button narrow-only.
     expect(ctx.className).toContain(WIDE_HEAD_ONLY)
-    const chip = header.querySelector<HTMLButtonElement>("button[aria-haspopup=menu]")!
+    const chip = header.querySelector<HTMLButtonElement>("[data-testid=context-menu-button]")!
     expect(chip.className).toContain(NARROW_HEAD_ONLY)
     expect(chip.className).toContain("amber")
     expect(chip.querySelector("[data-testid=context-mini]")).toBeNull()

@@ -69,7 +69,7 @@ function packApp(): string {
 
 function envFile(boxId: string, password: string, publicUrl: string, keepAlive: boolean) {
   const keep = [
-    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "UPSTASH_BOX_API_KEY", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
+    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "CODEX_AUTH_JSON", "CODEX_API_KEY", "UPSTASH_BOX_API_KEY", "WORKER_SNAPSHOT_ID", "WORKER_RUNTIME", "WORKER_SIZE",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "GITHUB_TOKEN", "GIT_USER_NAME", "GIT_USER_EMAIL",
     "BOX_POOL_MAX", "BOX_CREATE_CONCURRENCY", "BOX_SLOTS", "BOX_MAX_RESIDENT", "BOX_IDLE_DELETE_MINUTES", "BOXYARD_WORKSPACE_RETENTION_DAYS", "BOXYARD_ARCHIVE_RETENTION_DAYS", "ORCHESTRATOR_MODEL", "WORKER_MODEL", "CAPTAIN_MODEL", "CAPTAIN_EFFORT",
     "BOXYARD_NOTES_MAX", "BOXYARD_NOTES_MAX_TOKENS",
@@ -183,11 +183,13 @@ async function main() {
   const publicUrl = (await box.getPublicURL(3000)).url
   await box.files.write({ path: `${APP}/.env`, content: envFile(box.id, password, publicUrl, box.keepAlive) })
 
-  log("Installing dependencies, Claude Code and building (a few minutes the first time)…")
+  log("Installing dependencies, Claude Code, Codex and building (a few minutes the first time)…")
   await sh(
     box,
     `set -e; cd ${APP}; command -v git >/dev/null || (apt-get update -qq && apt-get install -y -qq git curl >/dev/null); ` +
       `command -v claude >/dev/null || npm install -g @anthropic-ai/claude-code --no-audit --no-fund >/dev/null 2>&1; ` +
+      // Codex, for a Coordinator or Captains set to run on it (docs/codex.md); agents' boxes get it on first use.
+      `command -v codex >/dev/null || npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1 || true; ` +
       `npm ci --no-audit --no-fund >/dev/null 2>&1 || npm install --no-audit --no-fund >/dev/null; npm run build >/dev/null; claude --version`,
     "build",
   )

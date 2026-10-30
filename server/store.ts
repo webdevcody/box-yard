@@ -5,8 +5,12 @@ import { BOX_SIZES, WAIT_FIXES, shouldNotify, weakerSource } from "../shared/typ
 import { activityLine } from "../shared/activity.js"
 import { todaysRaise } from "./cloudLimit.js"
 import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
+import { parsePriority, type TaskPriority } from "../shared/priority.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { DEFAULT_AGENT_CLI, isAgentCli, type AgentCli } from "../shared/agentCli.js"
+import { isProjectColor, type ProjectColor } from "../shared/projectColors.js"
+import { isTaskIcon, type TaskIconName } from "../shared/taskIcons.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -93,7 +97,7 @@ function sideThreadFrom(r: SideThreadRow): SideThread {
     id: r.id,
     projectId: r.project_id,
     anchorId: r.anchor_id,
-    kind: r.kind === "reply" ? "reply" : "ask",
+    kind: r.kind === "reply" || r.kind === "task" ? r.kind : "ask",
     quote: r.quote,
     context: r.context === "fork" || r.context === "summary" ? r.context : null,
     busy: false,
@@ -188,6 +192,8 @@ export interface TaskRow {
   routing_reason: string | null
   /** The task's own runner, 'local' or 'box', over its project's; null (and old rows) follow the project. */
   runs_on?: string | null
+  /** The CLI its agent runs on, 'claude' or 'codex'; null on rows from before Codex: Claude Code. */
+  agent_cli?: string | null
   /** Where it last ran once its box let it go: a Place plus leftAt (Task.placement.last). */
   last_place_json?: string | null
   placed_how?: string | null
@@ -197,6 +203,12 @@ export interface TaskRow {
   pr_labels_json: string | null
   merge_request_json: string | null
   push_state_json: string | null
+  /** Its icon (shared/taskIcons.ts); null picks one from its title. */
+  icon?: string | null
+  /** Shared by the tasks one create_tasks call started; null when started on its own. */
+  batch_id?: string | null
+  /** 'high' jumps the queue (shared/priority.ts); null (and old rows) are normal. */
+  priority?: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -326,6 +338,8 @@ const AGENTS_PER_BOX = "COALESCE(agents_per_box, CASE WHEN heavy_tasks IN ('one-
 interface ProjectRow {
   id: string
   name: string
+  /** Its colour (shared/projectColors.ts); null picks one from its name. */
+  color?: string | null
   description: string
   repo: string | null
   base_branch: string
@@ -348,6 +362,7 @@ interface ProjectRow {
   docker_image?: string | null
   docker_dockerfile?: string | null
   identity_id?: string | null
+  agent_cli?: string | null
   notes_max_count?: number | null
   notes_max_tokens?: number | null
   snapshot_id?: string | null
@@ -504,6 +519,7 @@ type TaskPatch = Partial<{
   mergeRequest: StoredMergeRequest | null
   pushState: PushState | null
   placedHow: BoxPick | null
+  priority: TaskPriority
 }>
 
 const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
@@ -549,6 +565,7 @@ const TASK_COLUMNS: Record<keyof TaskPatch, string> = {
   mergeRequest: "merge_request_json",
   pushState: "push_state_json",
   placedHow: "placed_how",
+  priority: "priority",
 }
 
 /** How many notifications to keep; older ones are pruned as new ones land. */
@@ -614,6 +631,8 @@ interface TaskCompactionRow {
 }
 
 const taskRunsOn = (row: { runs_on?: string | null }) => parseRunsOn(row.runs_on)
+/** The CLI a task's agent runs on: the one it was created with; older rows ran on Claude Code. */
+export const taskAgentCli = (row: { agent_cli?: string | null }): AgentCli => (isAgentCli(row.agent_cli) ? row.agent_cli : DEFAULT_AGENT_CLI)
 
 const oneLine = (text: string | null | undefined, max = 200) => {
   const t = (text ?? "").replace(/\s+/g, " ").trim()
@@ -804,6 +823,7 @@ export class Store {
       pushAtTurnEnd: row.push_at_turn_end === null || row.push_at_turn_end === undefined ? null : row.push_at_turn_end === 1,
       depCache: row.dep_cache === null || row.dep_cache === undefined ? null : row.dep_cache === 1,
       runner: normalizeRunner(row.runner),
+      agentCli: isAgentCli(row.agent_cli) ? row.agent_cli : null,
       agentsPerBox: row.agents_per_box ?? legacyAgentsPerBox(row.heavy_tasks),
       wholeMachine: row.whole_machine === 1,
       tasksPerBox: row.tasks_per_box ?? null,
@@ -812,6 +832,7 @@ export class Store {
       gpuMachine: gpuMachineOf(row),
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       identityId: row.identity_id || DEFAULT_IDENTITY_ID,
+      color: isProjectColor(row.color) ? row.color : null,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -905,8 +926,11 @@ export class Store {
     gpuMachine?: Partial<ProjectGpuMachine>
     docker?: Partial<ProjectDocker>
     identityId?: string
+    /** The CLI its new tasks run on; null/omitted uses Settings › Box agents. */
+    agentCli?: AgentCli | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
+    color?: ProjectColor | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -933,6 +957,8 @@ export class Store {
     this.setProjectBoxLimits(id, input)
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
+    if (input.agentCli) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
+    if (input.color) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(input.color, id)
     return this.getProject(id)!
   }
 
@@ -981,6 +1007,10 @@ export class Store {
       notesMaxTokens?: number | null
       /** Who acts for it (shared/identities.ts). The caller checks that its runner fits. */
       identityId?: string
+      /** The CLI its new tasks run on; null clears it (Settings › Box agents applies). Its existing tasks keep theirs. */
+      agentCli?: AgentCli | null
+      /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+      color?: ProjectColor | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -1009,6 +1039,8 @@ export class Store {
     this.setProjectBoxLimits(id, patch)
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
+    if (patch.agentCli !== undefined) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(patch.agentCli, id)
+    if (patch.color !== undefined) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(patch.color, id)
     return this.getProject(id)!
   }
 
@@ -1229,6 +1261,7 @@ export class Store {
       contextWindow: row.context_window ?? null,
       compactPending: Boolean(row.compact_pending),
       compacting: Boolean(row.compacting),
+      agentCli: taskAgentCli(row),
       model: row.model ?? null,
       effort: row.effort ?? null,
       claudeCostUsd: usage.costUsd,
@@ -1239,6 +1272,10 @@ export class Store {
       placement: this.taskPlacement(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
+      icon: isTaskIcon(row.icon) ? row.icon : null,
+      batchId: row.batch_id ?? null,
+      priority: parsePriority(row.priority),
+      lastActiveAt: row.last_active_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -1350,6 +1387,14 @@ export class Store {
     startedBy?: string | null
     /** Its own runner over the project's (TaskRow.runs_on); omitted follows the project. */
     runsOn?: Runner | null
+    /** The CLI its agent runs on for good (TaskRow.agent_cli); omitted: Claude Code. */
+    agentCli?: AgentCli | null
+    /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
+    icon?: TaskIconName | null
+    /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
+    batchId?: string | null
+    /** "high" jumps the queue (shared/priority.ts); omitted is normal. */
+    priority?: TaskPriority | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1378,7 +1423,16 @@ export class Store {
     // Its own statement, so the insert above also works on schemas from before the column (migration tests).
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
+    if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
+    if (input.icon) this.setTaskIcon(id, input.icon)
+    if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
+    if (input.priority === "high") this.db.prepare("UPDATE tasks SET priority = 'high' WHERE id = ?").run(id)
     return this.getTask(id)!
+  }
+
+  /** A task's icon (shared/taskIcons.ts); null goes back to the one from its title. */
+  setTaskIcon(id: string, icon: TaskIconName | null) {
+    this.db.prepare("UPDATE tasks SET icon = ? WHERE id = ?").run(icon, id)
   }
 
   startTaskTurn(input: {
@@ -1477,6 +1531,7 @@ export class Store {
       else if (key === "waitFor") args.push((value as WaitFor[]).length ? JSON.stringify(value) : null)
       else if (key === "mergeRequest" || key === "pushState") args.push(value === null ? null : JSON.stringify(value))
       else if (key === "sessionStarted" || key === "compactPending" || key === "compacting") args.push(value ? 1 : 0)
+      else if (key === "priority") args.push(value === "high" ? "high" : null)
       else args.push(value)
     }
     if (opts.touch !== false) {
@@ -2221,14 +2276,31 @@ export class Store {
     return r ? sideThreadFrom(r) : null
   }
 
-  /** The reply thread on a chat message, if it has one. */
-  replyThreadOn(projectId: string | null, anchorId: string): SideThread | null {
+  /** The thread of a kind that has one per anchor (a message's reply thread, a task card's thread), if there is one. */
+  threadOn(projectId: string | null, anchorId: string, kind: "reply" | "task"): SideThread | null {
     const r = (
       projectId
-        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, projectId)
-        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId)
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = ? AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, kind, projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = ? AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, kind)
     ) as SideThreadRow | undefined
     return r ? sideThreadFrom(r) : null
+  }
+
+  /** The tasks one create_tasks call started (Task.batchId), oldest first. */
+  tasksInBatch(batchId: string): Task[] {
+    return (this.db.prepare("SELECT * FROM tasks WHERE batch_id = ? ORDER BY created_at ASC, rowid ASC").all(batchId) as TaskRow[]).map((r) => this.taskFromRow(r))
+  }
+
+  /** The newest `limit` Coordinator chat notices about any of these tasks (meta.taskId), oldest first. */
+  taskNotices(taskIds: readonly string[], limit = 20): ChatMessage[] {
+    if (!taskIds.length) return []
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM (SELECT *, rowid AS rid FROM chat_messages WHERE role = 'notice' AND json_extract(meta_json, '$.taskId') IN (${taskIds.map(() => "?").join(",")})
+         ORDER BY created_at DESC, rowid DESC LIMIT ?) ORDER BY created_at ASC, rid ASC`,
+      )
+      .all(...taskIds, limit) as { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }[]
+    return rows.map((r) => ({ id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
   }
 
   /** Resolve a thread (folded away under its message), or reopen it. */

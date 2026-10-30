@@ -7,7 +7,7 @@ import { z } from "zod"
 import { selfUrl } from "./bind.js"
 import { configProblems, qstashEnabled, redisEnabled, tildePath, type Config } from "./config.js"
 import { openDb, type DB } from "./db.js"
-import { Store, BadRequestError, ConflictError, NotFoundError } from "./store.js"
+import { Store, BadRequestError, ConflictError, NotFoundError, taskAgentCli } from "./store.js"
 import { Hub } from "./hub.js"
 import { Artifacts } from "./artifacts.js"
 import { Uploads, uploadsDir, tooLarge } from "./uploads.js"
@@ -45,7 +45,10 @@ import { HOOK_ACTIONS, HOOK_SOURCES, HOOK_TEMPLATES, HOOK_TRIGGERS } from "../sh
 import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import { AGENT_CLIS } from "../shared/agentCli.js"
+import { hasOwnCodexLogin } from "./chatAgent.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
+import { PROJECT_COLORS } from "../shared/projectColors.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
@@ -58,6 +61,8 @@ import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
+import { ClaudeModels } from "./claudeModels.js"
+import { serverClaudeEnv } from "./turnCredentials.js"
 import { projectDockerPatch } from "./docker/settings.js"
 import { BOX_SIZES, EFFORTS, PROJECT_BOX_LIMITS, type Health } from "../shared/types.js"
 import { BOX_ACTORS, BOX_EVENT_TYPES, type BoxActorKind, type BoxEventType } from "../shared/boxHistory.js"
@@ -128,6 +133,10 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** The CLI its new tasks run on; null/omitted: Settings › Box agents. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
+    /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+    color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),
@@ -145,6 +154,10 @@ const schemas = {
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
     identityId: z.string().min(1).max(64).optional(),
+    /** null: back to Settings › Box agents. Its tasks keep the CLI they started on. */
+    agentCli: z.enum(AGENT_CLIS).nullable().optional(),
+    /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+    color: z.enum(PROJECT_COLORS).nullable().optional(),
     ...projectBoxLimits,
     ...projectNotesBudget,
   }),
@@ -160,8 +173,16 @@ const schemas = {
     attachments: attachmentIds,
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
+    /** Run on Claude Code or Codex over the project's Agent (Task.agentCli), for good. */
+    agentCli: z.enum(AGENT_CLIS).nullish(),
   }),
-  message: z.object({ content: z.string().trim().max(50_000), attachments: attachmentIds, runsOn: z.enum(RUNNERS).optional() }),
+  message: z.object({
+    content: z.string().trim().max(50_000),
+    attachments: attachmentIds,
+    runsOn: z.enum(RUNNERS).optional(),
+    /** Sent from the task's card in the Coordinator chat: the chat gets a line saying so (TaskManager.sentFromChat). */
+    inChat: z.boolean().optional(),
+  }),
   queuedEdit: z.object({ text: z.string().max(50_000), version: z.number().int().positive().optional() }),
   sendNow: z.object({ allowMergeInterrupt: z.boolean().optional() }),
   chat: z.object({ id: idSchema, content: z.string().trim().max(50_000), attachments: attachmentIds }),
@@ -170,8 +191,8 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
-    kind: z.enum(["ask", "reply"]).optional(),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. "task": from a task card (anchorId: the task, or `batch:<id>`). */
+    kind: z.enum(["ask", "reply", "task"]).optional(),
     quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
@@ -417,7 +438,7 @@ export function createBoxYard(
   // Read the running commit now, before a `git pull` can move HEAD under this process.
   buildInfo()
   const tasks = new TaskManager({ config: c, store, provider, hub, redis, artifacts, uploads, settings, github: opts.github, gpu, docker, identities })
-  tasks.runnerProblem = (runner, claudeKey) => setup.runnerProblem(runner, claudeKey)
+  tasks.runnerProblem = (runner, key, cli) => setup.runnerProblem(runner, key, cli)
   runpod.onPodEvent = (e) => tasks.gpuPodEvent(e)
   runpod.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   runpod.images.onChange(() => hub.broadcast({ type: "runpod.build", build: runpod.images.status() }))
@@ -509,11 +530,19 @@ export function createBoxYard(
   const publicUrl = () => c.publicUrl
 
   let claudeVersion: string | null | undefined
-  const checkClaude = () =>
+  let codexVersion: string | null | undefined
+  const versionOf = (cmd: string) =>
     new Promise<string | null>((resolve) => {
-      const [bin, ...pre] = c.claudeBin.split(" ")
+      const [bin, ...pre] = cmd.split(" ")
       execFile(bin!, [...pre, "--version"], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : stdout.trim()))
     })
+  const checkClaude = () => versionOf(c.claudeBin)
+  // The model/effort pickers' list, from the installed CLI (logged in like the Coordinator), over the built-in one.
+  const claudeModels = new ClaudeModels({
+    claudeBin: c.claudeBin,
+    env: () => serverClaudeEnv(null, settings.credentials.claudeEnv()),
+    version: async () => (claudeVersion === undefined ? (claudeVersion = await checkClaude()) : claudeVersion),
+  })
 
   const app = express()
   app.disable("x-powered-by")
@@ -647,8 +676,13 @@ export function createBoxYard(
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
     // A "This computer" setup may be signed in with the computer's own claude login instead of a token.
-    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true })
-    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    const coordinatorCli = settings.get().orchestratorCli
+    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true, codexLogin: hasOwnCodexLogin(), coordinatorCli })
+    if (coordinatorCli === "claude" && !claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    if (coordinatorCli === "codex") {
+      if (codexVersion === undefined) codexVersion = await versionOf(c.codexBin)
+      if (!codexVersion) problems.push(`The Coordinator runs on Codex, but the codex CLI (${c.codexBin}) was not found. Install it: npm i -g @openai/codex`)
+    }
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
       ok: problems.length === 0,
@@ -950,7 +984,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(body.runsOn, body.projectId, body.env)
+    await tasks.requireRunner(body.runsOn, body.projectId, body.env, { agentCli: body.agentCli, model })
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -964,10 +998,12 @@ export function createBoxYard(
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
     const row = store.getTaskRow(req.params.id!)
-    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, row ? { agentCli: taskAgentCli(row) } : undefined)
     const files = withAttachments(body.content, body.attachments)
     if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
-    res.json(tasks.sendInput(req.params.id!, body.content, "cody", files))
+    const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
+    if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
+    res.json(task)
   })
   // Queued messages (waiting for the task's next turn): list, edit, delete and undo. 409 once a turn has taken one.
   api.get("/tasks/:id/queue", (req, res) => {
@@ -1055,6 +1091,10 @@ export function createBoxYard(
   api.get("/settings", (_req, res) => {
     // Text-to-speech keys appear only as set/unset plus where they come from.
     res.json({ defaultTimezone: c.defaultTimezone, scheduler: scheduler.mode, maxUploadMb: c.maxUploadMb, ttsKeys: ttsSettings.info().keys, localDir: tildePath(c.localDir) })
+  })
+  // Every model and effort picker's list (shared/models.ts); ?refresh=1 asks the CLI again now.
+  api.get("/models", async (req, res) => {
+    res.json(await claudeModels.get(req.query.refresh === "1"))
   })
 
   // ---- first-run setup and Settings › Credentials. Values go in, never out: responses carry set/unset and the source.

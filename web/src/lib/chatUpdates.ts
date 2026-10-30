@@ -13,6 +13,19 @@ export const ATTENTION_KINDS: ReadonlySet<NoticeKind> = new Set(["needs_input", 
 
 export const isAttention = (m: Pick<ChatMessage, "role" | "content" | "meta">) => m.role === "notice" && ATTENTION_KINDS.has(noticeKind(m.content, m.meta))
 
+/** Cody's message to a task from its card (TaskManager.sentFromChat): Cody's words, so a bubble, never a chip. */
+export const isSent = (m: Pick<ChatMessage, "role" | "meta">) => m.role === "notice" && m.meta?.sent === true
+
+/**
+ * A task notice's own words, after "**Title** verb: ": what Cody wrote in a sent notice, or what the agent said at the
+ * end of its turn. Still markdown. `truncated`: the server shortened it (the task has the rest).
+ */
+export function noticeText(m: Pick<ChatMessage, "content" | "meta">): { text: string; truncated: boolean } {
+  const { event, truncated } = splitNotice(m.content, m.meta)
+  const colon = event.indexOf(": ")
+  return { text: colon >= 0 ? event.slice(colon + 2) : event, truncated }
+}
+
 /**
  * Whether the Coordinator reads this notice with its next updates. A task notice goes to the task's project Captain
  * instead (TaskManager.notice marks it seen at once), except hook fires and merge requests ({ coordinator: true }).
@@ -37,6 +50,8 @@ export interface UpdateSource {
   /** "box-yard Captain", the task's title, or null for a notice about no task (the kind names it). */
   label: string | null
   kind: NoticeKind
+  /** The task it's about (its tile leads the name), or null for a Captain or a notice about no task. */
+  taskId: string | null
 }
 
 export type CoordinatorRow =
@@ -118,16 +133,24 @@ function readChip(m: ChatMessage): ChipView {
   }
 }
 
+/** The task an update is about: a task notice's (not a Captain's report), or the task whose files it is. */
+export function itemTask(item: UpdateItem): string | null {
+  if (item.type === "files") return item.group.taskId
+  const m = item.message
+  return m.meta?.captain !== true && typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+}
+
 function sourceOf(item: UpdateItem, rowId: string): UpdateSource {
-  if (item.type === "files") return { id: item.id, rowId, label: item.group.taskTitle, kind: "artifact" }
+  if (item.type === "files") return { id: item.id, rowId, label: item.group.taskTitle, kind: "artifact", taskId: item.group.taskId }
   const v = chipView(item.message)
-  return { id: item.id, rowId, label: v.source?.label ?? null, kind: v.kind }
+  return { id: item.id, rowId, label: v.source?.label ?? null, kind: v.kind, taskId: itemTask(item) }
 }
 
 /**
  * The chat's rows, oldest first. Published files fold per task first (lib/publishedNotices.ts). Every notice that
- * isn't a question, failure or merge request becomes an update; two or more updates with nothing between them form
- * one group. Only Box Yard's own words separate them: a Coordinator reply of "(no update)" is never stored.
+ * isn't a question, failure, merge request or Cody's own message to a task (isSent) becomes an update; two or more
+ * updates with nothing between them form one group. Only Box Yard's own words separate them: a Coordinator reply of
+ * "(no update)" is never stored.
  *
  * Which updates a reply covers: a turn reads every update that came in before it started, so a reply covers the
  * Coordinator-read updates (readByCoordinator) that arrived before its turn's first tool call or, with none, before
@@ -167,7 +190,7 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
     if (m.role === "notice") {
       const item: UpdateItem = { type: "notice", id: m.id, message: m }
       if (readByCoordinator(m)) waiting.push(item)
-      if (!isAttention(m)) {
+      if (!isAttention(m) && !isSent(m)) {
         run.push(item)
         continue
       }
@@ -193,7 +216,18 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
 
 /** The distinct names in a reply's "from:" line, in order: "box-yard Captain", "Fix login", "Warning". */
 export function sourceLabels(sources: readonly UpdateSource[], kindLabel: (kind: NoticeKind) => string): string[] {
-  return [...new Set(sources.map((s) => s.label ?? kindLabel(s.kind)))]
+  return sourceNames(sources, kindLabel).map((n) => n.label)
+}
+
+/** sourceLabels, each with the task it names (for its tile), if any. */
+export function sourceNames(sources: readonly UpdateSource[], kindLabel: (kind: NoticeKind) => string): { label: string; taskId: string | null }[] {
+  const out = new Map<string, string | null>()
+  for (const s of sources) {
+    const label = s.label ?? kindLabel(s.kind)
+    if (!out.has(label)) out.set(label, s.taskId)
+    else if (!out.get(label) && s.taskId) out.set(label, s.taskId)
+  }
+  return [...out].map(([label, taskId]) => ({ label, taskId }))
 }
 
 /** The distinct sources a group's chip previews: "box-yard Captain, Fix login +2". */
@@ -203,7 +237,7 @@ export function groupPreview(items: readonly UpdateItem[], max = 2): string {
 }
 
 const sameList = <T>(a: readonly T[], b: readonly T[], eq: (x: T, y: T) => boolean = Object.is) => a.length === b.length && a.every((x, i) => eq(x, b[i]!))
-const sameSource = (a: UpdateSource, b: UpdateSource) => a.id === b.id && a.rowId === b.rowId && a.label === b.label && a.kind === b.kind
+const sameSource = (a: UpdateSource, b: UpdateSource) => a.id === b.id && a.rowId === b.rowId && a.label === b.label && a.kind === b.kind && a.taskId === b.taskId
 
 function sameRow(a: CoordinatorRow, b: CoordinatorRow): boolean {
   if (a.type !== b.type || a.id !== b.id || !sameList(rowMessages(a), rowMessages(b))) return false

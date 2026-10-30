@@ -36,6 +36,8 @@ import type { MachineStats } from "./machineStats.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
+import { AGENT_CLIS, type AgentCli } from "../shared/agentCli.js"
+import { TASK_PRIORITIES, byQueueOrder, type TaskPriority } from "../shared/priority.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
 import { compactionTime } from "./compactions.js"
@@ -47,6 +49,8 @@ import { redactValues } from "./redact.js"
 import { scopeLine, type Connectors } from "./connectors/connectors.js"
 import type { Connector } from "../shared/connectors.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
+import { PROJECT_COLORS, type ProjectColor } from "../shared/projectColors.js"
+import { TASK_ICONS, type TaskIconName } from "../shared/taskIcons.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
 import { timingReport, type McpHandshakes } from "./turnTimings.js"
 import { formatMs, TURN_ROLES, TURN_STAGES, type Quantiles, type TurnRole } from "../shared/turnTimings.js"
@@ -153,7 +157,8 @@ const effortSchema = z
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. " +
+      "Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.",
   )
 
 const modelSchema = z
@@ -163,7 +168,10 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
+  .describe(
+    "Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them. " +
+      "Any id `claude --model` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6.",
+  )
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
@@ -180,6 +188,23 @@ const runsOnSchema = z
     'Where this agent runs, over the project\'s "Runs on" setting, for every later turn too (send_to_task, retries, hooks, Merge PR): "local" = this computer (the one running Box Yard, unsandboxed), "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod (billed per hour; needs a RunPod key), "docker" = the project\'s own isolated Docker container on this computer (needs Docker running and a Claude key). Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", and "docker" for "in a container" or "isolated". If the runner can\'t run (e.g. claude missing or signed out on this computer, or Docker stopped), the call fails with the reason; it never falls back to the other runner.',
   )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
+const agentSchema = z
+  .enum(AGENT_CLIS)
+  .optional()
+  .describe(
+    'The agent CLI it runs on, for good: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to follow the project\'s Agent (else Settings › Box agents); a gpt-* or o* model picks "codex" on its own. Pass "codex" when Cody asks for Codex, GPT or OpenAI.',
+  )
+const iconSchema = z
+  .enum(TASK_ICONS)
+  .optional()
+  .describe("The task's icon in the Coordinator chat, drawn in its project's colour. Omit it to pick one from the title.")
+
+/** When a task's turns are pulled from the queue (shared/priority.ts). */
+const PRIORITY_HELP =
+  '"high" puts its turns at the front of the queue: when a slot frees up (Settings › Tasks running at once on this computer (localAgents), a box, a GPU pod or a Docker container), it goes before every normal task waiting, first in, first out among the high ones. ' +
+  "Use it when Cody wants something to run before the work already queued, e.g. while the localAgents limit is full. It never stops a running agent, and its project's own limits (agents_per_box, whole_machine) still hold; a high task they hold back doesn't block other tasks. " +
+  "It stays on the task (its follow-ups go first too) until set_task_priority lowers it."
+const prioritySchema = z.enum(TASK_PRIORITIES).optional()
 
 /**
  * The tools the Coordinator and project Captains use to run Box Yard.
@@ -360,6 +385,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   }
   /** How worker messages from this caller are labelled (#51). */
   const inputSource = scopeId ? (`captain:${scopeId}` as const) : ("orchestrator" as const)
+  /** Who set a task's priority, for its log. */
+  const prioritySetter = scopeId ? "its project's Captain" : "the Coordinator"
   const absolute = (url: string) => (url.startsWith("/") && deps.publicUrl() ? `${deps.publicUrl().replace(/\/$/, "")}${url}` : url)
   const ago = (ts: number) => {
     const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
@@ -414,6 +441,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     box: t.boxId ?? undefined,
     placement: placementLine(t),
     runsOn: t.runsOn ?? undefined,
+    priority: t.priority === "high" ? t.priority : undefined,
     turns: t.turnCount,
     model: t.model ?? undefined,
     effort: t.effort ?? undefined,
@@ -644,6 +672,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     repo: p.repo,
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
+    // The CLI its new tasks run on (its own, else Settings › Box agents'); each task keeps the one it started on.
+    agent: p.agentCli ?? `${(deps.settings?.get() ?? DEFAULT_SETTINGS).agentCli} (Settings)`,
     boxSettings: tasks.projectBoxSettings(p),
     // Its RunPod pods and $/hr caps, when it runs on RunPod GPU.
     ...(p.runner === "gpu" && tasks ? { gpu: await tasks.projectGpuSettings(p, true) } : {}),
@@ -741,12 +771,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           repo: z.string().optional(),
           base_branch: z.string().optional(),
           env: envSchema,
+          agent: agentSchema.describe('The agent CLI its tasks run on: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to use Settings › Box agents.'),
           ...boxSettingsInput,
         },
       },
-      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> } & BoxSettingsArgs) => {
+      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string>; agent?: AgentCli } & BoxSettingsArgs) => {
         if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
-        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), ...boxSettingsPatch(a) })
+        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), agentCli: a.agent ?? null, ...boxSettingsPatch(a) })
         hub.broadcast({ type: "project", project: p })
         return ok(await projectView(p))
       }),
@@ -759,7 +790,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description: scopeId
         ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget, or its colour in the chat and sidebar (color).",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -770,6 +801,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             base_branch: z.string().optional(),
             env: envSchema,
             remove_env: z.array(z.string()).optional(),
+            agent: z
+              .enum(AGENT_CLIS)
+              .nullable()
+              .optional()
+              .describe('The agent CLI its new tasks run on: "claude" or "codex"; null goes back to Settings › Box agents. Its existing tasks keep theirs.'),
             ...boxSettingsInput,
             notes_max: z
               .number()
@@ -787,6 +823,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               .nullable()
               .optional()
               .describe("This project's notes token budget; null goes back to the one in Settings."),
+            color: z
+              .enum(PROJECT_COLORS)
+              .nullable()
+              .optional()
+              .describe("Its colour in the Coordinator chat (task icons, the project bar, cards) and the sidebar. null goes back to the one picked from its name."),
           },
     },
     safe(
@@ -799,8 +840,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch?: string
           env?: Record<string, string>
           remove_env?: string[]
+          agent?: AgentCli | null
           notes_max?: number | null
           notes_max_tokens?: number | null
+          color?: ProjectColor | null
         } & BoxSettingsArgs,
       ) => {
         if (!a.project && !scopeId) return fail("Name the project to update.")
@@ -817,9 +860,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 baseBranch: a.base_branch,
                 env: a.env,
                 removeEnv: a.remove_env,
+                agentCli: a.agent,
                 ...box,
                 notesMaxCount: a.notes_max,
                 notesMaxTokens: a.notes_max_tokens,
+                color: a.color,
               },
         )
         hub.broadcast({ type: "project", project: p })
@@ -1095,7 +1140,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_task",
     {
       description:
-        "Start a NEW agent (a fresh Claude Code session) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
+        "Start a NEW agent (a fresh Claude Code or Codex session, see agent) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
         "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt. If Cody attached files (a screenshot of a bug, a spec) that the agent needs, pass them in attachments.",
       inputSchema: {
         project: z.string().describe("Project id or name"),
@@ -1105,13 +1150,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks: relatedTasksSchema,
         attachments: attachmentsSchema,
         runs_on: runsOnSchema,
+        agent: agentSchema,
+        icon: iconSchema,
+        priority: prioritySchema.describe(`"high" or "normal" (the default). ${PRIORITY_HELP}`),
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
-      await tasks.requireRunner(a.runs_on, projectId, a.env)
+      await tasks.requireRunner(a.runs_on, projectId, a.env, { agentCli: a.agent, model: a.model })
       const t = tasks.createTask({
         projectId,
         title: a.title,
@@ -1124,6 +1172,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingReason: a.routing_reason ?? null,
         source: inputSource,
         runsOn: a.runs_on ?? null,
+        agentCli: a.agent ?? null,
+        icon: a.icon ?? null,
+        priority: a.priority ?? null,
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -1136,6 +1187,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     related_tasks: z.array(z.string()).optional().describe("Earlier tasks for this task only, added to the shared related_tasks"),
     env: envSchema,
     runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer), over the shared runs_on and the project\'s "Runs on"'),
+    agent: agentSchema.describe('"claude" or "codex" for this task, over the shared agent and the project\'s Agent'),
+    icon: iconSchema,
+    priority: prioritySchema.describe('"high" or "normal" for this task, over the shared priority. See create_task.'),
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -1144,9 +1198,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_tasks",
     {
       description:
-        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh Claude Code session exactly like create_task. ` +
+        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh agent session exactly like create_task. ` +
         "Use it instead of a series of create_task calls whenever you start two or more independent tasks at once: every create_task call costs you a whole step, so dozens of them take minutes before the last task even exists, while create_tasks queues them all at once and Box Yard creates the boxes they need in parallel. " +
-        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, model, effort and routing_* win. " +
+        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, agent, priority, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win. " +
         "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids, and that a runs_on runner can run). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
         "Returns the new tasks' ids in the order given.",
       inputSchema: {
@@ -1162,8 +1216,10 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         runs_on: runsOnSchema.describe(
           'Where every task runs (an item\'s own runs_on wins): "local" = this computer, "box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod, "docker" = the project\'s isolated Docker container on this computer, over the project\'s "Runs on", for every later turn too. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer".',
         ),
-        model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
+        agent: agentSchema.describe('The agent CLI every task runs on, "claude" or "codex" (an item\'s own agent wins). Omit it to follow the project\'s Agent.'),
+        model: modelSchema.describe("Model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
         effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
+        priority: prioritySchema.describe(`"high" or "normal" (the default) for every task (an item's own priority wins). ${PRIORITY_HELP}`),
         routing_rule: routingRuleSchema,
         routing_reason: routingReasonSchema,
       },
@@ -1177,6 +1233,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         related_tasks?: string[]
         env?: Record<string, string>
         runs_on?: Runner
+        agent?: AgentCli
+        priority?: TaskPriority
         model?: string
         effort?: Effort
         routing_rule?: string
@@ -1213,8 +1271,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             const r = item.runs_on ?? a.runs_on
             if (!r) return null
             const env = { ...a.env, ...item.env }
-            const key = `${r} ${tasks.turnCredentials(p.id, env).claudeFrom}`
-            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env).then(() => null, (err: unknown) => errorMessage(err)))
+            const agent = { agentCli: item.agent ?? a.agent, model: item.model ?? a.model }
+            const key = `${r} ${tasks.turnCredentials(p.id, env).claudeFrom} ${tasks.codexCredentials(p.id, env).kind} ${agent.agentCli ?? ""} ${agent.model ?? ""}`
+            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env, agent).then(() => null, (err: unknown) => errorMessage(err)))
             return runners.get(key)!
           }),
         )
@@ -1248,13 +1307,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             routingReason: item.routing_reason ?? a.routing_reason ?? null,
             source: inputSource,
             runsOn: item.runs_on ?? a.runs_on ?? null,
+            agentCli: item.agent ?? a.agent ?? null,
+            icon: item.icon ?? null,
+            priority: item.priority ?? a.priority ?? null,
           }
         })
         const created = tasks.createTasks(inputs)
         return okCompact({
           project: p.name,
           created: created.length,
-          tasks: created.map((t) => ({ id: t.id, title: t.title, status: t.status })),
+          tasks: created.map((t) => ({ id: t.id, title: t.title, status: t.status, ...(t.priority === "high" ? { priority: t.priority } : {}) })),
           next: "Every task is queued. Each agent starts as soon as a box slot is free, and Box Yard creates the boxes they need in parallel. Follow them with list_tasks, or wait_for_tasks when the work is quick.",
         })
       },
@@ -1279,16 +1341,21 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           .describe('Pin the task to "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer) from its next turn on, over the project\'s "Runs on". Omit it to leave it where it runs.'),
         interrupt: z.boolean().optional().describe(SEND_NOW_DESCRIPTION),
         allow_merge_interrupt: z.boolean().optional().describe(ALLOW_MERGE_INTERRUPT_DESCRIPTION),
+        priority: prioritySchema.describe(
+          `"high" or "normal". When the task rests and has to wait for a slot, a high follow-up goes before every normal task waiting. Omit it to keep the task's priority (normal unless raised). ${PRIORITY_HELP}`,
+        ),
         ...routeParams,
       },
     },
-    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; interrupt?: boolean; allow_merge_interrupt?: boolean; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { task: string; message: string; attachments?: string[]; runs_on?: Runner; interrupt?: boolean; allow_merge_interrupt?: boolean; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const before = task(a.task)
       // Refused before anything is sent, so a refusal leaves no message behind.
       const risk = a.interrupt && !a.allow_merge_interrupt ? tasks.mergeInterruptRisk(store.getTaskRow(before.id)!) : null
       if (risk) return fail(`${risk} Nothing was sent. Send it without interrupt (it goes out when the turn ends), or pass allow_merge_interrupt: true if it can't wait.`)
-      await tasks.requireRunner(a.runs_on, before.projectId, store.taskEnv(before.id))
+      await tasks.requireRunner(a.runs_on, before.projectId, store.taskEnv(before.id), { agentCli: before.agentCli })
       if (a.runs_on) tasks.setRunsOn(before.id, a.runs_on)
+      // Before the message: queuing it runs the scheduler, which must already see the new priority.
+      if (a.priority) tasks.setTaskPriority(before.id, a.priority, prioritySetter)
       const how = delivery(before)
       const { task: t, inputId } = tasks.send(before.id, a.message, inputSource, attachmentsOf(a.attachments), {
         model: a.model,
@@ -1418,6 +1485,21 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         routingReason: a.routing_reason ?? undefined,
       })
       return ok(brief(t))
+    }),
+  )
+
+  server.registerTool(
+    "set_task_priority",
+    {
+      description:
+        "Raise or lower an existing task's priority without sending it a message, e.g. move a task that is already queued to the front of the queue. " +
+        PRIORITY_HELP +
+        " pool_status's queued list shows the queue in order, high first.",
+      inputSchema: { task: z.string(), priority: z.enum(TASK_PRIORITIES).describe('"high" (front of the queue) or "normal"') },
+    },
+    safe(async (a: { task: string; priority: TaskPriority }) => {
+      const t = tasks.setTaskPriority(task(a.task).id, a.priority, prioritySetter)
+      return ok({ ...brief(t), next: t.status === "queued" ? "pool_status's queued list shows where it is in the queue." : "It applies the next time the task waits for a slot." })
     }),
   )
 
@@ -1918,7 +2000,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks, numbered in the order the scheduler pulls them (high priority first, marked [high priority]; then first in, first out). pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1965,12 +2047,14 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         ...(await gpuPools()),
         // Docker projects: their one container each (docker-<project>), image and limits.
         ...(await dockerPools()),
+        // In the order the scheduler pulls them: high priority first, then first in, first out.
         queued: store
           .listTasks({ projectId: scopeId ?? undefined, status: ["queued"] })
-          .map((t) => {
+          .sort(byQueueOrder)
+          .map((t, i) => {
             // The tasks holding it back, by id (a Captain only gets its own project's).
             const by = t.waitFor.filter((w) => !scopeId || store.getTaskRow(w.taskId)?.project_id === scopeId).map((w) => w.taskId)
-            return `${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason}${by.length ? `; held back by ${by.join(", ")}` : ""})` : ""}`
+            return `${i + 1}. ${t.priority === "high" ? "[high priority] " : ""}${t.id} ${t.title}${t.waitReason ? ` (${t.waitReason}${by.length ? `; held back by ${by.join(", ")}` : ""})` : ""}`
           }),
       })
     }),

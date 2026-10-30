@@ -8,6 +8,8 @@ import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
 import { IdentityBadge } from "./IdentityBadge"
 import { DEFAULT_IDENTITY_ID } from "../../../shared/identities"
+import { projectColors } from "../../../shared/projectColors"
+import { projectColorStyle } from "./TaskIcon"
 import { IS_MAC } from "./CommandPalette"
 
 /** A sidebar row: Yard, Inbox… and each project. */
@@ -80,6 +82,8 @@ export const ProjectList = memo(function ProjectList({
   const { mutate: save } = useReorderProjects()
   const identityList = useIdentities().data
   const identities = useMemo(() => new Map((identityList ?? []).map((i) => [i.id, i])), [identityList])
+  // Each project's colour (shared/projectColors.ts) tints its folder, as its tasks' tiles in the Coordinator chat.
+  const colors = useMemo(() => projectColors(projects ?? []), [projects])
   // The order just dropped, shown until the cache catches up (the mutation writes it a few microtasks later).
   const [optimistic, setOptimistic] = useState<string[] | null>(null)
   useEffect(() => setOptimistic(null), [projects])
@@ -374,7 +378,11 @@ export const ProjectList = memo(function ProjectList({
                 held && "cursor-grabbing bg-zinc-800 text-zinc-50 shadow-lg ring-1 shadow-black/40 ring-zinc-700",
               )}
             >
-              {p.repo ? <FolderGit2 className="h-4 w-4 shrink-0" /> : <FolderOpen className="h-4 w-4 shrink-0" />}
+              {p.repo ? (
+                <FolderGit2 style={projectColorStyle(colors.get(p.id))} data-color={colors.get(p.id)} className="h-4 w-4 shrink-0 text-(--pc)" />
+              ) : (
+                <FolderOpen style={projectColorStyle(colors.get(p.id))} data-color={colors.get(p.id)} className="h-4 w-4 shrink-0 text-(--pc)" />
+              )}
               <span className="truncate">{p.name}</span>
               {identity ? (
                 <span className="ml-auto flex min-w-0 shrink items-center gap-2">

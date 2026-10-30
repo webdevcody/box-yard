@@ -27,9 +27,10 @@ import { RunPodPanel } from "./RunPodSettings"
 import { DockerPanel } from "./DockerSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
-import { EFFORT_LABEL, MODELS } from "../lib/models"
+import { EffortPicker, ModelPicker } from "./ModelPicker"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
+import { AGENT_CLIS, AGENT_CLI_LABEL, CODEX_MODEL_SUGGESTIONS, isClaudeModel, type AgentCli } from "../../../shared/agentCli"
 import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_AGENTS_LIMITS, LOCAL_UNSANDBOXED } from "../../../shared/runner"
 import {
@@ -38,7 +39,6 @@ import {
   BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
   DEFAULT_AUTOCOMPACT_TOKENS,
-  EFFORTS,
   SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
   WORKER_SIZES,
@@ -100,16 +100,19 @@ export function SourceHint({ source, env, changed }: { source?: SettingSource; e
 /** One setting: label and help text on the left, the control and where its value comes from on the right. */
 export function Row({ id, label, help, hint, children }: { id?: string; label: string; help: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className="grid gap-x-8 gap-y-2 border-t border-zinc-900 py-4 first:border-t-0 first:pt-0 sm:grid-cols-[minmax(0,1fr)_17rem]">
-      <div>
-        <label htmlFor={id} className="text-sm font-medium text-zinc-200">
-          {label}
-        </label>
-        <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
-      </div>
-      <div className="space-y-1.5">
-        {children}
-        {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+    // Two columns by the row's own width, not the window's: at 125% zoom the sidebar leaves the help text a sliver.
+    <div className="@container border-t border-zinc-900 py-4 first:border-t-0 first:pt-0">
+      <div className="grid gap-x-8 gap-y-2 @md:grid-cols-[minmax(0,1fr)_17rem]">
+        <div>
+          <label htmlFor={id} className="text-sm font-medium text-zinc-200">
+            {label}
+          </label>
+          <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
+        </div>
+        <div className="space-y-1.5">
+          {children}
+          {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+        </div>
       </div>
     </div>
   )
@@ -177,12 +180,41 @@ function AutoCompactControl({
   )
 }
 
-function EffortOptions() {
-  return EFFORTS.map((x) => (
-    <option key={x} value={x}>
-      {EFFORT_LABEL[x]}
-    </option>
-  ))
+/** Claude Code or Codex (shared/agentCli.ts). */
+function AgentCliSelect({ id, value, onChange, testId }: { id: string; value: AgentCli; onChange: (v: AgentCli) => void; testId: string }) {
+  return (
+    <Select id={id} className="w-full" value={value} onChange={(e) => onChange(e.target.value as AgentCli)} data-testid={testId}>
+      {AGENT_CLIS.map((c) => (
+        <option key={c} value={c}>
+          {AGENT_CLI_LABEL[c]}
+        </option>
+      ))}
+    </Select>
+  )
+}
+
+/** A Codex model id, from the suggestions or typed; empty is Codex's own default. Warns on a Claude model, which Codex can't run. */
+function CodexModelInput({ id, value, onChange, testId }: { id: string; value: string; onChange: (v: string) => void; testId: string }) {
+  const claude = isClaudeModel(value)
+  return (
+    <>
+      <input
+        id={id}
+        className={inputClass}
+        list="boxyard-codex-models"
+        placeholder="Codex's default"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-invalid={claude || undefined}
+        data-testid={testId}
+      />
+      {claude && (
+        <p className="text-xs text-red-300" role="alert">
+          That's a Claude model: Codex runs OpenAI models.
+        </p>
+      )}
+    </>
+  )
 }
 
 // ------------------------------------------------------------------ dialog
@@ -390,7 +422,7 @@ export function SettingsDialog({
         aria-label="Settings categories"
         aria-orientation="vertical"
         onKeyDown={onNavKey}
-        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:p-3"
+        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-r sm:border-b-0 sm:p-3"
       >
         {SETTINGS_SECTIONS.map((sec) => {
           const Icon = SECTION_ICON[sec.key]
@@ -467,28 +499,40 @@ export function SettingsDialog({
               </label>
             </Row>
             <Row
-              id={fid("om")}
-              label="Model"
-              help="The Claude model the Coordinator chat runs on. Type any model id, or pick one."
-              hint={hint("orchestratorModel")}
+              id={fid("ocli")}
+              label="Agent"
+              help="The coding agent the Coordinator chat runs on; Codex needs a Codex login in Settings › Credentials."
+              hint={hint("orchestratorCli")}
             >
-              <input
-                id={fid("om")}
-                className={inputClass}
-                list="boxyard-models"
-                value={s.orchestratorModel}
-                onChange={(e) => set("orchestratorModel", e.target.value)}
-              />
+              <AgentCliSelect id={fid("ocli")} value={s.orchestratorCli} onChange={(v) => set("orchestratorCli", v)} testId="orchestrator-cli" />
             </Row>
-            <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
-              <Select
-                id={fid("oe")}
-                className="w-full"
-                value={s.orchestratorEffort}
-                onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}
+            {s.orchestratorCli === "codex" ? (
+              <Row
+                id={fid("ocm")}
+                label="Codex model"
+                help="The OpenAI model the Coordinator runs on; leave it empty for Codex's own default."
+                hint={hint("orchestratorCodexModel")}
               >
-                <EffortOptions />
-              </Select>
+                <CodexModelInput id={fid("ocm")} value={s.orchestratorCodexModel} onChange={(v) => set("orchestratorCodexModel", v)} testId="orchestrator-codex-model" />
+              </Row>
+            ) : (
+              <Row
+                id={fid("om")}
+                label="Model"
+                help="The Claude model the Coordinator chat and its side threads run on. Pick a model or alias, or enter a custom model ID."
+                hint={hint("orchestratorModel")}
+              >
+                <ModelPicker id={fid("om")} value={s.orchestratorModel} onChange={(v) => set("orchestratorModel", v)} testId="orchestrator-model" />
+              </Row>
+            )}
+            <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
+              <EffortPicker
+                id={fid("oe")}
+                model={s.orchestratorCli === "codex" ? s.orchestratorCodexModel : s.orchestratorModel}
+                value={s.orchestratorEffort}
+                onChange={(v) => set("orchestratorEffort", v as Settings["orchestratorEffort"])}
+                testId="orchestrator-effort"
+              />
             </Row>
             <Row
               id={fid("oac")}
@@ -504,59 +548,83 @@ export function SettingsDialog({
                 tokens={DEFAULT_AUTOCOMPACT_TOKENS}
               />
             </Row>
-            <Row
-              id={fid("orl")}
-              label="Relay turns"
-              help="Runs the Coordinator's relay-only turns (woken by task updates and Captain replies, with no message from you) on this model and effort. Off by default: another model or effort can't reuse the last turn's prompt cache, so each relay turn sends the whole context again. That's quick and cheap on a small model, slow and costly on a big one. Your own messages always use the model above."
-              hint={hint("orchestratorRelay")}
-            >
-              <div className="space-y-2">
-                <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
-                  <input
-                    id={fid("orl")}
-                    type="checkbox"
-                    checked={s.orchestratorRelay.enabled}
-                    onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, enabled: e.target.checked })}
-                    data-testid="orchestrator-relay"
+            {/* Relay turns switch to a lighter Claude model; a Coordinator on Codex keeps its one model. */}
+            {s.orchestratorCli !== "codex" && (
+              <Row
+                id={fid("orl")}
+                label="Relay turns"
+                help="Runs the Coordinator's relay-only turns (woken by task updates and Captain replies, with no message from you) on this model and effort. Off by default: another model or effort can't reuse the last turn's prompt cache, so each relay turn sends the whole context again. That's quick and cheap on a small model, slow and costly on a big one. Your own messages always use the model above."
+                hint={hint("orchestratorRelay")}
+              >
+                <div className="space-y-2">
+                  <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                    <input
+                      id={fid("orl")}
+                      type="checkbox"
+                      checked={s.orchestratorRelay.enabled}
+                      onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, enabled: e.target.checked })}
+                      data-testid="orchestrator-relay"
+                    />
+                    {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
+                  </label>
+                  <ModelPicker
+                    value={s.orchestratorRelay.model}
+                    onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, model: v })}
+                    disabled={!s.orchestratorRelay.enabled}
+                    ariaLabel="Relay turn model"
+                    testId="orchestrator-relay-model"
                   />
-                  {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
-                </label>
-                <input
-                  className={cx(inputClass, "disabled:opacity-50")}
-                  list="boxyard-models"
-                  disabled={!s.orchestratorRelay.enabled}
-                  aria-label="Relay turn model"
-                  value={s.orchestratorRelay.model}
-                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, model: e.target.value })}
-                />
-                <Select
-                  className="w-full"
-                  disabled={!s.orchestratorRelay.enabled}
-                  aria-label="Relay turn effort"
-                  value={s.orchestratorRelay.effort}
-                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: e.target.value as Settings["orchestratorEffort"] })}
-                >
-                  <EffortOptions />
-                </Select>
-              </div>
-            </Row>
+                  <EffortPicker
+                    value={s.orchestratorRelay.effort}
+                    onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: v as Settings["orchestratorEffort"] })}
+                    model={s.orchestratorRelay.model}
+                    disabled={!s.orchestratorRelay.enabled}
+                    ariaLabel="Relay turn effort"
+                    testId="orchestrator-relay-effort"
+                  />
+                </div>
+              </Row>
+            )}
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
-              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
-              share the auto-compact threshold above.
+              Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its agent, model and effort separately to tune that cost.
+              Captains share the auto-compact threshold above.
             </p>
             <Row
-              id={fid("cm")}
-              label="Captain model"
-              help="The Claude model every project Captain runs on. Type any model id, or pick one."
-              hint={hint("captainModel")}
+              id={fid("ccli")}
+              label="Captain agent"
+              help="The coding agent every project's Captain runs on; Codex needs a Codex login in Settings › Credentials."
+              hint={hint("captainCli")}
             >
-              <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
+              <AgentCliSelect id={fid("ccli")} value={s.captainCli} onChange={(v) => set("captainCli", v)} testId="captain-cli" />
             </Row>
+            {s.captainCli === "codex" ? (
+              <Row
+                id={fid("ccm")}
+                label="Captain Codex model"
+                help="The OpenAI model every Captain runs on; leave it empty for Codex's own default."
+                hint={hint("captainCodexModel")}
+              >
+                <CodexModelInput id={fid("ccm")} value={s.captainCodexModel} onChange={(v) => set("captainCodexModel", v)} testId="captain-codex-model" />
+              </Row>
+            ) : (
+              <Row
+                id={fid("cm")}
+                label="Captain model"
+                help="The Claude model every project Captain and its side threads run on. Pick a model or alias, or enter a custom model ID."
+                hint={hint("captainModel")}
+              >
+                <ModelPicker id={fid("cm")} value={s.captainModel} onChange={(v) => set("captainModel", v)} testId="captain-model" />
+              </Row>
+            )}
             <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Lower is faster and cheaper." hint={hint("captainEffort")}>
-              <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
-                <EffortOptions />
-              </Select>
+              <EffortPicker
+                id={fid("ce")}
+                model={s.captainCli === "codex" ? s.captainCodexModel : s.captainModel}
+                value={s.captainEffort}
+                onChange={(v) => set("captainEffort", v as Settings["captainEffort"])}
+                testId="captain-effort"
+              />
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project notes</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
@@ -613,8 +681,24 @@ export function SettingsDialog({
             >
               <input id={fid("on")} className={inputClass} value={s.ownerName} maxLength={40} onChange={(e) => set("ownerName", e.target.value)} />
             </Row>
+            <Row
+              id={fid("acli")}
+              label="Agent"
+              help="The coding agent new tasks run on: a project can pick its own, a task keeps the agent it started on, and a task given a gpt-* model runs on Codex."
+              hint={hint("agentCli")}
+            >
+              <AgentCliSelect id={fid("acli")} value={s.agentCli} onChange={(v) => set("agentCli", v)} testId="agent-cli" />
+            </Row>
             <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on, unless the task or its project's Routing YAML entry picks one. Once saved here or set by an env var, it wins over the YAML's defaults and fallback." hint={hint("agentModel")}>
-              <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
+              <ModelPicker id={fid("am")} value={s.agentModel} onChange={(v) => set("agentModel", v)} testId="agent-model" />
+            </Row>
+            <Row
+              id={fid("acm")}
+              label="Codex model"
+              help="The OpenAI model tasks on Codex run on, unless the task or its Routing YAML entry picks one; leave it empty for Codex's own default."
+              hint={hint("agentCodexModel")}
+            >
+              <CodexModelInput id={fid("acm")} value={s.agentCodexModel} onChange={(v) => set("agentCodexModel", v)} testId="agent-codex-model" />
             </Row>
             <Row
               id={fid("ae")}
@@ -626,10 +710,14 @@ export function SettingsDialog({
               }
               hint={hint("agentEffort")}
             >
-              <Select id={fid("ae")} className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
-                <option value="orchestrator">Let the Coordinator decide</option>
-                <EffortOptions />
-              </Select>
+              <EffortPicker
+                id={fid("ae")}
+                model={s.agentModel}
+                value={s.agentEffort}
+                onChange={(v) => set("agentEffort", v as AgentEffort)}
+                lead={<option value="orchestrator">Let the Coordinator decide</option>}
+                testId="agent-effort"
+              />
             </Row>
             <Row
               id={fid("arc")}
@@ -673,8 +761,8 @@ export function SettingsDialog({
         )}
       </div>
 
-      <datalist id="boxyard-models">
-        {MODELS.map((m) => (
+      <datalist id="boxyard-codex-models">
+        {CODEX_MODEL_SUGGESTIONS.map((m) => (
           <option key={m} value={m} />
         ))}
       </datalist>

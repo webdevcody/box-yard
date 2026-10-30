@@ -207,7 +207,7 @@ export function isCopiedDefaultRoute(
 
 export function routingInstructions(
   dataDir: string,
-  settings: Pick<Settings, "agentRoutingConfig"> & Partial<Pick<Settings, "ownerName" | "agentModel" | "agentEffort">>,
+  settings: Pick<Settings, "agentRoutingConfig"> & Partial<Pick<Settings, "ownerName" | "agentModel" | "agentEffort" | "agentCli" | "agentCodexModel">>,
 ): string {
   const loaded = loadRouting(dataDir, settings)
   const owner = (text: string) => withOwner(text, settings.ownerName)
@@ -220,6 +220,11 @@ export function routingInstructions(
 - When you call send_to_task for a follow-up, you may pass a new model/effort for the next turn. Use this to escalate a task that failed, is looping, or outgrew its original cheap route; a resumed Claude session may use a different --model.`),
   ]
   if (coordinatorEffort) parts.push(owner("Settings › Box agents › Effort is \"Let the Coordinator decide\": pass an effort on create_task (low for one-command chores, high for real coding). Without one, the routing config or the built-in default applies."))
+  parts.push(
+    owner(
+      `Agent CLI: a task runs on Claude Code or Codex, and keeps the one it started on. It's the task's agent param on create_task/create_tasks, else what its model names (gpt-* and o* models are Codex's), else its project's Agent (list_projects shows it), else Settings › Box agents (now ${settings.agentCli ?? "claude"}${settings.agentCodexModel ? `, Codex model ${settings.agentCodexModel}` : ""}). Pass agent "codex" only when Cody asks for Codex, GPT or OpenAI, or a routing rule says so; a Claude model on a Codex task (or the reverse) is ignored.`,
+    ),
+  )
   if (settings.agentModel || settings.agentEffort) parts.push(`Settings › Box agents now: model ${settings.agentModel ?? DEFAULT_MODEL}, effort ${coordinatorEffort ? "chosen by you" : (settings.agentEffort ?? DEFAULT_EFFORT)}.`)
   if (loaded.sources.length) parts.push(`Routing sources: ${loaded.sources.join(", ")}`)
   if (loaded.yaml) parts.push(`Current routing config:\n\`\`\`yaml\n${loaded.yaml}\n\`\`\``)

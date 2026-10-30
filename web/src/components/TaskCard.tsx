@@ -5,7 +5,7 @@ import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { InRepo, LinkedText, NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
+import { AgentCliChip, InRepo, LinkedText, NewTabLink, PrChip, PriorityPill, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
@@ -52,6 +52,7 @@ export const TaskCard = memo(function TaskCard({
         </div>
         <span className="mt-0.5 flex shrink-0 gap-1">
           {quiet && <QuietPill />}
+          <PriorityPill task={task} />
           <StatusBadge status={badgeStatus(task)} />
         </span>
       </div>
@@ -107,6 +108,7 @@ export const TaskCard = memo(function TaskCard({
             {money(task.claudeCostUsd)}
           </span>
         )}
+        <AgentCliChip cli={task.agentCli} className="shrink-0 rounded border border-zinc-800 px-1.5 py-px text-[11px] font-medium text-zinc-400" />
         {(task.model || task.effort) && (
           <span className="shrink-0 truncate" title={[task.model, task.effort ? `${task.effort} effort` : "", task.routingRule, task.routingReason].filter(Boolean).join(" · ")}>
             {[task.model, task.effort].filter(Boolean).join(" · ")}

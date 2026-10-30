@@ -3,11 +3,12 @@ import renderMarkdown, { type Components, type Options } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useLocation } from "wouter"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
-import { ArrowUpRight, Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
+import { ArrowUpRight, Bot, Box, Check, ChevronsUp, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
 import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
 import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { TaskTile } from "./TaskIcon"
 import { clickImage, imageTarget, openLightbox } from "../lib/lightbox"
 import { openPreview } from "../lib/preview"
 import { api } from "../lib/api"
@@ -17,6 +18,7 @@ import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
 import { elapsedLabel } from "../lib/runningTasks"
 import type { BoxSize, PrState, Task, TaskStatus } from "../../../shared/types"
+import { AGENT_CLI_LABEL, AGENT_CLI_SHORT, type AgentCli } from "../../../shared/agentCli"
 
 export function cx(...parts: (string | false | null | undefined)[]) {
   return parts.filter(Boolean).join(" ")
@@ -81,6 +83,16 @@ export function StatusBadge({ status }: { status: BadgeStatus }) {
 export const META_CHIP =
   "inline-flex min-h-11 shrink-0 items-center gap-1 rounded-md border px-2 text-xs font-medium whitespace-nowrap transition sm:h-6 sm:min-h-0 sm:px-1.5"
 
+/** "Codex" on a task whose agent runs on Codex. Claude Code is the default, so it gets no chip. */
+export function AgentCliChip({ cli, className }: { cli: AgentCli | undefined; className?: string }) {
+  if (cli !== "codex") return null
+  return (
+    <span data-testid="agent-cli-chip" title={`Runs on ${AGENT_CLI_LABEL[cli]}, fixed when the task started`} className={className}>
+      {AGENT_CLI_SHORT[cli]}
+    </span>
+  )
+}
+
 /** The quiet form of StatusBadge for header meta rows: a colored dot and the label, no pill. */
 export function StatusDot({ status, title, children, className }: { status: BadgeStatus; title?: string; children?: ReactNode; className?: string }) {
   const s = status === "merged" ? MERGED_BADGE : STATUS[status]
@@ -101,6 +113,30 @@ export function QuietPill({ className }: { className?: string }) {
       className={cx("inline-flex shrink-0 items-center whitespace-nowrap rounded-full bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400", className)}
     >
       Quiet
+    </span>
+  )
+}
+
+/** A queued task that jumps the queue (shared/priority.ts): it goes before every normal task waiting for a slot. */
+export const waitsHighPriority = (task: Pick<Task, "priority" | "status">) => task.priority === "high" && task.status === "queued"
+
+const PRIORITY_TITLE = "High priority: it goes before every normal task waiting for a slot. Running tasks are never stopped for it."
+
+/**
+ * The "High priority" pill on a queued task (nothing otherwise). `compact`: the icon alone, for tight rows; the title
+ * and label still say it.
+ */
+export function PriorityPill({ task, compact, className }: { task: Pick<Task, "priority" | "status">; compact?: boolean; className?: string }) {
+  if (!waitsHighPriority(task)) return null
+  return (
+    <span
+      data-testid="priority-pill"
+      title={PRIORITY_TITLE}
+      aria-label={compact ? "High priority" : undefined}
+      className={cx("inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-orange-500/15 text-xs font-medium text-orange-300", compact ? "p-0.5" : "py-0.5 pr-2 pl-1.5", className)}
+    >
+      <ChevronsUp className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      {!compact && "High priority"}
     </span>
   )
 }
@@ -316,13 +352,21 @@ function GithubRefText({ text, inLink }: { text: string; inLink?: boolean }) {
   )
 }
 
+/** A link to a task page (`/tasks/task_…`, maybe with the origin): the task's id. */
+const TASK_HREF = /^(?:https?:\/\/[^/]+)?\/tasks\/(task_[A-Za-z0-9-]{6,40})\/?$/
+
 const MARKDOWN_COMPONENTS: Components = {
-  a: ({ href = "", title, children }) => (
-    <AppLink href={href} title={title}>
-      {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
-      {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
-    </AppLink>
-  ),
+  a: ({ href = "", title, children }) => {
+    const taskId = TASK_HREF.exec(href)?.[1]
+    return (
+      <AppLink href={href} title={title}>
+        {/* A task link leads with the task's tile, in its project's colour. */}
+        {taskId && <TaskTile id={taskId} bare className="mr-0.5 align-[-1px]" />}
+        {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
+        {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
+      </AppLink>
+    )
+  },
   pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
   img: ({ src, alt, title }) => <ChatImage src={typeof src === "string" ? src : ""} alt={alt} title={title} />,
 }

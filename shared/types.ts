@@ -7,10 +7,14 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { AgentCli } from "./agentCli.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
+import type { ProjectColor } from "./projectColors.js"
+import type { TaskIconName } from "./taskIcons.js"
+import type { TaskPriority } from "./priority.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -64,6 +68,8 @@ export interface Project {
   depCache: boolean | null
   /** Where its agents run: "box" in Upstash boxes, "local" on the computer running Box Yard (shared/runner.ts). */
   runner: Runner
+  /** The CLI its new tasks run on (Claude Code or Codex); null uses Settings › Box agents › Agent. */
+  agentCli: AgentCli | null
   /**
    * Tasks running at once: how many of its own tasks may run at the same time on one box, GPU pod or this computer.
    * Other projects' tasks never wait for it; the box's own limit (Settings › Tasks running at once per box, or › on this
@@ -92,6 +98,8 @@ export interface Project {
   identityId: string
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
+  /** Its colour in the Coordinator chat and the sidebar (shared/projectColors.ts); null: one from its name. */
+  color: ProjectColor | null
   createdAt: number
   updatedAt: number
 }
@@ -208,6 +216,8 @@ export interface Task {
   compactPending: boolean
   /** A compaction turn is running right now. */
   compacting: boolean
+  /** The CLI its agent runs on (Claude Code or Codex), fixed when it was created. */
+  agentCli: AgentCli
   /** Model currently selected for subsequent turns, when routing overrode the global agent model. */
   model: string | null
   /** Effort currently selected for subsequent turns, when routing or the orchestrator overrode the global effort. */
@@ -234,6 +244,14 @@ export interface Task {
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
   pushState?: PushState | null
+  /** The icon it was given (shared/taskIcons.ts: create_task's `icon`); null: one from its title (taskIcon()). */
+  icon?: TaskIconName | null
+  /** Shared by the tasks one create_tasks call started (the Coordinator's cards view shows them as one card); null when started on its own. */
+  batchId?: string | null
+  /** "high": its next turn goes before every normal task waiting for a slot (shared/priority.ts). Sticky until changed. */
+  priority?: TaskPriority
+  /** When it last joined the queue (a new task, a message): FIFO within a priority (queueOrder). */
+  lastActiveAt?: number
   createdAt: number
   updatedAt: number
 }
@@ -393,11 +411,14 @@ export interface SideThread {
   id: string
   /** null: the Coordinator chat; else that project's Captain chat. */
   projectId: string | null
-  /** The chat message the highlight is in (an ask), or the message replied to (a reply thread). */
+  /** The chat message the highlight is in (an ask), the message replied to (a reply thread), or a task card's key (a task thread: the task's id, or `batch:<batch id>`). */
   anchorId: string
-  /** "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown as "N replies" under it. */
+  /**
+   * "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown
+   * as "N replies" under it. "task": questions to the Coordinator from a task's card, one thread per card, shown in it.
+   */
   kind: SideThreadKind
-  /** The highlighted text, as selected; for a reply thread, the whole message replied to. */
+  /** The highlighted text, as selected; for a reply thread, the whole message replied to; for a task thread, the card's title. */
   quote: string
   /** How the thread got the chat's context: a fork of its session at the message, or (after a compaction) its summary. null until the first answer. */
   context: "fork" | "summary" | null
@@ -413,7 +434,7 @@ export interface SideThread {
   updatedAt: number
 }
 
-export type SideThreadKind = "ask" | "reply"
+export type SideThreadKind = "ask" | "reply" | "task"
 
 export type SideThreadRole = "user" | "assistant" | "tool" | "error"
 
@@ -739,16 +760,28 @@ export interface Settings {
   startInZen: boolean
   /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
   showCloudMeter: boolean
+  /** The CLI the Coordinator runs on (shared/agentCli.ts): Claude Code unless set to Codex. */
+  orchestratorCli: AgentCli
   orchestratorModel: string
+  /** The Coordinator's model when it runs on Codex; "" is Codex's own default. */
+  orchestratorCodexModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */
   orchestratorAutoCompact: AutoCompact
   /** A lighter model or effort for the Coordinator's relay-only turns (task updates, no message from Cody); off by default. */
   orchestratorRelay: RelayModel
+  /** The CLI every project's Captain runs on. */
+  captainCli: AgentCli
   /** Model for the per-project Captains, separate from the Coordinator's. */
   captainModel: string
+  /** The Captains' model when they run on Codex; "" is Codex's own default. */
+  captainCodexModel: string
   captainEffort: Effort
+  /** The CLI new tasks run on unless their project (or the task) picks one; a task keeps the one it started on. */
+  agentCli: AgentCli
   agentModel: string
+  /** Box agents' model on Codex, unless the task or routing picks a Codex model; "" is Codex's own default. */
+  agentCodexModel: string
   agentEffort: AgentEffort
   /** YAML routing rules the orchestrator uses to choose per-task/per-turn model and effort. */
   agentRoutingConfig: string
