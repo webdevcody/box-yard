@@ -1142,9 +1142,20 @@ function CostsPanel({
   return (
     <Panel section="costs">
       <Row
+        id={fid("scm")}
+        label="Box spend in the header"
+        help="The Coordinator's header shows the cloud meter: boxes running, what they cost an hour and today's spend against the daily limit. Off, the Boxes page still shows it, and the limit's notices and Raise today's limit work the same."
+        hint={hint("showCloudMeter")}
+      >
+        <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+          <input id={fid("scm")} type="checkbox" checked={Boolean(s.showCloudMeter)} onChange={(e) => set("showCloudMeter", e.target.checked)} data-testid="show-cloud-meter" />
+          {s.showCloudMeter ? "Shown in the Coordinator's header" : "Off: only on the Boxes page"}
+        </label>
+      </Row>
+      <Row
         id={fid("daily-budget")}
         label="Daily cloud limit"
-        help="What boxes may cost per day, by the CPU they use (Claude isn't counted). At 80% Box Yard says so; at the limit new boxes wait until midnight while work already running goes on, and the Coordinator's cloud meter offers Raise today's limit. 0: no daily limit."
+        help="What boxes may cost per day, by the CPU they use (Claude isn't counted). At 80% Box Yard says so; at the limit new boxes wait until midnight while work already running goes on, and the cloud meter (on the Boxes page, and in the Coordinator's header if shown) offers Raise today's limit. 0: no daily limit."
         hint={hint("budget")}
       >
         {money(s.budget.dailyUsd, (n) => set("budget", { ...s.budget, dailyUsd: n }), fid("daily-budget"))}

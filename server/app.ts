@@ -19,6 +19,7 @@ import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js
 import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
+import { MachineStats, type MachineReaders } from "./machineStats.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -164,11 +165,14 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    quote: z.string().trim().min(1).max(MAX_QUOTE_CHARS),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
+    kind: z.enum(["ask", "reply"]).optional(),
+    quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
   }),
   sideThreadMessage: z.object({ id: idSchema, content: z.string().trim().min(1).max(MAX_QUESTION_CHARS) }),
+  sideThreadResolve: z.object({ resolved: z.boolean().default(true) }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
@@ -298,6 +302,8 @@ export function createBoxYard(
     setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs" | "localCheck">
     /** A made-up home folder and PATH for identity detection to read instead of this computer's (tests, mock screenshots). */
     detect?: Pick<DetectOptions, "home" | "env">
+    /** A made-up computer for machine_stats to read instead of this one (tests). */
+    machine?: MachineReaders
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -317,6 +323,8 @@ export function createBoxYard(
   })
   /** Reads this computer's gh, git and ssh for detect_identities and the gh:/file:/agent: references (server-side only). */
   const identityDetector = new IdentityDetector({ ...opts.detect, github: opts.github?.fetch })
+  /** This computer's memory, swap and load for machine_stats, sampled once a minute from start(). */
+  const machine = new MachineStats(opts.machine)
   /** Every credential value in effect: no transcript keeps one, and no error shows one. */
   const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues()]
   store.transcriptSecrets = secretValues
@@ -533,7 +541,7 @@ export function createBoxYard(
   app.all(
     "/mcp",
     mcpHandler(
-      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads },
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads, machine },
       mcpToken,
     ),
   )
@@ -1187,6 +1195,13 @@ export function createBoxYard(
     const body = parse(schemas.sideThreadMessage, req.body)
     res.status(201).json(threads.send(req.params.id!, body.content, body.id))
   })
+  api.post("/threads/:id/resolve", (req, res) => {
+    const body = parse(schemas.sideThreadResolve, req.body ?? {})
+    res.json(threads.resolve(req.params.id!, body.resolved))
+  })
+  api.post("/threads/:id/seen", (req, res) => {
+    res.json(threads.seen(req.params.id!))
+  })
   api.post("/threads/:id/stop", (req, res) => {
     threads.get(req.params.id!)
     threads.stop(req.params.id!)
@@ -1411,6 +1426,7 @@ export function createBoxYard(
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
       if (setup.onThisComputer()) await setup.refreshLocal()
       await tasks.start()
+      machine.start()
       scheduler.start()
       orchestrator.resumeScheduled()
       stopSnapshots = startSelfSnapshots(c, db)
@@ -1431,6 +1447,7 @@ export function createBoxYard(
       retro.stop()
       hooks.stop()
       scheduler.stop()
+      machine.stop()
       tasks.stop()
       captains.stop()
       orchestrator.stop()
