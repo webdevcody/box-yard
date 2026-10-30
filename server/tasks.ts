@@ -3244,9 +3244,17 @@ export class TaskManager {
     return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
   }
 
-  /** What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login. */
-  codexCredentials(projectId: string, taskEnv: Record<string, string> = {}): CodexTurnLogin {
-    return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, this.settings.credentials.codexLogin())
+  /**
+   * What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login.
+   * On `boxId`, when that box can't be handed Settings' ChatGPT login (`codexHandOver`), Settings' API key if it has one.
+   */
+  codexCredentials(projectId: string, taskEnv: Record<string, string> = {}, boxId?: string | null): CodexTurnLogin {
+    let global = this.settings.credentials.codexLogin()
+    if (global?.kind === "chatgpt" && boxId && !this.codexHandOver(boxId)) {
+      const key = this.settings.credentials.get("codexApiKey")
+      global = key ? { kind: "api_key", key } : null
+    }
+    return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, global)
   }
 
   /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
@@ -3749,10 +3757,9 @@ export class TaskManager {
   private machineAgent(row: TaskRow): (m: Machine) => Pick<MachineCandidate, "agentFound" | "agentLogin"> {
     const env = this.store.taskEnv(row.id)
     if (taskAgentCli(row) === "codex") {
-      const kind = this.codexCredentials(row.project_id, env).kind
       return (m) => ({
         agentFound: this.c.mock || m.lastTest?.tools.codex.found === true,
-        agentLogin: this.c.mock || kind === "api_key" || (kind === "chatgpt" && this.codexHandOver(machineBoxId(m.id))) || m.lastTest?.codexLogin === true,
+        agentLogin: this.c.mock || this.codexCredentials(row.project_id, env, machineBoxId(m.id)).kind !== null || m.lastTest?.codexLogin === true,
       })
     }
     const claudeKey = this.c.mock || this.turnCredentials(row.project_id, env).claudeFrom !== null
@@ -3760,11 +3767,12 @@ export class TaskManager {
   }
 
   /**
-   * Box Yard's ChatGPT login for Codex goes to an SSH machine only when the machine keeps it in memory (its tmpfs for
-   * secrets, Linux's /dev/shm): it's a long-lived login that Codex refreshes, so it never lands on the machine's disk.
+   * Whether Settings' ChatGPT login for Codex may go to a box. An SSH machine gets it only when it keeps it in memory
+   * (its tmpfs for secrets, Linux's /dev/shm): it's a long-lived login that Codex refreshes, so it never lands on the
+   * machine's disk. Mock mode's machines are folders here.
    */
   private codexHandOver(boxId: string): boolean {
-    return Boolean(providerOf(this.provider, boxId).secretsDir)
+    return !isMachineBox(boxId) || this.c.mock || Boolean(providerOf(this.provider, boxId).secretsDir)
   }
 
   /** Put a task on the machine `machineTarget` picked. One moving off another machine restores there from its archive. */
@@ -5261,7 +5269,7 @@ export class TaskManager {
    */
   private async takeBackCodexAuth(row: TaskRow) {
     if (taskAgentCli(row) !== "codex" || !row.box_id || this.settings.credentials.codexLogin()?.kind !== "chatgpt") return
-    if (this.codexCredentials(row.project_id, this.store.taskEnv(row.id)).kind !== "chatgpt") return
+    if (this.codexCredentials(row.project_id, this.store.taskEnv(row.id), row.box_id).kind !== "chatgpt") return
     try {
       const file = await this.provider.readFile(row.box_id, `${this.taskDir(row.box_id, row.id)}/codex/auth.json`)
       if (this.settings.credentials.adoptCodexAuth(file.toString("utf8"))) console.log(`[box-yard] ${row.id}: kept the Codex login it refreshed`)
@@ -5339,7 +5347,7 @@ export class TaskManager {
     if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in env)) env[k] = v
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
     const agent = taskAgentCli(row)
-    const codex = agent === "codex" ? this.codexCredentials(project.id, this.store.taskEnv(row.id)) : null
+    const codex = agent === "codex" ? this.codexCredentials(project.id, this.store.taskEnv(row.id), boxId) : null
     if (codex) {
       // A Codex turn logs in with Codex's login: Settings' Claude login stays off its box (a project's own env stays).
       if (claudeFrom === "global") for (const k of CLAUDE_CREDENTIAL_VARS) delete env[k]
@@ -5367,9 +5375,9 @@ export class TaskManager {
             codexArgs,
             // "chatgpt": the login file comes as codex-auth.json for the turn (box-runner.mjs prepareCodexHome).
             codexLogin: codex.kind,
-            // The same rule for Codex: on this computer (or an SSH machine) with no Codex login set, its own `codex login` (~/.codex).
-            // An SSH machine gets Box Yard's ChatGPT login only when it keeps it in memory (`codexHandOver`); else its own.
-            isolateCodex: !(local || machine) || this.c.mock || codex.kind === "api_key" || (codex.kind === "chatgpt" && (!machine || this.codexHandOver(boxId))),
+            // The same rule for Codex: on this computer (or an SSH machine) with no Codex login to hand it, its own
+            // `codex login` (~/.codex). An SSH machine without a tmpfs never gets the ChatGPT login (`codexHandOver`).
+            isolateCodex: !(local || machine) || this.c.mock || codex.kind !== null,
           }
         : {}),
       port: row.port_base ?? PORT_BASE,

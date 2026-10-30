@@ -387,7 +387,7 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     expect(r.boxes.created).toBe(0)
   })
 
-  it("runs Codex tasks on a machine's own codex: Box Yard's ChatGPT login only in its memory folder, an API key for one turn, nothing installed", { timeout: 200_000 }, async () => {
+  it("runs Codex tasks on a machine's own codex: Box Yard's ChatGPT login only in its memory folder, else an API key for one turn; nothing installed", { timeout: 200_000 }, async () => {
     const root = tmpDir("by-fake-ssh-")
     cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }))
     const fake = fakeSsh(root)
@@ -448,11 +448,11 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     const second = create("api key")
     await waitsForLogin(second.id)
     expect(getTask(r, second.id).boxId).toBeNull()
-    // …and an OpenAI API key for Codex goes in for one turn and doesn't stay.
+    // …or uses Settings' OpenAI API key for Codex in its place, which goes in for one turn and doesn't stay.
     const key = "sk-proj-towerkey00000000000000000"
-    r.yard.store.updateProject(p.id, { env: { CODEX_API_KEY: key } })
+    r.yard.settings.credentials.update({ codexApiKey: key })
     await done(r, second.id)
-    expect(fake.codexRuns().at(-1)).toMatchObject({ login: "api_key" })
+    expect(fake.codexRuns().at(-1)).toMatchObject({ login: "api_key", secret: key })
     expect(fake.stdin()).not.toContain(key)
     expect(fake.argv()).not.toContain(key)
     expect(filesWith(fake.home, key)).toEqual([])
