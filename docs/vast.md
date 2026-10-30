@@ -10,7 +10,7 @@ A GPU project runs on RunPod unless one of these says Vast.ai:
 ## Setup (once per Box Yard install)
 
 1. **Credit.** Vast.ai is prepaid. Add credit at [cloud.vast.ai › Billing](https://cloud.vast.ai/billing/). Vast stops instances when the credit runs out, so the credit is a hard ceiling on spend. Box Yard's $/hr caps apply on top.
-2. **API key.** Make one at [cloud.vast.ai › Keys](https://cloud.vast.ai/manage-keys/). A key limited to instances and your account (`instance_read`, `instance_write`, `user_read`) is enough; Box Yard never needs billing or team permissions. Then either paste it in **Settings › Credentials › Vast.ai API key** (where **Test** checks it and shows your credit), or set `VAST_API_KEY` in Box Yard's environment. Box Yard only uses the key from the server; it never reaches an agent.
+2. **API key.** Make one at [cloud.vast.ai › Keys](https://cloud.vast.ai/manage-keys/). Box Yard only searches offers, manages instances and reads your credit, so a key scoped to those (Vast's permission groups, e.g. `instance_read`, `instance_write`, `user_read`) can replace a full one; it never needs billing or team permissions. Check a scoped key with `npm run smoke:vast` once. Then either paste it in **Settings › Credentials › Vast.ai API key** (where **Test** checks it and shows your credit), or set `VAST_API_KEY` in Box Yard's environment. Box Yard only uses the key from the server; it never reaches an agent.
 3. **Settings › Vast.ai GPU.** The defaults suit browser and WebGL game testing:
 
    | Setting | Default | What it does |
