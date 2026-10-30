@@ -4,8 +4,9 @@ import { memo, useMemo } from "react"
 import { CornerLeftUp } from "lucide-react"
 import { groupKey, setOpen, useAllOpen } from "../lib/chipState"
 import { revealChatMessage } from "../lib/reveal"
-import { sourceLabels, type UpdateSource } from "../lib/chatUpdates"
+import { sourceNames, type UpdateSource } from "../lib/chatUpdates"
 import { NOTICE_ICON } from "./noticeIcons"
+import { TaskTile } from "./TaskIcon"
 
 /** The chip keys a reply's sources open: each update, and the group it sits in. */
 export function sourceKeys(sources: readonly UpdateSource[]): string[] {
@@ -13,7 +14,7 @@ export function sourceKeys(sources: readonly UpdateSource[]): string[] {
 }
 
 export const ReplySources = memo(function ReplySources({ sources }: { sources: UpdateSource[] }) {
-  const labels = useMemo(() => sourceLabels(sources, (kind) => NOTICE_ICON[kind].label), [sources])
+  const names = useMemo(() => sourceNames(sources, (kind) => NOTICE_ICON[kind].label), [sources])
   const keys = useMemo(() => sourceKeys(sources), [sources])
   const open = useAllOpen(keys)
   const toggle = () => {
@@ -32,7 +33,15 @@ export const ReplySources = memo(function ReplySources({ sources }: { sources: U
     >
       <CornerLeftUp className="h-3 w-3 shrink-0" aria-hidden />
       <span className="shrink-0">from:</span>
-      <span className="min-w-0 truncate text-yard-400/80">{labels.join(" · ")}</span>
+      <span className="min-w-0 truncate text-yard-400/80">
+        {names.map((n, i) => (
+          <span key={n.label}>
+            {i > 0 && " · "}
+            {n.taskId && <TaskTile id={n.taskId} bare className="mr-0.5 align-[-2px]" />}
+            {n.label}
+          </span>
+        ))}
+      </span>
     </button>
   )
 })
