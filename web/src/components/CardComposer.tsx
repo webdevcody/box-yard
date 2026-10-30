@@ -1,27 +1,23 @@
-// Replying inside a card of the Coordinator chat (CoordinatorCards.tsx). "This task", the default, sends straight to
-// the task's agent like the task page's composer, and the chat shows what was sent (TaskManager.sentFromChat).
-// "Coordinator" asks in the card's own side thread (kind "task", CardThread.tsx): read-only, with the task as its
-// context, and the main chat and the Coordinator's session never see it. Each card remembers its choice for the session.
-import { memo, useCallback, useRef } from "react"
-import { Bot } from "lucide-react"
+// Replying inside a card of the Coordinator chat (CoordinatorCards.tsx): the box sends straight to the card's task,
+// like the task page's composer, and the chat shows what was sent (TaskManager.sentFromChat). A gone box isn't a
+// failure (sending restores the task from its archive or a recap). Only when the server refuses the message does it
+// go to the Coordinator instead, with the task's id and the reason (lib/reroute.ts), and the card says so.
+import { memo, useCallback, useRef, useState } from "react"
+import { CornerUpRight } from "lucide-react"
 import { Composer } from "./Composer"
 import { TaskTile } from "./TaskIcon"
 import { cx } from "./ui"
-import { useSendTaskMessage } from "../lib/queries"
-import { newThreadIds, useAskCard } from "../lib/threads"
-import { setOpen, useChipOpen } from "../lib/chipState"
+import { newClientId, refused, useSendChat, useSendTaskMessage } from "../lib/queries"
+import { reroutedMessage } from "../lib/reroute"
+import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { badgeStatus } from "../lib/prState"
 import type { Attachment, Task } from "../../../shared/types"
 
 /** The box in a card: the same Composer as every chat, text only, in the card's flow instead of a sticky footer. */
 const BOX = "pt-1"
 
-/** The chipState key of a card's "send to the Coordinator" choice (closed: to the task). */
-const askKey = (taskId: string) => `ask:${taskId}`
-
-/** What the box says: where the message goes and what it does to the task. */
-export function cardPlaceholder(task: Task, coordinator: boolean): string {
-  if (coordinator) return "Ask the Coordinator about this…"
+/** What the box says: what a message does to the task. */
+export function cardPlaceholder(task: Task): string {
   const status = badgeStatus(task)
   if (status === "queued" || status === "starting" || status === "working") return "Queue another message…"
   if (status === "needs_input") return "Answer the agent…"
@@ -29,93 +25,75 @@ export function cardPlaceholder(task: Task, coordinator: boolean): string {
   return "Reply to this task…"
 }
 
-const TARGET =
-  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] whitespace-nowrap focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
-
-/** The box is a `box` container: a narrow one (a 320px phone, a batch's task row) keeps the picked target's word and
- *  shows the other as its icon, so the toggle never runs under the send button. The placeholder names the target too. */
-const BOX_CONTAINER = "@container/box"
-const OTHER_LABEL = "@max-[18rem]/box:sr-only"
-
-/** A task's card (or a batch's task row): This task | Coordinator. `className`: the side panel's sticky footer. */
+/** A task's card (or a batch's task row). `className`: the side panel's sticky footer. */
 export const CardComposer = memo(function CardComposer({ task, className = BOX }: { task: Task; className?: string }) {
-  const [coordinator] = useChipOpen(askKey(task.id))
-  const toTask = useSendTaskMessage(task.id)
-  const ask = useAskCard()
+  const toTask = useSendTaskMessage(task.id, { quiet: refused })
+  const toCoordinator = useSendChat()
   const panel = useRef<HTMLElement>(null)
+  // Why the last reply went to the Coordinator instead, until the next one goes through.
+  const [rerouted, setRerouted] = useState<string | null>(null)
   const submit = useCallback(
-    (text: string, attachments: Attachment[]) => {
+    async (text: string, attachments: Attachment[]) => {
       const content = text.trim()
       if (!content) return
-      // A task card's thread is anchored on its task: the same one from its own card or its batch's row.
-      if (coordinator) return ask.mutateAsync({ ...newThreadIds(), anchorId: task.id, title: task.title, question: content })
-      return toTask.mutateAsync({ content, attachments, inChat: true })
+      try {
+        await toTask.mutateAsync({ content, attachments, inChat: true })
+        setRerouted(null)
+      } catch (err) {
+        if (!refused(err)) throw err
+        const reason = (err as Error).message
+        // Thrown again when the Coordinator can't take it either: the Composer puts the text back.
+        await toCoordinator.mutateAsync({ id: newClientId("chat"), content: reroutedMessage(task, reason, content) })
+        setRerouted(reason)
+      }
     },
-    [coordinator, task.id, task.title, ask.mutateAsync, toTask.mutateAsync],
+    [task, toTask.mutateAsync, toCoordinator.mutateAsync],
   )
-  const pick = (ask: boolean) => setOpen([askKey(task.id)], ask)
   return (
-    <div data-testid="card-composer" data-to={coordinator ? "coordinator" : "task"} className={BOX_CONTAINER}>
+    <div data-testid="card-composer" className="@container/box">
       <Composer
         onSubmit={submit}
-        placeholder={cardPlaceholder(task, coordinator)}
+        placeholder={cardPlaceholder(task)}
         panelRef={panel}
-        historyKey={coordinator ? `card-thread:${task.id}` : `task:${task.id}`}
+        historyKey={`task:${task.id}`}
         files={false}
         className={className}
         tools={
-          <span className="flex min-w-0 items-center gap-2">
-            <span role="group" aria-label="Send to" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
-              <button type="button" aria-pressed={!coordinator} onClick={() => pick(false)} title="Straight to this task's agent, like the task page's box" className={cx(TARGET, !coordinator ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}>
-                <TaskTile id={task.id} bare />
-                <span className={cx(coordinator && OTHER_LABEL)}>This task</span>
-              </button>
-              <button type="button" aria-pressed={coordinator} onClick={() => pick(true)} title="A read-only side thread with the Coordinator (like a reply thread), with this task as context" className={cx(TARGET, coordinator ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}>
-                <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden />
-                <span className={cx(!coordinator && OTHER_LABEL)}>Coordinator</span>
-              </button>
-            </span>
-            <span data-testid="card-composer-hint" className="min-w-0 truncate text-[11px] text-zinc-600 @max-[30rem]/box:hidden">
-              {coordinator ? "A side thread with the Coordinator about this task: it answers, it doesn't act" : "Goes straight to this task's agent and resumes its session"}
-            </span>
+          <span data-testid="card-composer-hint" title="Goes straight to this task's agent and resumes its session" className="flex min-w-0 items-center gap-1.5 text-[11px] text-zinc-600 @max-[18rem]/box:hidden">
+            <TaskTile id={task.id} bare />
+            <span className="min-w-0 truncate">To this task</span>
           </span>
         }
       />
+      {rerouted !== null && <Rerouted reason={rerouted} />}
     </div>
   )
 })
 
-/** A batch card's own box: questions to the Coordinator about all its tasks, in the batch card's thread. Each task's row has its own CardComposer. `className`: the side panel's sticky footer. */
-export const BatchComposer = memo(function BatchComposer({ cardKey, title, className = BOX }: { cardKey: string; title: string; className?: string }) {
-  const ask = useAskCard()
-  const panel = useRef<HTMLElement>(null)
-  const submit = useCallback(
-    (text: string) => {
-      const content = text.trim()
-      if (!content) return
-      return ask.mutateAsync({ ...newThreadIds(), anchorId: cardKey, title, question: content })
-    },
-    [cardKey, title, ask.mutateAsync],
-  )
+/** Under a card's box: its last reply went to the Coordinator, why, and (behind a project filter) the way to it. */
+function Rerouted({ reason }: { reason: string }) {
+  const filtered = useChatProjectFilter() !== null
+  const show = () => {
+    setChatProjectFilter(null)
+    requestAnimationFrame(() => document.getElementById("card-coordinator")?.scrollIntoView?.({ block: "nearest", behavior: "smooth" }))
+  }
   return (
-    <div data-testid="card-composer" data-to="coordinator" className={BOX_CONTAINER}>
-      <Composer
-        onSubmit={submit}
-        placeholder="Ask the Coordinator about these tasks…"
-        panelRef={panel}
-        historyKey={`card-thread:${cardKey}`}
-        files={false}
-        className={className}
-        tools={
-          <span data-testid="card-composer-hint" title="A read-only side thread with the Coordinator, with these tasks as context" className="flex min-w-0 items-center gap-1 text-[11px] text-zinc-600">
-            <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden />
-            <span className="min-w-0 truncate">A side thread with the Coordinator: it answers, it doesn't act</span>
-          </span>
-        }
-      />
+    <div data-testid="card-rerouted" role="status" className="flex items-start gap-1.5 px-1 pt-1 text-[11.5px] text-amber-300/90">
+      <CornerUpRight className="mt-px h-3.5 w-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 wrap-anywhere">
+        This task couldn't take it ({reason}), so it went to the Coordinator.
+        {filtered && (
+          <>
+            {" "}
+            <button type="button" onClick={show} className={cx("text-yard-400 underline-offset-2 hover:underline pointer-coarse:min-h-9")}>
+              Show
+            </button>
+          </>
+        )}
+      </span>
     </div>
   )
-})
+}
 
 /** "••• The Hollow is working": someone is answering in this card. */
 export function WorkingLine({ who }: { who: string }) {

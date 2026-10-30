@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
-import { api, clientId } from "./api"
+import { ApiError, api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
@@ -343,10 +343,11 @@ export const useSettings = () =>
   })
 export const useOrchestratorState = () =>
   useQuery({ queryKey: keys.orchestrator, queryFn: () => api<OrchestratorState>("/api/orchestrator"), staleTime: Infinity })
-export const useCaptainState = (projectId: string) =>
-  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity })
-export const useCaptainMessages = (projectId: string) =>
-  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`) })
+/** `enabled` false: no project yet (the Coordinator chat's bottom panel with "All" picked). */
+export const useCaptainState = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captain(projectId), queryFn: () => api<CaptainState>(`/api/projects/${projectId}/captain`), staleTime: Infinity, enabled: o.enabled })
+export const useCaptainMessages = (projectId: string, o: { enabled?: boolean } = {}) =>
+  useQuery({ queryKey: keys.captainMessages(projectId), queryFn: () => api<CaptainMessage[]>(`/api/projects/${projectId}/captain/messages`), enabled: o.enabled })
 export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
@@ -978,7 +979,11 @@ export function useCreateTask() {
   })
 }
 
-export function useSendTaskMessage(taskId: string) {
+/** The server refused it (not "can't reach the server"): a card's reply then goes to the Coordinator (CardComposer). */
+export const refused = (err: unknown) => err instanceof ApiError && err.status >= 400
+
+/** `quiet`: errors it says nothing about, because the caller handles them (a card's reroute). */
+export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Error) => boolean } = {}) {
   const qc = useQueryClient()
   return useMutation({
     /** `inChat`: sent from the task's card in the Coordinator chat, which then shows it (TaskManager.sentFromChat). */
@@ -1000,6 +1005,7 @@ export function useSendTaskMessage(taskId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      if (quiet?.(err)) return
       playSendSound("failed")
       fail("Couldn't send the message")(err)
     },

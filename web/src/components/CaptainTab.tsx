@@ -263,7 +263,7 @@ function AgentSource({ meta }: { meta: CaptainMessage["meta"] }) {
 }
 
 /** A message to the Captain, labelled by who sent it: Cody (right), the Coordinator or a schedule (left). Long ones fold. */
-const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }) {
+export const InboundMessage = memo(function InboundMessage({ m }: { m: CaptainMessage }) {
   const source = captainSourceOf(m)
   const s = INBOUND[source]
   const Icon = s.icon
