@@ -23,7 +23,7 @@ import type { SettingsStore } from "./settings.js"
 import type { McpCaller } from "./mcp.js"
 import { listCompactions, readCompactionInfo, summaryBody } from "./compactions.js"
 import { resultUsageObject } from "./usage.js"
-import { serverClaudeEnv } from "./turnCredentials.js"
+import { serverClaudeEnv, withPromptCacheTtl } from "./turnCredentials.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
 import type { ChatMessage, SideThread, SideThreadKind, SideThreadMessage } from "../shared/types.js"
@@ -508,7 +508,7 @@ export class SideThreads {
       ]
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       // Like its chat's own `claude`: the chat's Claude login, and never the key identities' secrets are encrypted with.
-      const env = serverClaudeEnv(host.claudeLogin(), this.settings.credentials.claudeEnv())
+      const env = withPromptCacheTtl(serverClaudeEnv(host.claudeLogin(), this.settings.credentials.claudeEnv()), this.settings.get().promptCache1h)
 
       let child: ChildProcess
       try {

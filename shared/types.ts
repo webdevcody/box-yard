@@ -731,6 +731,12 @@ export interface Settings {
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */
   orchestratorAutoCompact: AutoCompact
+  /**
+   * The Coordinator, Captains and their reply threads write the prompt cache for 1 hour instead of 5 minutes, so the
+   * first step after a gap of 5–60 minutes reads the context instead of writing it all again. With an API key, 1-hour
+   * writes cost 2× the input price (5-minute ones 1.25×); a Claude subscription already defaults to 1 hour.
+   */
+  promptCache1h: boolean
   /** Model for the per-project Captains, separate from the Coordinator's. */
   captainModel: string
   captainEffort: Effort

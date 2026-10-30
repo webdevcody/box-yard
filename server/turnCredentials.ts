@@ -36,6 +36,21 @@ export function serverClaudeEnv(own: Record<string, string> | null, global: Reco
   return Object.assign(env, own ?? global)
 }
 
+/**
+ * The prompt cache's TTL for a server-side `claude` (Settings › 1-hour prompt cache): 1h keeps a Coordinator's or a
+ * Captain's context cached across the gaps between Cody's messages, so the first step after more than 5 minutes idle
+ * reads it instead of writing it all again. CLAUDE_CODE_PROMPT_CACHE_TTL beats a settings.json promptCacheTtl and
+ * ENABLE_PROMPT_CACHING_1H; FORCE_PROMPT_CACHING_5M beats them all, so it goes when 1h is on (checked on CLI 2.1.293).
+ */
+export function withPromptCacheTtl(env: NodeJS.ProcessEnv, oneHour: boolean): NodeJS.ProcessEnv {
+  if (oneHour) {
+    delete env.FORCE_PROMPT_CACHING_5M
+    return Object.assign(env, { CLAUDE_CODE_PROMPT_CACHE_TTL: "1h", ENABLE_PROMPT_CACHING_1H: "1" })
+  }
+  delete env.ENABLE_PROMPT_CACHING_1H
+  return Object.assign(env, { CLAUDE_CODE_PROMPT_CACHE_TTL: "5m" })
+}
+
 /** The strongest Claude credential in `env`, as a one-var env; empty values don't count. */
 function strongestClaude(env: Record<string, string>): Record<string, string> {
   const k = CLAUDE_CREDENTIAL_VARS.find((v) => env[v])

@@ -39,7 +39,7 @@ import {
   writeCompaction,
 } from "./compactions.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
-import { serverClaudeEnv } from "./turnCredentials.js"
+import { serverClaudeEnv, withPromptCacheTtl } from "./turnCredentials.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
@@ -1034,7 +1034,7 @@ class Captain {
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       // Its project identity's own Claude login, else env vars or Settings › Credentials, read on every run so a
       // saved token works without a restart.
-      const env = serverClaudeEnv(this.claudeLogin(), this.settings.credentials.claudeEnv())
+      const env = withPromptCacheTtl(serverClaudeEnv(this.claudeLogin(), this.settings.credentials.claudeEnv()), this.settings.get().promptCache1h)
 
       let child: ChildProcess
       try {

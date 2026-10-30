@@ -102,6 +102,8 @@ export const DEFAULT_SETTINGS: Settings = {
   depCacheEnabled: false,
   depCacheMaxMb: 2048,
   notesRetroEnabled: true,
+  // On: Coordinator and Captain turns write the prompt cache for 1 hour, not 5 minutes (server/turnCredentials.ts).
+  promptCache1h: true,
   notesMaxCount: DEFAULT_NOTE_BUDGET.maxNotes,
   notesMaxTokens: DEFAULT_NOTE_BUDGET.maxTokens,
 }
@@ -217,6 +219,7 @@ export const settingsPatch = z
     depCacheEnabled: z.boolean(),
     depCacheMaxMb: z.number().int().min(100).max(1_000_000),
     notesRetroEnabled: z.boolean(),
+    promptCache1h: z.boolean(),
     notesMaxCount: z.number().int().min(NOTE_BUDGET_LIMITS.maxNotes.min).max(NOTE_BUDGET_LIMITS.maxNotes.max),
     notesMaxTokens: z.number().int().min(NOTE_BUDGET_LIMITS.maxTokens.min).max(NOTE_BUDGET_LIMITS.maxTokens.max),
   })

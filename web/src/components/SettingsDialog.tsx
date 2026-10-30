@@ -504,10 +504,21 @@ export function SettingsDialog({
                 tokens={DEFAULT_AUTOCOMPACT_TOKENS}
               />
             </Row>
+            <Row
+              id={fid("pc1h")}
+              label="1-hour prompt cache"
+              help="Keeps the Coordinator's and every Captain's context in Claude's prompt cache for an hour instead of 5 minutes, so the first reply after a quiet spell reads it instead of re-sending it all (about 6 s more per 50k tokens). With an Anthropic API key, 1-hour cache writes cost 2× the input price instead of 1.25×; reads cost the same. A Claude subscription already uses the 1-hour cache, so off makes it 5 minutes there too."
+              hint={hint("promptCache1h")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("pc1h")} type="checkbox" checked={s.promptCache1h} onChange={(e) => set("promptCache1h", e.target.checked)} data-testid="prompt-cache-1h" />
+                {s.promptCache1h ? "On: cached for 1 hour" : "Off: cached for 5 minutes"}
+              </label>
+            </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
               Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
-              share the auto-compact threshold above.
+              share the auto-compact threshold and prompt cache setting above.
             </p>
             <Row
               id={fid("cm")}

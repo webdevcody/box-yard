@@ -30,7 +30,7 @@ import {
 import { routingInstructions } from "./routing.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds, type StatusOnly } from "./compactionTasks.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
-import { serverClaudeEnv } from "./turnCredentials.js"
+import { serverClaudeEnv, withPromptCacheTtl } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 
@@ -738,7 +738,7 @@ export class Orchestrator {
       const args = this.claudeArgs(kind, sessionId, resume)
       const [bin, ...pre] = this.c.claudeBin.split(" ")
       // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
-      const env = serverClaudeEnv(null, this.settings.credentials.claudeEnv())
+      const env = withPromptCacheTtl(serverClaudeEnv(null, this.settings.credentials.claudeEnv()), this.settings.get().promptCache1h)
       const effort = this.settings.get().orchestratorEffort
       const clock = new TurnClock()
 
@@ -757,7 +757,7 @@ export class Orchestrator {
       let settled = false
       let raw = ""
       let said = ""
-      let resultUsage: Record<string, number> | null = null
+      let resultUsage: ReturnType<typeof resultUsageObject> = null
       let resultCostUsd: number | null = null
       let resultDurationMs: number | null = null
       let resultModel: string | null = null
