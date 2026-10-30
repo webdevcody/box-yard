@@ -1767,6 +1767,7 @@ export function createBoxYard(
       machine.start()
       scheduler.start()
       orchestrator.resumeScheduled()
+      captains.resume()
       stopSnapshots = startSelfSnapshots(c, db)
       stopHold = startSelfHold(c, () => {
         if (orchestrator.busy) return true
