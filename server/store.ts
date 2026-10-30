@@ -2075,6 +2075,13 @@ export class Store {
     })()
   }
 
+  /** Projects whose Captain has messages still waiting for a turn (after a restart, say). */
+  queuedCaptainProjectIds(): string[] {
+    return (
+      this.db.prepare("SELECT DISTINCT project_id FROM captain_messages WHERE json_extract(meta_json, '$.queued') = 1").all() as { project_id: string }[]
+    ).map((r) => r.project_id)
+  }
+
   /** Ids of Coordinator chat messages still waiting for a turn (after a restart, say). */
   queuedChatIds(): string[] {
     return (this.db.prepare("SELECT id FROM chat_messages WHERE json_extract(meta_json, '$.queued') = 1 ORDER BY created_at ASC, rowid ASC").all() as { id: string }[]).map((r) => r.id)

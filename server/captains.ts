@@ -91,6 +91,22 @@ const usageKey = (projectId: string) => `captain_usage:${projectId}`
 const notesSeenKey = (projectId: string) => `captain_notes_seen:${projectId}`
 /** The summary file this Captain's next turn starts with (see Orchestrator RECAP_KEY). */
 const recapKey = (projectId: string) => `captain_recap:${projectId}`
+/** Messages up to this moment were taken by a turn; later ones are unanswered (see Captain.unansweredUserMessages). */
+const lastTurnKey = (projectId: string) => `captain_last_turn_at:${projectId}`
+/**
+ * Set while a turn answers messages, to where lastTurnKey stood before the turn took them, and cleared at its reply.
+ * Still set on startup: Box Yard stopped (a restart, an upgrade) mid-turn and killed it before it replied, so
+ * Captain.resume puts its messages back for a turn of their own.
+ */
+const openTurnKey = (projectId: string) => `captain_open_turn:${projectId}`
+
+/** The first lines of a turn retrying messages a stop cut off. */
+const RETRY_NOTE =
+  "(Box Yard restarted while you were answering the messages below, before your reply, so they are still unanswered: answer them now. " +
+  "You may have started on them already (a task created, a message sent): check with list_tasks before you redo anything.)"
+
+/** An agent's message the loop guard holds back for now (Captain.fromAgent). */
+const heldNow = (m: CaptainMessage) => typeof m.meta?.heldUntil === "number" && m.meta.heldUntil > Date.now()
 
 /** The summary prompt for one project: its "Projects and repos" section is about that project only. */
 function captainSummaryPrompt(project: Project, ownerName?: string) {
@@ -428,6 +444,17 @@ export class CaptainManager {
     for (const c of this.captains.values()) c.stop()
   }
 
+  /**
+   * On startup, like Orchestrator.resumeScheduled: a Captain whose turn the last stop cut off before it replied, or
+   * with messages queued for a turn that never came, answers them now.
+   */
+  resume() {
+    const queued = new Set(this.store.queuedCaptainProjectIds())
+    for (const p of this.store.listProjects()) {
+      if (queued.has(p.id) || this.store.getKv(openTurnKey(p.id)) !== null) this.get(p.id).resume()
+    }
+  }
+
   anyBusy() {
     return [...this.captains.values()].some((c) => c.active)
   }
@@ -438,6 +465,8 @@ const waitMs = (seconds: number) => Math.max(5, Math.min(seconds, CAPTAIN_WAIT_M
 class Captain {
   private running = false
   private pending = false
+  /** The next turn answers messages a stop cut off (resume): its prompt says so. */
+  private retrying = false
   private wakeWanted = false
   private wakeTimer: NodeJS.Timeout | null = null
   private throttleTimer: NodeJS.Timeout | null = null
@@ -552,7 +581,7 @@ class Captain {
   }
 
   restoreQueued(id: string): CaptainMessage {
-    const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
+    const since = Number(this.store.getKv(lastTurnKey(this.project.id)) ?? 0)
     const msg = this.queuedChanged(
       this.store.restoreQueuedChat("captain_messages", id, this.project.id, { queued: this.running, at: Math.max(Date.now(), since) }),
     )
@@ -746,7 +775,9 @@ class Captain {
           await this.turn()
         } else {
           this.wakeWanted = false
-          await this.autoTurn()
+          // A message no turn has answered yet gets that turn, never a wake-up telling the Captain no one wrote.
+          if (this.unansweredUserMessages().some((m) => !heldNow(m))) await this.turn()
+          else await this.autoTurn()
         }
       }
     } catch (err) {
@@ -764,8 +795,29 @@ class Captain {
   }
 
   private unansweredUserMessages(): CaptainMessage[] {
-    const since = Number(this.store.getKv(`captain_last_turn_at:${this.project.id}`) ?? 0)
+    const since = Number(this.store.getKv(lastTurnKey(this.project.id)) ?? 0)
     return this.store.listCaptainMessages(this.project.id, 200).filter((m) => m.role === "user" && m.createdAt >= since && m.meta?.cancelled !== true)
+  }
+
+  /**
+   * On startup (CaptainManager.resume). A turn that Box Yard's stop cut off before it replied (its openTurnKey is
+   * still set) gets its messages back, and they and any queued meanwhile get a turn of their own, triggered by
+   * whoever sent them. Without this they counted as answered, and the next wake-up told the Captain no one had written.
+   */
+  resume() {
+    const open = this.store.getKv(openTurnKey(this.project.id))
+    if (open !== null) {
+      this.store.setKv(lastTurnKey(this.project.id), open)
+      this.store.setKv(openTurnKey(this.project.id), null)
+      this.retrying = true
+    }
+    if (!this.unansweredUserMessages().length) {
+      this.retrying = false
+      return
+    }
+    this.pending = true
+    this.publishState()
+    void this.drain()
   }
 
   private async turn() {
@@ -775,6 +827,8 @@ class Captain {
     const messages = answering
       .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${forwardedQueueNote(m)}${note(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
+    const retry = this.retrying
+    this.retrying = false
     if (!messages.length) return
     // Codex sees attached images with the message itself; Claude Code opens them with Read.
     const images = codex ? answering.flatMap((m) => attachedImages(m.meta?.attachments)) : []
@@ -784,7 +838,9 @@ class Captain {
       const m = answering.find((x) => x.id === d.id)!
       this.hub.broadcast({ type: "captain.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
     }
-    this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
+    // Until the turn replies, a stop can still cut it off: remember where it took its messages from (see resume).
+    this.store.setKv(openTurnKey(this.project.id), this.store.getKv(lastTurnKey(this.project.id)) ?? "0")
+    this.store.setKv(lastTurnKey(this.project.id), String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
     const named = await namedState(
@@ -793,12 +849,17 @@ class Captain {
       { store: this.store, prs: this.prs() },
       NAMED_TASKS_HEADING,
     )
-    const prompt = [updatesBlock("Project updates since your last turn", notices), named, messages.join("\n\n")]
+    const prompt = [updatesBlock("Project updates since your last turn", notices), named, retry ? RETRY_NOTE : null, messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
     const sources = new Set(answering.map(captainSourceOf))
     const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)), images }
-    const result = await this.runPrompt(prompt, false, ask, (reply) => this.replyUpward(answering, reply))
+    const result = await this.runPrompt(prompt, false, ask, (reply) => {
+      // Replied (or failed with an error shown in the chat): the messages are answered. A stop that killed the
+      // turn before its reply leaves the mark for resume.
+      if (reply.ok || !this.stopped) this.store.setKv(openTurnKey(this.project.id), null)
+      this.replyUpward(answering, reply)
+    })
     this.handled(entries, result.ok)
     const said = result.ok ? result.text.trim() : `The Captain hit an error: ${result.error.slice(0, 500)}`
     const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
