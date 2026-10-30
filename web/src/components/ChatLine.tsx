@@ -403,37 +403,34 @@ export const ChatLine = memo(function ChatLine({
   )
 })
 
-const USER_BUBBLE = "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100"
-
-/** The tasks a question was asked about from their card (Orchestrator.send's meta.about). */
-const aboutTasks = (m: ChatMessage): string[] => (Array.isArray(m.meta?.about) ? m.meta.about.filter((t): t is string => typeof t === "string") : [])
+export const USER_BUBBLE = "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100"
+/** Over Cody's bubble in a card: where it went ("to this task", "to the Coordinator"). */
+export const SENT_LABEL = "flex max-w-[85%] min-w-0 items-center gap-1 text-[11px] text-zinc-500"
 
 /**
- * Over a message Cody sent from a card: where it went. In the card, "to this task" or "to the Coordinator"; in the
- * Timeline, the task it went to or is about, and the way to its card.
+ * Over a message Cody sent to a task from its card: where it went. In the card, "to this task"; in the Timeline, the
+ * task, and the way to its card.
  */
-function SentFrom({ taskIds, coordinator, inCard }: { taskIds: readonly string[]; coordinator: boolean; inCard: boolean }) {
-  const tile = useTaskTile(taskIds[0])
-  const label = "flex max-w-[85%] min-w-0 items-center gap-1 text-[11px] text-zinc-500"
+function SentFrom({ taskId, inCard }: { taskId: string; inCard: boolean }) {
+  const tile = useTaskTile(taskId)
   if (inCard)
     return (
-      <div data-testid="sent-from" className={label}>
-        {coordinator ? <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden /> : <TaskTile id={taskIds[0]} bare />}
-        {coordinator ? "to the Coordinator" : "to this task"}
+      <div data-testid="sent-from" className={SENT_LABEL}>
+        <TaskTile id={taskId} bare />
+        to this task
       </div>
     )
-  const name = taskIds.length > 1 ? `${taskIds.length} tasks` : (tile?.title ?? "a task")
   return (
-    <div data-testid="sent-from" className={label}>
-      <span className="shrink-0">{coordinator ? "about" : "to"}</span>
-      <TaskTile id={taskIds[0]} bare />
-      <span className="min-w-0 truncate text-zinc-400">{name}</span>
+    <div data-testid="sent-from" className={SENT_LABEL}>
+      <span className="shrink-0">to</span>
+      <TaskTile id={taskId} bare />
+      <span className="min-w-0 truncate text-zinc-400">{tile?.title ?? "a task"}</span>
       <span aria-hidden className="text-zinc-700">
         ·
       </span>
       <button
         type="button"
-        onClick={() => showCard(taskIds[0]!)}
+        onClick={() => showCard(taskId)}
         className="shrink-0 rounded-sm font-medium text-yard-400 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
       >
         Open card ›
@@ -448,7 +445,7 @@ const SentLine = memo(function SentLine({ m, inCard }: { m: ChatMessage; inCard:
   const text = useMemo(() => noticeText(m).text, [m])
   return (
     <div id={`chat-${m.id}`} data-testid="sent-message" className="flex flex-col items-end gap-1">
-      {taskId && <SentFrom taskIds={[taskId]} coordinator={false} inCard={inCard} />}
+      {taskId && <SentFrom taskId={taskId} inCard={inCard} />}
       <div className={cx(MESSAGE_BLOCK, USER_BUBBLE)}>
         {text}
         <AttachmentList files={m.meta?.attachments} />
@@ -528,10 +525,8 @@ function ChatLineBody({
         {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} anchorId={m.id} />}
       </div>
     )
-    const about = aboutTasks(m)
     return (
       <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
-        {about.length > 0 && <SentFrom taskIds={about} coordinator inCard={inCard} />}
         {m.meta?.queued === true ? (
           <QueuedChatMessage m={m} projectId={null} who="the Coordinator">
             {bubble}
