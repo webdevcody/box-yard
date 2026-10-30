@@ -17,6 +17,10 @@
 // A quick question whose prompt carries the state of what it names ("[What this message names …]", server/handoff.ts)
 // is answered from that block with no tool call, as the prompt tells a model to.
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
+//   [fyi]                                     (a Captain marks its reply to the Coordinator FYI: no wake needed)
+//   [decide]                                  (a Captain's reply ends with a decision for Cody)
+//   [fail]                                    (a Captain's turn fails)
+// FAKE_CLAUDE_EXIT_MS=<ms> waits that long between the result line and exiting, like the real CLI's exit tail.
 // Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
 // [reply] (reply_to_agent) or [reply-task] (send_to_task), after any [slow:<seconds>]; otherwise it doesn't reply.
@@ -364,7 +368,12 @@ async function orchestrator(mcp, prompt) {
     else continue
     lines.push(`Answered ${m[1]}.`)
   }
-  await say(withNextSteps(lines.join("\n"), ["Check the latest yard status", "Start a related task", "Summarize open decisions"]))
+  const captain = prompt.includes("[Project now: ")
+  if (captain && /\[fail\]/i.test(text)) throw new Error("fake Captain failure")
+  if (captain && /\[decide\]/i.test(text)) lines.push("", "Cody needs to decide: merge PR #1 now, or after the release.")
+  // A Captain's reply that's only for Cody's information says so, so it doesn't wake the Coordinator.
+  const fyi = captain && /\[fyi\]/i.test(text) ? "\n\n<!-- boxyard-coordinator: fyi -->" : ""
+  await say(withNextSteps(lines.join("\n") + fyi, ["Check the latest yard status", "Start a related task", "Summarize open decisions"]))
   return lines.join("\n")
 }
 
@@ -533,5 +542,6 @@ process.stdin.on("end", async () => {
     usage: usageNow(),
     modelUsage: { fake: { contextWindow: WINDOW } },
   })
+  if (Number(process.env.FAKE_CLAUDE_EXIT_MS) > 0) await sleep(Number(process.env.FAKE_CLAUDE_EXIT_MS))
   process.exit(0)
 })
