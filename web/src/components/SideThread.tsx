@@ -255,9 +255,8 @@ export const repliesLabel = (n: number) => `${n} ${n === 1 ? "reply" : "replies"
 function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: OpenThread; headerClassName: string }) {
   const id = open.id
   const draft = open.draft ?? null
-  const saved = useThread(chat, id)
-  const thread = saved ?? null
-  const messages = useThreadMessages(id).data ?? NO_MESSAGES
+  const thread = useThread(chat, id)
+  const messages = useThreadMessages(id, Boolean(thread)).data ?? NO_MESSAGES
   const send = useSendThreadMessage(chat, id)
   const start = useAskThread(chat)
   const control = useThreadControl(chat)

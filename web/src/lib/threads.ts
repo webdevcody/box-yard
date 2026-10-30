@@ -47,8 +47,9 @@ export function useThread(chat: ThreadChat, id: string | null): SideThread | nul
   return (id && q.data?.find((t) => t.id === id)) || null
 }
 
-export function useThreadMessages(id: string) {
-  return useQuery({ queryKey: threadKeys.messages(id), queryFn: () => api<SideThreadMessage[]>(`/api/threads/${id}/messages`), staleTime: Infinity })
+/** `enabled` false: a draft reply thread, which has no messages on the server yet. */
+export function useThreadMessages(id: string, enabled = true) {
+  return useQuery({ queryKey: threadKeys.messages(id), queryFn: () => api<SideThreadMessage[]>(`/api/threads/${id}/messages`), staleTime: Infinity, enabled })
 }
 
 export function useThreadStream(id: string) {
