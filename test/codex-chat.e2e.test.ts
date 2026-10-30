@@ -133,6 +133,11 @@ describe("the Coordinator on Codex", () => {
     await call(r, "POST", "/api/chat", { content: "status" })
     await waitFor(() => runs().length === 3 && !r.yard.orchestrator.busy, "the turn after")
     expect(runs()[2].resume).toBeNull()
+    // No /compact summary on Codex: the new thread gets Box Yard's whole summary.
+    const thread = JSON.parse(fs.readFileSync(path.join(runs()[2].home, "fake-claude", "fake-sessions", `${runs()[2].thread}.json`), "utf8"))
+    const first = thread.turns[0].prompt as string
+    expect(first).toMatch(/^\[Box Yard: Your context was just compacted\. This is the summary you wrote right before it/)
+    expect(first).toContain("## Decisions and preferences")
   })
 })
 

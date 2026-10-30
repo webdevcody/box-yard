@@ -5,7 +5,7 @@ import type { Server } from "node:http"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createBoxYard, type BoxYard } from "../server/app.js"
-import { buildMcpServer, type McpCaller } from "../server/mcp.js"
+import { ALWAYS_LOAD, buildMcpServer, CORE_TOOLS, type McpCaller } from "../server/mcp.js"
 import { followupPrompt } from "../server/prompts.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import { userMessageLabel } from "../shared/sender.js"
@@ -105,6 +105,19 @@ describe("Captain MCP scoping (#43)", () => {
     }
     expect(r.yard.store.findProject("gamma")).toBeNull()
     expect(r.yard.store.findProject("beta")).not.toBeNull()
+  })
+
+  it("loads only each caller's core tools up front; the CLI's tool search defers the rest", async () => {
+    const { r, a } = await twoProjects()
+    const alwaysLoaded = async (caller: McpCaller) => {
+      const tools = (await (await mcpAs(r, caller)).client.listTools()).tools
+      expect(tools.length).toBeGreaterThan(40)
+      return tools.filter((t) => t._meta?.[ALWAYS_LOAD] === true).map((t) => t.name).sort()
+    }
+    expect(await alwaysLoaded({ kind: "coordinator" })).toEqual([...CORE_TOOLS.coordinator].sort())
+    expect(await alwaysLoaded({ kind: "captain", projectId: a.id })).toEqual([...CORE_TOOLS.captain].sort())
+    // A side thread lists the same tools as its chat, so its fork keeps the chat's prompt cache.
+    expect(await alwaysLoaded({ kind: "coordinator", readOnly: true })).toEqual([...CORE_TOOLS.coordinator].sort())
   })
 
   it("denies a Captain another project's tasks and project, with a clear error", async () => {

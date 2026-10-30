@@ -16,6 +16,7 @@ import { compactThreshold, type SettingsStore } from "./settings.js"
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import {
   SUMMARY_PROMPT,
+  afterCompactBlock,
   cleanSummary,
   compactCommand,
   compactionsDir,
@@ -34,7 +35,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
-import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
+import { CHAT_ALLOWED_TOOLS, CHAT_TOOLS, attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 
@@ -410,15 +411,19 @@ export class Orchestrator {
     return summaryPrompt(withOwner(SUMMARY_PROMPT, this.owner()), { previous, liveTasks: liveTaskLines(this.store, ids, { busy: true, statusOnly: this.statusOnly }) })
   }
 
-  /** A saved summary as a prompt block, with the current state of every task it names. */
-  private recap(file: string, lead?: string): string | null {
+  /**
+   * A saved summary as a prompt block, with the current state of every task it names. Right after a /compact
+   * (`compacted`) only that state: the CLI's own summary carries the rest.
+   */
+  private recap(file: string, opts: { lead?: string; compacted?: boolean } = {}): string | null {
     let markdown: string
     try {
       markdown = fs.readFileSync(file, "utf8")
     } catch {
       return null
     }
-    return recapBlock(file, markdown, liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { statusOnly: this.statusOnly }), lead)
+    const live = liveTaskLines(this.store, mentionedTaskIds([summaryBody(markdown)]), { statusOnly: this.statusOnly })
+    return opts.compacted ? afterCompactBlock(file, markdown, live) : recapBlock(file, markdown, live, opts.lead)
   }
 
   /**
@@ -705,9 +710,11 @@ export class Orchestrator {
 
   private async runPrompt(body: string, ask: RunAsk = {}): Promise<{ ok: boolean; error: string }> {
     const recapFile = this.store.getKv(RECAP_KEY)
-    const compacted = recapFile ? this.recap(recapFile) : null
-    const prompt = [compacted, this.yardNow(), body].filter(Boolean).join("\n\n")
     const s = this.session()
+    // A /compact keeps the session; Codex's compaction starts a new one, which gets the whole summary.
+    const compacted = recapFile ? this.recap(recapFile, { compacted: s.started }) : null
+    const now = [this.yardNow(), body].join("\n\n")
+    const prompt = [compacted, now].filter(Boolean).join("\n\n")
     this.turnKey = `turn_${randomUUID().slice(0, 12)}`
     // A session the other CLI started can't be resumed: start over the same way as when it's gone.
     const switched = s.started && (this.store.getKv(SESSION_CLI_KEY) ?? "claude") !== this.cli()
@@ -721,9 +728,9 @@ export class Orchestrator {
         .filter((m) => (m.role === "user" || m.role === "assistant") && m.meta?.cancelled !== true)
         .map((m) => `[${m.role}] ${m.content.slice(0, 800)}`)
         .join("\n")
-      const last = compacted ? null : this.latestSummary()
-      const saved = last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false, "turn", ask)
+      const last = recapFile ? { file: recapFile } : this.latestSummary()
+      const saved = last ? this.recap(last.file, { lead: "Your session was reset. This is the last summary you wrote" }) : null
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${now}`, fresh, false, "turn", ask)
     }
     this.turnKey = null
     if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
@@ -784,10 +791,10 @@ export class Orchestrator {
       "--mcp-config",
       this.mcpConfigPath,
       "--tools",
-      "Read,WebSearch,WebFetch",
+      CHAT_TOOLS,
       // Only a turn may use them; Read is for the compaction log and uploads (and only those folders). With no
       // allow rules, dontAsk denies every call, so the summary pass can only write text.
-      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")] : []),
+      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", ...CHAT_ALLOWED_TOOLS, ...this.readRules()].join(",")] : []),
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",
