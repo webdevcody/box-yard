@@ -29,8 +29,9 @@ function setup() {
   const config = testConfig()
   // GitHub as the tracker sees it: PR #91 is open until `gh.state` says otherwise.
   const gh = { state: "OPEN", requests: 0, down: false }
-  const fetch = (async () => {
-    gh.requests++
+  const fetch = (async (url: string) => {
+    // The tracker's GraphQL polls; a merge also reads the PR over REST for the issues it names.
+    if (String(url).endsWith("/graphql")) gh.requests++
     if (gh.down) return new Response("unavailable", { status: 502 })
     const pr =
       gh.state === "MERGED"

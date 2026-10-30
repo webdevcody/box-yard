@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
@@ -119,8 +120,11 @@ describe("On PR ready → merge, end to end", () => {
     const order = ["Opened pull request", 'The hook "On PR ready → merge" asked', "Pull request #7 was merged"].map((p) => transcript.findIndex((m) => m.content.startsWith(p)))
     expect(order).toEqual([...order].sort((a, b) => a - b))
 
-    // The agent got the message labelled as the hook, not as Cody.
-    const turn = JSON.parse(fs.readFileSync(path.join(r.yard.tasks.taskDir(done.boxId!, task.id), "turn.json"), "utf8"))
+    // The agent got the message labelled as the hook, not as Cody. Its workspace is archived and gone once the merge
+    // moved it to done, so read the prompt fake-claude kept for the session.
+    const sessionId = r.yard.store.getTaskRow(task.id)!.session_id!
+    const session = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".fake-claude"), "fake-sessions", `${sessionId}.json`), "utf8")) as { turns: { prompt: string }[] }
+    const turn = session.turns.at(-1)!
     expect(turn.prompt).toMatch(/^Message from the Box Yard hook "On PR ready → merge" \(an automation that runs on "PR ready", set up by Cody; not a new message from Cody\):/)
     expect(turn.prompt).toContain(mergeRequestPrompt(7))
 
