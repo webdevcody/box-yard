@@ -37,6 +37,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     claudeOauthToken: "",
     anthropicApiKey: "",
     githubToken: "",
+    vastApiKey: "",
     elevenlabsApiKey: "",
     openaiApiKey: "",
     ttsProvider: "",
