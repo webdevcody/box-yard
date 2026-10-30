@@ -13,7 +13,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPc
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
-import { CloudMeter } from "./CloudMeter"
+import { CloudMeter, useShowCloudMeter } from "./CloudMeter"
 import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
 import { ChatRows, useCoordinatorRows } from "./UpdateChips"
@@ -51,6 +51,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const openSettings = useOpenSettings()
   const compactNow = useCallback(() => compact.mutate(), [compact.mutate])
   const autoCompact = useAutoCompact("coordinator")
+  // Settings › Usage: off by default, since not everyone uses boxes (the Boxes page always shows the meter).
+  const showCloud = useShowCloudMeter()
   const meterRow = spotClass(autoCompact, "header")
   const projects = useProjects()
   const tasks = useTasks()
@@ -143,7 +145,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           <div className={HEAD_CONTAINER}>
           <header
             className={cx(
-              // A container, so the cloud meter and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
+              // A container, so the cloud meter (if shown) and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
               // A column: the controls' row, then (in a narrow header) the cloud meter's strip.
               "@container flex flex-col justify-center",
               // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
@@ -162,7 +164,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 {zen && <span className="max-sm:hidden">Box Yard </span>}
                 Coordinator
               </div>
-              <CloudMeter variant="inline" />
+              {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">
                 {!autoCompact && <CoordinatorContext zen={zen} state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
                 <VoiceControl />
@@ -197,7 +199,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 )}
               </div>
             </div>
-            <CloudMeter variant="strip" />
+            {showCloud && <CloudMeter variant="strip" />}
           </header>
           {!zen && meterRow !== null && (
             <ContextMeter

@@ -22,6 +22,7 @@ import { badgeStatus } from "../lib/prState"
 import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 import { WaitReason } from "./WaitReason"
+import { CloudMeter } from "./CloudMeter"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -118,9 +119,13 @@ export function BoxesView() {
             Worker boxes on {health.data?.provider ?? "…"} and the tasks running on them.
           </p>
         </div>
-        <button onClick={() => openSettings("limits")} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg text-sm text-sky-400 hover:underline sm:min-h-0">
-          <Settings className="h-3.5 w-3.5" /> Edit limits
-        </button>
+        <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 sm:justify-end">
+          {/* Today's spend and the boxes' sheet, here whether or not the Coordinator's header shows them. */}
+          {!noBoxes && <CloudMeter variant="page" />}
+          <button onClick={() => openSettings("limits")} className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg text-sm text-sky-400 hover:underline sm:min-h-0">
+            <Settings className="h-3.5 w-3.5" /> Edit limits
+          </button>
+        </div>
       </header>
 
       {!noBoxes && <CapacityNotice onEdit={() => openSettings("limits")} />}

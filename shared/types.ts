@@ -715,6 +715,8 @@ export interface Settings {
   ownerName: string
   /** A plain visit to / opens Zen (the Coordinator alone, full screen) unless Zen was left on purpose last time. */
   startInZen: boolean
+  /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
+  showCloudMeter: boolean
   orchestratorModel: string
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */

@@ -9,7 +9,7 @@ import { boxState, dollars, limitPct, meterLabel } from "../web/src/lib/cloud.js
 import { keys } from "../web/src/lib/queries.js"
 import type { CloudBox, CloudStatus } from "../shared/types"
 
-// The cloud meter on the Coordinator: boxes now, $/h and today's spend against the daily cloud limit; its sheet
+// The cloud meter (Boxes page, and the Coordinator if shown): boxes now, $/h and today's spend against the daily cloud limit; its sheet
 // raises today's limit. A task the limit holds back offers the same raise.
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
