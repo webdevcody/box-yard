@@ -8,10 +8,11 @@ import { AlertTriangle, FileText, Laptop, Loader2, Paperclip, Plus, ShieldAlert,
 import { newClientId, useAgentSettings, useCreateTask, useProjects, useSettings } from "../lib/queries"
 import { draftScope, loadDraft, saveDraft } from "../lib/newTask"
 import { primeSendSound } from "../lib/sendSound"
-import { EFFORT_LABEL, MODELS } from "../lib/models"
+import { EFFORT_LABEL } from "../../../shared/models"
+import { EffortPicker, ModelPicker } from "./ModelPicker"
 import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
-import { EFFORTS, type Attachment, type Effort, type Project } from "../../../shared/types"
+import { type Attachment, type Effort, type Project } from "../../../shared/types"
 import { LOCAL_UNSANDBOXED, type Runner } from "../../../shared/runner"
 import { Modal, focusables } from "./Modal"
 import { formatSize } from "./Attachments"
@@ -513,24 +514,17 @@ export function NewTaskDialog({
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="Model">
-          <Select className="w-full" value={model} onChange={(e) => setModel(e.target.value)} data-testid="new-task-model">
-            <option value="">Default{settings?.agentModel ? ` (${settings.agentModel})` : ""}</option>
-            {MODELS.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </Select>
+          <ModelPicker value={model} onChange={setModel} defaultLabel={`Default${settings?.agentModel ? ` (${settings.agentModel})` : ""}`} testId="new-task-model" />
         </Field>
         <Field label="Effort">
-          <Select className="w-full" value={effort} onChange={(e) => setEffort(e.target.value as Effort | "")} data-testid="new-task-effort">
-            <option value="">Default{settings?.agentEffort ? ` (${EFFORT_LABEL[settings.agentEffort] ?? "same as Coordinator"})` : ""}</option>
-            {EFFORTS.map((x) => (
-              <option key={x} value={x}>
-                {EFFORT_LABEL[x]}
-              </option>
-            ))}
-          </Select>
+          <EffortPicker
+            value={effort}
+            onChange={(v) => setEffort(v as Effort | "")}
+            model={model || settings?.agentModel || ""}
+            effective={effort || (settings?.agentEffort !== "orchestrator" ? settings?.agentEffort : "") || ""}
+            lead={<option value="">Default{settings?.agentEffort ? ` (${settings.agentEffort === "orchestrator" ? "Coordinator decides" : EFFORT_LABEL[settings.agentEffort]})` : ""}</option>}
+            testId="new-task-effort"
+          />
         </Field>
       </div>
       <RunHereToggle on={runsOn === "local"} projectLocal={projectRunner === "local"} onChange={(on) => setRunner(on ? "local" : projectRunner === "local" ? "box" : projectRunner)} />

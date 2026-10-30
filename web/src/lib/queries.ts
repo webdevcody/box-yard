@@ -9,6 +9,7 @@ import type { ProjectSnapshotState } from "./projectSnapshot"
 import type { SnapshotJob } from "../../../shared/snapshots"
 import type { ProjectAutoSize } from "../../../shared/autoSize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
+import { BUILTIN_MODELS, type ClaudeModel, type ModelCatalog } from "../../../shared/models"
 import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type IdentityDetection, type IdentityInput, type IdentitySigningInput, type IdentityClaudeKind } from "../../../shared/identities"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
@@ -85,6 +86,7 @@ export const keys = {
   captainMessages: (projectId: string) => ["captain-messages", projectId] as const,
   captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
+  models: ["models"] as const,
   tts: ["tts-settings"] as const,
   setup: ["setup"] as const,
   runpod: ["runpod"] as const,
@@ -335,6 +337,10 @@ export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity, enabled: o.enabled })
+/** Every model and effort picker's list: the installed CLI's own (GET /api/models), or the built-in one until then. */
+export const useModelCatalog = () =>
+  useQuery({ queryKey: keys.models, queryFn: () => api<ModelCatalog>("/api/models"), staleTime: 30 * 60_000, retry: false })
+export const useModels = (): ClaudeModel[] => useModelCatalog().data?.models ?? (BUILTIN_MODELS as ClaudeModel[])
 /** Settings › Voice text-to-speech choices; keys only as set/unset. Also feeds lib/speech's engine choice. */
 export const useTtsSettings = () =>
   useQuery({
