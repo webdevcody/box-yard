@@ -10,7 +10,17 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import Database from "better-sqlite3"
+import { createRequire } from "node:module"
+
+// better-sqlite3 from the Box Yard checkout you run it in, so a copy of this file runs from anywhere (say /tmp).
+const require = createRequire(path.join(process.cwd(), "package.json"))
+const Database = (() => {
+  try {
+    return require("better-sqlite3")
+  } catch {
+    return createRequire(import.meta.url)("better-sqlite3")
+  }
+})()
 
 const args = process.argv.slice(2)
 const take = (name) => {
