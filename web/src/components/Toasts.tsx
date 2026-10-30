@@ -3,6 +3,7 @@ import { navigate } from "wouter/use-browser-location"
 import { Loader2, X } from "lucide-react"
 import { dismiss, isCritical, pauseToasts, resumeToasts, useToasts, type Toast, type ToastTone } from "../lib/toast"
 import { followAppLink } from "../lib/linkify"
+import { openInZenPanel } from "../lib/zenPanel"
 import { StatusBadge, cx } from "./ui"
 
 const TONE: Record<ToastTone, string> = {
@@ -41,8 +42,8 @@ export function Toasts({ className, quiet = false }: { className?: string; quiet
 
 function TaskToast({ t }: { t: Toast }) {
   const open = (e: MouseEvent<HTMLAnchorElement>) => {
-    // Plain click: navigate in place. Cmd/Ctrl/middle click: the browser opens a new tab.
-    followAppLink(e, t.href!, navigate)
+    // Plain click: navigate in place (in Zen, a task opens in the side panel). Cmd/Ctrl/middle click: the browser opens a new tab.
+    followAppLink(e, t.href!, (to) => openInZenPanel(to) || navigate(to))
     t.onOpen?.()
     dismiss(t.id)
   }
