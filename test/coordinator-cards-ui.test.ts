@@ -11,6 +11,7 @@ import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorVi
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
+import { COORDINATOR_CHAT, closeThread, forgetThread, openThread, openThreadId } from "../web/src/lib/threads.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -78,6 +79,13 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // The side panel's store outlives a test: empty it.
+  const open = openThreadId(COORDINATOR_CHAT)
+  if (open)
+    act(() => {
+      closeThread(COORDINATOR_CHAT)
+      forgetThread(COORDINATOR_CHAT, open)
+    })
   act(() => setChatProjectFilter(null))
   act(() => setCoordinatorView("cards"))
   act(() => root.unmount())
@@ -402,5 +410,129 @@ describe("Reply in a card", () => {
     expect(own.dataset.to).toBe("coordinator")
     await send(own, "How far along is the batch?")
     expect(posts[1]!.body).toMatchObject({ content: "How far along is the batch?", about: [CAMP.id, HOLLOW.id, DAM.id] })
+  })
+})
+
+describe("A card in the side panel", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+  })
+
+  const panel = () => host.querySelector('[data-testid="side-thread"]') as HTMLElement | null
+  const expand = (key: string) => card(key).querySelector('[data-testid="chat-card-panel"]') as HTMLElement
+
+  it("⤢ opens it beside the chat as Tasks › its title, with its header, its history and a box at the bottom; its card is outlined", () => {
+    render()
+    click(expand(LOGIN.id))
+    // The header keeps its click: the card itself stays as it was.
+    expect(card(LOGIN.id).dataset.open).toBeUndefined()
+    const p = panel()!
+    expect(p.dataset.card).toBe(LOGIN.id)
+    expect(p.getAttribute("aria-label")).toBe("Task")
+    const crumb = p.querySelector('nav[aria-label="Breadcrumb"]')!
+    expect(crumb.textContent).toBe("TasksFix login")
+    expect(p.querySelector('[data-testid="card-panel-head"]')!.textContent).toContain("Needs you")
+    expect(p.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Fix login and build the cards")
+    // A question is one of its replies, as the card's header counts them.
+    expect(p.querySelector('[data-testid="card-panel-divider"]')!.textContent).toBe("1 reply")
+    expect(p.textContent).toContain("Which page, the old one or the new one?")
+    // Its box is the panel's footer, after the history.
+    const box = p.querySelector('[data-testid="card-composer"]') as HTMLElement
+    expect(box.dataset.to).toBe("task")
+    expect(box.previousElementSibling!.contains(p.querySelector('[data-testid="card-panel-divider"]'))).toBe(true)
+    // ✓ Mark done, ⋯ and the task page.
+    expect(p.querySelector('[data-testid="card-panel-done"]')).not.toBeNull()
+    expect(p.querySelector('button[aria-label="More card actions"]')).not.toBeNull()
+    expect(p.querySelector(`a[href="/tasks/${LOGIN.id}"]`)!.textContent).toBe("Open the task page")
+
+    expect(card(LOGIN.id).dataset.inPanel).toBe("true")
+    expect(expand(LOGIN.id).getAttribute("aria-pressed")).toBe("true")
+    expect(card(CARDS.id).dataset.inPanel).toBeUndefined()
+    // Esc closes it; the card loses its outline.
+    act(() => void p.querySelector('[data-testid="card-panel"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+  })
+
+  it("replies to its task from the panel's box", async () => {
+    render()
+    click(expand(LOGIN.id))
+    const box = panel()!.querySelector('[data-testid="card-composer"]') as HTMLElement
+    expect(box.querySelector("textarea")!.placeholder).toBe("Answer the agent…")
+    const textarea = box.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, "The new one")
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void box.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
+  })
+
+  it("reads its news while it's there, and shows every entry, not the card's newest 4", async () => {
+    render()
+    const more = Array.from({ length: 6 }, (_, i) => notice(CARDS, `💬 **Coordinator cards** says: step ${i + 1}`))
+    await setChat([...CHAT, ...more])
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("6 new")
+    click(expand(CARDS.id))
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
+    expect(panel()!.querySelector('[data-testid="card-earlier"]')).toBeNull()
+    for (const n of [1, 6]) expect(panel()!.textContent).toContain(`step ${n}`)
+    // News while it's in the panel is read too.
+    await setChat([...CHAT, ...more, notice(CARDS, "💬 **Coordinator cards** says: step 7")])
+    expect(panel()!.textContent).toContain("step 7")
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
+  })
+
+  it("is one panel with reply threads: ⤢ again closes it, and a thread takes its place", () => {
+    render()
+    click(expand(LOGIN.id))
+    // Another card swaps in.
+    click(expand(CARDS.id))
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+    expect(card(CARDS.id).dataset.inPanel).toBe("true")
+    click(expand(CARDS.id))
+    expect(card(CARDS.id).dataset.inPanel).toBeUndefined()
+    click(expand(LOGIN.id))
+    act(() => openThread(COORDINATOR_CHAT, "thr_somethread"))
+    expect(panel()!.getAttribute("aria-label")).toBe("Thread")
+    expect(panel()!.querySelector('nav[aria-label="Breadcrumb"]')!.textContent).toContain("Threads")
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+  })
+
+  it("opens from an open card's footer, and stays open in the Timeline", () => {
+    render()
+    click(head(CARDS.id))
+    click(button(card(CARDS.id), "Open in panel"))
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    click(viewButton("Timeline"))
+    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    expect(panel()!.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Coordinator cards")
+    expect(panel()!.textContent).toContain("opened PR #9")
+  })
+
+  it("shows a batch with its tasks' rows and a box to the Coordinator, and no Mark done or task page", () => {
+    render()
+    click(expand(`batch:${B}`))
+    const p = panel()!
+    expect(p.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Map 3 PR")
+    expect(p.querySelectorAll('[data-testid="batch-task"]')).toHaveLength(3)
+    expect((p.querySelector('[data-testid="card-composer"]') as HTMLElement).dataset.to).toBe("coordinator")
+    expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
+    expect(p.querySelector('header a[href^="/tasks/"]')).toBeNull()
+  })
+
+  it("offers no Mark done for a task that's done", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    click(expand(DOCS.id))
+    expect(panel()!.querySelector('[data-testid="card-panel-done"]')).toBeNull()
+    expect(panel()!.querySelector(`a[href="/tasks/${DOCS.id}"]`)).not.toBeNull()
   })
 })
