@@ -523,6 +523,8 @@ describe("A card in the side panel", () => {
     const p = panel()!
     expect(p.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Map 3 PR")
     expect(p.querySelectorAll('[data-testid="batch-task"]')).toHaveLength(3)
+    // Its updates are under its rows, so no "No updates yet".
+    expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
     expect((p.querySelector('[data-testid="card-composer"]') as HTMLElement).dataset.to).toBe("coordinator")
     expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
     expect(p.querySelector('header a[href^="/tasks/"]')).toBeNull()

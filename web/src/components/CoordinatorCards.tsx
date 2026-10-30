@@ -553,7 +553,8 @@ function CardSession({
           ))}
         </div>
       )}
-      {inPanel && (
+      {/* A batch's history is under its rows: its own divider only when it has some of its own. */}
+      {inPanel && (own.length > 0 || !card.batchId) && (
         <div data-testid="card-panel-divider" className="flex items-center gap-2 pt-1 text-[11px] text-zinc-500">
           <span className="shrink-0">{own.length ? countLabel(updates, own.length - updates) : "No updates yet"}</span>
           <span className="h-px flex-1 bg-zinc-800" />
