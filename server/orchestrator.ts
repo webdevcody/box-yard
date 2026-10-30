@@ -909,8 +909,8 @@ export class Orchestrator {
           if (text && text !== NO_UPDATE) {
             const parsed = parseNextSteps(text)
             // The session line it came from: a side thread on this message forks the session there.
-            const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId) }
-            const m = this.store.addChat("assistant", parsed.content, Object.keys(meta).length ? meta : null)
+            const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId), turn: startedAt }
+            const m = this.store.addChat("assistant", parsed.content, meta)
             this.hub.broadcast({ type: "chat.message", message: m })
             reply = m
           } else if (text === NO_UPDATE) reply = null
@@ -918,7 +918,7 @@ export class Orchestrator {
             if (b.type !== "tool_use") continue
             reply = null
             const name = String(b.name).replace(/^mcp__boxyard__/, "")
-            const m = this.store.addChat("tool", name, { input: b.input })
+            const m = this.store.addChat("tool", name, { input: b.input, turn: startedAt })
             if ((CREATES[name] || CAPTAIN_TOOLS.has(name)) && typeof b.id === "string") created.set(b.id, m)
             this.hub.broadcast({ type: "chat.message", message: m })
           }
