@@ -2,13 +2,36 @@
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
 // its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
 // latest line. Open, it shows where it came from, its newest entries with its side thread's questions and answers among
-// them (CardThread.tsx), a box to reply in (CardComposer.tsx), and the way to its timeline and its task page.
+// them (CardThread.tsx), a box to reply in (CardComposer.tsx), and the way to its timeline and its task page. ⤢ opens
+// it in the side panel reply threads use (SideThread.tsx) instead, with its whole history.
 // A create_tasks batch is one card whose tasks open in place. Finished cards fold into "N done today" at the top,
 // and a card with news says "N new" until opened; the ↓ pill steps through them. What goes in which card is
 // lib/chatCards.ts; Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
-import { AlertTriangle, ArrowDown, Bot, ChevronRight, ChevronUp, CornerDownRight, LayoutGrid, Layers, List, Send, X, type LucideIcon } from "lucide-react"
-import { useBadgeStatuses, useTasksIn } from "../lib/queries"
+import { useLocation } from "wouter"
+import {
+  AlertTriangle,
+  ArrowDown,
+  Bot,
+  ChevronRight,
+  ChevronUp,
+  CircleCheck,
+  CornerDownRight,
+  LayoutGrid,
+  Layers,
+  Link2,
+  List,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  Send,
+  Square,
+  Undo2,
+  X,
+  type LucideIcon,
+} from "lucide-react"
+import { useBadgeStatuses, useMarkDoneFromInbox, useStopTask, useTasksIn } from "../lib/queries"
+import { undoClose, usePendingCloses } from "../lib/inbox"
 import { useEntityIndex } from "../lib/entities"
 import { useTaskTile, useTiles } from "../lib/taskTiles"
 import { badgeStatus, type BadgeStatus } from "../lib/prState"
@@ -21,13 +44,17 @@ import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSee
 import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
-import { useCardThread, useCardThreadLog, useThreadMessages } from "../lib/threads"
 import type { Provenance } from "../lib/chatProvenance"
+import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown, useCardThread, useCardThreadLog, useThreadControl, useThreadMessages } from "../lib/threads"
+import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
 import { BatchComposer, CardComposer, WorkingLine } from "./CardComposer"
 import { CardThreadLine, CardThreadLive } from "./CardThread"
-import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
+import { MESSAGE_BLOCK, MessageActions, MessageMenu, type MenuItem } from "./MessageActions"
+import { COMPOSER_FOOTER } from "./Composer"
+import { PANEL_ICON, PANEL_WIDE, PanelHeader, type CardPanelProps } from "./SideThread"
+import { StickyScroll } from "./StickyScroll"
 import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
@@ -50,6 +77,8 @@ const FOOT =
 const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
 
 export interface CardsLayout {
+  /** Every card, unfiltered and unfolded: the side panel finds its card here. */
+  all: readonly ChatCard[]
   live: readonly ChatCard[]
   /** Finished in the last day: "N done today". */
   done: readonly ChatCard[]
@@ -95,8 +124,10 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
         })
       : cards.coordinator
     const p = last.current
-    if (p && sameList(p.live, live) && sameList(p.done, done) && sameList(p.coordinator, coordinator) && p.newest === newest) return p
+    const all = cards.cards
+    if (p && sameList(p.all, all) && sameList(p.live, live) && sameList(p.done, done) && sameList(p.coordinator, coordinator) && p.newest === newest) return p
     return (last.current = {
+      all: p && sameList(p.all, all) ? p.all : all,
       live: p && sameList(p.live, live) ? p.live : live,
       done: p && sameList(p.done, done) ? p.done : done,
       coordinator: p && sameList(p.coordinator, coordinator) ? p.coordinator : coordinator,
@@ -211,29 +242,85 @@ function DoneFold({ cards, newest, onFollowUp }: { cards: readonly ChatCard[]; n
 
 const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged"])
 
-/** One task's card, or a batch's. */
-const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
-  const [open, toggle] = useChipOpen(cardOpenKey(card.key))
+/** What a card's header says: its title (a batch's is what its tasks' titles share), its tasks and their statuses. */
+function useCardHead(card: ChatCard) {
   const tiles = useTiles().tasks
   const tasks = useTasksIn(card.taskIds).data ?? NO_TASKS
   const first = tiles.get(card.taskIds[0]!)
   const batch = card.batchId ? batchTitle(card.taskIds.map((id) => tiles.get(id)?.title ?? "")) : null
   const title = card.batchId ? (batch ?? `${first?.projectName ?? "A"} batch`) : (first?.title ?? card.key)
   const statuses = useMemo(() => tasks.map(badgeStatus), [tasks])
+  return { first, tasks, batch, title, statuses }
+}
+
+type CardHead = ReturnType<typeof useCardHead>
+
+/** A card's icon: its task's tile, or a batch's stack. */
+function CardIcon({ card, size }: { card: ChatCard; size?: "lg" }) {
+  if (!card.batchId) return <TaskTile id={card.taskIds[0]} size={size} />
+  return (
+    <span aria-hidden className={cx("grid shrink-0 place-items-center rounded-md bg-(--pc)/15 text-(--pc)", size === "lg" ? "h-[22px] w-[22px]" : "h-4 w-4")}>
+      <Layers className={size === "lg" ? "h-[13px] w-[13px]" : "h-3 w-3"} />
+    </span>
+  )
+}
+
+/** A card's full-width title: a batch's says how many tasks it holds. */
+function CardTitle({ card, title }: { card: ChatCard; title: string }) {
+  return (
+    <span data-testid="chat-card-title" className="min-w-0 flex-1 text-[13.5px] leading-[22px] font-semibold wrap-anywhere text-zinc-100">
+      {title}
+      {card.batchId && <span className="text-xs font-normal text-zinc-500"> · {card.taskIds.length} tasks</span>}
+    </span>
+  )
+}
+
+/** The line under a card's title: its project, status, run time and PR (a batch's counts), what it holds, and when. */
+function CardMeta({ card, head }: { card: ChatCard; head: CardHead }) {
+  const { first, tasks, statuses } = head
+  const updates = card.entries.filter((e) => e.type === "update").length
+  const replies = card.entries.length - updates
+  return (
+    <div className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
+      <span className="flex min-w-0 items-center gap-1.5">
+        <ProjectDot projectId={first?.projectId} />
+        <span className="truncate text-zinc-400">{first?.projectName}</span>
+      </span>
+      {card.batchId ? (
+        <BatchCounts statuses={statuses} />
+      ) : (
+        tasks[0] && (
+          <>
+            <StatusBadge status={statuses[0]!} />
+            <Running task={tasks[0]} />
+            <PrChip task={tasks[0]} variant="link" className="text-[11.5px]" />
+          </>
+        )
+      )}
+      {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
+      <TimeAgo ts={card.last} />
+    </div>
+  )
+}
+
+/** One task's card, or a batch's. */
+const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
+  const [open, toggle] = useChipOpen(cardOpenKey(card.key))
+  const inPanel = useCardShown(COORDINATOR_CHAT, card.key)
+  const head = useCardHead(card)
+  const { first, tasks, batch, title, statuses } = head
   const asks = statuses.includes("needs_input")
   const finished = statuses.length > 0 && statuses.every((s) => FINISHED.has(s))
   const thread = useCardThread(card.key)
   // An answer in its side thread Cody hasn't seen is news too.
   const unread = newSince(card.entries, useSeenAt(card.key)) + (thread?.unread ? 1 : 0)
-  // Open, its news is in front of Cody (the thread's answers are marked read by CardBody).
+  // Open, its news is in front of Cody (the thread's answers are marked read by CardSession).
   useEffect(() => {
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
-  const updates = card.entries.filter((e) => e.type === "update").length
-  const replies = card.entries.length - updates
   const onHead = (e: MouseEvent | KeyboardEvent) => {
-    // Its PR link keeps its click.
-    if ((e.target as HTMLElement).closest("a")) return
+    // Its PR link and its ⤢ keep their click.
+    if ((e.target as HTMLElement).closest("a, button")) return
     if ("key" in e && e.key !== "Enter" && e.key !== " ") return
     e.preventDefault()
     toggle()
@@ -244,50 +331,42 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
       data-testid="chat-card"
       data-card={card.key}
       data-open={open || undefined}
+      data-in-panel={inPanel || undefined}
       aria-label={title}
       style={projectColorStyle(first?.color)}
-      className={cx(CARD, "border-l-(--pc)", asks && "border-amber-500/40 border-l-(--pc) bg-amber-500/[0.04]", finished && "opacity-75")}
+      className={cx(
+        CARD,
+        "border-l-(--pc)",
+        asks && "border-amber-500/40 border-l-(--pc) bg-amber-500/[0.04]",
+        finished && "opacity-75",
+        // The card the side panel shows.
+        inPanel && "ring-1 ring-yard-400/45",
+      )}
     >
       <div role="button" tabIndex={0} aria-expanded={open} onClick={onHead} onKeyDown={onHead} className={CARD_HEAD}>
         <div className="flex items-start gap-2">
-          {card.batchId ? (
-            <span aria-hidden className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-md bg-(--pc)/15 text-(--pc)">
-              <Layers className="h-[13px] w-[13px]" />
-            </span>
-          ) : (
-            <TaskTile id={card.taskIds[0]} size="lg" />
-          )}
-          <span data-testid="chat-card-title" className="min-w-0 flex-1 text-[13.5px] leading-[22px] font-semibold wrap-anywhere text-zinc-100">
-            {title}
-            {card.batchId && <span className="text-xs font-normal text-zinc-500"> · {card.taskIds.length} tasks</span>}
-          </span>
+          <CardIcon card={card} size="lg" />
+          <CardTitle card={card} title={title} />
           {unread > 0 && (
             <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="mt-[3px] inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
               <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
               {unread} new
             </span>
           )}
+          <button
+            type="button"
+            data-testid="chat-card-panel"
+            onClick={() => toggleCard(COORDINATOR_CHAT, card.key)}
+            aria-pressed={inPanel}
+            aria-label="Open in the side panel"
+            title={inPanel ? "Close the side panel" : "Open in the side panel"}
+            className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-pressed:text-yard-300 pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
+          >
+            <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
+          </button>
           <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
-        <div className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
-          <span className="flex min-w-0 items-center gap-1.5">
-            <ProjectDot projectId={first?.projectId} />
-            <span className="truncate text-zinc-400">{first?.projectName}</span>
-          </span>
-          {card.batchId ? (
-            <BatchCounts statuses={statuses} />
-          ) : (
-            tasks[0] && (
-              <>
-                <StatusBadge status={statuses[0]!} />
-                <Running task={tasks[0]} />
-                <PrChip task={tasks[0]} variant="link" className="text-[11.5px]" />
-              </>
-            )
-          )}
-          {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
-          <TimeAgo ts={card.last} />
-        </div>
+        <CardMeta card={card} head={head} />
         {!open && <LatestLine card={card} batch={batch} thread={thread} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
       </div>
@@ -413,17 +492,21 @@ function LatestLine({ card, batch, thread }: { card: ChatCard; batch: string | n
 
 const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 
+/** How many entries the side panel shows before "N earlier": its whole history, nearly always. */
+const PANEL_SHOW = 50
+
 /**
- * An open card: where it came from, a batch's tasks, its newest entries, who's answering, the box to reply in, and the
- * way to its timeline and page.
+ * A card's session, in the card or in the side panel: where it came from, a batch's tasks, its newest entries, and
+ * who's answering. In the panel, its history goes under a divider.
  */
-function CardBody({
+function CardSession({
   card,
   batch,
   title,
   tasks,
   next,
   onFollowUp,
+  inPanel = false,
 }: {
   card: ChatCard
   batch: string | null
@@ -431,13 +514,16 @@ function CardBody({
   tasks: readonly Task[]
   next: string | null
   onFollowUp: (text: string) => void
+  inPanel?: boolean
 }) {
   // A batch's tasks keep their own entries under their rows; the card has what's about several, and replies.
   const own = useMemo(() => (card.batchId ? card.entries.filter((e) => e.type === "message" || e.tasks.length !== 1) : card.entries), [card])
   const log = useCardThreadLog(card.key)
-  const showInTimelineCard = useCallback(() => showInTimeline({ key: card.key, taskIds: card.taskIds }), [card.key, card.taskIds])
+  const updates = own.filter((e) => e.type === "update").length
+  // Only its side thread so far: the divider has no count over it.
+  const label = own.length ? countLabel(updates, own.length - updates) : log.messages.length ? null : "No updates yet"
   return (
-    <div data-testid="chat-card-body" className={CARD_BODY}>
+    <>
       {card.origin && (
         <button
           type="button"
@@ -458,14 +544,49 @@ function CardBody({
           ))}
         </div>
       )}
-      <CardEntries entries={own} thread={log.messages} show={CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
+      {/* A batch's history is under its rows: its own divider only when it has some of its own. */}
+      {inPanel && (own.length > 0 || log.messages.length > 0 || !card.batchId) && (
+        <div data-testid="card-panel-divider" className="flex items-center gap-2 pt-1 text-[11px] text-zinc-500">
+          {label && <span className="shrink-0">{label}</span>}
+          <span className="h-px flex-1 bg-zinc-800" />
+        </div>
+      )}
+      <CardEntries entries={own} thread={log.messages} show={inPanel ? PANEL_SHOW : CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
       {log.thread && <CardThreadLive thread={log.thread} />}
       {!card.batchId && tasks[0] && isWorking(tasks[0]) && <WorkingLine who={tasks[0].title} />}
+    </>
+  )
+}
+
+/** An open card: its session, the box to reply in, and the way to its timeline, the side panel and its page. */
+function CardBody({
+  card,
+  batch,
+  title,
+  tasks,
+  next,
+  onFollowUp,
+}: {
+  card: ChatCard
+  batch: string | null
+  title: string
+  tasks: readonly Task[]
+  next: string | null
+  onFollowUp: (text: string) => void
+}) {
+  const showInTimelineCard = useCallback(() => showInTimeline({ key: card.key, taskIds: card.taskIds }), [card.key, card.taskIds])
+  return (
+    <div data-testid="chat-card-body" className={CARD_BODY}>
+      <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />
       {card.batchId ? <BatchComposer cardKey={card.key} title={title} /> : tasks[0] && <CardComposer task={tasks[0]} />}
       <div className="flex flex-wrap items-center gap-1 pt-0.5">
         <button type="button" onClick={showInTimelineCard} className={FOOT} data-testid="chat-card-timeline">
           <List className="h-3 w-3" aria-hidden />
           Show in timeline
+        </button>
+        <button type="button" onClick={() => openCard(COORDINATOR_CHAT, card.key)} className={FOOT} data-testid="chat-card-open-panel">
+          <Maximize2 className="h-3 w-3" aria-hidden />
+          Open in panel
         </button>
         {!card.batchId && (
           <AppLink href={`/tasks/${card.taskIds[0]}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
@@ -473,6 +594,155 @@ function CardBody({
           </AppLink>
         )}
       </div>
+    </div>
+  )
+}
+
+/** The panel's box: the chat's sticky footer. */
+const PANEL_BOX = cx(COMPOSER_FOOTER, "px-3")
+
+type CardPanelOwn = { layout: CardsLayout | null; onFollowUp: (text: string) => void }
+
+/**
+ * A card in the side panel (⤢), the panel reply threads open in, with their header: "Tasks › [tile] title", ✓ (Mark
+ * done, or Reopen once done), ⋯, Maximize ↔ Minimize and ×. Then its header, its whole history under a divider, and its
+ * box at the bottom.
+ */
+export const CardPanel = memo(function CardPanel({ chat, open, headerClassName, layout, onFollowUp }: CardPanelProps & CardPanelOwn) {
+  const card = layout?.all.find((c) => c.key === open.card) ?? null
+  if (!card)
+    return (
+      <div data-testid="card-panel" className="relative flex h-full min-h-0 flex-col">
+        <PanelHeader chat={chat} open={open} className={headerClassName} crumb="Tasks" closeLabel="Close" closeTitle="Close (Esc)" title={null} />
+        <p className="px-4 py-6 text-sm text-zinc-500">This card isn't in the chat any more.</p>
+      </div>
+    )
+  const next = layout?.newest && card.entries.some((e) => e.id === layout.newest) ? layout.newest : null
+  return <CardPanelView chat={chat} open={open} headerClassName={headerClassName} card={card} next={next} onFollowUp={onFollowUp} />
+})
+
+function CardPanelView({
+  chat,
+  open,
+  headerClassName,
+  card,
+  next,
+  onFollowUp,
+}: CardPanelProps & { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
+  const head = useCardHead(card)
+  const { first, tasks, batch, title } = head
+  const task = card.batchId ? null : (tasks[0] ?? null)
+  const pane = useRef<HTMLDivElement>(null)
+  const more = useRef<HTMLButtonElement>(null)
+  const [menu, setMenu] = useState(false)
+  const markDone = useMarkDoneFromInbox()
+  const stop = useStopTask()
+  const control = useThreadControl(COORDINATOR_CHAT)
+  // Its side thread (CardSession reads it and marks it seen): its lines and its working line scroll the panel too.
+  const thread = useCardThread(card.key)
+  const lines = useThreadMessages(thread?.id ?? "", Boolean(thread)).data?.length ?? 0
+  const closing = usePendingCloses()
+  const [, navigate] = useLocation()
+  const unread = newSince(card.entries, useSeenAt(card.key))
+  // In the panel, its news is in front of Cody.
+  useEffect(() => {
+    if (unread && !open.closing) markSeen(card.key, card.last)
+  }, [unread, open.closing, card.key, card.last])
+  // Focus moves in with it, so Esc closes it.
+  useEffect(() => pane.current?.focus({ preventScroll: true }), [])
+  const page = task ? `/tasks/${task.id}` : null
+  // Done, or marked done and still in its undo window.
+  const done = task ? task.status === "done" || closing.has(task.id) : false
+  // A closed task reopens with a message (closing archived its workspace), so Reopen goes to the box.
+  const reopen = () => {
+    if (task && !undoClose(task.id)) pane.current?.querySelector("textarea")?.focus()
+  }
+  const showItsCard = () => {
+    showCard(card.key)
+    // A sheet covers the chat: get out of the way of the card.
+    if (open.expanded) return toggleExpanded(chat)
+    const aside = pane.current?.closest("aside")
+    if (aside && getComputedStyle(aside).position === "absolute") closeThread(chat)
+  }
+  const items: MenuItem[] = [
+    { icon: List, label: "Show in timeline", run: () => showInTimeline({ key: card.key, taskIds: card.taskIds }) },
+    ...(page ? [{ icon: Link2, label: "Open the task page", run: () => void (openInZenPanel(page) || navigate(page)) }] : []),
+    // Its agent's turn, or the Coordinator's answer in its side thread.
+    ...((task && isRunning(task)) || thread?.busy
+      ? [
+          {
+            icon: Square,
+            label: "Stop answering",
+            run: () => {
+              if (task && isRunning(task)) stop.mutate(task.id)
+              if (thread?.busy) control.stop(thread.id)
+            },
+          },
+        ]
+      : []),
+    { icon: LayoutGrid, label: "Show its card", run: showItsCard },
+  ]
+  // Over the whole chat, it reads in a column.
+  const wide = open.expanded && "mx-auto w-full max-w-3xl"
+  return (
+    <div ref={pane} tabIndex={-1} data-testid="card-panel" className="relative flex h-full min-h-0 flex-col focus:outline-none">
+      <PanelHeader
+        chat={chat}
+        open={open}
+        className={headerClassName}
+        crumb="Tasks"
+        closeLabel="Close"
+        closeTitle="Close (Esc). The card stays in the chat."
+        title={
+          <span style={projectColorStyle(first?.color)} title={title} className="flex min-w-0 items-center gap-1.5">
+            <CardIcon card={card} />
+            <span data-testid="card-panel-title" className="min-w-0 truncate text-zinc-400">
+              {title}
+            </span>
+          </span>
+        }
+      >
+        {task &&
+          (done ? (
+            <button type="button" data-testid="card-panel-done" onClick={reopen} aria-pressed aria-label="Reopen" title="Done. Reopen it: write to it below" className={PANEL_ICON}>
+              <Undo2 className="h-4 w-4" />
+            </button>
+          ) : (
+            <button type="button" data-testid="card-panel-done" onClick={() => markDone(task)} aria-pressed={false} aria-label="Mark done" title="Mark done" className={PANEL_ICON}>
+              <CircleCheck className="h-4 w-4" />
+            </button>
+          ))}
+        <button ref={more} type="button" onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} aria-label="More card actions" title="More" className={PANEL_ICON}>
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
+        {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
+        <button
+          type="button"
+          data-testid="card-panel-expand"
+          onClick={() => toggleExpanded(chat)}
+          aria-pressed={Boolean(open.expanded)}
+          aria-label={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          title={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          className={cx(PANEL_ICON, PANEL_WIDE)}
+        >
+          {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+        </button>
+      </PanelHeader>
+      <StickyScroll count={card.entries.length + lines + (thread?.busy ? 1 : 0)} resetKey={card.key} className={cx("px-3 py-3", wide)} contentClassName="space-y-2.5">
+        <div data-testid="card-panel-head" style={projectColorStyle(first?.color)} className="rounded-[10px] border border-l-[3px] border-zinc-800/80 border-l-(--pc) bg-zinc-900/40 py-2 pr-2.5 pl-3">
+          <div className="flex items-start gap-2">
+            <CardIcon card={card} size="lg" />
+            <CardTitle card={card} title={title} />
+          </div>
+          <CardMeta card={card} head={head} />
+        </div>
+        <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} inPanel />
+      </StickyScroll>
+      {card.batchId ? (
+        <BatchComposer cardKey={card.key} title={title} className={cx(PANEL_BOX, wide)} />
+      ) : (
+        task && <CardComposer task={task} className={cx(PANEL_BOX, wide)} />
+      )}
     </div>
   )
 }
@@ -662,7 +932,7 @@ const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
   )
 })
 
-/** Cody's own thread, pinned under the cards: his messages and the answers that aren't about one task. */
+/** Cody's own thread, pinned under the cards: Cody's messages and the answers that aren't about one task. */
 function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entries: readonly CardEntry[]; next: string | null; onFollowUp: (text: string) => void; active: boolean; children?: ReactNode }) {
   return (
     <section id="card-coordinator" data-testid="coordinator-card" aria-label="Coordinator" className={cx(CARD, "border-l-yard-500 bg-zinc-900/25")}>

@@ -11,7 +11,7 @@ import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorVi
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
-import { COORDINATOR_CHAT, applyThreadEvent, threadKeys } from "../web/src/lib/threads.js"
+import { COORDINATOR_CHAT, applyThreadEvent, closeThread, forgetThread, openThread, openThreadId, threadKeys } from "../web/src/lib/threads.js"
 import type { ChatMessage, Project, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -79,6 +79,13 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // The side panel's store outlives a test: empty it.
+  const open = openThreadId(COORDINATOR_CHAT)
+  if (open)
+    act(() => {
+      closeThread(COORDINATOR_CHAT)
+      forgetThread(COORDINATOR_CHAT, open)
+    })
   act(() => setChatProjectFilter(null))
   act(() => setCoordinatorView("cards"))
   act(() => root.unmount())
@@ -439,5 +446,251 @@ describe("Reply in a card", () => {
     const question = batch.querySelector('[data-testid="card-thread-question"]')!
     expect(question.textContent).toContain("How far along is the batch?")
     expect(question.closest('[data-testid="batch-task"]')).toBeNull()
+  })
+})
+
+describe("A card in the side panel", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {} })
+      return new Promise(() => {})
+    })
+  })
+
+  const panel = () => host.querySelector('[data-testid="side-thread"]') as HTMLElement | null
+  const expand = (key: string) => card(key).querySelector('[data-testid="chat-card-panel"]') as HTMLElement
+  /** Opens the panel's ⋯ and reads its items. */
+  const menu = (p: HTMLElement) => {
+    if (!document.querySelector('[role="menu"]')) click(p.querySelector('button[aria-label="More card actions"]')!)
+    return [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)
+  }
+  const menuItem = (label: string) => [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === label) as HTMLElement
+
+  it("⤢ opens it beside the chat as Tasks › its title, with its header, its history and a box at the bottom; its card is outlined", () => {
+    render()
+    click(expand(LOGIN.id))
+    // The header keeps its click: the card itself stays as it was.
+    expect(card(LOGIN.id).dataset.open).toBeUndefined()
+    const p = panel()!
+    expect(p.dataset.card).toBe(LOGIN.id)
+    expect(p.getAttribute("aria-label")).toBe("Task")
+    const crumb = p.querySelector('nav[aria-label="Breadcrumb"]')!
+    expect(crumb.textContent).toBe("TasksFix login")
+    expect(p.querySelector('[data-testid="card-panel-head"]')!.textContent).toContain("Needs you")
+    expect(p.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Fix login and build the cards")
+    // A question is one of its replies, as the card's header counts them.
+    expect(p.querySelector('[data-testid="card-panel-divider"]')!.textContent).toBe("1 reply")
+    expect(p.textContent).toContain("Which page, the old one or the new one?")
+    // Its box is the panel's footer, after the history.
+    const box = p.querySelector('[data-testid="card-composer"]') as HTMLElement
+    expect(box.dataset.to).toBe("task")
+    expect(box.previousElementSibling!.contains(p.querySelector('[data-testid="card-panel-divider"]'))).toBe(true)
+    // The thread panel's header: ✓ Mark done, ⋯, Maximize and ×.
+    expect(p.querySelector('[data-testid="card-panel-done"]')!.getAttribute("aria-label")).toBe("Mark done")
+    expect(p.querySelector('button[aria-label="More card actions"]')).not.toBeNull()
+    expect(p.querySelector('[data-testid="card-panel-expand"]')!.getAttribute("aria-label")).toBe("Expand over the chat")
+    expect(p.querySelector('header button[aria-label="Close"]')).not.toBeNull()
+    expect(p.querySelector("header a")).toBeNull()
+
+    expect(card(LOGIN.id).dataset.inPanel).toBe("true")
+    expect(expand(LOGIN.id).getAttribute("aria-pressed")).toBe("true")
+    expect(card(CARDS.id).dataset.inPanel).toBeUndefined()
+    // Esc closes it; the card loses its outline.
+    act(() => void p.querySelector('[data-testid="card-panel"]')!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+  })
+
+  it("replies to its task from the panel's box", async () => {
+    render()
+    click(expand(LOGIN.id))
+    const box = panel()!.querySelector('[data-testid="card-composer"]') as HTMLElement
+    expect(box.querySelector("textarea")!.placeholder).toBe("Answer the agent…")
+    const textarea = box.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, "The new one")
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void box.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
+  })
+
+  it("reads its news while it's there, and shows every entry, not the card's newest 4", async () => {
+    render()
+    const more = Array.from({ length: 6 }, (_, i) => notice(CARDS, `💬 **Coordinator cards** says: step ${i + 1}`))
+    await setChat([...CHAT, ...more])
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("6 new")
+    click(expand(CARDS.id))
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
+    expect(panel()!.querySelector('[data-testid="card-earlier"]')).toBeNull()
+    for (const n of [1, 6]) expect(panel()!.textContent).toContain(`step ${n}`)
+    // News while it's in the panel is read too.
+    await setChat([...CHAT, ...more, notice(CARDS, "💬 **Coordinator cards** says: step 7")])
+    expect(panel()!.textContent).toContain("step 7")
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
+  })
+
+  it("is one panel with reply threads: ⤢ again closes it, and a thread takes its place", () => {
+    render()
+    click(expand(LOGIN.id))
+    // Another card swaps in.
+    click(expand(CARDS.id))
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+    expect(card(CARDS.id).dataset.inPanel).toBe("true")
+    click(expand(CARDS.id))
+    expect(card(CARDS.id).dataset.inPanel).toBeUndefined()
+    click(expand(LOGIN.id))
+    act(() => openThread(COORDINATOR_CHAT, "thr_somethread"))
+    expect(panel()!.getAttribute("aria-label")).toBe("Thread")
+    expect(panel()!.querySelector('nav[aria-label="Breadcrumb"]')!.textContent).toContain("Threads")
+    expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
+  })
+
+  it("opens from an open card's footer, and stays open in the Timeline", () => {
+    render()
+    click(head(CARDS.id))
+    click(button(card(CARDS.id), "Open in panel"))
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    click(viewButton("Timeline"))
+    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    expect(panel()!.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Coordinator cards")
+    expect(panel()!.textContent).toContain("opened PR #9")
+  })
+
+  it("shows a batch with its tasks' rows and a box to the Coordinator, and no Mark done or task page", () => {
+    render()
+    click(expand(`batch:${B}`))
+    const p = panel()!
+    expect(p.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Map 3 PR")
+    expect(p.querySelectorAll('[data-testid="batch-task"]')).toHaveLength(3)
+    // Its updates are under its rows, so no "No updates yet".
+    expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
+    expect((p.querySelector('[data-testid="card-composer"]') as HTMLElement).dataset.to).toBe("coordinator")
+    expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
+    expect(menu(p)).toEqual(["Show in timeline", "Show its card"])
+  })
+
+  it("has the thread panel's ⋯: Show in timeline, Open the task page and Show its card", () => {
+    render()
+    click(expand(LOGIN.id))
+    expect(menu(panel()!)).toEqual(["Show in timeline", "Open the task page", "Show its card"])
+  })
+
+  it("stops its task's agent from ⋯ while it works", async () => {
+    render()
+    await act(async () => {
+      qc.setQueryData(keys.tasks, TASKS.map((t) => (t.id === LOGIN.id ? { ...t, status: "working" as const } : t)))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    click(expand(LOGIN.id))
+    const items = menu(panel()!)
+    expect(items).toEqual(["Show in timeline", "Open the task page", "Stop answering", "Show its card"])
+    click(menuItem("Stop answering"))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts.map((x) => x.url)).toEqual([`/api/tasks/${LOGIN.id}/stop`])
+  })
+
+  it("shows its side thread with the Coordinator among its history, and ⋯ Stop answering stops the Coordinator's answer", async () => {
+    const at = Date.now()
+    const thread: SideThread = { id: "thr_cards0001", projectId: null, anchorId: CARDS.id, kind: "task", quote: CARDS.title, context: "fork", busy: true, replies: 3, unread: true, resolvedAt: null, createdAt: at - 3000, updatedAt: at }
+    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
+    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
+      { id: "thm_q", threadId: thread.id, role: "user", content: "Can it wait?", meta: null, createdAt: at - 3000 },
+      { id: "thm_a", threadId: thread.id, role: "assistant", content: "Yes, till Monday.", meta: null, createdAt: at - 2000 },
+      { id: "thm_q2", threadId: thread.id, role: "user", content: "And the docs?", meta: null, createdAt: at - 1000 },
+    ])
+    render()
+    click(expand(CARDS.id))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    const p = panel()!
+    // Its lines come after its history's pull request, in time order, and the Coordinator is still answering.
+    const order = [...p.querySelectorAll('[data-testid="update-chip"], [data-testid="card-thread-question"], [data-testid="card-thread-answer"]')]
+    expect(order.map((e) => (e as HTMLElement).dataset.testid)).toEqual(["update-chip", "card-thread-question", "card-thread-answer", "card-thread-question"])
+    expect(p.querySelector('[data-testid="card-thread-answer"]')!.textContent).toContain("Yes, till Monday.")
+    expect(p.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
+    // Shown, its answers are read.
+    expect(posts).toEqual([{ url: `/api/threads/${thread.id}/seen`, body: {} }])
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
+    // Its task isn't running: Stop answering stops the Coordinator's answer only.
+    expect(menu(p)).toEqual(["Show in timeline", "Open the task page", "Stop answering", "Show its card"])
+    click(menuItem("Stop answering"))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts.map((x) => x.url)).toEqual([`/api/threads/${thread.id}/seen`, `/api/threads/${thread.id}/stop`])
+  })
+
+  it("has no count over a batch's divider when all it has of its own is its side thread", async () => {
+    const at = Date.now()
+    const thread: SideThread = { id: "thr_batch0001", projectId: null, anchorId: `batch:${B}`, kind: "task", quote: "Map 3 PR", context: "fork", busy: false, replies: 2, unread: false, resolvedAt: null, createdAt: at - 2000, updatedAt: at }
+    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
+    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
+      { id: "thm_q", threadId: thread.id, role: "user", content: "How far along is it?", meta: null, createdAt: at - 2000 },
+      { id: "thm_a", threadId: thread.id, role: "assistant", content: "One of three is done.", meta: null, createdAt: at },
+    ])
+    render()
+    click(expand(`batch:${B}`))
+    const p = panel()!
+    expect(p.querySelector('[data-testid="card-panel-divider"]')!.textContent).toBe("")
+    expect(p.querySelector('[data-testid="card-thread-answer"]')!.textContent).toContain("One of three is done.")
+    expect(p.querySelector('[data-testid="card-thread-answer"]')!.closest('[data-testid="batch-task"]')).toBeNull()
+  })
+
+  it("Show its card goes back to the Cards view, opens the card and scrolls to it", async () => {
+    const scrolled: string[] = []
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
+      if (this.id.startsWith("card-")) scrolled.push(this.id)
+    })
+    render()
+    click(expand(CARDS.id))
+    click(viewButton("Timeline"))
+    expect(host.querySelector('[data-testid="chat-cards"]')).toBeNull()
+    menu(panel()!)
+    click(menuItem("Show its card"))
+    await act(async () => await new Promise((r) => setTimeout(r, 50)))
+    expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
+    expect(card(CARDS.id).dataset.open).toBe("true")
+    expect(scrolled).toEqual([`card-${CARDS.id}`])
+    // Beside the chat, it stays open.
+    expect(panel()!.dataset.card).toBe(CARDS.id)
+    vi.restoreAllMocks()
+  })
+
+  it("expands over the chat and back, as a thread does", () => {
+    render()
+    click(expand(LOGIN.id))
+    const max = () => panel()!.querySelector('[data-testid="card-panel-expand"]') as HTMLElement
+    click(max())
+    expect(panel()!.dataset.expanded).toBe("true")
+    expect(max().getAttribute("aria-label")).toBe("Back beside the chat")
+    expect(max().getAttribute("aria-pressed")).toBe("true")
+    click(max())
+    expect(panel()!.dataset.expanded).toBeUndefined()
+  })
+
+  it("turns ✓ into Reopen once done: in the undo window it undoes Mark done, after it goes to the box", () => {
+    render()
+    click(expand(LOGIN.id))
+    const done = () => panel()!.querySelector('[data-testid="card-panel-done"]') as HTMLElement
+    click(done())
+    expect(done().getAttribute("aria-label")).toBe("Reopen")
+    expect(done().getAttribute("aria-pressed")).toBe("true")
+    click(done())
+    expect(done().getAttribute("aria-label")).toBe("Mark done")
+    expect(posts).toEqual([])
+  })
+
+  it("offers Reopen for a task that's done, which goes to its box", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    click(expand(DOCS.id))
+    const done = panel()!.querySelector('[data-testid="card-panel-done"]') as HTMLElement
+    expect(done.getAttribute("aria-label")).toBe("Reopen")
+    click(done)
+    const box = panel()!.querySelector("textarea")!
+    expect(document.activeElement).toBe(box)
+    expect(box.placeholder).toBe("Reply (reopens the task)…")
   })
 })

@@ -37,8 +37,8 @@ const TARGET =
 const BOX_CONTAINER = "@container/box"
 const OTHER_LABEL = "@max-[18rem]/box:sr-only"
 
-/** A task's card (or a batch's task row): This task | Coordinator. */
-export const CardComposer = memo(function CardComposer({ task }: { task: Task }) {
+/** A task's card (or a batch's task row): This task | Coordinator. `className`: the side panel's sticky footer. */
+export const CardComposer = memo(function CardComposer({ task, className = BOX }: { task: Task; className?: string }) {
   const [coordinator] = useChipOpen(askKey(task.id))
   const toTask = useSendTaskMessage(task.id)
   const ask = useAskCard()
@@ -62,7 +62,7 @@ export const CardComposer = memo(function CardComposer({ task }: { task: Task })
         panelRef={panel}
         historyKey={coordinator ? `card-thread:${task.id}` : `task:${task.id}`}
         files={false}
-        className={BOX}
+        className={className}
         tools={
           <span className="flex min-w-0 items-center gap-2">
             <span role="group" aria-label="Send to" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
@@ -85,8 +85,8 @@ export const CardComposer = memo(function CardComposer({ task }: { task: Task })
   )
 })
 
-/** A batch card's own box: questions to the Coordinator about all its tasks, in the batch card's thread. Each task's row has its own CardComposer. */
-export const BatchComposer = memo(function BatchComposer({ cardKey, title }: { cardKey: string; title: string }) {
+/** A batch card's own box: questions to the Coordinator about all its tasks, in the batch card's thread. Each task's row has its own CardComposer. `className`: the side panel's sticky footer. */
+export const BatchComposer = memo(function BatchComposer({ cardKey, title, className = BOX }: { cardKey: string; title: string; className?: string }) {
   const ask = useAskCard()
   const panel = useRef<HTMLElement>(null)
   const submit = useCallback(
@@ -105,7 +105,7 @@ export const BatchComposer = memo(function BatchComposer({ cardKey, title }: { c
         panelRef={panel}
         historyKey={`card-thread:${cardKey}`}
         files={false}
-        className={BOX}
+        className={className}
         tools={
           <span data-testid="card-composer-hint" title="A read-only side thread with the Coordinator, with these tasks as context" className="flex min-w-0 items-center gap-1 text-[11px] text-zinc-600">
             <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden />
