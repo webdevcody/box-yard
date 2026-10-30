@@ -404,7 +404,7 @@ export class BoxJanitor {
           .split("\n")
           .map((l) => l.match(/^(\d+) (.+)$/))
           .filter((m): m is RegExpMatchArray => Boolean(m))
-        if (!gone.length) return ownComputer(provider) ? `no stale temp folders (${provider.name === "ssh" ? "an SSH machine's" : "a local box's"} /tmp is the computer's own, so it's left alone)` : "no stale temp folders"
+        if (!gone.length) return ownComputer(provider) ? `no stale temp folders (${provider.name === "ssh" ? "an SSH machine's /tmp is its own" : "a local box's /tmp is this machine's"}, so it's left alone)` : "no stale temp folders"
         const kb = gone.reduce((n, m) => n + Number(m[1]), 0)
         entry.removed.push(`${gone.length} stale temp ${gone.length === 1 ? "folder" : "folders"} (${formatBytes(kb * 1024)})`)
         return null

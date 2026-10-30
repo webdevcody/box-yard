@@ -1069,6 +1069,7 @@ export class Store {
       const runner = normalizeRunner(v)
       this.db.prepare("UPDATE projects SET runner = ? WHERE id = ?").run(runner === "box" ? null : runner, id)
     }
+    if (v === undefined && machineLabel === undefined) return
     const ssh = this.projectRunner(id) === "ssh"
     if (!ssh) this.db.prepare("UPDATE projects SET machine_label = NULL WHERE id = ?").run(id)
     else if (machineLabel !== undefined) this.db.prepare("UPDATE projects SET machine_label = ? WHERE id = ?").run(normalizeLabel(machineLabel), id)
