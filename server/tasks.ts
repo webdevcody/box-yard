@@ -603,7 +603,7 @@ export class TaskManager {
    * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
    * `claudeKey` says whether the task's turns would have a Claude key (turnCredentials); undefined: the global one.
    */
-  runnerProblem: ((runner: Runner, claudeKey?: boolean) => Promise<string | null>) | null = null
+  runnerProblem: ((runner: Runner, claudeKey?: boolean, gpuCloud?: GpuProvider) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** RunPod GPU pods, or null when this install has no GPU runner. */
@@ -846,7 +846,7 @@ export class TaskManager {
   async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}): Promise<void> {
     if (!runner || !this.runnerProblem) return
     const claudeKey = projectId && this.store.getProject(projectId) ? this.turnCredentials(projectId, taskEnv).claudeFrom !== null : undefined
-    const problem = await this.runnerProblem(runner, claudeKey)
+    const problem = await this.runnerProblem(runner, claudeKey, projectId && runner === "gpu" ? this.gpuCloudOf(projectId) : undefined)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
