@@ -12,6 +12,8 @@ import { useTail } from "../web/src/lib/tail.js"
 // with whatever position it has by then.
 
 const VIEW = 400
+// The list's visible height: a growing composer below it takes some away.
+let view = VIEW
 
 class FakeResizeObserver {
   static all = new Set<FakeResizeObserver>()
@@ -39,7 +41,7 @@ let dispatched = 0
 const rows = () => [...content.children] as HTMLElement[]
 const height = (el: Element) => Number((el as HTMLElement).dataset.h ?? 0)
 const contentHeight = () => rows().reduce((sum, r) => sum + height(r), 0)
-const max = () => Math.max(0, contentHeight() - VIEW)
+const max = () => Math.max(0, contentHeight() - view)
 const atBottom = () => top === max()
 const jumpButton = () => [...host.querySelectorAll("button")].find((b) => /latest|new message/.test(b.textContent ?? ""))
 
@@ -56,8 +58,8 @@ function installLayout() {
   scroller = host.querySelector<HTMLElement>(".overflow-y-auto")!
   content = scroller.firstElementChild as HTMLElement
   Object.defineProperties(scroller, {
-    clientHeight: { get: () => VIEW },
-    scrollHeight: { get: () => Math.max(VIEW, contentHeight()) },
+    clientHeight: { get: () => view },
+    scrollHeight: { get: () => Math.max(view, contentHeight()) },
     scrollTop: {
       get: () => top,
       set: (v: number) => {
@@ -123,7 +125,7 @@ beforeEach(() => {
   vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver)
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
     const y = this === scroller ? 0 : rowTop(this)
-    const h = this === scroller ? VIEW : height(this)
+    const h = this === scroller ? view : height(this)
     return { top: y, bottom: y + h, left: 0, right: 0, width: 0, height: h, x: 0, y, toJSON() {} } as DOMRect
   })
   host = document.createElement("div")
@@ -131,6 +133,7 @@ beforeEach(() => {
   root = createRoot(host)
   top = 0
   dispatched = 0
+  view = VIEW
   heights = Array.from({ length: 20 }, () => 100)
   render()
   installLayout()
@@ -387,6 +390,88 @@ describe("StickyScroll", () => {
       nextFrame()
       messageRenders()
       expect(top).toBe(reading)
+    })
+
+    // Like Safari: a smooth scroll runs to where it aimed when it started, over the next frame, and a smooth
+    // scrollTo while it's still animating is dropped.
+    const smoothScrollDropsRetarget = () => {
+      let animating = false
+      scroller.scrollTo = ((opts: ScrollToOptions) => {
+        if (opts.behavior !== "smooth") return void (scroller.scrollTop = opts.top ?? 0)
+        if (animating) return
+        animating = true
+        const target = Math.min(max(), opts.top ?? 0)
+        frames.push(() => {
+          animating = false
+          scroller.scrollTop = target
+        })
+      }) as typeof scroller.scrollTo
+    }
+    const settle = () => {
+      for (let i = 0; i < 30; i++) {
+        nextFrame()
+        flush()
+      }
+    }
+
+    it("lands on the true bottom when the sent message renders mid-glide", () => {
+      smoothScrollDropsRetarget()
+      readHistory()
+      send()
+      nextFrame()
+      // The glide is under way to the old bottom; the message's growth can't retarget it.
+      messageRenders(120)
+      nextFrame()
+      flush()
+      expect(max() - top).toBe(120)
+      settle()
+      expect(atBottom()).toBe(true)
+      expect(rowTop(rows().at(-1)!) + height(rows().at(-1)!)).toBe(view)
+      expect(jumpButton()).toBeUndefined()
+    })
+
+    it("lands on the true bottom when the composer grows after the send", () => {
+      smoothScrollDropsRetarget()
+      readHistory()
+      send()
+      nextFrame()
+      // An attachment row or the auto-sized textarea takes 60px off the list's height mid-glide.
+      view -= 60
+      frame()
+      settle()
+      expect(atBottom()).toBe(true)
+      expect(jumpButton()).toBeUndefined()
+    })
+
+    it("stays pinned when the browser moves the list up right after a send (scroll anchoring)", () => {
+      smoothScrollDropsRetarget()
+      send()
+      nextFrame()
+      nextFrame()
+      flush()
+      // Rows trimmed above the view: the browser's scroll anchoring pulls scrollTop up.
+      top -= 150
+      flush()
+      settle()
+      expect(atBottom()).toBe(true)
+      expect(jumpButton()).toBeUndefined()
+    })
+
+    it("a scrollbar drag up mid-glide still unpins", () => {
+      smoothScrollDropsRetarget()
+      readHistory()
+      send()
+      nextFrame()
+      nextFrame()
+      flush()
+      act(() => void scroller.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })))
+      userScroll(-300)
+      flush()
+      const reading = top
+      settle()
+      messageRenders()
+      expect(top).toBe(reading)
+      expect(jumpButton()).toBeDefined()
     })
 
     it("follows the visual viewport (an iOS keyboard closing) back to the bottom", () => {

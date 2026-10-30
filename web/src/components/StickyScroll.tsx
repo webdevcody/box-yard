@@ -15,6 +15,13 @@ const RESTORE_SETTLE_MS = 1000
 // Give up on a restore whose list never shows the row (or any content) within this long.
 const RESTORE_GIVE_UP_MS = 10_000
 
+// After a send or "Jump to latest", check every frame until the list has sat at the bottom this many frames in a
+// row (late layout: the sent message, the composer shrinking back), and give up after this many.
+const SETTLE_FRAMES = 20
+const SETTLE_MAX_FRAMES = 300
+// A glide that hasn't moved for this many frames while short of the bottom has stopped there: finish it.
+const STALL_FRAMES = 3
+
 // Keys that scroll a page up. Shift+Space too.
 const UP_KEYS = new Set(["PageUp", "ArrowUp", "Home"])
 
@@ -87,6 +94,8 @@ export function StickyScroll({
   const restoring = useRef<{ spot: LiveSpot; since: number; found: number } | null>(null)
   // Gliding to the bottom after a send: growth follows with a smooth scroll until the bottom is reached.
   const gliding = useRef(false)
+  // Checking each frame that a glide really reaches the bottom (see settleFrame).
+  const settle = useRef<{ frames: number; quiet: number; still: number; last: number } | null>(null)
   const latest = useRef({ hidden, onLoadEarlier, onTrim })
   latest.current = { hidden, onLoadEarlier, onTrim }
 
@@ -196,6 +205,7 @@ export function StickyScroll({
 
   const unpin = () => {
     gliding.current = false
+    settle.current = null
     const el = scroller.current
     // A list that fits has nowhere to scroll.
     if (!el || el.scrollHeight - el.clientHeight < BOTTOM_SLOP_PX) return
@@ -222,7 +232,8 @@ export function StickyScroll({
     if (atBottom) {
       gliding.current = false
       if (!stuck.current) pin()
-    } else if (moved < 0) unpin()
+      // Mid-glide, a move up the user didn't make (scroll anchoring as rows are trimmed above) isn't them leaving.
+    } else if (moved < 0 && !settle.current) unpin()
     else if (!stuck.current) markAnchor()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -252,6 +263,8 @@ export function StickyScroll({
     }
     const onPointerDown = () => {
       restoring.current = null
+      // A scrollbar drag only shows up as scroll events: let them unpin.
+      settle.current = null
       pointerInside.current = true
     }
     const onDocPointerDown = () => {
@@ -391,23 +404,58 @@ export function StickyScroll({
     return () => io.disconnect()
   }, [hidden, loadEarlier])
 
-  const jump = () => {
+  // One frame of a glide's check. A smooth scroll aims at the bottom as it was when it started; layout that lands
+  // mid-glide (the sent message, the composer shrinking back, a queued row) retargets it from the resize observer,
+  // but Safari drops a retarget while it's animating and the glide stops short. So until the list has sat at the
+  // bottom for SETTLE_FRAMES, a glide that has stopped short of it is finished with a jump.
+  const settleFrame = (s: NonNullable<typeof settle.current>) => {
+    const el = scroller.current
+    if (settle.current !== s) return
+    if (!el || !stuck.current || restoring.current || ++s.frames > SETTLE_MAX_FRAMES) return void (settle.current = null)
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SLOP_PX) {
+      gliding.current = false
+      s.still = 0
+      if (++s.quiet >= SETTLE_FRAMES) return void (settle.current = null)
+    } else {
+      s.quiet = 0
+      s.still = el.scrollTop === s.last ? s.still + 1 : 0
+      if (s.still >= STALL_FRAMES) {
+        gliding.current = false
+        toBottom()
+      }
+    }
+    s.last = el.scrollTop
+    requestAnimationFrame(() => settleFrame(s))
+  }
+
+  // Re-pin and glide to the bottom, then make sure it gets there.
+  const glide = () => {
+    restoring.current = null
     pin()
+    gliding.current = true
+    const s = { frames: 0, quiet: 0, still: 0, last: -1 }
+    settle.current = s
+    return s
+  }
+
+  const jump = () => {
+    const s = glide()
     toBottom("smooth")
+    requestAnimationFrame(() => settleFrame(s))
   }
 
   // After a send. Pinning makes the sent message's layout (the resize observer above) carry the list
-  // to it whenever it renders; the frame covers a message that's already laid out. Scrolling up
-  // again unpins as usual, so the streaming reply doesn't pull the view back down.
+  // to it whenever it renders; the frame covers a message that's already laid out, and settleFrame
+  // lands it on the true bottom once layout settles. Scrolling up again unpins as usual, so the
+  // streaming reply doesn't pull the view back down.
   useImperativeHandle(
     handle,
     () => ({
       scrollToEnd: () => {
-        restoring.current = null
-        pin()
-        gliding.current = true
+        const s = glide()
         requestAnimationFrame(() => {
-          if (stuck.current) toBottom("smooth")
+          if (settle.current === s && stuck.current) toBottom("smooth")
+          settleFrame(s)
         })
       },
     }),
