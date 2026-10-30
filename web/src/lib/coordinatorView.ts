@@ -11,6 +11,12 @@ const timeline = localFlag("boxyard:coordinator-timeline")
 
 export const useCoordinatorView = (): CoordinatorView => (timeline.use() ? "timeline" : "cards")
 
+// The Cards view's "Tasks only": the task cards without the Coordinator card under them. This browser remembers it.
+const tasksOnly = localFlag("boxyard:cards-tasks-only")
+export const useTasksOnly = tasksOnly.use
+/** Hide (or show again) the Coordinator card. Sending to the Coordinator shows it, so its answer is in view. */
+export const setTasksOnly = tasksOnly.set
+
 /** A card's tasks, for the Timeline of just them. */
 export interface TimelineCard {
   key: string

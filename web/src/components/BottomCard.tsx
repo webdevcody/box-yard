@@ -28,6 +28,7 @@ const FOOT =
 /**
  * The bottom card's header: its icon, who it is ("Coordinator · your main chat"), and under it what the box below
  * does, or, folded, its newest line. A click anywhere on it (but its links and buttons) folds or unfolds the card.
+ * It stays in reach (sticky) while the card's history scrolls by.
  */
 export function BottomCardHead({
   icon,
@@ -66,7 +67,11 @@ export function BottomCardHead({
       title={folded ? "Show the conversation" : "Fold it to this line"}
       onClick={toggle}
       onKeyDown={toggle}
-      className="flex cursor-pointer items-start gap-2 rounded-[9px] py-2 pr-2 pl-3 hover:bg-zinc-900/40 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
+      // Sticky: pinned at the top of the chat while a long history scrolls by under it.
+      className={cx(
+        "sticky top-[calc(-1*var(--chat-pad,0px))] z-20 flex cursor-pointer items-start gap-2 bg-zinc-950/95 py-2 pr-2 pl-3 backdrop-blur hover:bg-zinc-900 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none",
+        folded ? "rounded-[9px]" : "rounded-t-[9px]",
+      )}
     >
       {icon}
       <div className="min-w-0 flex-1">

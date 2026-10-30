@@ -156,6 +156,10 @@ function sourceOf(item: UpdateItem, rowId: string): UpdateSource {
  * Coordinator-read updates (readByCoordinator) that arrived before its turn's first tool call or, with none, before
  * the reply. One that arrived after that tool call came in mid-turn and waits for the next reply. A turn that ended in
  * an error covers nothing. Updates the Coordinator didn't read (a task notice its Captain handled) aren't listed.
+ *
+ * A turn that ends with nothing for Cody stores no reply ("(no update)"), so the server stamps each turn's tool calls
+ * and replies with when it started (meta.turn): a new stamp starts a new turn, and what a silent turn read is dropped
+ * rather than credited to the next reply. Rows from before the stamp fall back to the reply and error as the ends.
  */
 export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRow[] {
   const rows: CoordinatorRow[] = []
@@ -164,6 +168,8 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
   let waiting: UpdateItem[] = []
   let read: UpdateItem[] = []
   let started = false
+  /** The stamp of the turn the last tool call or reply was in (null: unstamped, from before meta.turn). */
+  let turn: number | null = null
   const rowOf = new Map<string, string>()
   const covers: [MessageRow, UpdateItem[]][] = []
   const flush = () => {
@@ -196,6 +202,13 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
       }
     }
     flush()
+    const stamp = (m.role === "tool" || m.role === "assistant") && typeof m.meta?.turn === "number" ? m.meta.turn : null
+    if (stamp !== null && stamp !== turn) {
+      // A new turn: whatever the last one read without replying about isn't this reply's.
+      read = []
+      started = false
+    }
+    if (m.role === "tool" || m.role === "assistant") turn = stamp
     if (m.role === "tool" || m.role === "error") start()
     const row: MessageRow = { type: "message", id: m.id, message: m, sources: null }
     rows.push(row)
@@ -205,7 +218,8 @@ export function coordinatorRows(messages: readonly ChatMessage[]): CoordinatorRo
     }
     if (m.role === "assistant" || m.role === "error") {
       read = []
-      started = false
+      // A stamped turn may go on after a reply; what comes in from here waits for the next turn.
+      started = m.role === "assistant" && stamp !== null
     }
   }
   flush()

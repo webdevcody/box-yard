@@ -197,7 +197,8 @@ describe("Coordinator cards", () => {
     expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("1 new")
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
     const pill = host.querySelector('[data-testid="new-cards-pill"]')!
-    expect(pill.textContent).toContain("1 new in")
+    expect(pill.textContent).toContain("1 new")
+    expect(pill.querySelector('[data-testid="new-cards-target"]')!.textContent).toBe("Coordinator cards")
     // The card got news without moving.
     expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
 
@@ -699,6 +700,8 @@ describe("The bottom panel with a project picked", () => {
     expect(host.querySelector('[data-testid="context-menu-button"]')!.getAttribute("title")).toBe(`Context ${contextLabel(50_000, 200_000)}`)
     expect(textarea().placeholder).toBe("Message the Map 3 Captain…")
     expect(host.querySelector('[data-testid="composer-to"]')!.textContent).toBe("To the Map 3 Captain")
+    // No Coordinator card to hide.
+    expect(host.querySelector('[data-testid="tasks-only"]')).toBeNull()
     await send("Shoot the dam at dusk")
     expect(posts).toHaveLength(1)
     expect(posts[0]!.url).toBe(`/api/projects/${MAP.id}/captain/messages`)
@@ -712,6 +715,7 @@ describe("The bottom panel with a project picked", () => {
     expect(host.querySelector('[data-testid="chat-title"]')!.textContent).toBe("Coordinator")
     expect(host.querySelector('[data-testid="context-menu-button"]')!.getAttribute("title")).toBe(`Context ${contextLabel(10_000, 1_000_000)}`)
     expect(host.querySelector('[data-testid="composer-to"]')).toBeNull()
+    expect(host.querySelector('[data-testid="tasks-only"]')).not.toBeNull()
     await send("What's left?")
     expect(posts[1]!.url).toBe("/api/chat")
   })
@@ -911,5 +915,99 @@ describe("Mark done in the cards", () => {
     expect(toastTitles()).toEqual(["Marked done"])
     undo()
     expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+  })
+})
+
+describe("Finding your way in the cards", () => {
+  /** Where each card sits on screen: the rest are laid out nowhere (happy-dom). */
+  const place = (rects: Record<string, { top: number; bottom: number }>) =>
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const r = rects[this.id.replace(/^card-/, "")] ?? { top: 0, bottom: 0 }
+      return { ...r, left: 0, right: 100, width: 100, height: r.bottom - r.top, x: 0, y: r.top, toJSON() {} } as DOMRect
+    })
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+  const pill = () => host.querySelector('[data-testid="new-cards-pill"]') as HTMLElement | null
+  const target = () => pill()!.querySelector('[data-testid="new-cards-target"]')!.textContent
+
+  it("the pill names the card it goes to and points the way, then goes on to the next, round to the first", async () => {
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+    place({ [LOGIN.id]: { top: -400, bottom: -300 }, [`batch:${B}`]: { top: 2000, bottom: 2100 } })
+    render()
+    await setChat([...CHAT, notice(LOGIN, "💬 **Fix login** says: the old page"), notice(HOLLOW, "💬 **Map 3 PR #406: The Hollow cave** says: lit"), notice(DAM, "💬 **Map 3 PR #409: Dam powerhouse** says: started")])
+    expect(pill()!.textContent).toContain("3 new")
+    expect(target()).toBe("Fix login")
+    expect(pill()!.dataset.direction).toBe("up")
+    expect(pill()!.querySelector('[data-testid="new-cards-more"]')!.textContent).toBe("+1")
+
+    click(pill()!)
+    await act(async () => await new Promise((r) => requestAnimationFrame(() => r(null))))
+    // It's there: ringed, and focused for the keyboard and screen readers.
+    expect(document.activeElement).toBe(card(LOGIN.id))
+    expect(card(LOGIN.id).classList.contains("card-flash")).toBe(true)
+    expect(target()).toBe("Map 3 PR")
+    expect(pill()!.dataset.direction).toBe("down")
+
+    click(pill()!)
+    expect(target()).toBe("Fix login")
+  })
+
+  it("says a card on screen is here", async () => {
+    place({ [CARDS.id]: { top: 100, bottom: 200 } })
+    render()
+    await setChat([...CHAT, notice(CARDS, "💬 **Coordinator cards** says: screenshots are up")])
+    expect(pill()!.dataset.direction).toBe("here")
+    expect(pill()!.textContent).toContain("on screen")
+  })
+
+  it("pulses the stripe of a card at work, and a batch's running and queued tasks in its strip", () => {
+    render()
+    const batch = card(`batch:${B}`)
+    expect(batch.classList.contains("stripe-pulse")).toBe(true)
+    expect(card(CARDS.id).classList.contains("stripe-pulse")).toBe(false)
+    expect(card(LOGIN.id).classList.contains("stripe-pulse")).toBe(false)
+    // Done, working, queued.
+    expect([...batch.querySelectorAll("i[title]")].map((i) => i.classList.contains("work-pulse"))).toEqual([false, true, true])
+  })
+
+  it("keeps the Coordinator card's header in reach and folds its history back with Show less", () => {
+    render()
+    const head = coordinator().querySelector('[data-testid="bottom-card-head"]')!
+    expect(head.className).toContain("sticky")
+    expect(coordinator().textContent).toContain("1 earlier")
+    expect(host.querySelector('[data-testid="coordinator-fold"]')).toBeNull()
+    click(coordinator().querySelector('[data-testid="card-earlier"]')!)
+    expect(coordinator().textContent).toContain("Fix login and build the cards")
+    click(host.querySelector('[data-testid="coordinator-fold"]')!)
+    expect(coordinator().textContent).not.toContain("Fix login and build the cards")
+    expect(coordinator().textContent).toContain("1 earlier")
+    expect(host.querySelector('[data-testid="coordinator-fold"]')).toBeNull()
+  })
+
+  it("Tasks only hides the Coordinator card, remembers it, and sending to the Coordinator shows it again", async () => {
+    render()
+    const toggle = () => host.querySelector('[data-testid="tasks-only"]') as HTMLElement
+    click(toggle())
+    expect(toggle().getAttribute("aria-pressed")).toBe("true")
+    expect(coordinator()).toBeNull()
+    expect(localStorage.getItem("boxyard:cards-tasks-only")).toBe("1")
+    click(host.querySelector('[data-testid="coordinator-hidden"]')!)
+    expect(coordinator()).not.toBeNull()
+    expect(toggle().getAttribute("aria-pressed")).toBe("false")
+
+    click(toggle())
+    const textarea = host.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, "What's next?")
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void textarea.closest("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(coordinator()).not.toBeNull()
+    // Only in the Cards view.
+    click(viewButton("Timeline"))
+    expect(toggle()).toBeNull()
   })
 })
