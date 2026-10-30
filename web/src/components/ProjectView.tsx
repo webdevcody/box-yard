@@ -753,7 +753,7 @@ function ProjectDockerSettings({ draft, setDraft }: { draft: DockerDraft; setDra
  * The project's colour (shared/projectColors.ts): its tasks' tiles and its chip in the Coordinator chat, its folder in
  * the sidebar. Auto is the one picked from its name, shown as it would be.
  */
-function ProjectColorPicker({ project, value, onChange }: { project: Project; value: ProjectColor | null; onChange: (c: ProjectColor | null) => void }) {
+export function ProjectColorPicker({ project, value, onChange }: { project: Project; value: ProjectColor | null; onChange: (c: ProjectColor | null) => void }) {
   const projects = useProjects().data
   const auto = useMemo(() => projectColors((projects ?? [project]).map((p) => (p.id === project.id ? { ...p, color: null } : p))).get(project.id), [projects, project])
   const swatch = (c: ProjectColor | undefined, on: boolean, label: string, pick: () => void, auto = false) => (

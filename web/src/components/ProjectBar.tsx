@@ -49,7 +49,8 @@ export const ProjectBar = memo(function ProjectBar({ recent, className }: { rece
       >
         All
         <span className="text-zinc-400">
-          · <b className="font-semibold text-zinc-200 tabular-nums">{active}</b> active
+          {" · "}
+          <b className="font-semibold text-zinc-200 tabular-nums">{active}</b> active
         </span>
       </button>
       {rows.map((row) => (

@@ -10,6 +10,7 @@ import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type Notice
 import { NOTICE_ICON } from "./noticeIcons"
 import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
+import { ProjectDot, TaskTile } from "./TaskIcon"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
@@ -155,6 +156,8 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
               {i > 0 && ", "}
               {t.ref ? (
                 <AppLink href={t.ref.href} className="text-zinc-400 hover:text-zinc-200 hover:underline">
+                  {t.ref.kind === "task" && <TaskTile id={t.ref.id} bare className="mr-0.5 align-[-2px]" />}
+                  {t.ref.kind === "project" && <ProjectDot projectId={t.ref.id} className="mr-1 align-[1px]" />}
                   {t.text.slice(0, 60)}
                 </AppLink>
               ) : (
