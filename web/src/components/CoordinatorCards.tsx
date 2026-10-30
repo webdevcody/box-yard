@@ -18,7 +18,7 @@ import { publishedLabel } from "../lib/publishedNotices"
 import { setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
-import { setChatProjectFilter } from "../lib/projectBar"
+import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import type { Provenance } from "../lib/chatProvenance"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine } from "./ChatLine"
@@ -129,15 +129,22 @@ export const CardsView = memo(function CardsView({
   const { live, done, coordinator, newest } = layout
   // A browser's first look at the cards: what's here is the starting point, not news.
   useEffect(() => startSeen(newestAt(layout)), [layout])
-  // "Back to its card": open it (unfolding "done today" or the project filter if it's behind them) and go to it.
+  // "Back to its card": open it (unfolding "done today", or dropping the project filter it's behind) and go to it.
   const focus = useFocusCard()
+  const project = useChatProjectFilter()
   useEffect(() => {
     if (!focus) return
-    if (done.some((c) => c.key === focus)) setOpen(["cards:done"], true)
-    else if (!live.some((c) => c.key === focus)) return setChatProjectFilter(null)
+    const finished = done.some((c) => c.key === focus)
+    if (!finished && !live.some((c) => c.key === focus)) {
+      if (project) setChatProjectFilter(null)
+      // Not a card any more (quiet for a day): nothing to go to.
+      else clearFocusCard()
+      return
+    }
+    if (finished) setOpen(["cards:done"], true)
     clearFocusCard()
     scrollToCard(focus)
-  }, [focus, live, done])
+  }, [focus, live, done, project])
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <div data-testid="chat-cards" className="space-y-2">
