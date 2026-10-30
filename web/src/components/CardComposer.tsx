@@ -31,6 +31,11 @@ export function cardPlaceholder(task: Task, coordinator: boolean): string {
 const TARGET =
   "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] whitespace-nowrap focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
 
+/** The box is a `box` container: a narrow one (a 320px phone, a batch's task row) keeps the picked target's word and
+ *  shows the other as its icon, so the toggle never runs under the send button. The placeholder names the target too. */
+const BOX_CONTAINER = "@container/box"
+const OTHER_LABEL = "@max-[18rem]/box:sr-only"
+
 /** A task's card (or a batch's task row): This task | Coordinator. */
 export const CardComposer = memo(function CardComposer({ task }: { task: Task }) {
   const [coordinator] = useChipOpen(askKey(task.id))
@@ -48,7 +53,7 @@ export const CardComposer = memo(function CardComposer({ task }: { task: Task })
   )
   const pick = (ask: boolean) => setOpen([askKey(task.id)], ask)
   return (
-    <div data-testid="card-composer" data-to={coordinator ? "coordinator" : "task"}>
+    <div data-testid="card-composer" data-to={coordinator ? "coordinator" : "task"} className={BOX_CONTAINER}>
       <Composer
         onSubmit={submit}
         placeholder={cardPlaceholder(task, coordinator)}
@@ -61,14 +66,14 @@ export const CardComposer = memo(function CardComposer({ task }: { task: Task })
             <span role="group" aria-label="Send to" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
               <button type="button" aria-pressed={!coordinator} onClick={() => pick(false)} title="Straight to this task's agent" className={cx(TARGET, !coordinator ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}>
                 <TaskTile id={task.id} bare />
-                This task
+                <span className={cx(coordinator && OTHER_LABEL)}>This task</span>
               </button>
               <button type="button" aria-pressed={coordinator} onClick={() => pick(true)} title="The Coordinator, with this task as context" className={cx(TARGET, coordinator ? "bg-zinc-800 text-zinc-100" : "text-zinc-500 hover:text-zinc-200")}>
                 <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden />
-                Coordinator
+                <span className={cx(!coordinator && OTHER_LABEL)}>Coordinator</span>
               </button>
             </span>
-            <span data-testid="card-composer-hint" className="min-w-0 truncate text-[11px] text-zinc-600 @max-[34rem]:hidden">
+            <span data-testid="card-composer-hint" className="min-w-0 truncate text-[11px] text-zinc-600 @max-[30rem]/box:hidden">
               {coordinator ? "Goes to the Coordinator, with this task as context" : "Goes straight to this task's agent"}
             </span>
           </span>
@@ -91,7 +96,7 @@ export const BatchComposer = memo(function BatchComposer({ taskIds }: { taskIds:
     [taskIds, toChat.mutateAsync],
   )
   return (
-    <div data-testid="card-composer" data-to="coordinator">
+    <div data-testid="card-composer" data-to="coordinator" className={BOX_CONTAINER}>
       <Composer
         onSubmit={submit}
         placeholder="Ask the Coordinator about these tasks…"
