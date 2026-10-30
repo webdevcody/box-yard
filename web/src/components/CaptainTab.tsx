@@ -26,6 +26,7 @@ import {
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
+import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
 import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
@@ -436,7 +437,10 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
   const compact = useCompactCaptain(projectId)
   const settings = useAgentSettings().data?.settings
   const model = settings ? `${settings.orchestratorModel} · ${settings.orchestratorEffort} effort` : null
-  const meter: MeterProps = {
+  // Captains compact on the Coordinator's auto-compact setting; with it on they show no meter or Compact.
+  const autoCompact = useAutoCompact("coordinator")
+  const headerMeter = spotClass(autoCompact, "header")
+  const meter: MeterProps | null = autoCompact ? null : {
     tokens: state?.usage.tokens ?? null,
     window: state?.usage.window ?? null,
     compacting: state?.compacting ?? false,
@@ -445,13 +449,15 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
     onCompact: () => compact.mutate(),
   }
   return (
-    // Like the task header: name, status and a small context reading; model, last active and the full meter are in ⋯.
-    <header className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
+    // Like the task header: name, status and a small context reading (when wide); model, last active and the full meter are in ⋯.
+    <header className={cx(HEAD_CONTAINER, "flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4")}>
       <AgentIcon busy={Boolean(state?.busy)} />
       <span className="text-sm font-semibold text-zinc-100">Captain</span>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">
-        <ContextMiniBar tokens={meter.tokens} window={meter.window} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className="mr-1" />
+        {meter && headerMeter !== null && (
+          <ContextMiniBar tokens={meter.tokens} window={meter.window} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className={cx("mr-1", headerMeter)} />
+        )}
         <CaptainMenu projectId={projectId} meter={meter} model={model} lastActive={lastActive} />
       </div>
     </header>
@@ -460,7 +466,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
 
 type MeterProps = Omit<ComponentProps<typeof ContextMeter>, "className">
 
-function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: string; meter: MeterProps; model: string | null; lastActive: number | null }) {
+function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: string; meter: MeterProps | null; model: string | null; lastActive: number | null }) {
   const { open, setOpen, root, trigger } = usePopover()
   const [history, setHistory] = useState(false)
   const compactions = useCaptainCompactions(projectId)
@@ -497,7 +503,7 @@ function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: strin
                 Active <TimeAgo ts={lastActive} />
               </p>
             )}
-            <ContextMeter className="pt-1.5" {...meter} />
+            {meter && <ContextMeter className="pt-1.5" {...meter} />}
           </div>
           <button
             type="button"

@@ -23,6 +23,7 @@ import { SideThreadPane, ThreadChatProvider } from "./SideThread"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
+import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
 import { TryFirst, markTryFirstDone, useTryFirstDone } from "./TryFirst"
 import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
@@ -38,7 +39,7 @@ const NO_MESSAGES: ChatMessage[] = []
 /**
  * `onClose` adds a close button to the header; App passes it only while the panel is a drawer. `zen` lays the same
  * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css), and the
- * context meter moves into the header (ZenContext).
+ * context meter moves into the header (CoordinatorContext). With auto-compact on there's no meter or Compact at all.
  */
 export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onClose?: () => void; zen?: boolean }) {
   const chat = useChat()
@@ -49,6 +50,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const compact = useCompactOrchestrator()
   const openSettings = useOpenSettings()
   const compactNow = useCallback(() => compact.mutate(), [compact.mutate])
+  const autoCompact = useAutoCompact("coordinator")
+  const meterRow = spotClass(autoCompact, "header")
   const projects = useProjects()
   const tasks = useTasks()
   const [location] = useLocation()
@@ -136,6 +139,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           for it), over it when not. */}
       <section ref={panel} data-testid="chat-panel" className="@container/coord relative flex h-full min-w-0 bg-zinc-950">
         <div className="relative flex min-w-0 flex-1 flex-col">
+          {/* The `head` container: the header and the docked meter row under it switch to their narrow layout together. */}
+          <div className={HEAD_CONTAINER}>
           <header
             className={cx(
               // A container, so the cloud meter and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
@@ -159,7 +164,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               </div>
               <CloudMeter variant="inline" />
               <div className="ml-auto flex shrink-0 items-center gap-1">
-                {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
+                {!autoCompact && <CoordinatorContext zen={zen} state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
                 <VoiceControl />
                 {!zen && (
                   <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
@@ -194,9 +199,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             </div>
             <CloudMeter variant="strip" />
           </header>
-          {!zen && (
+          {!zen && meterRow !== null && (
             <ContextMeter
-              className="border-b border-zinc-900 px-4 py-2"
+              className={cx("border-b border-zinc-900 px-4 py-2", meterRow)}
               tokens={orch.data?.usage.tokens ?? null}
               window={orch.data?.usage.window ?? null}
               compacting={orch.data?.compacting ?? false}
@@ -204,6 +209,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               onCompact={() => compact.mutate()}
             />
           )}
+          </div>
 
           {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
           {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
@@ -263,12 +269,13 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
 
 /**
- * Zen's context reading, in the header left of the voice button: the mini bar and "58%" (full reading in its
- * tooltip), then Compact, quiet until CONTEXT_WARN_PCT and amber from there. Compact keeps one width in every
- * state (the icon turns into a spinner), so nothing in the header moves. On phones the chip alone opens a menu
- * with the full reading and Compact.
+ * The Coordinator's context reading in its header, left of the voice button, while auto-compact is off. A wide Zen
+ * header: the mini bar and "58%" (full reading in its tooltip), then Compact, quiet until CONTEXT_WARN_PCT and amber
+ * from there. Compact keeps one width in every state (the icon turns into a spinner), so nothing in the header moves.
+ * The docked panel has its meter row under the header instead. A narrow header (a phone, a slim panel) has neither:
+ * one ⋯ button, amber from CONTEXT_WARN_PCT, opens a menu with the full reading and Compact.
  */
-function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
+function CoordinatorContext({ zen, state, queued, onCompact }: { zen: boolean; state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
   const { open, setOpen, root, trigger } = usePopover()
   const tokens = state?.usage.tokens ?? null
   const window = state?.usage.window ?? null
@@ -280,39 +287,47 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
   const title = status ?? "Compact: summarise the conversation to free up context. If a turn is running, it compacts right after."
   const icon = waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Minimize2 className="h-3 w-3" />
   const bar = pct === null ? <span className="text-xs text-zinc-500">Context</span> : <ContextMiniBar tokens={tokens} window={window} hint={ZEN_CONTEXT_HINT} />
+  const reading = `Context ${contextLabel(tokens, window)}`
+  const menu = spotClass(false, "menu")
   return (
-    <div ref={root} data-testid="zen-context" className="relative mr-1 flex items-center gap-1.5">
-      <span className="max-sm:hidden">{bar}</span>
-      <button
-        type="button"
-        onClick={() => onCompact()}
-        disabled={waiting}
-        title={title}
-        aria-label={status ?? "Compact"}
-        className={cx(
-          META_CHIP,
-          "max-sm:hidden disabled:cursor-default",
-          warn ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
-        )}
-      >
-        {icon}
-        Compact
-      </button>
-      <button
+    <div ref={root} className="relative flex items-center">
+      {zen && (
+        <div data-testid="zen-context" className={cx("mr-1 flex items-center gap-1.5", spotClass(false, "header"))}>
+          {bar}
+          <button
+            type="button"
+            onClick={() => onCompact()}
+            disabled={waiting}
+            title={title}
+            aria-label={status ?? "Compact"}
+            className={cx(
+              META_CHIP,
+              "disabled:cursor-default",
+              warn ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
+            )}
+          >
+            {icon}
+            Compact
+          </button>
+        </div>
+      )}
+      <Button
         ref={trigger}
-        type="button"
+        size="sm"
+        variant="ghost"
         onClick={() => setOpen(!open)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Context ${contextLabel(tokens, window)}: more`}
-        className={cx(META_CHIP, "sm:hidden", warn ? "border-amber-500/40 bg-amber-500/10" : "border-zinc-800")}
+        aria-label={`${reading}: more`}
+        title={reading}
+        data-testid="context-menu-button"
+        className={cx(menu, warn && "text-amber-300! hover:text-amber-200!")}
       >
-        {bar}
-        <MoreHorizontal className="h-3.5 w-3.5 text-zinc-500" />
-      </button>
+        {waiting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MoreHorizontal className="h-3.5 w-3.5" />}
+      </Button>
       {open && (
-        <div role="menu" className="absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl sm:hidden">
-          <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">Context {contextLabel(tokens, window)}</div>
+        <div role="menu" className={cx("absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl", menu)}>
+          <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">{reading}</div>
           <button
             type="button"
             role="menuitem"

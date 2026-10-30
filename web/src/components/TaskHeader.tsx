@@ -38,6 +38,7 @@ import { QueuedLink } from "./QueuedMessages"
 import { PlacementHeaderChip } from "./PlacementChip"
 import { IdentityBadge } from "./IdentityBadge"
 import { useOpenSettings } from "./SettingsDialog"
+import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 
 /** A boolean saved in localStorage, so a toggle keeps its state across tasks and reloads. */
 export function useStoredFlag(key: string): [boolean, (v: boolean) => void] {
@@ -73,7 +74,7 @@ export function TaskHeader({
   const primary = primaryAction(task.status)
 
   return (
-    <header className="mb-4 space-y-1">
+    <header className={cx(HEAD_CONTAINER, "mb-4 space-y-1")}>
       <Breadcrumb task={task} project={project} />
       <div className="flex items-start gap-2 sm:items-center">
         <h1 className="line-clamp-2 min-w-0 flex-1 text-lg leading-snug font-semibold tracking-tight wrap-anywhere text-zinc-50 max-sm:pt-1.5 sm:truncate" title={task.title}>
@@ -139,21 +140,29 @@ export function TaskMetaRow({ task, project, files }: { task: Task; project: Pro
   )
 }
 
-/** The context bar and "58%"; from 75% it turns amber (red from 90%) and offers Compact right there. */
+/**
+ * The context bar and "58%"; from 75% it turns amber (red from 90%) and offers Compact right there. Only with agent
+ * auto-compact off, and only in a wide header: a narrow one leaves them to the ⋯ details. A compaction in progress
+ * always says so.
+ */
 function ContextSlot({ task }: { task: Task }) {
   const compact = useCompactTask()
+  const shown = spotClass(useAutoCompact("agent"), "header")
   const pct = contextPct(task.contextTokens, task.contextWindow)
   const canCompact = task.turnCount > 0 && task.status !== "failed"
   const busy = task.compacting || task.compactPending
-  if (pct === null && !busy) return null
+  if ((pct === null || shown === null) && !busy) return null
   return (
     <span className="inline-flex shrink-0 items-center gap-1">
-      <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." />
+      {shown !== null && (
+        <ContextMiniBar tokens={task.contextTokens} window={task.contextWindow} hint="How much of this agent's context window is used. Compact from the ⋯ menu when it gets high." className={shown} />
+      )}
       {busy ? (
         <span className="inline-flex items-center gap-1 whitespace-nowrap">
           <Loader2 className="h-3 w-3 animate-spin" /> {task.compacting ? "Compacting…" : "Compact queued"}
         </span>
       ) : (
+        shown !== null &&
         pct !== null &&
         pct >= CONTEXT_WARN_PCT &&
         canCompact && (
@@ -161,7 +170,7 @@ function ContextSlot({ task }: { task: Task }) {
             type="button"
             onClick={() => compact.mutate(task.id)}
             title="Summarise the conversation to free up context"
-            className="inline-flex min-h-11 items-center gap-1 rounded-md px-2 whitespace-nowrap text-amber-300 hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:outline-none sm:min-h-0 sm:px-1"
+            className={cx(shown, "inline-flex min-h-11 items-center gap-1 rounded-md px-2 whitespace-nowrap text-amber-300 hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-500 focus-visible:outline-none sm:min-h-0 sm:px-1")}
           >
             <Minimize2 className="h-3 w-3" /> Compact
           </button>
@@ -281,6 +290,7 @@ function TaskMenu({
   const [portOpen, setPortOpen] = useState(false)
   const close = useCloseTask()
   const compact = useCompactTask()
+  const autoCompact = useAutoCompact("agent")
   const del = useDeleteTask()
 
   useEffect(() => {
@@ -384,15 +394,17 @@ function TaskMenu({
                 </Detail>
               )}
             </dl>
-            <ContextMeter
-              className="mt-2.5 border-t border-zinc-800/80 pt-2.5"
-              tokens={task.contextTokens}
-              window={task.contextWindow}
-              compacting={task.compacting}
-              queued={task.compactPending}
-              canCompact={task.turnCount > 0 && task.status !== "failed"}
-              onCompact={() => compact.mutate(task.id)}
-            />
+            {!autoCompact && (
+              <ContextMeter
+                className="mt-2.5 border-t border-zinc-800/80 pt-2.5"
+                tokens={task.contextTokens}
+                window={task.contextWindow}
+                compacting={task.compacting}
+                queued={task.compactPending}
+                canCompact={task.turnCount > 0 && task.status !== "failed"}
+                onCompact={() => compact.mutate(task.id)}
+              />
+            )}
           </div>
 
           <div className="border-t border-zinc-800/80 pt-1.5">
