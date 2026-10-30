@@ -11,6 +11,8 @@ import type { SshPool, SshTarget } from "../server/runpod/ssh.js"
 import { DEFAULT_VAST_SETTINGS, type VastSettings } from "../shared/vast.js"
 import { gpuBoxIdOn, gpuBoxProvider } from "../shared/gpu.js"
 import { gpuBoxIndex, gpuBoxProject, isGpuBox } from "../shared/runpod.js"
+import { workerSystemPrompt } from "../server/prompts.js"
+import type { Project } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
 // The Vast.ai GPU runner (docs/vast.md). Nothing here talks to Vast.ai: every call goes to a fake fetch that keeps
@@ -416,5 +418,28 @@ describe("VastProvider", () => {
     const { p } = provider()
     await expect(p.create({ labels: [] })).rejects.toThrow(/aren't made through the box pool/)
     await expect(p.wake("runpod-proj1")).rejects.toThrow(/isn't a Vast.ai box/)
+  })
+})
+
+describe("worker prompt on a GPU instance", () => {
+  const project = { id: "prj_1", name: "Game", description: "" } as Project
+  const task = { id: "task_1", title: "T" }
+  const prompt = (cloud?: "vast") => workerSystemPrompt({ project, task, branch: "b", port: 4000, box: { memoryBytes: null, slots: 2, gpu: { name: "RTX A5000", ...(cloud ? { cloud } : {}) } } })
+
+  it("says Vast.ai, plain-HTTP previews and no network volume", () => {
+    const p = prompt("vast")
+    expect(p).toContain("running on a Vast.ai GPU instance of your project's own")
+    expect(p).toContain("Your instance has an NVIDIA RTX A5000, shared with up to 1 other agents")
+    expect(p).toContain("plain HTTP")
+    expect(p).toContain("There's no network volume")
+    expect(p).not.toMatch(/RunPod|\/workspace\/data/)
+  })
+
+  it("is RunPod's when the cloud is unset", () => {
+    const p = prompt()
+    expect(p).toContain("running on a RunPod GPU pod of your project's own")
+    expect(p).toContain("RunPod's HTTPS proxy")
+    expect(p).toContain("/workspace/data is the project's network volume")
+    expect(p).not.toContain("Vast.ai")
   })
 })

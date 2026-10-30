@@ -4213,7 +4213,8 @@ export class TaskManager {
     if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots, alone, local: true }
     if (isGpuBox(boxId)) {
       const pod = this.gpuFor(boxId)?.provider.cached(boxId)
-      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU" } }
+      const cloud = gpuBoxProvider(boxId) ?? "runpod"
+      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU", ...(cloud === "vast" ? { cloud } : {}) } }
     }
     if (isDockerBox(boxId)) {
       const d = this.docker?.settings()
