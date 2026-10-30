@@ -11,6 +11,7 @@ import {
   DEFAULT_CAPTAIN_MODEL,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  DEFAULT_RELAY_MODEL,
   EFFORTS,
   SIZE_DEFAULTS,
   WORKER_SIZES,
@@ -61,6 +62,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // A fixed token count, not a share of the window: 80% of a 1M window let every Coordinator and Captain turn
   // carry up to 800k tokens of history. A value saved in Settings wins (only changed keys are saved).
   orchestratorAutoCompact: { enabled: true, unit: "tokens", value: DEFAULT_AUTOCOMPACT_TOKENS },
+  orchestratorRelay: DEFAULT_RELAY_MODEL,
   captainModel: DEFAULT_CAPTAIN_MODEL,
   captainEffort: DEFAULT_CAPTAIN_EFFORT,
   agentModel: DEFAULT_MODEL,
@@ -184,6 +186,10 @@ export const settingsPatch = z
     orchestratorModel: model,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
+    orchestratorRelay: z
+      .object({ enabled: z.boolean(), model, effort: z.enum(EFFORTS) })
+      .strict()
+      .describe("The Coordinator's relay-only turns (task updates, no message from Cody) on this model and effort when enabled. Off by default: another model or effort starts each such turn with a cold prompt cache."),
     captainModel: model,
     captainEffort: z.enum(EFFORTS),
     agentModel: model,
