@@ -725,7 +725,7 @@ export function SettingsDialog({
             >
               <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
                 <input id={fid("cim")} type="checkbox" checked={s.closeIssuesOnMerge ?? true} onChange={(e) => set("closeIssuesOnMerge", e.target.checked)} data-testid="close-issues-on-merge" />
-                {(s.closeIssuesOnMerge ?? true) ? "On: closed on any branch, with a comment" : "Off: only GitHub closes them (default branch)"}
+                {(s.closeIssuesOnMerge ?? true) ? "On: closed after a merge into an epic branch, with a comment" : "Off: only GitHub closes them (default branch)"}
               </label>
             </Row>
           </Panel>

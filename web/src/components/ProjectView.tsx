@@ -1188,7 +1188,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       >
         <Select className="w-full sm:w-80" value={closeIssuesOnMerge} onChange={(e) => setCloseIssuesOnMerge(e.target.value as "" | "on" | "off")} data-testid="project-close-issues-on-merge">
           <option value="">Default ({defaults?.closeIssuesOnMerge === false ? "off" : "on"}: Settings → Close the issues it names)</option>
-          <option value="on">On: close them on any branch</option>
+          <option value="on">On: close them after a merge into an epic branch</option>
           <option value="off">Off: leave issues to GitHub</option>
         </Select>
       </Field>
