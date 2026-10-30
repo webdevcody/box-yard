@@ -367,7 +367,8 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     expect(machine.lastTest!.tools.claude.path).toBe(path.join(root, "machine-tools", "claude"))
     expect(machine.lastTest!.tools.codex).toMatchObject({ found: true, version: "codex-cli 0.40.0" })
     expect(machine.lastTest!.notes.join("\n")).toMatch(/claude isn't logged in on it/)
-    expect(machine.lastTest!.notes.join("\n")).toMatch(/codex is installed/)
+    // Codex is detected (the version above) but gets no note: Codex tasks don't run on SSH machines yet.
+    expect(machine.lastTest!.notes.join("\n")).not.toMatch(/codex/)
 
     const p = await call<Project>(r, "POST", "/api/projects", { name: "on-the-tower", runner: "ssh", machineLabel: "gpu" })
     const t = r.yard.tasks.createTask({ projectId: p.id, title: "haiku", prompt: "write a haiku" })
