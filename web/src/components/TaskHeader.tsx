@@ -1,7 +1,7 @@
 // The task page header, three calm rows: the breadcrumb, the title with the actions that matter right now
 // (Merge PR, Stop / Mark done / Retry, ⋯), and one meta row (status · PR · files · previews · context).
 // Everything else (model and route, times, box, branch, id, full context numbers) is in the ⋯ details popover.
-import { useEffect, useRef, useState, type ReactNode } from "react"
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react"
 import { Link, useLocation } from "wouter"
 import {
   ChevronRight,
@@ -240,15 +240,16 @@ function PreviewChip({ preview }: { preview: PreviewLink }) {
   )
 }
 
-/** Closes on Escape (focus goes back to the trigger) and on a click outside. */
-export function usePopover() {
+/** Closes on Escape (focus goes back to the trigger) and on a click outside `root` (and `portal`, a panel rendered elsewhere). */
+export function usePopover(portal?: RefObject<HTMLElement | null>) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false)
+      const t = e.target as Node
+      if (!root.current?.contains(t) && !portal?.current?.contains(t)) setOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return
@@ -262,7 +263,7 @@ export function usePopover() {
       document.removeEventListener("mousedown", onDown)
       document.removeEventListener("keydown", onKey)
     }
-  }, [open])
+  }, [open, portal])
   return { open, setOpen, root, trigger }
 }
 

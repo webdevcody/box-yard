@@ -46,6 +46,8 @@ import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
 import { PublishedRow, SLIM_TITLE_LINK } from "./PublishedNotices"
 import { menuItem, usePopover } from "./TaskHeader"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
 const NO_MESSAGES: CaptainMessage[] = []
@@ -66,6 +68,8 @@ function CaptainChat({ project }: { project: Project }) {
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   const thread = useRef<StickyScrollHandle>(null)
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(project.id, box)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
@@ -446,7 +450,7 @@ function StatusPill({ state }: { state: CaptainState | undefined }) {
 function CaptainHeader({ projectId, state, lastActive }: { projectId: string; state: CaptainState | undefined; lastActive: number | null }) {
   const compact = useCompactCaptain(projectId)
   const settings = useAgentSettings().data?.settings
-  const model = settings ? `${settings.orchestratorModel} · ${settings.orchestratorEffort} effort` : null
+  const model = settings ? `${settings.captainModel} · ${settings.captainEffort} effort` : null
   // Captains compact on the Coordinator's auto-compact setting; with it on they show no meter or Compact.
   const autoCompact = useAutoCompact("coordinator")
   const headerMeter = spotClass(autoCompact, "header")
@@ -462,7 +466,8 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
     // Like the task header: name, status and a small context reading (when wide); model, last active and the full meter are in ⋯.
     <header className={cx(HEAD_CONTAINER, "flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4")}>
       <AgentIcon busy={Boolean(state?.busy)} />
-      <span className="text-sm font-semibold text-zinc-100">Captain</span>
+      {/* Opens the chat switcher: the Coordinator, then every project's Captain. */}
+      <ChatSwitcher current={projectId}>Captain</ChatSwitcher>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">
         {meter && headerMeter !== null && (
@@ -504,7 +509,7 @@ function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: strin
         >
           <div className="space-y-1 border-b border-zinc-800/80 px-2 pt-1.5 pb-2.5 text-xs text-zinc-500">
             {model && (
-              <p className="truncate" title="The Captain runs on the Coordinator's model and effort (Settings → Coordinator)">
+              <p className="truncate" title="Captains' model and effort (Settings → Coordinator → Project Captains)">
                 <span className="text-zinc-300">{model}</span>
               </p>
             )}

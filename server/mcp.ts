@@ -155,7 +155,8 @@ const effortSchema = z
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. " +
+      "Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.",
   )
 
 const modelSchema = z
@@ -165,7 +166,10 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
+  .describe(
+    "Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them. " +
+      "Any id `claude --model` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6.",
+  )
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
