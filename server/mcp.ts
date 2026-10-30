@@ -656,17 +656,23 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     server.registerTool(
       "send_to_captain",
       {
-        description:
+        description: owner(
           "Coordinator tool: send project-scoped work to that project's Captain and return immediately. The Captain has its own persistent Claude session and owns create_task/send_to_task/model routing for the project. " +
-          'When it finishes the turn that handles your message, its reply reaches you as a Box Yard update ("Captain for <project> replied: …") that wakes you, so you don\'t need wait_for_captain.',
+            'Its reply shows on Cody\'s chat as soon as it\'s written ("Captain for <project> replied: …") and reaches you as a Box Yard update, so you don\'t need wait_for_captain. ' +
+            "It wakes you only when there's something for you to do: a question or decision for Cody, a failure, a next step, or act_on_reply. A reply only for Cody's information (a status, an answer) comes with your next turn's updates instead. Replies to Captains you asked in the same turn (a fan-out) always wake you.",
+        ),
         inputSchema: {
           project: z.string().describe("Project id or name"),
           message: z.string().min(1).describe("The project-scoped request for the Captain."),
+          act_on_reply: z
+            .boolean()
+            .optional()
+            .describe("true when you'll act on the reply yourself (start a next step, route it on, answer Cody with it): the reply then always wakes you."),
         },
       },
-      safe(async (a: { project: string; message: string }) => {
+      safe(async (a: { project: string; message: string; act_on_reply?: boolean }) => {
         if (!deps.captains) return fail("Captains are not available in this Box Yard process.")
-        const msg = deps.captains.send(a.project, a.message, { source: "coordinator", tool: "send_to_captain" })
+        const msg = deps.captains.send(a.project, a.message, { source: "coordinator", tool: "send_to_captain", actOnReply: a.act_on_reply === true })
         return ok({ delivered: true, projectId: msg.projectId, messageId: msg.id, state: deps.captains.state(msg.projectId) })
       }),
     ),
