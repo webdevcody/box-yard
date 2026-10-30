@@ -2,10 +2,11 @@
 // in a panel on the right, like a comment on a doc. Or Reply to a whole message: the replies stay out of the chat,
 // which shows "↰ N replies" under the message, and open in the same panel (Slack's and Claude's threads). The thread
 // sees the chat up to that message (server/sideThreads.ts) but shows only the message or highlight and the replies.
+// A card of the Coordinator chat opens in the same panel too (⤢, CoordinatorCards.tsx): "Tasks ›" instead of "Threads ›".
 //
 // The panel lives inside the chat's section, which is a `coord` container: from 35.5rem wide (a 125%-zoomed laptop; a 560px phone stays a sheet) it's a column beside the
 // chat (the Coordinator's dock widens to make room, App.tsx), below that a full-height sheet over it.
-import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { Fragment, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { createPortal } from "react-dom"
 import { useQueryClient } from "@tanstack/react-query"
 import {
@@ -182,11 +183,15 @@ export function AskPopover({
 
 // ---------------------------------------------------------------- the panel
 
+/** What the panel hands a card it shows (OpenThread.card). */
+export type CardPanelProps = { chat: ThreadChat; open: OpenThread; headerClassName: string }
+
 /**
  * The chat's open thread: a column on the right, or a sheet over the chat in a narrow panel (or when expanded).
- * `headerClassName` sizes its header like the chat's, so the two line up side by side.
+ * `headerClassName` sizes its header like the chat's, so the two line up side by side. `renderCard` shows the card the
+ * panel was opened on (⤢ on a card of the Coordinator chat) instead of a thread.
  */
-export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: ThreadChat; headerClassName?: string }) {
+export function SideThreadPane({ chat, headerClassName = "min-h-12", renderCard }: { chat: ThreadChat; headerClassName?: string; renderCard?: (p: CardPanelProps) => ReactNode }) {
   const cur = useOpenThread(chat)
   const [shown, setShown] = useState(false)
   const id = cur?.id ?? null
@@ -213,13 +218,14 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: T
     return () => setOpenHighlight(id, false)
   }, [id, closing])
 
-  if (!id || !cur) return null
+  if (!id || !cur || (cur.card && !renderCard)) return null
   return (
     <aside
       data-testid="side-thread"
       data-open={shown || undefined}
       data-expanded={expanded || undefined}
-      aria-label="Thread"
+      data-card={cur.card}
+      aria-label={cur.card ? "Task" : "Thread"}
       onKeyDown={(e) => {
         if (e.key !== "Escape" || e.defaultPrevented) return
         e.stopPropagation()
@@ -236,7 +242,11 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: T
     >
       {/* At its final width while the column grows, so the text doesn't reflow on every frame. */}
       <div className={cx("flex h-full min-h-0 w-full flex-col", !expanded && "@min-[35.5rem]/coord:w-(--thread-w)")}>
-        <ThreadView key={id} chat={chat} open={cur} headerClassName={headerClassName} />
+        {cur.card && renderCard ? (
+          <Fragment key={id}>{renderCard({ chat, open: cur, headerClassName })}</Fragment>
+        ) : (
+          <ThreadView key={id} chat={chat} open={cur} headerClassName={headerClassName} />
+        )}
       </div>
     </aside>
   )
@@ -251,6 +261,57 @@ export function threadTitle(text: string) {
 }
 
 export const repliesLabel = (n: number) => `${n} ${n === 1 ? "reply" : "replies"}`
+
+/** The panel header's icon buttons: 44px for a finger, 32px for a mouse. */
+export const PANEL_ICON =
+  "grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 aria-expanded:bg-zinc-800 aria-pressed:text-yard-300 [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-8"
+/** A header button only for the column beside the chat: a sheet has ‹ instead. */
+export const PANEL_WIDE = "hidden @min-[35.5rem]/coord:grid"
+
+/**
+ * The panel's header, a thread's or a card's: ‹ on a sheet, "Threads › title" (or "Tasks › title"), its own buttons
+ * (`children`), and × in a column.
+ */
+export function PanelHeader({
+  chat,
+  open,
+  className,
+  crumb,
+  title,
+  closeLabel,
+  closeTitle,
+  children,
+}: {
+  chat: ThreadChat
+  open: OpenThread
+  className: string
+  crumb: string
+  title: ReactNode
+  closeLabel: string
+  closeTitle: string
+  children?: ReactNode
+}) {
+  const close = () => closeThread(chat)
+  return (
+    <header className={cx(className, "flex shrink-0 items-center gap-1 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-2")}>
+      {/* A sheet goes back to the chat; a column closes with the × on the right. */}
+      <button type="button" onClick={close} aria-label="Back to the chat" title="Back to the chat" className={cx(PANEL_ICON, open.expanded ? "hidden" : "@min-[35.5rem]/coord:hidden")}>
+        <ChevronLeft className="h-5 w-5" />
+      </button>
+      <nav aria-label="Breadcrumb" className="flex min-w-0 flex-1 items-center gap-1 text-sm @min-[35.5rem]/coord:pl-2">
+        <span className="shrink-0 font-semibold text-zinc-100">{crumb}</span>
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+        {title}
+      </nav>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {children}
+        <button type="button" onClick={close} aria-label={closeLabel} title={closeTitle} className={cx(PANEL_ICON, open.expanded ? "grid" : PANEL_WIDE)}>
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </header>
+  )
+}
 
 function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: OpenThread; headerClassName: string }) {
   const id = open.id
@@ -270,7 +331,6 @@ function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: O
   const anchorId = thread?.anchorId ?? draft?.anchorId ?? null
   const original = thread?.quote ?? draft?.text ?? ""
   const resolved = thread?.resolvedAt != null
-  const close = () => closeThread(chat)
 
   // Opened from Reply: straight to the composer.
   useEffect(() => {
@@ -310,56 +370,50 @@ function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: O
     ...(thread ? [{ icon: Trash2, label: "Delete thread", run: () => void remove() }] : []),
   ]
 
-  const icon = "grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 aria-expanded:bg-zinc-800 aria-pressed:text-yard-300 [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-8"
-  const wide = "hidden @min-[35.5rem]/coord:grid"
   return (
     <div ref={pane} className="relative flex h-full min-h-0 flex-col">
-      <header className={cx(headerClassName, "flex shrink-0 items-center gap-1 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-2")}>
-        {/* A sheet goes back to the chat; a column closes with the × on the right. */}
-        <button type="button" onClick={close} aria-label="Back to the chat" title="Back to the chat" className={cx(icon, open.expanded ? "hidden" : "@min-[35.5rem]/coord:hidden")}>
-          <ChevronLeft className="h-5 w-5" />
-        </button>
-        <nav aria-label="Breadcrumb" className="flex min-w-0 flex-1 items-center gap-1 text-sm @min-[35.5rem]/coord:pl-2">
-          <span className="shrink-0 font-semibold text-zinc-100">Threads</span>
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+      <PanelHeader
+        chat={chat}
+        open={open}
+        className={headerClassName}
+        crumb="Threads"
+        closeLabel="Close thread"
+        closeTitle="Close (Esc). It stays under the message."
+        title={
           <span data-testid="side-thread-title" title={quotePreview(original, 400)} className="min-w-0 truncate text-zinc-400">
             {reply ? threadTitle(original) : `“${quotePreview(original, 140)}”`}
           </span>
-        </nav>
-        <div className="flex shrink-0 items-center gap-0.5">
-          {thread && (
-            <button
-              type="button"
-              data-testid="side-thread-resolve"
-              onClick={() => void control.resolve(id, !resolved)}
-              aria-pressed={resolved}
-              aria-label={resolved ? "Reopen thread" : "Resolve thread"}
-              title={resolved ? "Resolved. Reopen it" : "Resolve: fold it away under the message"}
-              className={icon}
-            >
-              {resolved ? <Undo2 className="h-4 w-4" /> : <CircleCheck className="h-4 w-4" />}
-            </button>
-          )}
-          <button ref={more} type="button" onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} aria-label="More thread actions" title="More" className={icon}>
-            <MoreHorizontal className="h-4 w-4" />
-          </button>
-          {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
+        }
+      >
+        {thread && (
           <button
             type="button"
-            data-testid="side-thread-expand"
-            onClick={() => toggleExpanded(chat)}
-            aria-pressed={Boolean(open.expanded)}
-            aria-label={open.expanded ? "Back beside the chat" : "Expand over the chat"}
-            title={open.expanded ? "Back beside the chat" : "Expand over the chat"}
-            className={cx(icon, wide)}
+            data-testid="side-thread-resolve"
+            onClick={() => void control.resolve(id, !resolved)}
+            aria-pressed={resolved}
+            aria-label={resolved ? "Reopen thread" : "Resolve thread"}
+            title={resolved ? "Resolved. Reopen it" : "Resolve: fold it away under the message"}
+            className={PANEL_ICON}
           >
-            {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            {resolved ? <Undo2 className="h-4 w-4" /> : <CircleCheck className="h-4 w-4" />}
           </button>
-          <button type="button" onClick={close} aria-label="Close thread" title="Close (Esc). It stays under the message." className={cx(icon, open.expanded ? "grid" : wide)}>
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      </header>
+        )}
+        <button ref={more} type="button" onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} aria-label="More thread actions" title="More" className={PANEL_ICON}>
+          <MoreHorizontal className="h-4 w-4" />
+        </button>
+        {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
+        <button
+          type="button"
+          data-testid="side-thread-expand"
+          onClick={() => toggleExpanded(chat)}
+          aria-pressed={Boolean(open.expanded)}
+          aria-label={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          title={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+          className={cx(PANEL_ICON, PANEL_WIDE)}
+        >
+          {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+        </button>
+      </PanelHeader>
       {!reply && thread && (
         <div className="shrink-0 border-b border-zinc-900 px-3 py-2.5">
           <button
