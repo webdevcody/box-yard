@@ -2,8 +2,10 @@
 // the cards' order, a batch's one card, and the Coordinator card for the rest. Pure, so it is unit tested.
 //
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
-// - A reply the Coordinator wrote on its own after reading updates (the "from:" line, lib/chatUpdates.ts) goes to the
-//   cards of the tasks those updates are about. A reply to Cody stays with his message, in the Coordinator card.
+// - A reply the Coordinator wrote on its own (after reading updates, the "from:" line in lib/chatUpdates.ts) goes to the
+//   cards of the tasks it names: a link, an id or a bold title. One turn often reads several projects' updates, so
+//   what it read doesn't say which card the reply is about; a reply naming no task stays in the Coordinator card.
+//   A reply to Cody stays with his message, in the Coordinator card.
 // - What Cody sends to a task from its card stays in it (a sent notice). Cody's questions to the Coordinator from a card
 //   aren't in the chat at all: they're the card's side thread (CardThread.tsx).
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
@@ -118,7 +120,6 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   /** When the chat first named each task (and in what order, for names in the same millisecond), and the message that started it. */
   const named = new Map<string, { at: number; seq: number; origin: ChatMessage | null }>()
   const started = new Set<string>()
-  const items = new Map<string, UpdateItem>()
   /** The newest user message since the last reply: a reply after one answers it. */
   let asked: ChatMessage | null = null
 
@@ -132,22 +133,9 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     if (known.length) placed.push({ ...entry, tasks: known })
   }
   const update = (item: UpdateItem) => {
-    items.set(item.id, item)
     const ms = itemMessages(item)
     for (const m of ms) name(m, null)
     place({ type: "update", id: item.id, item, at: Math.max(...ms.map((m) => m.createdAt)) }, itemTasks(item, index))
-  }
-  /** The tasks of the updates a reply read. */
-  const readTasks = (sources: readonly UpdateSource[] | null) => {
-    const out = new Set<string>()
-    for (const s of sources ?? []) {
-      if (s.taskId) out.add(s.taskId)
-      else {
-        const item = items.get(s.id)
-        if (item) for (const t of itemTasks(item, index)) out.add(t)
-      }
-    }
-    return [...out]
   }
 
   for (const r of rows) {
@@ -168,7 +156,7 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
         continue
       }
       // A reply about tasks that are all gone stays in the Coordinator card rather than vanishing.
-      const about = m.role === "assistant" && !asked ? readTasks(r.sources).filter((t) => tasks.has(t)) : NO_TASKS
+      const about = m.role === "assistant" && !asked ? messageRefs(m, index).tasks.filter((t) => tasks.has(t)) : NO_TASKS
       if (about.length) placed.push({ ...entry, tasks: about })
       else coordinator.push({ ...entry, tasks: NO_TASKS })
       if (m.role === "assistant" || m.role === "error") asked = null
