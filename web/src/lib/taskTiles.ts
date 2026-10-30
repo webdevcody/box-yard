@@ -1,7 +1,8 @@
 // What a task's tile and a project's dot need (components/TaskIcon.tsx): each task's title, icon and project, and
 // each project's colour (shared/projectColors.ts). One store for the whole app, fed by the query cache, so a chat
 // with hundreds of tiles has one listener on it rather than one query each, and a tile re-renders only when a task
-// is added or renamed, gets an icon, or a project is renamed or recoloured: never on a status update.
+// is added or renamed, gets an icon, or a project is renamed or recoloured: never on a status update. The cards view
+// reads its batches here too, for the same reason.
 import { useSyncExternalStore } from "react"
 import { useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { keys } from "./queries"
@@ -16,6 +17,9 @@ export interface TileInfo {
   projectName: string
   icon: TaskIconName
   color: ProjectColor
+  /** The create_tasks call it came from, if that started more than one (the cards view's batch card). */
+  batchId: string | null
+  createdAt: number
 }
 
 export interface Tiles {
@@ -31,14 +35,14 @@ export function buildTiles(tasks: readonly Task[], projects: readonly Project[])
   for (const t of tasks) {
     const color = colors.get(t.projectId)
     if (!color) continue
-    out.set(t.id, { id: t.id, title: t.title, projectId: t.projectId, projectName: names.get(t.projectId) ?? "", icon: taskIcon(t), color })
+    out.set(t.id, { id: t.id, title: t.title, projectId: t.projectId, projectName: names.get(t.projectId) ?? "", icon: taskIcon(t), color, batchId: t.batchId ?? null, createdAt: t.createdAt })
   }
   return { tasks: out, colors }
 }
 
 /** What the tiles depend on: a status update leaves it the same. */
 const signature = (tasks: readonly Task[], projects: readonly Project[]) =>
-  projects.map((p) => `${p.id}\t${p.name}\t${p.color ?? ""}\t${p.createdAt}`).join("\n") + "\u0000" + tasks.map((t) => `${t.id}\t${t.projectId}\t${t.title}\t${t.icon ?? ""}`).join("\n")
+  projects.map((p) => `${p.id}\t${p.name}\t${p.color ?? ""}\t${p.createdAt}`).join("\n") + "\u0000" + tasks.map((t) => `${t.id}\t${t.projectId}\t${t.title}\t${t.icon ?? ""}\t${t.batchId ?? ""}`).join("\n")
 
 const EMPTY: Tiles = { tasks: new Map(), colors: new Map() }
 const NO_TASKS: Task[] = []

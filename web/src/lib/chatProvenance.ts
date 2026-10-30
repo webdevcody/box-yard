@@ -69,7 +69,8 @@ export function messageRefs(m: ChatMessage, index: EntityIndex): Refs {
     task(str(meta.resultId))
     project(str(meta.resultId))
     task(str(input.task))
-    if (Array.isArray(input.tasks)) for (const t of input.tasks) task(str(t))
+    // Ids (wait_for_tasks), or create_tasks' items by their titles.
+    if (Array.isArray(input.tasks)) for (const t of input.tasks) task(str(t && typeof t === "object" ? (t as { title?: unknown }).title : t))
     project(str(input.project))
     const captain = meta.captain as { projectId?: unknown } | undefined
     project(str(captain?.projectId))
@@ -88,6 +89,8 @@ export function messageRefs(m: ChatMessage, index: EntityIndex): Refs {
 export interface Provenance {
   /** Each message's projects (a turn's messages share theirs). */
   projects: ReadonlyMap<string, ReadonlySet<string>>
+  /** Each message's tasks, the same way: for the timeline of one task (a card's "Show in timeline"). */
+  tasks: ReadonlyMap<string, ReadonlySet<string>>
   /** The messages of a turn with no reply yet: a filter keeps them, so what Cody just sent stays in view. */
   pending: ReadonlySet<string>
 }
@@ -105,31 +108,41 @@ export function chatProvenance(messages: readonly ChatMessage[], index: EntityIn
   const read = new Map<string, ChatMessage[]>()
   for (const r of rows ?? []) if (r.type === "message" && r.sources?.length) read.set(r.id, r.sources.flatMap((s) => updates.get(s.id) ?? []))
   const projects = new Map<string, ReadonlySet<string>>()
+  const tasks = new Map<string, ReadonlySet<string>>()
   const pending = new Set<string>()
   let turn: ChatMessage[] = []
   let turnProjects = new Set<string>()
+  let turnTasks = new Set<string>()
   const close = (done: boolean) => {
-    const set: ReadonlySet<string> = turnProjects.size ? turnProjects : NONE
+    const ps: ReadonlySet<string> = turnProjects.size ? turnProjects : NONE
+    const ts: ReadonlySet<string> = turnTasks.size ? turnTasks : NONE
     for (const m of turn) {
-      projects.set(m.id, set)
+      projects.set(m.id, ps)
+      tasks.set(m.id, ts)
       if (!done) pending.add(m.id)
     }
     turn = []
     turnProjects = new Set()
+    turnTasks = new Set()
+  }
+  const add = (refs: Refs) => {
+    for (const p of refs.projects) turnProjects.add(p)
+    for (const t of refs.tasks) turnTasks.add(t)
   }
   for (const m of messages) {
     if (m.role === "notice") {
-      const own = messageRefs(m, index).projects
-      projects.set(m.id, own.length ? new Set(own) : NONE)
+      const own = messageRefs(m, index)
+      projects.set(m.id, own.projects.length ? new Set(own.projects) : NONE)
+      tasks.set(m.id, own.tasks.length ? new Set(own.tasks) : NONE)
       continue
     }
     turn.push(m)
-    for (const p of messageRefs(m, index).projects) turnProjects.add(p)
-    for (const n of read.get(m.id) ?? []) for (const p of messageRefs(n, index).projects) turnProjects.add(p)
+    add(messageRefs(m, index))
+    for (const n of read.get(m.id) ?? []) add(messageRefs(n, index))
     if (m.role === "assistant" || m.role === "error") close(true)
   }
   if (turn.length) close(false)
-  return { projects, pending }
+  return { projects, tasks, pending }
 }
 
 /**
@@ -141,6 +154,15 @@ export function filterByProject<T extends ChatMessage>(messages: readonly T[], p
   return messages.filter((m) => {
     const projects = prov.projects.get(m.id)
     return !projects || prov.pending.has(m.id) || projects.has(projectId)
+  })
+}
+
+/** The messages about any of `taskIds` (one card's tasks), and the turn waiting for its reply, like filterByProject. */
+export function filterByTasks<T extends ChatMessage>(messages: readonly T[], prov: Provenance, taskIds: readonly string[] | null): readonly T[] {
+  if (!taskIds?.length) return messages
+  return messages.filter((m) => {
+    const tasks = prov.tasks.get(m.id)
+    return !tasks || prov.pending.has(m.id) || taskIds.some((t) => tasks.has(t))
   })
 }
 
