@@ -344,6 +344,46 @@ describe("Reply in a card", () => {
     expect(label).toEqual(["aboutCoordinator cards·Open card ›"])
   })
 
+  it("keeps a card that's open where it is when its task finishes; closed, it folds at the next update", async () => {
+    const setTasks = (tasks: Task[]) =>
+      act(async () => {
+        qc.setQueryData(keys.tasks, tasks)
+        await new Promise((r) => setTimeout(r, 0))
+      })
+    render()
+    click(head(LOGIN.id))
+    await setTasks(TASKS.map((t) => (t.id === LOGIN.id || t.id === CARDS.id ? { ...t, status: "done" as const } : t)))
+    // The open one is still in the list, open; the closed one folded straight away.
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, `batch:${B}`])
+    expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("2 done today")
+
+    click(head(LOGIN.id))
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, `batch:${B}`])
+    await setChat([...CHAT, notice(HOLLOW, "💬 **Map 3 PR #406: The Hollow cave** says: halfway")])
+    expect(cards().map((c) => c.dataset.card)).toEqual([`batch:${B}`])
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("3 done today")
+  })
+
+  it("goes with an open card that leaves \"done today\" because its task is back at work", async () => {
+    const scrolled: string[] = []
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(function (this: HTMLElement) {
+      if (this.id.startsWith("card-")) scrolled.push(this.id)
+    })
+    render()
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    click(head(DOCS.id))
+    await send(card(DOCS.id), "Add a FAQ")
+    await act(async () => {
+      qc.setQueryData(keys.tasks, TASKS.map((t) => (t.id === DOCS.id ? { ...t, status: "queued" as const } : t)))
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, DOCS.id, `batch:${B}`])
+    expect(card(DOCS.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
+    expect(scrolled).toEqual([`card-${DOCS.id}`])
+    vi.restoreAllMocks()
+  })
+
   it("gives each of a batch's tasks its own box, and the batch one for the Coordinator about all of them", async () => {
     render()
     click(head(`batch:${B}`))

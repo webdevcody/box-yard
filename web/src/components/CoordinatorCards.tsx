@@ -16,7 +16,7 @@ import { arrangeCards, batchTaskName, batchTitle, chatCards, newSince, stableCar
 import { chipView, isSent, itemMessages, noticeText, type CoordinatorRow } from "../lib/chatUpdates"
 import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
-import { setOpen, useChipOpen } from "../lib/chipState"
+import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInTimeline, useCoordinatorView, useFocusCard, type TimelineCard } from "../lib/coordinatorView"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
@@ -80,7 +80,11 @@ export function useCards(rows: readonly CoordinatorRow[], prov: Provenance, on: 
   const last = useRef<CardsLayout | null>(null)
   return useMemo(() => {
     if (!cards) return null
-    const { live, done } = arrangeCards(cards.cards, (id) => statuses?.[id], (id) => tiles.get(id)?.projectId, Date.now(), project)
+    // A card open in the list when its task finishes (Cody replied in it and is reading the answer) stays put: it
+    // folds into "done today" at a later update once he has closed it, not under his eyes.
+    const shown = last.current?.live
+    const stay = (c: ChatCard) => Boolean(shown?.some((s) => s.key === c.key)) && isOpen(cardOpenKey(c.key))
+    const { live, done } = arrangeCards(cards.cards, (id) => statuses?.[id], (id) => tiles.get(id)?.projectId, Date.now(), project, stay)
     // A project's Coordinator card: what's about no project, or about that one.
     const coordinator = project
       ? cards.coordinator.filter((e) => {
@@ -168,6 +172,14 @@ export const CardsView = memo(function CardsView({
     clearFocusCard()
     scrollToCard(card.key)
   }, [focus, live, done, project])
+  // An open card leaving "done today" for the list (Cody replied in it, so its task is back at work): go with it.
+  const folded = useRef<ReadonlySet<string>>(new Set())
+  useEffect(() => {
+    const was = folded.current
+    folded.current = new Set(done.map((c) => c.key))
+    const back = live.find((c) => was.has(c.key) && isOpen(cardOpenKey(c.key)))
+    if (back) scrollToCard(back.key, false)
+  }, [live, done])
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <div data-testid="chat-cards" className="space-y-2">

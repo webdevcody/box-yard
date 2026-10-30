@@ -189,8 +189,8 @@ describe("arrangeCards", () => {
   const card = (key: string, taskIds: string[], last: number): ChatCard => ({ key, taskIds, batchId: null, entries: [], first: 0, last, origin: null })
   const statuses: Record<string, BadgeStatus> = {}
   const projects: Record<string, string> = {}
-  const arrange = (cards: ChatCard[], filter: string | null = null) => {
-    const r = arrangeCards(cards, (id) => statuses[id], (id) => projects[id], now, filter)
+  const arrange = (cards: ChatCard[], filter: string | null = null, stay?: (c: ChatCard) => boolean) => {
+    const r = arrangeCards(cards, (id) => statuses[id], (id) => projects[id], now, filter, stay)
     return { live: r.live.map((c) => c.key), done: r.done.map((c) => c.key) }
   }
 
@@ -208,6 +208,13 @@ describe("arrangeCards", () => {
     expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: ["batch:x"], done: [] })
     statuses.k2 = "done"
     expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: [], done: ["batch:x"] })
+  })
+
+  it("keeps a card it's told to where it is, finished or quiet", () => {
+    Object.assign(statuses, { s1: "done", s2: "idle", s3: "done" })
+    const cards = [card("s1", ["s1"], now - 1), card("s2", ["s2"], now - CARD_WINDOW_MS - 1), card("s3", ["s3"], now - 1)]
+    expect(arrange(cards)).toEqual({ live: [], done: ["s1", "s3"] })
+    expect(arrange(cards, null, (c) => c.key !== "s3")).toEqual({ live: ["s1", "s2"], done: ["s3"] })
   })
 
   it("keeps one project's cards", () => {

@@ -269,6 +269,7 @@ const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged
 /**
  * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
  * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top. `project` keeps one project's.
+ * `stay` keeps a card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
  */
 export function arrangeCards(
   cards: readonly ChatCard[],
@@ -276,6 +277,7 @@ export function arrangeCards(
   projectOf: (taskId: string) => string | undefined,
   now: number,
   project: string | null,
+  stay: (card: ChatCard) => boolean = () => false,
 ): { live: ChatCard[]; done: ChatCard[] } {
   const live: ChatCard[] = []
   const done: ChatCard[] = []
@@ -283,7 +285,7 @@ export function arrangeCards(
     if (project && projectOf(c.taskIds[0]!) !== project) continue
     const statuses = c.taskIds.map(statusOf).filter((s): s is BadgeStatus => s !== undefined)
     if (!statuses.length) continue
-    if (statuses.some((s) => OPEN.has(s))) live.push(c)
+    if (statuses.some((s) => OPEN.has(s)) || stay(c)) live.push(c)
     else if (c.last < now - CARD_WINDOW_MS) continue
     else if (statuses.every((s) => FINISHED.has(s))) done.push(c)
     else live.push(c)
