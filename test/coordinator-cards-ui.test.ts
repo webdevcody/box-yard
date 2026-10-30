@@ -11,7 +11,8 @@ import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorVi
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
-import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
+import { COORDINATOR_CHAT, applyThreadEvent, threadKeys } from "../web/src/lib/threads.js"
+import type { ChatMessage, Project, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -255,9 +256,9 @@ describe("Reply in a card", () => {
     for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
   }
   const sent = (t: Task, text: string) => msg("notice", `✉️ **${t.title}** got a message from Cody: ${text}`, { taskId: t.id, projectId: t.projectId, sent: true })
-  const setBusy = (busy: boolean) =>
+  const threadEvent = (ev: UiEvent) =>
     act(async () => {
-      qc.setQueryData(keys.chatBusy, busy)
+      applyThreadEvent(qc, ev)
       await new Promise((r) => setTimeout(r, 0))
     })
 
@@ -300,7 +301,8 @@ describe("Reply in a card", () => {
     expect(card(LOGIN.id).dataset.open).toBe("true")
   })
 
-  it("asks the Coordinator about the task instead, and the question waits for its answer in the card", async () => {
+  it("asks the Coordinator in the card's own side thread, which the main chat never sees, and shows the answer there", async () => {
+    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [])
     render()
     click(head(CARDS.id))
     expect(composer(card(CARDS.id)).querySelector("textarea")!.placeholder).toBe("Reply to this task…")
@@ -308,40 +310,70 @@ describe("Reply in a card", () => {
     const box = composer(card(CARDS.id))
     expect(box.dataset.to).toBe("coordinator")
     expect(box.querySelector("textarea")!.placeholder).toBe("Ask the Coordinator about this…")
-    expect(box.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("Goes to the Coordinator, with this task as context")
+    expect(box.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("A side thread with the Coordinator about this task: it answers, it doesn't act")
     await send(card(CARDS.id), "Is it blocking anything?")
     expect(posts).toHaveLength(1)
-    expect(posts[0]!.url).toBe("/api/chat")
-    expect(posts[0]!.body).toMatchObject({ content: "Is it blocking anything?", about: [CARDS.id] })
+    expect(posts[0]!.url).toBe("/api/threads")
+    expect(posts[0]!.body).toMatchObject({ kind: "task", anchorId: CARDS.id, question: "Is it blocking anything?", projectId: null })
 
-    // It shows in the card at once, not in the Coordinator card.
+    // It shows in the card at once; the main chat doesn't get it.
     const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
-    expect(body.textContent).toContain("Is it blocking anything?")
-    expect(body.querySelector('[data-testid="sent-from"]')!.textContent).toBe("to the Coordinator")
+    expect(body.querySelector('[data-testid="card-thread-question"]')!.textContent).toBe("to the CoordinatorIs it blocking anything?")
     expect(coordinator().textContent).not.toContain("Is it blocking anything?")
+    expect(qc.getQueryData(keys.chat)).toEqual(CHAT)
     expect(body.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
-    await setBusy(false)
-    expect(body.querySelector('[data-testid="card-working"]')).toBeNull()
 
-    // The choice holds when the card closes and opens again.
+    // Its answer streams in, then lands as the thread's message.
+    const id = String(posts[0]!.body.id)
+    const thread = qc.getQueryData<SideThread[]>(threadKeys.list(COORDINATOR_CHAT))!.find((t) => t.id === id)!
+    await threadEvent({ type: "thread.delta", threadId: id, text: "Not yet" })
+    expect(body.querySelector('[data-testid="card-thread-streaming"]')!.textContent).toContain("Not yet")
+    await threadEvent({ type: "thread.message", message: { id: "thm_answer", threadId: id, role: "assistant", content: "No: **nothing** waits on it.", meta: null, createdAt: Date.now() } })
+    await threadEvent({ type: "thread", thread: { ...thread, busy: false, context: "fork", replies: 2, updatedAt: Date.now() } })
+    const answer = body.querySelector('[data-testid="card-thread-answer"]')!
+    expect(answer.textContent).toContain("Coordinator· side thread")
+    expect(answer.textContent).toContain("No: nothing waits on it.")
+    expect(body.querySelector('[data-testid="card-working"]')).toBeNull()
+    expect(body.querySelector('[data-testid="card-thread-streaming"]')).toBeNull()
+    expect(coordinator().textContent).not.toContain("waits on it")
+
+    // The choice holds when the card closes and opens again; closed, its latest line is the answer.
     click(head(CARDS.id))
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Coordinator: No: nothing waits on it.")
     click(head(CARDS.id))
     expect(composer(card(CARDS.id)).dataset.to).toBe("coordinator")
+    // A second question goes to the same thread.
+    await send(card(CARDS.id), "And the docs?")
+    expect(posts[1]!.body).toMatchObject({ kind: "task", anchorId: CARDS.id, question: "And the docs?" })
+    const again = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
+    expect([...again.querySelectorAll('[data-testid="card-thread-question"]')].map((q) => q.textContent)).toEqual([
+      "to the CoordinatorIs it blocking anything?",
+      "to the CoordinatorAnd the docs?",
+    ])
   })
 
-  it("shows a question queued mid-turn in its card, and the Timeline says what it's about", async () => {
-    qc.setQueryData(keys.chatBusy, true)
-    const queued = msg("user", "Can it wait?", { about: [CARDS.id], queued: true })
-    qc.setQueryData(keys.chat, [...CHAT, queued])
+  it("says a closed card has an answer from the Coordinator, and opening it reads it; the Timeline doesn't show it", async () => {
+    const at = Date.now()
+    const thread: SideThread = { id: "thr_cards0001", projectId: null, anchorId: CARDS.id, kind: "task", quote: CARDS.title, context: "fork", busy: false, replies: 2, unread: true, resolvedAt: null, createdAt: at - 2000, updatedAt: at }
+    qc.setQueryData(threadKeys.list(COORDINATOR_CHAT), [thread])
+    qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), [
+      { id: "thm_q", threadId: thread.id, role: "user", content: "Can it wait?", meta: null, createdAt: at - 2000 },
+      { id: "thm_a", threadId: thread.id, role: "assistant", content: "Yes, till Monday.", meta: null, createdAt: at },
+    ])
     render()
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')!.textContent).toBe("1 new")
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Coordinator: Yes, till Monday.")
     click(head(CARDS.id))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts).toEqual([{ url: `/api/threads/${thread.id}/seen`, body: {} }])
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
     const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
-    expect(body.textContent).toContain("Can it wait?")
-    expect(body.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
-    expect(coordinator().textContent).not.toContain("Can it wait?")
+    // In time order among the card's updates: after the pull request.
+    const order = [...body.querySelectorAll('[data-testid="update-chip"], [data-testid="card-thread-question"], [data-testid="card-thread-answer"]')]
+    expect(order.map((e) => (e as HTMLElement).dataset.testid)).toEqual(["update-chip", "card-thread-question", "card-thread-answer"])
     click(viewButton("Timeline"))
-    const label = [...host.querySelectorAll('[data-testid="sent-from"]')].map((l) => l.textContent)
-    expect(label).toEqual(["aboutCoordinator cards·Open card ›"])
+    expect(host.textContent).not.toContain("Can it wait?")
+    expect(host.textContent).not.toContain("till Monday")
   })
 
   it("keeps a card that's open where it is when its task finishes; closed, it folds at the next update", async () => {
@@ -401,6 +433,11 @@ describe("Reply in a card", () => {
     expect(own.closest('[data-testid="batch-task"]')).toBeNull()
     expect(own.dataset.to).toBe("coordinator")
     await send(own, "How far along is the batch?")
-    expect(posts[1]!.body).toMatchObject({ content: "How far along is the batch?", about: [CAMP.id, HOLLOW.id, DAM.id] })
+    expect(posts[1]).toMatchObject({ url: "/api/threads", body: { kind: "task", anchorId: `batch:${B}`, question: "How far along is the batch?" } })
+    expect(own.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("A side thread with the Coordinator: it answers, it doesn't act")
+    // The batch's question shows under its tasks; the tasks' own threads are theirs.
+    const question = batch.querySelector('[data-testid="card-thread-question"]')!
+    expect(question.textContent).toContain("How far along is the batch?")
+    expect(question.closest('[data-testid="batch-task"]')).toBeNull()
   })
 })

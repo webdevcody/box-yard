@@ -139,30 +139,23 @@ describe("chatCards", () => {
     expect(batchesOf(known()).has(PAIR)).toBe(false)
   })
 
-  it("keeps what Cody sends from a card in it: his message to the task, and his question to the Coordinator with its answer", () => {
+  it("keeps what Cody sends to a task from its card in it, and the agent's answer", () => {
     const ask = user("Fix login")
     const call = tool("create_task", { project: "box-yard", title: "Fix login" }, { resultId: LOGIN.id })
     const answer = reply("Started.")
     // "This task": a sent notice, a message of its own (not a chip), in the task's card.
     const sent = msg("notice", "✉️ **Fix login** got a message from Cody: use the new form", { taskId: LOGIN.id, projectId: YARD.id, sent: true })
     const turn = notice(LOGIN, "💬 **Fix login** finished its turn: switched to the new form")
-    // "Coordinator": the question and the reply to it, even one that read updates about another task.
-    const question = msg("user", "is it blocking anything?", { about: [LOGIN.id] })
-    const other = notice(CARDS, "✅ **Coordinator cards** is done")
-    const call2 = tool("get_task", { task: LOGIN.id })
-    const answer2 = reply("No, nothing waits on it.")
+    // His questions to the Coordinator from a card are its side thread, not the chat: what's here is the main chat's.
     const later = user("thanks")
-    const answer3 = reply("Any time.")
-    const rows = coordinatorRows([ask, call, answer, sent, turn, question, other, call2, answer2, later, answer3])
+    const answer2 = reply("Any time.")
+    const rows = coordinatorRows([ask, call, answer, sent, turn, later, answer2])
     expect(rows.find((r) => r.id === sent.id)?.type).toBe("message")
     const m = chatCards(rows, index, known())
     const card = cardOf(m.cards, LOGIN.id)
-    expect(ids(card.entries)).toEqual([sent.id, turn.id, question.id, answer2.id])
-    expect(card.entries.map((e) => e.type)).toEqual(["message", "update", "message", "message"])
-    expect(ids(m.coordinator)).toEqual([ask.id, answer.id, later.id, answer3.id])
-    // A question about a task that's gone stays in the Coordinator card.
-    const lost = chatCards(rows, index, known([CARDS]))
-    expect(ids(lost.coordinator)).toEqual([ask.id, answer.id, question.id, answer2.id, later.id, answer3.id])
+    expect(ids(card.entries)).toEqual([sent.id, turn.id])
+    expect(card.entries.map((e) => e.type)).toEqual(["message", "update"])
+    expect(ids(m.coordinator)).toEqual([ask.id, answer.id, later.id, answer2.id])
   })
 })
 
@@ -260,13 +253,5 @@ describe("filterByTasks", () => {
     const prov = chatProvenance(all, index)
     expect(ids(filterByTasks(all, prov, [LOGIN.id]))).toEqual([ask.id, call.id, answer.id, own.id, waiting.id])
     expect(filterByTasks(all, prov, null)).toBe(all)
-  })
-
-  it("counts a question asked from a card as about its task and project", () => {
-    const question = msg("user", "is it blocking anything?", { about: [LOGIN.id] })
-    const answer = reply("No.")
-    const prov = chatProvenance([question, answer], index)
-    expect([...prov.tasks.get(answer.id)!]).toEqual([LOGIN.id])
-    expect([...prov.projects.get(question.id)!]).toEqual([YARD.id])
   })
 })
