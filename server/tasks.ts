@@ -28,7 +28,7 @@ import {
   type DirectoryEntry,
 } from "./prompts.js"
 import type { Uploads, StoredUpload } from "./uploads.js"
-import { BOX_SIZES, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type BoxFanout, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
+import { BOX_SIZES, DEFAULT_MODEL, RESTING_STATUSES, SIZE_DEFAULTS, isFinalPrState, type Attachment, type BoxContents, type BoxInfo, type BoxOperation, type BoxSize, type CaptainMessage, type Effort, type PrState, type PreviewLink, type Project, type PushState, type QueuedMessage, type QueuedSender, type SendNowDelivery, type Task, type TaskStatus, type WaitFix, type WaitFor, type BoxFanout, type CloudBox, type CloudSpend, type CloudStatus } from "../shared/types.js"
 import { agentRefs, boxBlockReason, limitBlock, localBlockReason, named, type BoxAgent } from "./agentLimits.js"
 import { autocompactFlag, noteBudgetOf, type SettingsStore } from "./settings.js"
 import { budgetNotes } from "../shared/notes.js"
@@ -60,7 +60,7 @@ import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dock
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
 import { CLAUDE_CREDENTIAL_VARS, CODEX_CREDENTIAL_VARS, GLOBAL_CREDENTIALS, codexTurnLogin, credentialSet, identityHomeEnv, ownGithubToken, turnEnv, type CodexTurnLogin, type TurnEnv } from "./turnCredentials.js"
-import { AGENT_CLI_LABEL, cliForModel, codexModel, type AgentCli } from "../shared/agentCli.js"
+import { AGENT_CLI_LABEL, cliForModel, codexModel, isOpenAiModel, type AgentCli } from "../shared/agentCli.js"
 import type { Identities, TurnSigning } from "./identity/identities.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
@@ -4896,7 +4896,9 @@ export class TaskManager {
       sources,
     })
     // Codex runs OpenAI models: a Claude model from Settings, routing or the built-in default gives way to the Codex model.
-    const model = taskAgentCli(row) === "codex" ? codexModel(route.model, s.agentCodexModel) : route.model
+    // And the reverse: an OpenAI model on a Claude Code task gives way to Settings' (or the built-in) Claude model.
+    const cli = taskAgentCli(row)
+    const model = cli === "codex" ? codexModel(route.model, s.agentCodexModel) : isOpenAiModel(route.model) ? (isOpenAiModel(s.agentModel) ? DEFAULT_MODEL : s.agentModel) : route.model
     return { model, effort: route.effort, autocompact: autocompactFlag(s.agentAutoCompact, row.context_window), route }
   }
 
