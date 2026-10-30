@@ -222,6 +222,13 @@ function CloudSheet({ status: s, onClose }: { status: CloudStatus; onClose: () =
               {s.vast.capUsd > 0 ? ` of its ${perHour(s.vast.capUsd)} cap` : ""}
             </p>
           )}
+          {s.daytona && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-zinc-400 tabular-nums">
+              <Cpu className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+              Daytona: {s.daytona.pods === 1 ? "1 sandbox" : `${s.daytona.pods} sandboxes`} · {perHour(s.daytona.hourlyUsd)}
+              {s.daytona.capUsd > 0 ? ` of its ${perHour(s.daytona.capUsd)} cap` : ""}
+            </p>
+          )}
         </section>
 
         <section aria-label="Boxes">

@@ -55,6 +55,16 @@ const COPY = {
     ],
     confirm: "Terminate instance",
   },
+  terminateDaytona: {
+    title: "Terminate",
+    verb: "terminate",
+    steps: [
+      "Archives every workspace that doesn't have an up-to-date archive yet, uncommitted files included. If one can't be archived, nothing is terminated.",
+      "Deletes the sandbox at Daytona (never just stops it): its disk goes with it, so billing stops.",
+      "Its tasks start a new sandbox on their next message, restoring from the archive.",
+    ],
+    confirm: "Terminate sandbox",
+  },
   container: {
     title: "Delete",
     verb: "delete",
@@ -67,7 +77,7 @@ const COPY = {
   },
 } as const
 
-/** What the dialog acts on: a worker box from the Boxes page, a GPU pod from Settings › RunPod GPU (or a Vast.ai instance from Settings › Vast.ai GPU), or a Docker container from Settings › Docker. */
+/** What the dialog acts on: a worker box from the Boxes page, a GPU pod from Settings › RunPod GPU (or a Vast.ai instance from Settings › Vast.ai GPU, a Daytona sandbox from Settings › Daytona), or a Docker container from Settings › Docker. */
 interface Target {
   id: string
   kind: "box" | "pod" | "container"
@@ -128,7 +138,18 @@ export function BoxActionDialog({
 }) {
   const target = box ? boxTarget(box) : pod ? podTarget(pod) : containerTarget(container!)
   const removing = action === "delete"
-  const copy = removing ? (target.kind === "pod" ? (gpuBoxProvider(target.id) === "vast" ? COPY.terminateVast : COPY.terminate) : target.kind === "container" ? COPY.container : COPY.delete) : COPY.clear
+  const cloud = gpuBoxProvider(target.id)
+  const copy = removing
+    ? target.kind === "pod"
+      ? cloud === "vast"
+        ? COPY.terminateVast
+        : cloud === "daytona"
+          ? COPY.terminateDaytona
+          : COPY.terminate
+      : target.kind === "container"
+        ? COPY.container
+        : COPY.delete
+    : COPY.clear
   const contents = useBoxContents(target.id)
   const clear = useClearBox()
   const del = useDeleteBox()
