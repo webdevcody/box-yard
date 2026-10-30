@@ -26,3 +26,24 @@ export function agentCaptainLabel(meta: Record<string, unknown> | null | undefin
   const title = typeof meta?.taskTitle === "string" && meta.taskTitle.trim() ? meta.taskTitle : null
   return title ? `From task "${title}" (${id})` : `From task ${id}`
 }
+
+/** A task's queued message as Cody's forward hands it to the Captain: enough to name it in the queue tools. */
+export interface ForwardedQueueItem {
+  id: string
+  sender: string
+  text: string
+}
+
+/** Cody's message sent from a task's chat to its project's Captain (POST /api/tasks/:id/captain), from its meta. */
+export interface ForwardedFromTask {
+  taskId: string
+  taskTitle: string
+  /** The task's queued messages when Cody sent it, oldest first. */
+  queue: ForwardedQueueItem[]
+}
+
+export function forwardedFromTask(meta: Record<string, unknown> | null | undefined): ForwardedFromTask | null {
+  const f = meta?.viaTask as Partial<ForwardedFromTask> | undefined
+  if (!f || typeof f.taskId !== "string") return null
+  return { taskId: f.taskId, taskTitle: typeof f.taskTitle === "string" ? f.taskTitle : f.taskId, queue: Array.isArray(f.queue) ? f.queue : [] }
+}
