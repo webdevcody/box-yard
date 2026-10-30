@@ -227,11 +227,16 @@ export function redisEnabled(c: Config = config) {
 
 /** Problems that stop Box Yard from doing real work, shown in the UI. Pass the credentials in effect (env or saved). */
 /** `claudeLogin`: this computer's own `claude` is signed in, and agents run here, so no token is needed. */
-export function configProblems(c: Config = config, opts: { claudeLogin?: boolean } = {}): string[] {
+/** `codexLogin`: this computer's own `codex login` is there, so a Coordinator on Codex needs no key either. */
+export function configProblems(c: Config = config, opts: { claudeLogin?: boolean; codexLogin?: boolean; coordinatorCli?: "claude" | "codex" } = {}): string[] {
   const problems: string[] = []
   if (c.mock || /fake-claude/.test(c.claudeBin)) return problems
-  if (!c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
+  // The Coordinator needs a sign-in for the CLI it runs on; agents on the other one say so when they start.
+  if ((opts.coordinatorCli ?? "claude") === "claude" && !c.claudeOauthToken && !c.anthropicApiKey && !opts.claudeLogin) {
     problems.push("Claude isn't signed in: add a subscription token (`claude setup-token`) or an Anthropic API key in Settings › Credentials, or set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.")
+  }
+  if (opts.coordinatorCli === "codex" && !c.codexAuthJson && !c.codexApiKey && !opts.codexLogin) {
+    problems.push("The Coordinator runs on Codex, but Codex isn't signed in: run `codex login` on this computer, or add a Codex login in Settings › Credentials (CODEX_AUTH_JSON or CODEX_API_KEY).")
   }
   if (c.provider === "upstash" && !c.upstashBoxApiKey) {
     problems.push("BOX_PROVIDER is upstash but there's no Upstash Box API key: add one in Settings › Credentials, or set UPSTASH_BOX_API_KEY.")

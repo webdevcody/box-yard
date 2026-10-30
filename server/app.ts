@@ -43,6 +43,7 @@ import { DEFAULT_OWNER_NAME } from "../shared/owner.js"
 import { NOTE_BUDGET_LIMITS } from "../shared/notes.js"
 import { RUNNERS, SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import { AGENT_CLIS } from "../shared/agentCli.js"
+import { hasOwnCodexLogin } from "./chatAgent.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { RunPodService } from "./runpod/service.js"
 import { Identities } from "./identity/identities.js"
@@ -475,11 +476,13 @@ export function createBoxYard(
   const publicUrl = () => c.publicUrl
 
   let claudeVersion: string | null | undefined
-  const checkClaude = () =>
+  let codexVersion: string | null | undefined
+  const versionOf = (cmd: string) =>
     new Promise<string | null>((resolve) => {
-      const [bin, ...pre] = c.claudeBin.split(" ")
+      const [bin, ...pre] = cmd.split(" ")
       execFile(bin!, [...pre, "--version"], { timeout: 15_000 }, (err, stdout) => resolve(err ? null : stdout.trim()))
     })
+  const checkClaude = () => versionOf(c.claudeBin)
 
   const app = express()
   app.disable("x-powered-by")
@@ -592,8 +595,13 @@ export function createBoxYard(
   api.get("/health", async (_req, res) => {
     if (claudeVersion === undefined) claudeVersion = await checkClaude()
     // A "This computer" setup may be signed in with the computer's own claude login instead of a token.
-    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true })
-    if (!claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    const coordinatorCli = settings.get().orchestratorCli
+    const problems = configProblems({ ...c, ...settings.credentials.values() }, { claudeLogin: setup.localCheck()?.claudeLogin === true, codexLogin: hasOwnCodexLogin(), coordinatorCli })
+    if (coordinatorCli === "claude" && !claudeVersion) problems.push(`The claude CLI (${c.claudeBin}) was not found for the Coordinator. Install it: npm i -g @anthropic-ai/claude-code`)
+    if (coordinatorCli === "codex") {
+      if (codexVersion === undefined) codexVersion = await versionOf(c.codexBin)
+      if (!codexVersion) problems.push(`The Coordinator runs on Codex, but the codex CLI (${c.codexBin}) was not found. Install it: npm i -g @openai/codex`)
+    }
     if (tasks.boxError) problems.push(tasks.boxError)
     const body: Health = {
       ok: problems.length === 0,

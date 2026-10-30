@@ -39,6 +39,11 @@ export function serverCodexHome(c: Pick<Config, "dataDir" | "mock" | "codexBin">
   return { home: process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex"), own: false }
 }
 
+/** This computer's own `codex login` is there (a login file in its Codex home). */
+export function hasOwnCodexLogin(): boolean {
+  return fs.existsSync(path.join(process.env.CODEX_HOME?.trim() || path.join(os.homedir(), ".codex"), "auth.json"))
+}
+
 /** A Codex run for a chat on this server: a manager (no shell), Box Yard's HTTP tools, the login in effect. */
 export function codexChatLaunch(opts: {
   c: Pick<Config, "codexBin" | "dataDir" | "mock">
