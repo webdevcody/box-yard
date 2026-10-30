@@ -370,7 +370,7 @@ export function compactionsPrompt(dir: string): string {
   const recent = files.slice(-5).reverse()
   return [
     ``,
-    `Compaction history: whenever your context is compacted, Box Yard first saves a markdown summary of what mattered (Cody's decisions and preferences, projects and repos, ongoing work, open threads) as one file in ${dir}/, and gives it back to you right after the compaction.`,
+    `Compaction history: whenever your context is compacted, Box Yard first saves a markdown summary of what mattered (Cody's decisions and preferences, projects and repos, ongoing work, open threads) as one file in ${dir}/, and the summary the compaction leaves you carries it.`,
     `File names are UTC timestamps, so they are in chronological order (oldest first). When you need history you no longer have in context (earlier decisions, who asked for what, how a project started), call search_history with a few keywords first: it searches these summaries and the chat transcripts. Then open a hit with read_compaction, or Read the files, newest first, by their full path. Don't read them otherwise.`,
     files.length
       ? `There ${files.length === 1 ? "is 1 file" : `are ${files.length} files`}. The newest: ${recent.map((f) => `${dir}/${f}`).join(", ")}.`
