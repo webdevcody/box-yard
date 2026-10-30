@@ -266,7 +266,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           </div>
         </div>
         {/* Its header as tall as the chat's: 3.5rem in Zen and the drawer, the docked header's 47px (py-3, a 22px row, the border). */}
-        <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+        <InRepo mentions>
+          <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+        </InRepo>
       </section>
     </ThreadChatProvider>
   )
