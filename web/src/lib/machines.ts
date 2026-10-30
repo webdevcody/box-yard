@@ -100,20 +100,25 @@ export function hardwareLine(t: MachineTest): string {
     .join(" · ")
 }
 
-const version = (t: MachineTool) => t.version?.replace(/\s*\(Claude Code.*\)$/, "").replace(/^v(?=\d)/, "") ?? "found"
+/** "2.43.0" from "git version 2.43.0", "codex-cli 0.40.0", "v20.11.1" or "2.0.14 (Claude Code)". */
+const version = (name: string, t: MachineTool) =>
+  t.version
+    ?.replace(new RegExp(`^${name}(-cli)?( version)? `), "")
+    .replace(/\s*\(Claude Code.*\)$/, "")
+    .replace(/^v(?=\d)/, "") ?? "found"
 
 /** Each tool the test looked for, found or not, with the claude login. */
 export function toolList(t: MachineTest): { name: string; text: string; ok: boolean | null }[] {
   const { git, node, claude, codex } = t.tools
   return [
-    { name: "git", text: git.found ? version(git) : "missing", ok: git.found },
-    { name: "node", text: node.found ? version(node) : "missing", ok: node.found },
+    { name: "git", text: git.found ? version("git", git) : "missing", ok: git.found },
+    { name: "node", text: node.found ? version("node", node) : "missing", ok: node.found },
     {
       name: "claude",
-      text: !claude.found ? "missing" : `${version(claude)}${t.claudeLogin === true ? ", logged in" : t.claudeLogin === false ? ", not logged in" : ""}`,
+      text: !claude.found ? "missing" : `${version("claude", claude)}${t.claudeLogin === true ? ", logged in" : t.claudeLogin === false ? ", not logged in" : ""}`,
       ok: !claude.found ? false : t.claudeLogin === false ? null : true,
     },
     // Codex is only detected: Box Yard runs Claude Code.
-    { name: "codex", text: codex.found ? `${version(codex)} (not used)` : "not installed", ok: null },
+    { name: "codex", text: codex.found ? `${version("codex", codex)} (not used)` : "not installed", ok: null },
   ]
 }
