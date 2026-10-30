@@ -43,7 +43,7 @@ import {
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
-import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
+import { CHAT_ALLOWED_TOOLS, CHAT_TOOLS, attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
@@ -1057,9 +1057,9 @@ class Captain {
       "--mcp-config",
       this.mcpConfigPath,
       "--tools",
-      "Read,WebSearch,WebFetch",
+      CHAT_TOOLS,
       // Only a turn may use them: with no allow rules, dontAsk denies every call.
-      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")] : []),
+      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", ...CHAT_ALLOWED_TOOLS, ...this.readRules()].join(",")] : []),
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",

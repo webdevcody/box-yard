@@ -35,7 +35,7 @@ import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
-import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
+import { CHAT_ALLOWED_TOOLS, CHAT_TOOLS, attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 
@@ -782,10 +782,10 @@ export class Orchestrator {
       "--mcp-config",
       this.mcpConfigPath,
       "--tools",
-      "Read,WebSearch,WebFetch",
+      CHAT_TOOLS,
       // Only a turn may use them; Read is for the compaction log and uploads (and only those folders). With no
       // allow rules, dontAsk denies every call, so the summary pass can only write text.
-      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", "WebSearch", "WebFetch", ...this.readRules()].join(",")] : []),
+      ...(kind === "turn" ? ["--allowedTools", ["mcp__boxyard", ...CHAT_ALLOWED_TOOLS, ...this.readRules()].join(",")] : []),
       "--permission-mode",
       "dontAsk",
       "--append-system-prompt",

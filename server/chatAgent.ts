@@ -11,6 +11,15 @@ import { codexContext, codexExecArgs, CodexStream, seedCodexAuth } from "./codex
 import { withOwner } from "../shared/owner.js"
 import type { AgentCli } from "../shared/agentCli.js"
 
+/**
+ * Claude Code's built-in tools on every Coordinator, Captain and side-thread run (--tools): the same on each kind of
+ * run, so summary passes and side-thread forks reuse the chat's prompt cache. ToolSearch turns on the CLI's tool
+ * search, which keeps every Box Yard tool but the caller's CORE_TOOLS (server/mcp.ts) out of context until it's loaded.
+ */
+export const CHAT_TOOLS = "Read,WebSearch,WebFetch,ToolSearch"
+/** The built-in tools a turn may run (--allowedTools), next to its MCP tools and read rules. */
+export const CHAT_ALLOWED_TOOLS = ["WebSearch", "WebFetch", "ToolSearch"]
+
 /** The env var a Codex chat reads its Box Yard MCP token from (codex's bearer_token_env_var). */
 export const MCP_TOKEN_ENV = "BOXYARD_MCP_TOKEN"
 

@@ -354,7 +354,7 @@ describe("orchestrator usage, compaction and the durable log", () => {
       for (const flag of ["--mcp-config", "--tools", "--permission-mode", "--append-system-prompt", "--model", "--effort"]) expect(argOf(pass, flag), flag).toBe(argOf(turnArgs, flag))
       expect(pass).not.toContain("--allowedTools")
     }
-    expect(argOf(turnArgs, "--tools")).toBe("Read,WebSearch,WebFetch")
+    expect(argOf(turnArgs, "--tools")).toBe("Read,WebSearch,WebFetch,ToolSearch")
     const state = await call<OrchestratorState>(r, "GET", "/api/orchestrator")
     expect(state.usage.tokens).toBe(2000)
     expect(state.lastCompaction).toMatchObject({ trigger: "button", tokensAfter: 2000 })

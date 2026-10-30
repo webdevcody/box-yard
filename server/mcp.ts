@@ -225,6 +225,25 @@ function nameOwnerInTools(server: McpServer, ownerName: string | undefined) {
 }
 
 /**
+ * The tools a Coordinator or Captain loads up front. The CLI's tool search (ToolSearch in CHAT_TOOLS) defers every
+ * other one: the model sees its name and loads its schema when it needs it, so the rarely used tools' descriptions
+ * stay out of every turn's context. A new tool is deferred unless it's added here.
+ */
+export const CORE_TOOLS: Record<McpCaller["kind"], ReadonlySet<string>> = {
+  coordinator: new Set(["send_to_captain", "ask_captain", "list_projects", "list_tasks", "get_task", "send_to_task", "wait_for_tasks", "list_inbox", "search_history"]),
+  captain: new Set(["create_task", "create_tasks", "send_to_task", "reply_to_agent", "list_tasks", "get_task", "wait_for_tasks", "search_history"]),
+}
+/** The tool `_meta` key that keeps a tool out of the CLI's tool search (Claude Code 2.1+). */
+export const ALWAYS_LOAD = "anthropic/alwaysLoad"
+
+/** Mark the caller's core tools always loaded, so the CLI defers only the rest. */
+function alwaysLoadCore(server: McpServer, core: ReadonlySet<string>) {
+  const register = server.registerTool.bind(server) as (name: string, config: Record<string, unknown>, cb: unknown) => RegisteredTool
+  server.registerTool = ((name: string, config: Record<string, unknown>, cb: unknown) =>
+    register(name, core.has(name) ? { ...config, _meta: { ...(config._meta as Record<string, unknown> | undefined), [ALWAYS_LOAD]: true } } : config, cb)) as typeof server.registerTool
+}
+
+/**
  * A side thread's tools: every tool stays listed with its description (so the thread's fork keeps the chat's prompt
  * cache), but only THREAD_TOOLS run; the rest answer READ_ONLY_REFUSAL. The CLI's allowlist refuses them first.
  */
@@ -271,6 +290,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   const ownerName = deps.settings?.get().ownerName
   const owner = (text: string) => withOwner(text, ownerName)
   nameOwnerInTools(server, ownerName)
+  alwaysLoadCore(server, CORE_TOOLS[caller.kind])
   if (caller.readOnly) readOnlyTools(server)
   const scopeId = caller.kind === "captain" ? caller.projectId : null
   const ownProject = (): Project => {
