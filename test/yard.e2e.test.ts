@@ -291,6 +291,10 @@ describe("box yard end to end", () => {
     const chat = await call<ChatMessage[]>(r, "GET", "/api/chat")
     expect(chat.filter((m) => m.role === "tool").map((m) => m.content)).toEqual(expect.arrayContaining(["create_project", "create_task"]))
     expect(chat.some((m) => m.role === "assistant" && m.content.includes("Started task"))).toBe(true)
+    // Each turn's tool calls and replies carry when it started, so the chat can tell turns apart (lib/chatUpdates.ts).
+    const turnOf = (name: string) => chat.find((m) => m.role === "tool" && m.content === name)?.meta?.turn
+    expect(chat.filter((m) => m.role === "tool" || m.role === "assistant").every((m) => typeof m.meta?.turn === "number")).toBe(true)
+    expect(turnOf("create_project")).not.toBe(turnOf("create_task"))
     const reply = [...chat].reverse().find((m) => m.role === "assistant")
     expect(reply?.content).not.toContain("boxyard-next-steps")
     expect(reply?.meta?.[NEXT_STEPS_META_KEY]).toEqual(["Check the latest yard status", "Start a related task", "Summarize open decisions"])

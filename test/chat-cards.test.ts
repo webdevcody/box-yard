@@ -82,16 +82,25 @@ describe("chatCards", () => {
     expect(model([ask, same, call2, answer]).cards.map((c) => c.key)).toEqual([LOGIN.id, CARDS.id])
   })
 
-  it("gives a reply the Coordinator wrote on its own to the cards of the updates it read", () => {
+  it("gives a reply the Coordinator wrote on its own to the cards of the tasks it names", () => {
     // A hook firing is the Coordinator's to read; a Captain's report is about the tasks it names.
     const hook = notice(LOGIN, "🪝 **Fix login** hook fired: Review")
     const report = captain(YARD, `**Coordinator cards** opened PR #9 (${CARDS.id}).`)
-    const own = reply("Login has a review queued, and the cards PR is up.")
+    const own = reply(`[Fix login](/tasks/${LOGIN.id}) has a review queued, and the **Coordinator cards** PR is up.`)
     const m = model([hook, report, own])
     expect(ids(cardOf(m.cards, LOGIN.id).entries)).toEqual([hook.id, own.id])
     expect(ids(cardOf(m.cards, CARDS.id).entries)).toEqual([report.id, own.id])
     expect(cardOf(m.cards, LOGIN.id).entries[1]!.tasks).toEqual([LOGIN.id, CARDS.id])
     expect(m.coordinator).toEqual([])
+
+    // It read both, but names only one: only that card gets it. Naming none, it's the Coordinator card's.
+    const one = model([notice(LOGIN, "🪝 **Fix login** hook fired: Review"), captain(YARD, `**Coordinator cards** opened PR #9.`), reply(`**Fix login** has a review queued.`)])
+    expect(cardOf(one.cards, LOGIN.id).entries.map((e) => e.type)).toEqual(["update", "message"])
+    expect(cardOf(one.cards, CARDS.id).entries.map((e) => e.type)).toEqual(["update"])
+    const none = reply("Login has a review queued, and the cards PR is up.")
+    const vague = model([notice(LOGIN, "🪝 **Fix login** hook fired: Review"), none])
+    expect(cardOf(vague.cards, LOGIN.id).entries.map((e) => e.type)).toEqual(["update"])
+    expect(ids(vague.coordinator)).toEqual([none.id])
 
     // The same updates read by a turn Cody started: the reply answers him, so it stays with his message.
     const hook2 = notice(LOGIN, "🪝 **Fix login** hook fired: Review")
@@ -100,6 +109,43 @@ describe("chatCards", () => {
     const asked = model([hook2, ask, answer])
     expect(ids(asked.coordinator)).toEqual([ask.id, answer.id])
     expect(ids(cardOf(asked.cards, LOGIN.id).entries)).toEqual([hook2.id])
+  })
+
+  it("never puts a reply linking only survive-the-night tasks on a box-yard task's card", () => {
+    const STN = project("prj_stn00001", "survive-the-night")
+    const MARK = task("task_mark0001", YARD.id, "Cards view: mark done, bulk clear idle tasks")
+    const GLACIER = task("task_glacier1", STN.id, "Map 4 #520: Glacier Lodge")
+    const CHECK = task("task_checkd01", STN.id, "Map 4 Checkpoint D: Wave 3 places review")
+    const tasks = [MARK, GLACIER, CHECK]
+    const stnIndex = buildEntityIndex({ projects: [YARD, STN], tasks })
+    const cards = (messages: ChatMessage[]) => chatCards(coordinatorRows(messages), stnIndex, known(tasks))
+    const merge = notice(MARK, "🪝 **Cards view: mark done, bulk clear idle tasks** hook fired: box-yard: auto-merge ready PRs")
+    const report = captain(STN, `[Map 4 #520: Glacier Lodge](/tasks/${GLACIER.id}) merged; Checkpoint D is reviewing (${CHECK.id}).`)
+    const status = (text: string) => reply(`${text} [Glacier Lodge](/tasks/${GLACIER.id}) has merged (#520, #523); [Checkpoint D](/tasks/${CHECK.id}) is next.`)
+    const onMark = (m: ReturnType<typeof cards>) => cardOf(m.cards, MARK.id)?.entries.filter((e) => e.type === "message") ?? []
+
+    // One turn read both projects' updates and replied about survive-the-night only.
+    const mixed = cards([merge, report, status("Map 4:")])
+    expect(onMark(mixed)).toEqual([])
+    expect(cardOf(mixed.cards, GLACIER.id).entries.map((e) => e.type)).toEqual(["update", "message"])
+
+    // A turn handled the merge with tool calls and said nothing ("(no update)" isn't stored); the next turn's reply is
+    // about Map 4. Stamped turns: the reply covers only its own turn's updates. Unstamped (older rows): still not on the card.
+    for (const stamped of [true, false]) {
+      const t1 = stamped ? { turn: 1 } : {}
+      const t2 = stamped ? { turn: 2 } : {}
+      const merge2 = notice(MARK, "🪝 **Cards view: mark done, bulk clear idle tasks** hook fired: box-yard: auto-merge ready PRs")
+      const silent = tool("Bash", { command: "gh pr merge 198 --squash" }, t1)
+      const report2 = captain(STN, `Glacier Lodge merged (${GLACIER.id}).`)
+      const look = tool("list_tasks", { project: "survive-the-night" }, t2)
+      const answer = { ...status("Map 4 status:"), meta: stamped ? t2 : null }
+      const rows = coordinatorRows([merge2, silent, report2, look, answer])
+      const sources = rows.find((r) => r.type === "message" && r.id === answer.id)
+      if (stamped) expect(sources?.type === "message" && sources.sources?.map((s) => s.id)).toEqual([report2.id])
+      const m = cards([merge2, silent, report2, look, answer])
+      expect(onMark(m)).toEqual([])
+      expect(cardOf(m.cards, GLACIER.id).entries.map((e) => e.id)).toEqual([report2.id, answer.id])
+    }
   })
 
   it("keeps a Captain's report about no task, and notices about none, in the Coordinator card", () => {
