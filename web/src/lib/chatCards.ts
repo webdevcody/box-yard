@@ -47,7 +47,7 @@ export interface ChatCard {
   /** When its newest entry came in (`first` while it has none). */
   last: number
   /** The message that started it (Cody's, or a schedule's or hook's prompt), when the chat first named it in that turn. */
-  originId: string | null
+  origin: ChatMessage | null
 }
 
 export interface CardsModel {
@@ -114,13 +114,13 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
   const placed: CardEntry[] = []
   const coordinator: CardEntry[] = []
   /** When the chat first named each task, and the message that started it. */
-  const named = new Map<string, { at: number; origin: string | null }>()
+  const named = new Map<string, { at: number; origin: ChatMessage | null }>()
   const started = new Set<string>()
   const items = new Map<string, UpdateItem>()
   /** The newest user message since the last reply: a reply after one answers it. */
-  let asked: string | null = null
+  let asked: ChatMessage | null = null
 
-  const name = (m: ChatMessage, origin: string | null) => {
+  const name = (m: ChatMessage, origin: ChatMessage | null) => {
     for (const t of messageRefs(m, index).tasks) if (!named.has(t)) named.set(t, { at: m.createdAt, origin })
   }
   const place = (entry: EntryBody, about: readonly string[]) => {
@@ -159,7 +159,7 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
         place(entry, noticeTasks(m, index))
         continue
       }
-      if (m.role === "user") asked = m.id
+      if (m.role === "user") asked = m
       name(m, asked)
       if (m.role === "tool") {
         for (const t of startedBy(m, index)) started.add(t)
@@ -188,15 +188,15 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
       const taskIds = batchId ? batches.get(batchId)! : [id]
       // The member the chat named first places the card and says where it came from.
       let first = Infinity
-      let originId: string | null = null
+      let origin: ChatMessage | null = null
       for (const t of taskIds) {
         const n = named.get(t)
         if (n && n.at < first) {
           first = n.at
-          originId = n.origin
+          origin = n.origin
         }
       }
-      cards.set(key, (c = { key, taskIds, batchId, entries: [], first, last: first, originId }))
+      cards.set(key, (c = { key, taskIds, batchId, entries: [], first, last: first, origin }))
     }
     return c
   }
@@ -244,7 +244,7 @@ export function stableCards(prev: CardsModel | null, next: CardsModel): CardsMod
   const cards = next.cards.map((c) => {
     const kept = keep(c.entries)
     const p = byKey.get(c.key)
-    if (p && p.first === c.first && p.last === c.last && p.originId === c.originId && p.batchId === c.batchId && sameList(p.taskIds, c.taskIds) && sameList(p.entries, kept)) return p
+    if (p && p.first === c.first && p.last === c.last && p.origin === c.origin && p.batchId === c.batchId && sameList(p.taskIds, c.taskIds) && sameList(p.entries, kept)) return p
     return { ...c, entries: kept }
   })
   const coordinator = keep(next.coordinator)

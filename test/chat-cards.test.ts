@@ -67,14 +67,14 @@ describe("chatCards", () => {
     const later = notice(LOGIN, "✅ **Fix login** is done")
     const m = model([ask, call, call2, answer, notice(CARDS, "▶️ **Coordinator cards** started"), later])
     expect(m.cards.map((c) => c.key)).toEqual([LOGIN.id, CARDS.id])
-    expect(m.cards.map((c) => c.originId)).toEqual([ask.id, ask.id])
+    expect(m.cards.map((c) => c.origin?.id)).toEqual([ask.id, ask.id])
     expect(cardOf(m.cards, LOGIN.id).first).toBe(call.createdAt)
     expect(cardOf(m.cards, LOGIN.id).last).toBe(later.createdAt)
     // A card the Coordinator just started has no updates yet, but it's there.
     const fresh = model([ask, call])
-    expect(fresh.cards.map((c) => [c.key, c.entries.length, c.originId])).toEqual([[LOGIN.id, 0, ask.id]])
+    expect(fresh.cards.map((c) => [c.key, c.entries.length, c.origin])).toEqual([[LOGIN.id, 0, ask]])
     // A task first named by a notice came from no message here.
-    expect(model([notice(LOGIN, "❓ **Fix login** needs input: which page?")]).cards[0]!.originId).toBeNull()
+    expect(model([notice(LOGIN, "❓ **Fix login** needs input: which page?")]).cards[0]!.origin).toBeNull()
   })
 
   it("gives a reply the Coordinator wrote on its own to the cards of the updates it read", () => {
@@ -128,7 +128,7 @@ describe("chatCards", () => {
     // In the order they were made: one call shares a timestamp, so by title.
     expect(batch.taskIds).toEqual([CAMP.id, HOLLOW.id, DAM.id])
     expect(batch.batchId).toBe(B)
-    expect(batch.originId).toBe(ask.id)
+    expect(batch.origin).toBe(ask)
     expect(ids(batch.entries)).toEqual([q.id, pr.id, report.id])
     expect(batch.entries[2]!.tasks).toEqual([HOLLOW.id, DAM.id])
     expect(batchesOf(known()).get(B)).toEqual([CAMP.id, HOLLOW.id, DAM.id])
@@ -156,7 +156,7 @@ describe("stableCards", () => {
 
 describe("arrangeCards", () => {
   const now = 10 * CARD_WINDOW_MS
-  const card = (key: string, taskIds: string[], last: number): ChatCard => ({ key, taskIds, batchId: null, entries: [], first: 0, last, originId: null })
+  const card = (key: string, taskIds: string[], last: number): ChatCard => ({ key, taskIds, batchId: null, entries: [], first: 0, last, origin: null })
   const statuses: Record<string, BadgeStatus> = {}
   const projects: Record<string, string> = {}
   const arrange = (cards: ChatCard[], filter: string | null = null) => {
