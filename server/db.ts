@@ -923,6 +923,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN agent_cli TEXT;
   `,
   `
+  -- Which GPU cloud a "Runs on: GPU" project's boxes come from (shared/gpu.ts): 'runpod' or 'vast'. NULL follows
+  -- Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that's on).
+  ALTER TABLE projects ADD COLUMN gpu_provider TEXT;
+  `,
+  `
   -- SSH machines (shared/machines.ts, docs/machines.md): computers of the owner's that agents run on over SSH. The
   -- key is a reference (file:~/.ssh/<key>, agent, agent:<fingerprint>, default), never the key itself.
   CREATE TABLE machines (

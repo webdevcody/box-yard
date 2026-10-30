@@ -7,6 +7,7 @@ import { LOCAL_BOX_ID } from "../../shared/runner.js"
 import { isDockerBox } from "../../shared/docker.js"
 import { isGpuBox } from "../../shared/runpod.js"
 import { isMachineBox } from "../../shared/machines.js"
+import { gpuBoxProvider } from "../../shared/gpu.js"
 import type { BoxHealth, BoxProvider, BoxSnapshotInfo, BoxUsageProbe, ExecResult } from "./types.js"
 import { TURN_SH } from "../turnProcess.js"
 
@@ -271,6 +272,8 @@ export class LocalRunnerRouter implements BoxProvider {
     readonly gpu: BoxProvider | null = null,
     /** Docker containers on this computer (`docker-<projectId>`, shared/docker.ts). */
     readonly docker: BoxProvider | null = null,
+    /** Vast.ai GPU instances (`vastai-<projectId>[-<n>]`, shared/gpu.ts), when set up. */
+    readonly vast: BoxProvider | null = null,
     /** Cody's SSH machines (`ssh-<machineId>`, shared/machines.ts). */
     readonly machines: BoxProvider | null = null,
   ) {
@@ -285,6 +288,10 @@ export class LocalRunnerRouter implements BoxProvider {
 
   of(boxId: string): BoxProvider {
     if (boxId === LOCAL_BOX_ID) return this.local
+    if (gpuBoxProvider(boxId) === "vast") {
+      if (!this.vast) throw new Error("Vast.ai GPU isn't set up: add VAST_API_KEY in Settings › Credentials")
+      return this.vast
+    }
     if (isGpuBox(boxId)) {
       if (!this.gpu) throw new Error("RunPod GPU isn't set up: add RUNPOD_API_KEY in Settings › Credentials")
       return this.gpu

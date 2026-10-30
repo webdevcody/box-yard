@@ -15,6 +15,7 @@ import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
+import type { GpuProvider } from "../shared/gpu.js"
 import { DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY } from "../shared/docker.js"
 import type { AgentCli } from "../shared/agentCli.js"
 
@@ -118,9 +119,10 @@ export class Setup {
    * BOX_PROVIDER=local); "docker" needs Docker running and a Claude key (a container can't use this computer's
    * login). Mock mode needs none. Never a reason to run it somewhere else instead. `claudeKey` says whether the task's
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
-   * whether Settings › Credentials has one.
+   * whether Settings › Credentials has one. "gpu" needs the key of `gpuCloud` (the project's GPU cloud), or of
+   * either cloud when there's no project to ask.
    */
-  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude"): Promise<string | null> {
+  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider): Promise<string | null> {
     const { c, credentials } = this.d
     // SSH machines say for themselves whether they have a Claude login (placement waits for one with the reason).
     if (runner === "ssh") return this.d.machinesProblem ? this.d.machinesProblem() : "SSH machines aren't available on this Box Yard"
@@ -129,7 +131,11 @@ export class Setup {
     if (c.mock || docker) return docker
     const creds = credentials.status()
     if (runner === "gpu") {
-      return creds.runpodApiKey.state === "set" ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
+      const runpod = creds.runpodApiKey.state === "set"
+      const vast = creds.vastApiKey.state === "set"
+      if (gpuCloud === "vast") return vast ? null : "Vast.ai GPU isn't set up: add a Vast.ai API key in Settings › Credentials"
+      if (gpuCloud === "runpod" || !vast) return runpod ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
+      return null
     }
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
@@ -255,6 +261,7 @@ export class Setup {
     if (key === "codexAuthJson") return this.checkCodex({ kind: "chatgpt", auth: value })
     if (key === "codexApiKey") return this.checkCodex({ kind: "api_key", key: value })
     if (key === "runpodApiKey") return this.checkRunPod(value)
+    if (key === "vastApiKey") return this.checkVast(value)
     return this.checkGitHub(value)
   }
 
@@ -290,6 +297,20 @@ export class Setup {
     const body = await res.text().catch(() => "")
     if (!res.ok) throw new Error(`RunPod ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
     return "Works: RunPod accepted the key."
+  }
+
+  /** GET /users/current/: the account the key belongs to (free; it never rents anything). */
+  private async checkVast(apiKey: string): Promise<string> {
+    const res = await this.request(this.d.fetch, "https://console.vast.ai/api/v0/users/current/", { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" } }, "Vast.ai")
+    const body = await res.text().catch(() => "")
+    if (!res.ok) throw new Error(`Vast.ai ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
+    let credit: number | null = null
+    try {
+      const u = JSON.parse(body) as { credit?: unknown; balance?: unknown }
+      const v = u.credit ?? u.balance
+      if (typeof v === "number" && Number.isFinite(v)) credit = v
+    } catch {}
+    return credit === null ? "Works: Vast.ai accepted the key." : `Works: Vast.ai accepted the key ($${credit.toFixed(2)} credit).`
   }
 
   /** GET /v1/models: free, and it fails the same way a real call would with a bad key. */

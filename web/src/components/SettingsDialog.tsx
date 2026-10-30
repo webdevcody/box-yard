@@ -24,6 +24,7 @@ import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { IdentitiesPanel } from "./Identities"
 import { RunPodPanel } from "./RunPodSettings"
+import { VastPanel } from "./VastSettings"
 import { DockerPanel } from "./DockerSettings"
 import { MachinesPanel } from "./MachineSettings"
 import { Modal } from "./Modal"
@@ -53,10 +54,10 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, docker: Container, machines: Server, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, vast: Cpu, docker: Container, machines: Server, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 /** Sections whose controls keep their own drafts (useDraft). They stay mounted once opened, so the drafts survive. */
-const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "docker", "machines", "hooks", "notifications", "voice"]
+const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "vast", "docker", "machines", "hooks", "notifications", "voice"]
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -472,6 +473,8 @@ export function SettingsDialog({
                 <IdentitiesPanel fid={fid} />
               ) : k === "runpod" ? (
                 <RunPodPanel fid={fid} active={section === "runpod"} />
+              ) : k === "vast" ? (
+                <VastPanel fid={fid} active={section === "vast"} />
               ) : k === "docker" ? (
                 <DockerPanel fid={fid} active={section === "docker"} />
               ) : k === "machines" ? (
@@ -1331,7 +1334,7 @@ function CostsPanel({
         {money(s.costRates.boxStorageGbMonthUsd, (n) => set("costRates", { ...s.costRates, boxStorageGbMonthUsd: n }), fid("storage"))}
       </Row>
       <div className="mt-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
-        Claude Code costs come from the CLI's result JSON and don't count against the cloud limits. A box's cost is Upstash's own charge when its API reports one, its measured CPU at these rates when that's more, and the time a turn ran (labeled an estimate) while neither is known. RunPod GPU pods have their own hourly caps (Settings › RunPod GPU).
+        Claude Code costs come from the CLI's result JSON and don't count against the cloud limits. A box's cost is Upstash's own charge when its API reports one, its measured CPU at these rates when that's more, and the time a turn ran (labeled an estimate) while neither is known. RunPod GPU pods and Vast.ai instances have their own hourly caps (Settings › RunPod GPU, Settings › Vast.ai GPU).
       </div>
     </Panel>
   )

@@ -54,6 +54,8 @@ import {
   type ThreadChat,
 } from "../lib/threads"
 import { caretAt, findQuoteRange, setOpenHighlight, setThreadRange, threadRange } from "../lib/threadHighlight"
+import { ResizeHandle, useElementWidth, useResizable } from "../lib/resize"
+import { THREAD_MAX, THREAD_MIN, THREAD_ROOM, threadLimit, threadWidthCss } from "../lib/layout"
 import type { ChatMessage, SideThread, SideThreadMessage } from "../../../shared/types"
 
 const ThreadChatContext = createContext<ThreadChat | null>(null)
@@ -197,6 +199,10 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12", renderCard 
   const id = cur?.id ?? null
   const closing = cur?.closing ?? false
   const expanded = Boolean(cur?.expanded)
+  // A column's left edge drags (one width for every chat's panel); the chat it sits in caps the drag.
+  const [aside, setAside] = useState<HTMLElement | null>(null)
+  const container = useElementWidth(aside?.parentElement)
+  const size = useResizable({ key: "box-yard:thread-width", defaultWidth: THREAD_ROOM, min: THREAD_MIN, max: THREAD_MAX, limit: container && threadLimit(container), edge: "left" })
 
   // Mounted closed, then opened a frame later, so it slides in.
   useEffect(() => {
@@ -231,26 +237,48 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12", renderCard 
         e.stopPropagation()
         closeThread(chat)
       }}
-      style={{ "--thread-w": "clamp(17rem, calc(50cqw - 1rem), 26rem)" } as React.CSSProperties}
+      ref={setAside}
+      style={{ "--thread-w": threadWidthCss(size.width) } as React.CSSProperties}
       className={cx(
         // A sheet over the chat, sliding in from the right...
-        "absolute inset-0 z-30 flex translate-x-full flex-col bg-zinc-950 shadow-2xl shadow-black/60 transition-[translate,width] duration-300 ease-out data-open:translate-x-0 motion-reduce:transition-none",
+        "absolute inset-0 z-30 flex translate-x-full flex-col bg-zinc-950 shadow-2xl shadow-black/60 data-open:translate-x-0",
+        // Eased as it opens and closes, not while its edge is dragged.
+        !size.handle.dragging && "transition-[translate,width] duration-300 ease-out motion-reduce:transition-none",
         // ...or, in a wide panel, a column beside it that grows from nothing (the chat slides left as it does). Expanded, it stays a sheet over the whole chat.
         !expanded &&
-          "@min-[35.5rem]/coord:static @min-[35.5rem]/coord:w-0 @min-[35.5rem]/coord:shrink-0 @min-[35.5rem]/coord:translate-x-0 @min-[35.5rem]/coord:overflow-hidden @min-[35.5rem]/coord:border-l @min-[35.5rem]/coord:border-zinc-800 @min-[35.5rem]/coord:shadow-none @min-[35.5rem]/coord:data-open:w-(--thread-w)",
+          "@min-[35.5rem]/coord:relative @min-[35.5rem]/coord:w-0 @min-[35.5rem]/coord:shrink-0 @min-[35.5rem]/coord:translate-x-0 @min-[35.5rem]/coord:overflow-hidden @min-[35.5rem]/coord:border-l @min-[35.5rem]/coord:border-zinc-800 @min-[35.5rem]/coord:shadow-none @min-[35.5rem]/coord:data-open:w-(--thread-w)",
       )}
     >
+      {/* Inside the column, which clips while it grows. A sheet has no edge to drag. */}
+      {!expanded && <ResizeHandle {...size.handle} inside className="@min-[35.5rem]/coord:block" />}
       {/* At its final width while the column grows, so the text doesn't reflow on every frame. */}
       <div className={cx("flex h-full min-h-0 w-full flex-col", !expanded && "@min-[35.5rem]/coord:w-(--thread-w)")}>
-        {cur.card && renderCard ? (
-          <Fragment key={id}>{renderCard({ chat, open: cur, headerClassName })}</Fragment>
-        ) : (
-          <ThreadView key={id} chat={chat} open={cur} headerClassName={headerClassName} />
-        )}
+        <PaneBody id={id} chat={chat} open={cur} headerClassName={headerClassName} renderCard={renderCard} />
       </div>
     </aside>
   )
 }
+
+/** The thread or card. Memoized: dragging the panel's edge re-renders the pane on every move. */
+const PaneBody = memo(function PaneBody({
+  id,
+  chat,
+  open,
+  headerClassName,
+  renderCard,
+}: {
+  id: string
+  chat: ThreadChat
+  open: OpenThread
+  headerClassName: string
+  renderCard?: (p: CardPanelProps) => ReactNode
+}) {
+  return open.card && renderCard ? (
+    <Fragment key={id}>{renderCard({ chat, open, headerClassName })}</Fragment>
+  ) : (
+    <ThreadView key={id} chat={chat} open={open} headerClassName={headerClassName} />
+  )
+})
 
 const NO_MESSAGES: SideThreadMessage[] = []
 
