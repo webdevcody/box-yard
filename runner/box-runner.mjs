@@ -292,6 +292,7 @@ async function runTurn() {
   }
   // Codex names its own thread; that's the session the next turn resumes.
   if (attempt.sessionId) sessionId = attempt.sessionId
+  if (codex) parkCodexAuth()
 
   const ok = stopping || (attempt.exitCode === 0 && !attempt.result?.is_error)
   if (!turn.compact && !stopping) {
@@ -734,15 +735,45 @@ function prepareCodexHome() {
     fs.rmSync(file, { force: true })
     return
   }
-  if (!delivered) return
   let existing = ""
   try {
     existing = fs.readFileSync(file, "utf8")
   } catch {}
-  if (existing && (existing === delivered || isRefreshOf(delivered, existing))) return
+  // The copy the last turn parked in memory (parkCodexAuth) is the newest unless the hand-over beats it.
+  const keep = existing && (!delivered || existing === delivered || isRefreshOf(delivered, existing))
+  const text = keep ? existing : delivered
+  if (!text) return
+  let linked = false
+  try {
+    linked = fs.lstatSync(file).isSymbolicLink()
+  } catch {}
+  if (keep && !linked) return
   const tmp = `${file}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, delivered, { mode: 0o600 })
+  fs.writeFileSync(tmp, text, { mode: 0o600 })
   fs.renameSync(tmp, file)
+}
+
+/**
+ * In a box with a tmpfs for secrets (Docker), the login goes back into memory between turns: moved there and linked
+ * from codex/auth.json, where Box Yard reads it back. The next turn copies it onto the disk again for Codex, which
+ * replaces the file when it refreshes. A container that stops loses it, and the next turn takes Box Yard's copy.
+ */
+function parkCodexAuth() {
+  if (!task.secretsDir || task.isolateCodex === false) return
+  const file = path.join(codexHome, "auth.json")
+  try {
+    if (fs.lstatSync(file).isSymbolicLink()) return
+  } catch {
+    return
+  }
+  const held = path.join(task.secretsDir, `${task.taskId ?? "none"}.codex-auth.json`)
+  try {
+    fs.copyFileSync(file, `${held}.tmp`)
+    fs.chmodSync(`${held}.tmp`, 0o600)
+    fs.renameSync(`${held}.tmp`, held)
+    fs.rmSync(file, { force: true })
+    fs.symlinkSync(held, file)
+  } catch {}
 }
 
 const toml = (v) => JSON.stringify(v)

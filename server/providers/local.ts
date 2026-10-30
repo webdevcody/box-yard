@@ -17,12 +17,15 @@ import { TURN_SH } from "../turnProcess.js"
 export class LocalProvider implements BoxProvider {
   readonly name: string = "local"
   readonly nodeBin = process.execPath
+  /** Its Codex: the stand-in beside a stand-in claude (scripts/fake-codex.mjs), so folder boxes never run the real one by accident. */
+  readonly codexBin: string
   constructor(
     private readonly baseDir: string,
     readonly claudeBin = "claude",
     makeDir = true,
   ) {
     if (makeDir) fs.mkdirSync(baseDir, { recursive: true })
+    this.codexBin = /fake-claude\.mjs/.test(claudeBin) ? claudeBin.replace(/fake-claude\.mjs/, "fake-codex.mjs") : "codex"
   }
 
   root(boxId: string) {
@@ -298,6 +301,9 @@ export class LocalRunnerRouter implements BoxProvider {
   }
   get claudeBin() {
     return this.base.claudeBin
+  }
+  get codexBin() {
+    return this.base.codexBin
   }
   get maxUploadBytes() {
     return this.base.maxUploadBytes

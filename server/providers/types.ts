@@ -40,6 +40,8 @@ export interface BoxProvider {
   readonly nodeBin: string
   /** Claude binary inside the box. */
   readonly claudeBin: string
+  /** Codex binary inside the box (docs/codex.md); "codex" when unset, installed on first use. */
+  readonly codexBin?: string
   /**
    * Each box is its own cgroup (Upstash Box), so the cgroup CPU counter the box probe reads (`usage_usec` in
    * /sys/fs/cgroup/cpu.stat) is that box's own CPU time, which is what Upstash bills. Unset: the probe reads a

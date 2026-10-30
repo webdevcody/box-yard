@@ -34,6 +34,9 @@ export class AutoProvider implements BoxProvider {
   get claudeBin() {
     return this.active.claudeBin
   }
+  get codexBin() {
+    return this.active.codexBin
+  }
 
   root(boxId: string) {
     return this.of(boxId).root(boxId)

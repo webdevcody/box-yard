@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import fs from "node:fs"
 import path from "node:path"
 import { execFileSync } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import type { Project, Task, TaskMessage } from "../shared/types.js"
@@ -152,5 +153,41 @@ describe("task agents on Codex", () => {
     // The task's own model wins; a Codex task without one gets Settings' Codex model, never the Claude default.
     expect(runs().map((x) => x.model).sort()).toEqual(["gpt-6-luna", "gpt-6.1-sol"])
     expect((await r.raw("POST", `/api/tasks/${gpt.id}/compact`)).status).toBe(400)
+  })
+
+  it("parks the login in memory between turns where the box has a tmpfs for secrets (Docker), and keeps the newest copy", () => {
+    const dir = tmpDir("codex-runner-")
+    const secrets = tmpDir("codex-secrets-")
+    fs.mkdirSync(path.join(dir, "work"))
+    fs.writeFileSync(
+      path.join(dir, "task.json"),
+      JSON.stringify({ taskId: "task_park", projectId: "prj_x", agent: "codex", codexBin: process.execPath, codexArgs: [path.resolve("scripts/fake-codex.mjs")], codexLogin: "chatgpt", isolateCodex: true, secretsDir: secrets, env: {}, unsetEnv: [] }),
+    )
+    const stale = login("2026-01-01T00:00:00Z")
+    const turn = (n: number, resume: string | null, refresh: boolean) => {
+      fs.writeFileSync(path.join(dir, "turn.json"), JSON.stringify({ turnId: `turn_${n}`, prompt: "Say hi", sessionId: resume ?? randomUUID(), resume: Boolean(resume), systemPrompt: "You are a test agent." }))
+      // Box Yard hands over the copy it has; here it never read the refreshed one back, so it's the stale one every time.
+      fs.writeFileSync(path.join(dir, "codex-auth.json"), stale)
+      execFileSync(process.execPath, [path.resolve("runner/box-runner.mjs"), "turn", dir], { env: { ...process.env, BOXYARD_RUNNER_DETACHED: "1", ...(refresh ? { FAKE_CODEX_REFRESH: "1" } : {}) } })
+      const events = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l))
+      return events.filter((e) => e.t === "turn_end").at(-1)
+    }
+    const auth = path.join(dir, "codex", "auth.json")
+    const parked = path.join(secrets, "task_park.codex-auth.json")
+
+    const first = turn(1, null, true)
+    expect(first).toMatchObject({ ok: true })
+    // Between turns the login is only in memory, linked from where Box Yard reads it back.
+    expect(fs.lstatSync(auth).isSymbolicLink()).toBe(true)
+    expect(fs.realpathSync(auth)).toBe(fs.realpathSync(parked))
+    expect(fs.existsSync(path.join(dir, "codex-auth.json"))).toBe(false)
+    const refreshed = JSON.parse(fs.readFileSync(auth, "utf8")).tokens.refresh_token
+    expect(refreshed).not.toBe("rt_first_000000000000")
+
+    // The next turn gets the stale hand-over again, but runs on the refreshed copy: the stale refresh token is spent.
+    const second = turn(2, first.sessionId, false)
+    expect(second).toMatchObject({ ok: true, sessionId: first.sessionId })
+    expect(runs().at(-1)).toMatchObject({ resume: first.sessionId, secret: refreshed })
+    expect(fs.lstatSync(auth).isSymbolicLink()).toBe(true)
   })
 })

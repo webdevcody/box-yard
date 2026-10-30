@@ -91,7 +91,7 @@ const login = (() => {
 
 const thread = resume ?? randomUUID()
 if (process.env.FAKE_CODEX_LOG) {
-  fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args: argv, home: process.env.CODEX_HOME ?? null, login: login?.kind ?? null, account: login?.account ?? null, thread, model, resume, sandbox, images, config }) + "\n")
+  fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args: argv, home: process.env.CODEX_HOME ?? null, login: login?.kind ?? null, account: login?.account ?? null, secret: login?.secret ?? null, thread, model, resume, sandbox, images, config }) + "\n")
 }
 
 process.stdout.on("error", () => {})
