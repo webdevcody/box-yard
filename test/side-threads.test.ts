@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { forkPoint, noticeLines, replyPrompt, sessionLineMeta, summaryContext, taskThreadPrompt, threadPrompt } from "../server/sideThreads.js"
+import { forkPoint, noticeLines, replyPrompt, sessionLineMeta, summaryContext, taskKey, taskThreadPrompt, threadPrompt } from "../server/sideThreads.js"
 import type { ChatMessage } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
@@ -158,6 +158,18 @@ describe("task threads", () => {
     expect(batch).toContain("started fresh, from your notes.]\n\nthe summary")
     expect(batch).toContain("about these tasks")
     expect(batch).not.toContain("updates in the chat")
+  })
+
+  it("tell a later turn the task's state again only when the task changed, not when time passed", () => {
+    const store = memStore()
+    const p = store.createProject({ name: "demo" })
+    const t = store.createTask({ projectId: p.id, title: "Haiku", prompt: "x" })
+    const key = taskKey([store.getTask(t.id)!])
+    expect(taskKey([store.getTask(t.id)!])).toBe(key)
+    const pr = { ...store.getTask(t.id)!, prState: "merged" as const }
+    expect(taskKey([pr])).not.toBe(key)
+    store.updateTask(t.id, { status: "done" })
+    expect(taskKey([store.getTask(t.id)!])).not.toBe(key)
   })
 })
 

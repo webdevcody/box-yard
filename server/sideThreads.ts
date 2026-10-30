@@ -244,14 +244,22 @@ export function taskThreadPrompt(o: { title: string; batch: boolean; state: stri
     .join("\n\n")
 }
 
+/**
+ * What a task thread's state says, without its "updated 3m ago"s: a later turn is told the state again only when this
+ * changed, not because a minute passed.
+ */
+export function taskKey(tasks: Task[]): string {
+  return JSON.stringify(tasks.map((t) => [t.id, t.status, t.updatedAt, t.prUrl ?? null, t.prState ?? null, t.pendingCount ?? 0, t.question ?? null, t.error ?? null]))
+}
+
 interface RunState {
   child: ChildProcess | null
   running: boolean
   pending: boolean
   /** The last user message a turn has taken: the next turn takes the ones after it. */
   lastAskId: string | null
-  /** A task thread's: the task's state as its last turn was told it. */
-  taskState?: string
+  /** A task thread's: the task's state as its last turn was told it (taskKey). */
+  taskKey?: string
 }
 
 interface RunResult {
@@ -537,8 +545,9 @@ export class SideThreads {
     const tasks = card.tasks.slice(-TASK_THREAD_TASKS)
     const state = await host.taskState(tasks)
     if (this.stopped || !this.store.getSideThread(id)) return
-    const changed = state !== r.taskState
-    r.taskState = state
+    const key = taskKey(tasks.map((t) => this.store.getTask(t.id) ?? t))
+    const changed = key !== r.taskKey
+    r.taskKey = key
 
     if (session.started) {
       const prompt = changed ? `[${card.batch ? "These tasks" : "The task"} now:]\n${state}\n\n${question}` : question
