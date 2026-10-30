@@ -3,8 +3,10 @@ import { AGENT_CLI_LABEL, type AgentCli } from "../shared/agentCli.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { formatBytes } from "../shared/disk.js"
+import type { GpuProvider } from "../shared/gpu.js"
 import { DEFAULT_NOTE_BUDGET, noteLine, shortTokens, type NoteBudget } from "../shared/notes.js"
 import type { LivePr } from "./prs.js"
+import { FYI_MARKER } from "./captainWake.js"
 
 export interface DirectoryEntry {
   id: string
@@ -32,10 +34,13 @@ export function workerSystemPrompt(input: {
   const cli = AGENT_CLI_LABEL[input.agent ?? "claude"]
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
+  const vast = input.box?.gpu?.cloud === "vast"
   const docker = Boolean(input.box?.docker)
   const header = [
     local
       ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
+      : vast
+      ? `You are a Box Yard agent: a headless ${cli} worker running on a Vast.ai GPU instance of your project's own (Linux, as root).`
       : gpu
       ? `You are a Box Yard agent: a headless ${cli} worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : docker
@@ -55,6 +60,8 @@ export function workerSystemPrompt(input: {
     `  Only suggest environment or box gotchas, Cody's decisions and preferences, and project facts that aren't in the code. Run logs, merge reports and code tours go in the PR description instead.`,
     local
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
+      : vast
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the instance, published straight from the host as plain HTTP that anyone with the link can open, so keep secrets out of it; ${port + 1}-${port + 9} work inside the instance only.`
       : gpu
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
       : docker
@@ -104,8 +111,8 @@ export interface BoxPromptInfo {
   alone?: boolean
   /** The local runner: the turn runs on the computer running Box Yard, unsandboxed (shared/runner.ts). */
   local?: boolean
-  /** A RunPod GPU pod of the project's own (shared/runpod.ts): its GPU, e.g. "RTX A5000". */
-  gpu?: { name: string }
+  /** A GPU pod of the project's own (shared/runpod.ts, shared/gpu.ts): its GPU, e.g. "RTX A5000", and its cloud (RunPod when unset). */
+  gpu?: { name: string; cloud?: GpuProvider }
   /** A Docker container of the project's own on the computer running Box Yard (shared/docker.ts): its CPU limit. */
   docker?: { cpus: number | null }
 }
@@ -114,6 +121,13 @@ export interface BoxPromptInfo {
 function boxLines(b: BoxPromptInfo): string[] {
   if (b.gpu) {
     const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    if (b.gpu.cloud === "vast") {
+      return [
+        `Your instance has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
+        `The instance is destroyed when your project has been idle a while, and a new one (on another host) is rented for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the instance's disk goes. There's no network volume, so large downloads come down again on a new instance.`,
+        `Run heavy jobs one at a time and stop servers you no longer need.`,
+      ]
+    }
     return [
       `Your pod has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
       `The pod is stopped when your project has been idle a while and started again (a new pod) for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the pod's disk goes. /workspace/data is the project's network volume: put large downloads, datasets and model weights there to keep them across pods.`,
@@ -319,7 +333,7 @@ export const SNAPSHOT_GUIDANCE =
 /** The task tools' shared options, explained once for both chats: the tools' parameters point here ("Task options"). */
 export const TASK_OPTIONS = [
   `Task options: create_task, create_tasks and send_to_task take these (set_task_model and set_task_priority change them later); omit one for its default.`,
-  `- runs_on overrides the project's "Runs on" for the task's later turns too (follow-ups, retries, hooks, Merge PR). "local" = this computer (the one running Box Yard, unsandboxed), when Cody says "locally", "on my machine" or "on this computer"; "box" = an Upstash box; "gpu" = the project's RunPod GPU pod (billed per hour; needs a RunPod key); "docker" = the project's isolated Docker container on this computer (needs Docker running and a Claude key), for "in a container" or "isolated". A runner that can't run (claude missing or signed out here, Docker stopped) fails the call with the reason, and nothing is created or sent: report it, never retry on another runner. On send_to_task it moves the task ("continue it locally") from its next turn, once nothing would be lost (its turn-end archive and push hold all the work); otherwise it keeps running where it is and its log says why.`,
+  `- runs_on overrides the project's "Runs on" for the task's later turns too (follow-ups, retries, hooks, Merge PR). "local" = this computer (the one running Box Yard, unsandboxed), when Cody says "locally", "on my machine" or "on this computer"; "box" = an Upstash box; "gpu" = the project's GPU pod on RunPod or Vast.ai (its gpu_provider; billed per hour; needs that cloud's key); "docker" = the project's isolated Docker container on this computer (needs Docker running and a Claude key), for "in a container" or "isolated". A runner that can't run (claude missing or signed out here, Docker stopped) fails the call with the reason, and nothing is created or sent: report it, never retry on another runner. On send_to_task it moves the task ("continue it locally") from its next turn, once nothing would be lost (its turn-end archive and push hold all the work); otherwise it keeps running where it is and its log says why.`,
   `- priority "high" puts the task's turns at the front of the queue: when a slot frees up (localAgents on this computer, a box, a GPU pod or a Docker container), it goes before every normal task waiting, first in, first out among the high ones. Use it when Cody wants something to run before the queued work ("run this next", "high priority"), e.g. while every slot on this computer is taken. It never stops a running agent, and the project's limits (agents_per_box, whole_machine) still hold; a high task they hold back doesn't block others. It stays on the task, follow-ups included, until set_task_priority lowers it.`,
   `- effort, when you pass one (a matching routing rule, an escalation, or Settings leaves effort to you): the lowest that fits. low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); medium = small, well-specified edits or config changes; high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.`,
   `- model: any id \`claude --model\` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6. When to pass model, effort and routing_*: "Agent model/effort routing" below.`,
@@ -347,7 +361,7 @@ How the yard is built:
 Quick questions first: where things stand, what an agent said or found, whether a PR is open or merged, what's running or waiting on Cody, what a project has open. Answer these yourself, in this turn, from [Yard now], that block and your read tools (list_tasks, get_task, list_inbox, search_history), not through a Captain: that hop adds a turn of its own plus a wake-up for you. Only when the answer is in a Captain's head (its plan, why it chose something) or in a status-only project's content, call ask_captain and answer in this same turn.
 
 Routing every request (check list_projects / list_tasks first when you're not sure what exists):
-1. Project-scoped work: send it to that project's Captain with send_to_captain and end your turn (tell Cody it's with the Captain). Name the tasks it's about by id: the Captain gets their status, PR and last reply with your message, so it doesn't spend a step looking them up. Its reply wakes you as a "Captain for <project> replied: …" update, so don't block on it. ask_captain (waits at most 60 s) is only for a quick answer you need right now; wait_for_captain is rarely needed. For cross-project requests, message all relevant Captains at once and synthesize their replies as they arrive.
+1. Project-scoped work: send it to that project's Captain with send_to_captain and end your turn (tell Cody it's with the Captain). Name the tasks it's about by id: the Captain gets their status, PR and last reply with your message, so it doesn't spend a step looking them up. The Captain's reply shows on Cody's chat at once and reaches you as a "Captain for <project> replied: …" update, so don't block on it. It wakes you when there's something for you to do (a question or decision for Cody, a failure, a next step); a reply only for Cody's information comes with your next turn's updates marked FYI, and needs no comment. When you'll act on the reply yourself (a step after it, routing it on), pass act_on_reply: true. ask_captain (waits at most 60 s) is only for a quick question whose answer you need right now; wait_for_captain is rarely needed. For cross-project requests, send to all relevant Captains in the same turn and synthesize their replies as they arrive: those always wake you.
 2. Follow-ups on work an agent already did (same issue, PR or branch, "those"/"that"/"it", corrections, "also do X there"): route them to the Captain of that task's project so it can send_to_task the right agent, which resumes its session with full context even when it's done (from a recap if its archive expired). Don't start a new agent for it.
    - A mid-turn agent still takes send_to_task: the message waits for its turn to end (list_queued_messages, edit_queued_message and cancel_queued_message change or withdraw it). Do that when the request depends on or changes what it's doing. If waiting would waste the work in progress, pass interrupt: true or call deliver_queued_now: that stops the current step and delivers the queue right away, in the same session.
    - A follow-up spanning several agents (e.g. "close all those issues", opened by agents in different projects): send_to_task each of them.
@@ -429,6 +443,7 @@ export function captainPrompt(project: Project, ownerName?: string, notesBudget:
     project.repo ? `Repository: ${project.repo} (base branch ${project.baseBranch}).` : `This project has no repository.`,
     ``,
     `Your job is to own all work inside this one project. The global Coordinator routes project requests to you; Cody may also message you directly from the project page. A turn that answers the Coordinator sends your reply back to it automatically, so make it a short, self-contained result.`,
+    `Your reply shows on Cody's screen as soon as your turn ends, and wakes the Coordinator for a turn of its own only when it has something to act on. When a reply to the Coordinator, or an automatic wake-up's report, is only for Cody's information (a status, an answer, "started task X") with no question or decision for Cody, no failure and no next step for the Coordinator (another project, a cross-project plan), end it with this hidden line on its own: ${FYI_MARKER}. When in doubt, leave it off: the Coordinator then wakes.`,
     `You have Box Yard MCP tools: create_task for new independent work in this project, send_to_task for follow-ups, wait_for_tasks for quick results, and list_tasks/get_task before choosing an existing agent.`,
     `A message that names tasks (by id, PR or full title) comes with a "[Tasks this message names …]" block: each one's status, PR and the start of its last reply, as they stand now. With [Project now] that usually answers a status question: reply from them, and call get_task or list_tasks only when you need more (each call is another model step before your reply).`,
     `To start two or more tasks at once (fanning out a plan, one task per page, issue or building), use one create_tasks call, never a series of create_task calls: each call costs a whole step, so dozens of them take minutes before the last agent even exists. Put the shared brief in common_prompt and each task's own part in its prompt. It creates all of them or none: if it lists problems, fix them and send the whole list again.`,

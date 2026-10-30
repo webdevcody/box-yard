@@ -40,3 +40,20 @@ export const MAIN_MIN_THREAD = 320
 export function threadDockWidth(viewport: number, sidebar: number, width: number): number {
   return Math.max(width, Math.min(width + THREAD_ROOM, viewport - sidebar - MAIN_MIN_THREAD))
 }
+
+/**
+ * The side thread panel's draggable width (SideThread.tsx) where it's a column beside a chat: THREAD_ROOM by default,
+ * never under THREAD_MIN, and the chat beside it keeps THREAD_CHAT_ROOM. In px, so 125% zoom keeps the same split.
+ */
+export const THREAD_MIN = 272
+export const THREAD_MAX = 960
+export const THREAD_CHAT_ROOM = 320
+
+/** The drag's cap in a chat `container` px wide: what's left after the chat's room, never under THREAD_MIN. */
+export const threadLimit = (container: number) => Math.max(THREAD_MIN, container - THREAD_CHAT_ROOM)
+
+/**
+ * The column's CSS width for a saved width: the container caps it too (100cqw), so a window that shrinks after a drag
+ * squeezes the thread instead of the chat, without overwriting what was saved.
+ */
+export const threadWidthCss = (width: number) => `max(${THREAD_MIN}px, min(${width}px, calc(100cqw - ${THREAD_CHAT_ROOM}px)))`

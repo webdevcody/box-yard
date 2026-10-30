@@ -93,7 +93,23 @@ export interface PrTrackerDeps {
   intervalMs?: number
   /** After a task's PR state changed (and maybe its status); the task is already saved. */
   onChange?: (change: PrChange) => void
+  /** Settings › Coordinator › Done when its PR merges (default on, as when it wasn't a setting). */
+  autoDone?: () => boolean
   log?: (message: string) => void
+}
+
+/** The statuses a merged PR moves to done when Settings' autoDoneOnMerge is on: the task's turn is over and nothing waits on Cody. */
+export const AUTO_DONE_FROM: readonly TaskStatus[] = ["pr_ready", "idle"]
+
+/** What a PR now in `state` does to a task's status: null leaves it alone. */
+export function restingStatus(row: Pick<TaskRow, "status" | "current_turn_id">, state: PrState, autoDone: boolean): TaskStatus | null {
+  if (row.current_turn_id) return null
+  if (state === "merged") {
+    if (autoDone) return AUTO_DONE_FROM.includes(row.status) ? "done" : null
+    return row.status === "pr_ready" ? "idle" : null
+  }
+  if (state === "closed" && row.status === "pr_ready") return "idle"
+  return null
 }
 
 /** owner, repo name and number of a github.com pull request URL. */
@@ -436,9 +452,10 @@ fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } headRefOi
   }
 
   /**
-   * Save a PR's state. A merged PR moves a pr_ready task to done; a closed one drops it back to idle.
-   * Any other status (working, needs input, ...) is left alone. Merges seen live notify Cody; the first
-   * check of an old PR (the startup backfill) doesn't.
+   * Save a PR's state. A merged PR moves a resting task (pr_ready or idle, its turn over) to done, or with
+   * Settings' autoDoneOnMerge off a pr_ready one to idle; a closed one drops a pr_ready task back to idle.
+   * Any other status (working, needs input, waiting, failed, ...) is left alone. Merges seen live notify Cody;
+   * the first check of an old PR (the startup backfill) doesn't.
    */
   apply(taskId: string, prUrl: string, info: PrInfo) {
     const row = this.store.getTaskRow(taskId)
@@ -452,11 +469,7 @@ fragment pr on PullRequest { state isDraft mergedAt mergedBy { login } headRefOi
       this.store.updateTask(row.id, { prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}) }, { quiet: true, touch: false })
       return
     }
-    let status: TaskStatus | null = null
-    if (row.status === "pr_ready" && !row.current_turn_id) {
-      if (info.state === "merged") status = "done"
-      else if (info.state === "closed") status = "idle"
-    }
+    const status = restingStatus(row, info.state, this.deps.autoDone?.() ?? true)
     const task = this.store.updateTask(
       row.id,
       { prState: info.state, prMergedAt: info.mergedAt, prMergedBy: info.mergedBy, prHeadSha: headSha, ...(info.labels ? { prLabels: info.labels } : {}), ...(status ? { status } : {}) },

@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { GpuProvider } from "./gpu.js"
 import type { AgentCli } from "./agentCli.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
@@ -92,6 +93,8 @@ export interface Project {
   gpuMaxHourlyUsd: number | null
   /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
   gpuMachine: ProjectGpuMachine
+  /** When it runs on a GPU: the cloud its boxes come from (shared/gpu.ts); null follows Settings › Vast.ai GPU › Use for GPU projects. */
+  gpuProvider: GpuProvider | null
   /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
   docker: ProjectDocker
   /** Who acts for it (shared/identities.ts): its GitHub account, git author, signing key and Claude login. */
@@ -760,6 +763,13 @@ export interface Settings {
   startInZen: boolean
   /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
   showCloudMeter: boolean
+  /** Cards view: a resting task's card with no activity for this many hours folds into "Idle". 0 = never. */
+  cardsIdleHours: number
+  /**
+   * When a task's PR merges and its turn is over (pr_ready or idle, nothing running or queued), it moves to done. Off, a
+   * merged PR leaves the task idle until it's marked done.
+   */
+  autoDoneOnMerge: boolean
   /** The CLI the Coordinator runs on (shared/agentCli.ts): Claude Code unless set to Codex. */
   orchestratorCli: AgentCli
   orchestratorModel: string
@@ -855,6 +865,9 @@ export interface Settings {
   /** ...and at most about this many tokens of them. Over either, the Captain is told to prune. */
   notesMaxTokens: number
 }
+
+/** Settings › Coordinator › Idle after: its default and range, in hours. */
+export const CARDS_IDLE_HOURS = { default: 3, min: 0, max: 24 * 30 } as const
 
 /** Agents that can run at once under a set of limits. */
 export function agentCapacity(p: { maxBoxes: number; slotsPerBox: number; maxAgents: number }) {
@@ -1012,6 +1025,8 @@ export interface CloudStatus {
   list: CloudBox[]
   /** RunPod GPU pods: their $/hour now against the cap for all pods; null when RunPod isn't set up. */
   gpu: { pods: number; hourlyUsd: number; capUsd: number } | null
+  /** Vast.ai GPU instances, the same way; null (or absent) when Vast.ai isn't set up. */
+  vast?: { pods: number; hourlyUsd: number; capUsd: number } | null
   /** New boxes past the ones Box Yard makes in an hour without asking. */
   fanout: BoxFanout
 }

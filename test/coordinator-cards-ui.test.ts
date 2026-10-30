@@ -11,8 +11,11 @@ import { setCoordinatorView, showInTimeline } from "../web/src/lib/coordinatorVi
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
+import { undoClose } from "../web/src/lib/inbox.js"
+import { stopSelecting } from "../web/src/lib/cardSelection.js"
+import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { COORDINATOR_CHAT, applyThreadEvent, closeThread, forgetThread, openThread, openThreadId, threadKeys } from "../web/src/lib/threads.js"
-import type { ChatMessage, Project, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
+import type { ChatMessage, Project, SettingsInfo, SideThread, SideThreadMessage, Task, TaskStatus, UiEvent } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -692,5 +695,146 @@ describe("A card in the side panel", () => {
     const box = panel()!.querySelector("textarea")!
     expect(document.activeElement).toBe(box)
     expect(box.placeholder).toBe("Reply (reopens the task)…")
+  })
+})
+
+describe("Mark done in the cards", () => {
+  // Resting since a turn 5 hours ago: past the 3 hour "Idle after".
+  const OLD = task("task_old00001", MAP.id, "Map 3 PR #401: East Town", "idle")
+  const oldNotice = { ...notice(OLD, "💬 **Map 3 PR #401: East Town** says: shot it"), createdAt: Date.now() - 5 * 3600_000 }
+  let posts: string[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push(url)
+      return new Promise(() => {})
+    })
+    qc.setQueryData(keys.tasks, [...TASKS, OLD])
+    qc.setQueryData(keys.chat, [oldNotice, ...CHAT])
+  })
+  afterEach(() => {
+    // The undo window and the selection outlive a test: take them back.
+    act(() => {
+      for (const t of [...TASKS, OLD]) undoClose(t.id)
+      stopSelecting()
+      for (const t of currentToasts()) dismiss(t.id)
+    })
+  })
+
+  const settings = (s: Partial<SettingsInfo["settings"]>) => qc.setQueryData(keys.agentSettings, { settings: s } as unknown as SettingsInfo)
+  const live = () => cards().map((c) => c.dataset.card)
+  const fold = (id: "done" | "idle") => host.querySelector(`[data-testid="cards-${id}"]`) as HTMLElement | null
+  const menuItem = (label: string) => [...document.querySelectorAll('[role="menuitem"]')].find((b) => b.textContent === label) as HTMLElement | undefined
+  const toastTitles = () => currentToasts().map((t) => t.title)
+  const undo = () => act(() => currentToasts().at(-1)!.action!.onClick())
+
+  it("folds a resting card with no news for the Idle after hours into \"N idle\", next to \"N done today\"", () => {
+    render()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(fold("idle")!.textContent).toContain("1 idle")
+    expect(fold("idle")!.title).toContain("3h")
+    click(fold("idle")!)
+    expect(card(OLD.id).textContent).toContain("Idle")
+  })
+
+  it("leaves it up with Idle after at 0, and folds at the hours set", async () => {
+    act(() => settings({ cardsIdleHours: 0 }))
+    render()
+    expect(fold("idle")).toBeNull()
+    expect(live()).toContain(OLD.id)
+    await act(async () => {
+      settings({ cardsIdleHours: 6 })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(live()).toContain(OLD.id)
+    await act(async () => {
+      settings({ cardsIdleHours: 4 })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(live()).not.toContain(OLD.id)
+  })
+
+  it("marks a card done from its ⋯, which folds it into done, with an Undo toast", () => {
+    render()
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Mark done", "Select", "Show in timeline"])
+    click(menuItem("Mark done")!)
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(fold("done")!.textContent).toContain("2 done today")
+    expect(toastTitles()).toEqual(["Marked done"])
+    // Sent once the undo window is over, not before.
+    expect(posts).toEqual([])
+    undo()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+  })
+
+  it("marks a task waiting on Cody done from the open card's footer; a batch's ⋯ has no Mark done while its tasks run", () => {
+    render()
+    click(head(LOGIN.id))
+    click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
+    expect(toastTitles()).toEqual(["Marked done"])
+    // Open, it stays where it is (it folds once closed), and says it's done.
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
+    click(card(`batch:${B}`).querySelector('[data-testid="chat-card-more"]')!)
+    expect([...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent)).toEqual(["Show in timeline"])
+  })
+
+  it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-clear-idle"]')!)
+    const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
+    expect(pop.textContent).toContain("Mark 2 tasks done?")
+    expect([...pop.querySelectorAll("li")].map((li) => li.textContent)).toEqual([`${OLD.title}Idle`, `${CARDS.title}PR ready`])
+    const boxes = [...pop.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[]
+    click(boxes[0]!)
+    const confirm = host.querySelector('[data-testid="cards-clear-idle-confirm"]') as HTMLElement
+    expect(confirm.textContent).toContain("Mark 1 done")
+    click(confirm)
+    expect(host.querySelector('[data-testid="cards-clear-idle-popover"]')).toBeNull()
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(fold("idle")!.textContent).toContain("1 idle")
+    expect(toastTitles()).toEqual(["Marked done"])
+  })
+
+  it("keeps to the project bar's filter", () => {
+    render()
+    act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="cards-clear-idle"]')!)
+    const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
+    expect(pop.textContent).toContain("Mark 1 task done?")
+    expect(pop.textContent).toContain(OLD.title)
+  })
+
+  it("selects cards and marks the picked ones done; the ones it can't close can't be picked; Esc cancels", () => {
+    const head = (key: string) => card(key).querySelector('[role="button"], [role="checkbox"]') as HTMLElement
+    render()
+    click(host.querySelector('[data-testid="cards-select"]')!)
+    const count = () => host.querySelector('[data-testid="cards-select-count"]')!.textContent
+    expect(count()).toBe("Pick cards to mark done")
+    expect(head(LOGIN.id).getAttribute("role")).toBe("checkbox")
+    expect(head(LOGIN.id).getAttribute("aria-disabled")).toBe("true")
+    click(head(LOGIN.id))
+    expect(head(LOGIN.id).getAttribute("aria-checked")).toBe("false")
+    click(head(CARDS.id))
+    expect(head(CARDS.id).getAttribute("aria-checked")).toBe("true")
+    expect(card(CARDS.id).dataset.open).toBeUndefined()
+    expect(count()).toBe("1 task selected")
+    const bar = host.querySelector('[data-testid="cards-select-bar"]')!
+    click(button(bar, "Select all"))
+    expect(count()).toBe("2 tasks selected")
+    act(() => void document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
+    expect(head(CARDS.id).getAttribute("role")).toBe("button")
+
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-more"]')!)
+    click(menuItem("Select")!)
+    expect(count()).toBe("1 task selected")
+    click(host.querySelector('[data-testid="cards-select-done"]')!)
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
+    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(toastTitles()).toEqual(["Marked done"])
+    undo()
+    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
   })
 })

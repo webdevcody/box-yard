@@ -3,7 +3,7 @@
 import type { SettingSource } from "./types.js"
 import type { Runner } from "./runner.js"
 
-export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "githubToken", "runpodApiKey"] as const
+export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "githubToken", "runpodApiKey", "vastApiKey"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
 /**
@@ -191,6 +191,13 @@ export const CREDENTIAL_INFO: Record<
     placeholder: "rpa_…",
     help: "Optional: lets projects run on RunPod GPU pods (Settings › RunPod GPU).",
     link: { href: "https://www.runpod.io/console/user/settings", label: "Create one in RunPod's settings" },
+  },
+  vastApiKey: {
+    label: "Vast.ai API key",
+    env: "VAST_API_KEY",
+    placeholder: "64 hex characters",
+    help: "Optional: lets projects run on Vast.ai GPU instances (Settings › Vast.ai GPU).",
+    link: { href: "https://cloud.vast.ai/manage-keys/", label: "Create one in Vast.ai's Keys page" },
   },
 }
 

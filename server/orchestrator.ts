@@ -134,6 +134,8 @@ export class Orchestrator {
   private autoTurns = 0
   /** Read on every nudge; tests shorten it. */
   readonly tuning = { wakeDebounceMs: WAKE_DEBOUNCE_MS }
+  /** The turn running now, stamped on what it sends to Captains so their replies know a fan-out (captainWake.ts). */
+  turnKey: string | null = null
   /** Set by stop(): the database closes right after, so a turn still winding down must not touch it. */
   private stopped = false
   /** Model-only notes for queued scheduled runs, by run id. The queue itself lives in the schedule_runs table. */
@@ -588,7 +590,7 @@ export class Orchestrator {
     this.hub.broadcast({ type: "schedule.run", run })
     // This message is answered by this turn, not by Cody's next one.
     this.store.setKv("orchestrator_last_turn_at", String(Date.now() + 1))
-    const notices = this.store.takeUnseenNotices()
+    const notices = this.takeNotices()
     const notes = this.runNotes.get(queued.id)
     const prompt = [
       updatesBlock("Box Yard updates since your last turn", notices),
@@ -603,6 +605,11 @@ export class Orchestrator {
 
   private owner(): string {
     return this.settings.get().ownerName
+  }
+
+  /** The updates for this turn's prompt. A Captain's FYI reply is already on Cody's screen and asked for nothing. */
+  private takeNotices(): string[] {
+    return this.store.takeUnseenNotices(withOwner("(FYI: already on Cody's screen, no action needed.)", this.owner()))
   }
 
   /** Messages Cody sent since the orchestrator last replied. */
@@ -625,7 +632,7 @@ export class Orchestrator {
   private async autoTurn() {
     if (this.autoTurns >= MAX_AUTO_TURNS) return
     const requestedAt = this.store.oldestUnseenNoticeAt()
-    const notices = this.store.takeUnseenNotices()
+    const notices = this.takeNotices()
     if (!notices.length) return
     this.autoTurns++
     await this.runPrompt(
@@ -656,7 +663,7 @@ export class Orchestrator {
     }
     this.store.setKv("orchestrator_last_turn_at", String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const named = await this.namedState(answering.filter((m) => m.meta?.source !== "hook").map((m) => m.content).join("\n\n"))
-    const notices = this.store.takeUnseenNotices()
+    const notices = this.takeNotices()
     const prompt = [
       updatesBlock("Box Yard updates since your last turn", notices),
       named,
@@ -708,6 +715,7 @@ export class Orchestrator {
     const compacted = recapFile ? this.recap(recapFile, { compacted: s.started }) : null
     const now = [this.yardNow(), body].join("\n\n")
     const prompt = [compacted, now].filter(Boolean).join("\n\n")
+    this.turnKey = `turn_${randomUUID().slice(0, 12)}`
     // A session the other CLI started can't be resumed: start over the same way as when it's gone.
     const switched = s.started && (this.store.getKv(SESSION_CLI_KEY) ?? "claude") !== this.cli()
     let result: RunResult = switched ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null } : await this.run(prompt, s.id, s.started, "turn", ask)
@@ -724,6 +732,7 @@ export class Orchestrator {
       const saved = last ? this.recap(last.file, { lead: "Your session was reset. This is the last summary you wrote" }) : null
       result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${now}`, fresh, false, "turn", ask)
     }
+    this.turnKey = null
     if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
     if (!result.ok) {
       const msg = this.store.addChat("error", `The orchestrator hit an error: ${result.error.slice(0, 1500)}`)
