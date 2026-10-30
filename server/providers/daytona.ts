@@ -489,7 +489,7 @@ export class DaytonaProvider implements BoxProvider {
       )
       await sleep(this.d.pollMs ?? 4000)
     }
-    throw new Error(`Daytona sandbox ${id} didn't start within ${s.startMinutes} minutes (no GPU of its types was free, or its image build is slow). Try again later, add a GPU type, or raise Start within in Settings › Daytona`)
+    throw new Error(`Daytona sandbox ${id} didn't start within ${s.startMinutes} minutes (no GPU of its types was free, or its image build is slow). Try again later, add a GPU type, or raise Wait for a GPU in Settings › Daytona`)
   }
 
   /** Make a started sandbox ready: tools installed (unless the image has them), init.sh, git identity. */

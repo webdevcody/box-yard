@@ -109,6 +109,15 @@ export interface DaytonaSettings {
   startMinutes: number
 }
 
+/**
+ * The vCPUs and memory a sandbox gets by Settings › Daytona, as the Min vCPUs and Min RAM that a project's own replace
+ * (a Daytona sandbox gets exactly what it asks for, so the project's "min" is its size).
+ */
+export function daytonaMachine(s: DaytonaSettings): { minRamGb: number; minVcpus: number } {
+  const cpu = s.gpuTypes.includes(DAYTONA_CPU)
+  return { minRamGb: cpu ? s.cpuMemoryGb : s.memoryGb, minVcpus: cpu ? s.cpuVcpus : s.vcpus }
+}
+
 export const DAYTONA_CPU_IMAGE = "ubuntu:24.04"
 
 export const DEFAULT_DAYTONA_SETTINGS: DaytonaSettings = {

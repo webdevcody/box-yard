@@ -11,7 +11,7 @@ import { DaytonaApi } from "./api.js"
 import { DaytonaSettingsStore } from "./settings.js"
 import { gpuBoxProvider } from "../../shared/gpu.js"
 import { RUNPOD_STOCK_IMAGE, gpuBoxIndex, gpuBoxProject } from "../../shared/runpod.js"
-import { DAYTONA_CPU, type DaytonaSandboxInfo, type DaytonaSettings, type DaytonaStatus } from "../../shared/daytona.js"
+import { daytonaMachine, type DaytonaSandboxInfo, type DaytonaSettings, type DaytonaStatus } from "../../shared/daytona.js"
 
 const MAX_KEEP_WARM_MINUTES = 24 * 60
 
@@ -76,8 +76,7 @@ export class DaytonaService implements GpuRunner {
    */
   settings(): DaytonaSettings & { minRamGb: number; minVcpus: number } {
     const s = this.store.get()
-    const cpu = s.gpuTypes.includes(DAYTONA_CPU)
-    return { ...s, minRamGb: cpu ? s.cpuMemoryGb : s.memoryGb, minVcpus: cpu ? s.cpuVcpus : s.vcpus }
+    return { ...s, ...daytonaMachine(s) }
   }
 
   enabled() {
