@@ -15,6 +15,7 @@ import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
+import type { MachineSettings, MachineStatus, MachinesStatus } from "../../../shared/machines"
 import type { Runner } from "../../../shared/runner"
 import type { ProjectColor } from "../../../shared/projectColors"
 import { setTtsInfo } from "./tts"
@@ -93,6 +94,8 @@ export const keys = {
   runpod: ["runpod"] as const,
   runpodGpus: ["runpod-gpus"] as const,
   docker: ["docker"] as const,
+  /** Cody's SSH machines (Settings › Machines, the Boxes page); the "machines" event keeps it live. */
+  machines: ["machines"] as const,
   setupRepos: ["setup-repos"] as const,
   notifications: ["notifications"] as const,
   usage: ["usage"] as const,
@@ -523,6 +526,47 @@ export function useDockerAction<T>(title: string, call: (input: T) => Promise<Do
   })
 }
 
+// ------------------------------------------------------------------ SSH machines (Settings › Machines)
+
+/** Every SSH machine with its state, labels and last test. The "machines" event keeps it live. */
+export const useMachines = (o?: Quiet & { enabled?: boolean }) =>
+  useQuery({ queryKey: keys.machines, queryFn: () => api<MachinesStatus>("/api/machines"), enabled: o?.enabled, notifyOnChangeProps: o?.notifyOnChangeProps, staleTime: 5_000 })
+
+/** What Add and Edit send. The key is a reference (file:~/.ssh/<key>, agent, …), never a key. */
+export interface MachineForm {
+  name: string
+  host: string
+  user: string
+  port?: number
+  keyRef: string
+  maxTasks?: number
+  labels?: string[]
+  dir?: string
+  enabled?: boolean
+}
+
+type MachineReply = { machine: MachineStatus; status: MachinesStatus }
+
+/** The calls Settings › Machines makes; each answers with every machine's status. */
+export const machineApi = {
+  add: (input: MachineForm & { test?: boolean }) => api<MachineReply>("/api/machines", { body: input }),
+  update: (id: string, patch: Partial<MachineForm>) => api<MachineReply>(`/api/machines/${encodeURIComponent(id)}`, { method: "PATCH", body: patch }),
+  test: (id: string) => api<MachineReply>(`/api/machines/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  forgetHostKey: (id: string) => api<MachineReply>(`/api/machines/${encodeURIComponent(id)}/forget-host-key`, { method: "POST" }),
+  remove: (id: string, force = false) => api<{ moved: string[]; lost: string[]; status: MachinesStatus }>(`/api/machines/${encodeURIComponent(id)}${force ? "?force=1" : ""}`, { method: "DELETE" }),
+  saveSettings: (s: MachineSettings) => api<MachinesStatus>("/api/machines/settings", { method: "PUT", body: s }),
+}
+
+/** A machine action whose reply carries every machine's status. Errors toast unless `quiet` (the form shows them). */
+export function useMachineAction<T>(title: string, call: (input: T) => Promise<{ status: MachinesStatus } | MachinesStatus>, o: { quiet?: boolean } = {}) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => qc.setQueryData(keys.machines, "machines" in r ? r : r.status),
+    onError: o.quiet ? undefined : fail(title),
+  })
+}
+
 // ------------------------------------------------------------------ identities (Settings › Identities)
 
 /** Every identity, its secrets as fingerprints only. The "identities" event keeps it live. */
@@ -604,7 +648,7 @@ export function useToggleHook(scope: string) {
 export function useCreateProject() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner }) =>
+    mutationFn: (input: { id: string; name: string; description?: string; repo?: string | null; baseBranch?: string; env?: Record<string, string>; runner?: Runner; machineLabel?: string | null }) =>
       api<Project>("/api/projects", { body: input }),
     onMutate: async (input) => {
       await qc.cancelQueries({ queryKey: keys.projects })
@@ -627,7 +671,7 @@ export function useCreateProject() {
           depCache: null,
           // Unless the form picked one, the server uses the setup choice.
           runner: input.runner ?? qc.getQueryData<SetupStatus>(keys.setup)?.runner.default ?? "box",
-          machineLabel: null,
+          machineLabel: input.machineLabel ?? null,
           agentsPerBox: null,
           wholeMachine: false,
           tasksPerBox: null,
@@ -673,6 +717,8 @@ export function useUpdateProject() {
       pushAtTurnEnd?: boolean | null
       depCache?: boolean | null
       runner?: Runner
+      /** Runs on: SSH machine: the machines' label or name; null is any machine. */
+      machineLabel?: string | null
       agentsPerBox?: number | null
       wholeMachine?: boolean
       tasksPerBox?: number | null

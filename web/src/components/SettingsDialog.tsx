@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react"
 import { useSearchParams } from "wouter"
-import { Bell, Bot, Boxes, Check, Container, Cpu, DollarSign, Fingerprint, Info, KeyRound, Network, Volume2, Webhook, type LucideIcon } from "lucide-react"
+import { Bell, Bot, Boxes, Check, Container, Cpu, DollarSign, Fingerprint, Info, KeyRound, Network, Server, Volume2, Webhook, type LucideIcon } from "lucide-react"
 import { useAgentSettings, useHealth, useResetSettings, useSaveSettings, useSettings } from "../lib/queries"
 import {
   SETTINGS_PARAM,
@@ -25,6 +25,7 @@ import { CredentialsPanel } from "./Setup"
 import { IdentitiesPanel } from "./Identities"
 import { RunPodPanel } from "./RunPodSettings"
 import { DockerPanel } from "./DockerSettings"
+import { MachinesPanel } from "./MachineSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
 import { EffortPicker, ModelPicker } from "./ModelPicker"
@@ -51,10 +52,10 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, docker: Container, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, docker: Container, machines: Server, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 /** Sections whose controls keep their own drafts (useDraft). They stay mounted once opened, so the drafts survive. */
-const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "docker", "hooks", "notifications", "voice"]
+const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "docker", "machines", "hooks", "notifications", "voice"]
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -435,6 +436,8 @@ export function SettingsDialog({
                 <RunPodPanel fid={fid} active={section === "runpod"} />
               ) : k === "docker" ? (
                 <DockerPanel fid={fid} active={section === "docker"} />
+              ) : k === "machines" ? (
+                <MachinesPanel fid={fid} />
               ) : (
                 <Panel section="hooks">
                   <HooksPanel projectId={null} intro={false} />

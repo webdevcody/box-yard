@@ -32,6 +32,7 @@ import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../sh
 import { RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
 import { gpuBoxIndex, isGpuBox } from "../../../shared/runpod"
 import { isDockerBox } from "../../../shared/docker"
+import { isMachineBox, machineOfBox } from "../../../shared/machines"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
 import { QueuedLink } from "./QueuedMessages"
@@ -343,6 +344,10 @@ function TaskMenu({
                   <span className="min-w-0 truncate text-zinc-300">Its project's RunPod GPU pod #{gpuBoxIndex(task.boxId)}</span>
                 ) : isDockerBox(task.boxId) ? (
                   <span className="min-w-0 truncate text-zinc-300">Its project's Docker container</span>
+                ) : isMachineBox(task.boxId) ? (
+                  <Link href="/boxes" className="min-w-0 truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
+                    SSH machine {task.placement?.now?.machine ?? machineOfBox(task.boxId)} (unsandboxed)
+                  </Link>
                 ) : task.boxId ? (
                   <Link href={`/boxes#${encodeURIComponent(task.boxId)}`} className="min-w-0 truncate text-zinc-300 hover:underline" onClick={() => setOpen(false)}>
                     {task.boxId}
@@ -354,7 +359,8 @@ function TaskMenu({
               {task.runsOn && (
                 <Detail label="Runs on">
                   <span className={cx("min-w-0 truncate", task.runsOn === "local" ? "text-amber-200" : "text-zinc-300")} data-testid="task-runs-on">
-                    {RUNNER_LABEL[task.runsOn]} · this task only
+                    {RUNNER_LABEL[task.runsOn]}
+                    {task.runsOn === "ssh" && task.machineLabel ? ` · ${task.machineLabel}` : ""} · this task only
                   </span>
                 </Detail>
               )}

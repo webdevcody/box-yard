@@ -9,6 +9,7 @@ import {
   useDocker,
   useHooks,
   useIdentities,
+  useMachines,
   useProjectAutoSize,
   useProjects,
   useRunPod,
@@ -40,6 +41,7 @@ import { HooksPanel } from "./Hooks"
 import { NotesTab } from "./NotesTab"
 import { ProjectSnapshotPanel } from "./ProjectSnapshot"
 import { useOpenSettings } from "./SettingsDialog"
+import { MachineLabelPicker } from "./MachineSettings"
 import { IdentityBadge } from "./IdentityBadge"
 import { BOX_SIZES, PROJECT_BOX_LIMITS, SIZE_DEFAULTS, WORKER_SIZES, type Artifact, type BoxSize, type Project, type SettingsInfo, type Task, type TaskStatus } from "../../../shared/types"
 import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
@@ -401,6 +403,7 @@ function ProjectBoxSettings(p: {
   local: boolean
   gpu: boolean
   docker: boolean
+  ssh: boolean
   boxSize: BoxSize | ""
   setBoxSize: (v: BoxSize | "") => void
   agentsPerBox: string
@@ -454,6 +457,8 @@ function ProjectBoxSettings(p: {
           " This project runs on RunPod GPU pods: Tasks running at once sets its tasks per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Task folders kept per box and Box size apply when it runs on boxes."}
         {p.docker &&
           " This project runs in a Docker container of its own: Tasks running at once sets its tasks in the container at once (blank: Settings › Docker › Tasks running at once per container), within the container's CPU and memory (Settings › Docker). Task folders kept per box and Box size apply when it runs on boxes."}
+        {p.ssh &&
+          " This project runs on your SSH machines: Tasks running at once limits its tasks on each machine, within the machine's own (Settings › Machines), and Whole machine keeps other projects' tasks off a machine while it runs. Task folders kept per box and Box size apply when it runs on boxes."}
       </p>
       <OverrideField
         id="project-box-size"
@@ -802,6 +807,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [env, setEnv] = useState("")
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [runner, setRunner] = useState<Runner>(project.runner ?? "box")
+  const [machineLabel, setMachineLabel] = useState(project.machineLabel ?? "")
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
@@ -830,10 +836,12 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const noUpstash = setup.data?.upstash.available === false
   // RunPod GPU waits for a RunPod key (Settings › RunPod GPU).
   const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
+  // SSH machine waits for a machine (Settings › Machines).
+  const noMachines = useMachines().data?.machines.length === 0
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, runner === "ssh" ? machineLabel : "", boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -857,6 +865,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           })
           if (!ok) return
         }
+        if (runner === "ssh" && project.runner !== "ssh") {
+          const ok = await confirmDialog({
+            title: "Run agents on your SSH machines?",
+            body: `${project.name}'s agents will run on your own computers over SSH, as the user Box Yard logs in as there, with that user's files and network: they're not sandboxed. Its tasks move over when nothing would be lost.`,
+            confirmLabel: "Run on SSH machines",
+            danger: true,
+          })
+          if (!ok) return
+        }
         update.mutate({
           id: project.id,
           name,
@@ -866,6 +883,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           env: parseEnv(env),
           removeEnv: removeKeys,
           runner,
+          ...(runner === "ssh" ? { machineLabel: machineLabel || null } : {}),
           boxSize: boxSize || null,
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
@@ -907,11 +925,15 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <div className="space-y-2">
         <Field
           label="Runs on"
-          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Tasks running at once on this computer). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Docker container: the project gets an isolated container of its own on this computer, started when a task needs it and stopped when idle (Settings → Docker). Tasks move over when nothing would be lost.`}
+          hint={`Upstash box: each agent runs in an isolated Upstash box. This computer: agents run straight on the computer running Box Yard (its GPU, its logged-in claude and gh), each task in its own folder in ${server.data?.localDir ?? "~/boxyard-workspaces"}, ${settings.data?.settings.localAgents ?? 2} at a time (Settings → Tasks running at once on this computer). RunPod GPU: the project gets GPU pods of its own at RunPod (up to its Max boxes, within its GPU cap), started when a task needs one and stopped when idle (Settings → RunPod GPU). Docker container: the project gets an isolated container of its own on this computer, started when a task needs it and stopped when idle (Settings → Docker). SSH machine: agents run on one of your own computers over SSH, a free one with the label you pick (Settings → Machines). Tasks move over when nothing would be lost.`}
         >
           <Select className="w-full sm:w-80" value={runner} onChange={(e) => setRunner(e.target.value as Runner)} data-testid="project-runner">
             {RUNNERS.map((r) => (
-              <option key={r} value={r} disabled={(r === "box" && noUpstash && project.runner === "local") || (r === "gpu" && noRunPod && project.runner !== "gpu")}>
+              <option
+                key={r}
+                value={r}
+                disabled={(r === "box" && noUpstash && project.runner === "local") || (r === "gpu" && noRunPod && project.runner !== "gpu") || (r === "ssh" && noMachines && project.runner !== "ssh")}
+              >
                 {RUNNER_LABEL[r]}
                 {r === "local"
                   ? " (not sandboxed)"
@@ -919,7 +941,11 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
                     ? " (add an Upstash key in Settings first)"
                     : r === "gpu" && noRunPod && project.runner !== "gpu"
                       ? " (add a RunPod key in Settings first)"
-                      : ""}
+                      : r === "ssh" && noMachines && project.runner !== "ssh"
+                        ? " (add one in Settings › Machines first)"
+                        : r === "ssh"
+                          ? " (not sandboxed)"
+                          : ""}
               </option>
             ))}
           </Select>
@@ -946,6 +972,19 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           </div>
         )}
         {runner === "docker" && <ProjectDockerSettings draft={docker} setDraft={setDocker} />}
+        {runner === "ssh" && (
+          <Field label="Which machines" hint="A label (or one machine's name). Each task takes a free machine with it, and keeps its folder there between turns.">
+            <MachineLabelPicker value={machineLabel} onChange={setMachineLabel} />
+          </Field>
+        )}
+        {(runner === "ssh" || noMachines) && (
+          <p className="text-xs text-zinc-500" data-testid="runner-ssh-note">
+            {runner === "ssh" ? "Your own computers, reached over SSH from this one. Agents there aren't sandboxed." : "Old laptops or a GPU tower around? Add them as SSH machines and run projects on them."}{" "}
+            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("machines")}>
+              Settings › Machines
+            </button>
+          </p>
+        )}
       </div>
       <div className="space-y-2">
         <Field label="Identity" hint="Who its agents act as on GitHub: the account's token, the git author its commits get and the key that signs them. Default is Settings › Credentials.">
@@ -992,6 +1031,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
         local={runner === "local"}
         gpu={runner === "gpu"}
         docker={runner === "docker"}
+        ssh={runner === "ssh"}
         boxSize={boxSize}
         setBoxSize={setBoxSize}
         agentsPerBox={agentsPerBox}

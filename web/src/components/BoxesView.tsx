@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { Link, useSearchParams } from "wouter"
 import { AlertTriangle, Boxes, Camera, Laptop, ChevronRight, Eraser, Globe, Info, Loader2, Maximize2, MoreHorizontal, PanelTopOpen, Settings, Sparkles, Trash2, X } from "lucide-react"
-import { useAgentSettings, useBoxes, useCleanBox, useHealth, useProjects, useSetup, useTasks } from "../lib/queries"
+import { useAgentSettings, useBoxes, useCleanBox, useHealth, useMachines, useProjects, useSetup, useTasks } from "../lib/queries"
 import { CAPACITY_NOTICE_KEY, capacityNotice, capacityNoticeText, showCapacityNotice } from "../lib/capacity"
 import { useHash, useScrollToHash } from "../lib/hash"
 import { shortDuration, splitBoxTasks } from "../lib/boxTasks"
@@ -23,6 +23,7 @@ import { useOpenSettings } from "./SettingsDialog"
 import { agentCapacity, type BoxCleanup, type BoxInfo, type Task } from "../../../shared/types"
 import { WaitReason } from "./WaitReason"
 import { CloudMeter } from "./CloudMeter"
+import { MachineCard } from "./MachineSettings"
 
 const RUNNING: Task["status"][] = ["working", "starting"]
 
@@ -154,6 +155,8 @@ export function BoxesView() {
         </section>
       )}
 
+      <MachinesSection tasksOn={tasksOn} projectName={projectName} onSettings={() => openSettings("machines")} />
+
       <section>
         <h2 className="mb-2 text-sm font-semibold text-zinc-300">
           Waiting for a slot <span className="text-zinc-600">{queued.length}</span>
@@ -191,6 +194,43 @@ export function BoxesView() {
         />
       )}
     </div>
+  )
+}
+
+// ---------------------------------------------------------------- SSH machines
+
+/** Cody's SSH machines (Settings › Machines): state, labels, last test and the tasks on each. Hidden until there's one. */
+function MachinesSection({ tasksOn, projectName, onSettings }: { tasksOn: (boxId: string) => Task[]; projectName: (id: string) => string; onSettings: () => void }) {
+  const machines = useMachines().data?.machines ?? []
+  if (!machines.length) return null
+  return (
+    <section className="@container" aria-labelledby="boxes-machines" data-testid="boxes-machines">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h2 id="boxes-machines" className="text-sm font-semibold text-zinc-300">
+          SSH machines <span className="text-zinc-600">{machines.length}</span>
+        </h2>
+        <button onClick={onSettings} className="inline-flex min-h-11 items-center gap-1.5 text-sm text-sky-400 hover:underline sm:min-h-0">
+          <Settings className="h-3.5 w-3.5" /> Settings › Machines
+        </button>
+      </div>
+      <ul className="grid gap-2 @3xl:grid-cols-2">
+        {machines.map((m) => {
+          const on = tasksOn(m.boxId)
+          const running = on.filter((t) => RUNNING.includes(t.status))
+          return (
+            <MachineCard key={m.id} machine={m}>
+              {on.length > 0 && (
+                <div className="-mx-3 divide-y divide-zinc-800/80 border-t border-zinc-800/80">
+                  {[...running, ...on.filter((t) => !running.includes(t))].map((t) => (
+                    <TaskRow key={t.id} task={t} projectName={projectName(t.projectId)} muted={!running.includes(t)} />
+                  ))}
+                </div>
+              )}
+            </MachineCard>
+          )
+        })}
+      </ul>
+    </section>
   )
 }
 
