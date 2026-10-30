@@ -186,6 +186,23 @@ describe("SSH machines (mock mode: machines are folders)", () => {
     expect(history(r, box)).toEqual(["created by owner", "deleted by owner"])
   })
 
+  it("gives a busy machine's next free slot to a high-priority task first", { timeout: 200_000 }, async () => {
+    const r = await start()
+    const { machine } = await addMachine(r, { name: "old-thinkpad", host: "thinkpad.lan", user: "cody", labels: ["laptops"], maxTasks: 1 })
+    const box = machineBoxId(machine.id)
+    const p = await call<Project>(r, "POST", "/api/projects", { name: "queue", runner: "ssh", machineLabel: "laptops" })
+    const busy = r.yard.tasks.createTask({ projectId: p.id, title: "busy", prompt: "[slow:3] write a haiku" })
+    await until(r, busy.id, (t) => t.boxId === box && t.status === "working", "to start")
+    const normal = r.yard.tasks.createTask({ projectId: p.id, title: "normal", prompt: "write a haiku" })
+    await until(r, normal.id, (t) => Boolean(t.waitReason), "to wait")
+    const urgent = r.yard.tasks.createTask({ projectId: p.id, title: "urgent", prompt: "[slow:3] write a haiku", priority: "high" })
+    await until(r, urgent.id, (t) => t.status === "working", "to take the free slot")
+    expect(getTask(r, normal.id)).toMatchObject({ status: "queued", boxId: null })
+    await done(r, urgent.id)
+    await done(r, normal.id)
+    expect(getTask(r, normal.id).boxId).toBe(box)
+  })
+
   it("lets the Coordinator add and label machines and place tasks by label; \"local\" stays this computer until Cody points it at a label", { timeout: 200_000 }, async () => {
     const r = await start()
     const coordinator = await mcpAs(r, { kind: "coordinator" })
