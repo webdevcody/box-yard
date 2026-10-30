@@ -7,7 +7,9 @@ import { App } from "../web/src/App.js"
 import { keys } from "../web/src/lib/queries.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { ZEN_PATH } from "../web/src/lib/zen.js"
-import { closeZenPanel, zenPanelState } from "../web/src/lib/zenPanel.js"
+import { closeZenPanel, openZenPanel, zenPanelState } from "../web/src/lib/zenPanel.js"
+import { pickProject, readPins, setChatProjectFilter } from "../web/src/lib/projectBar.js"
+import { captainHref } from "../web/src/components/ChatSwitcher.js"
 import { projectColors } from "../shared/projectColors.js"
 import type { Project } from "../shared/types"
 
@@ -73,11 +75,22 @@ const captainBox = (within: ParentNode = document) => within.querySelector<HTMLT
 const panelTitle = () => document.querySelector("[data-testid=zen-panel-title]")?.textContent
 
 const click = (el: Element) => act(() => void el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })))
-const key = (k: string, target: Element = document.activeElement ?? document.body) => {
-  const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })
+const key = (k: string, target: Element = document.activeElement ?? document.body, init: KeyboardEventInit = {}) => {
+  const e = new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true, ...init })
   act(() => void target.dispatchEvent(e))
   return e
 }
+const filterBox = () => menu()?.querySelector<HTMLInputElement>("[data-testid=chat-switcher-filter]") ?? null
+/** Types into the filter as React hears it. */
+const type = (text: string) =>
+  act(() => {
+    const input = filterBox()!
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, input.value + text)
+    input.dispatchEvent(new Event("input", { bubbles: true }))
+  })
+const highlighted = () => items().filter((el) => el.dataset.active === "true").map((el) => el.textContent!.replace(/(working|idle)$/, ""))
+const title = () => chatPanel().querySelector("[data-testid=chat-title]")!.textContent
+const pressedChip = () => chatPanel().querySelector('[data-testid="project-bar"] button[aria-pressed="true"]')?.textContent
 /** The composer is focused a frame after the pick. */
 const frame = () => act(() => new Promise<void>((r) => requestAnimationFrame(() => r())))
 
@@ -97,6 +110,7 @@ afterEach(() => {
   document.body.innerHTML = ""
   for (const t of currentToasts()) dismiss(t.id)
   closeZenPanel()
+  setChatProjectFilter(null)
   vi.unstubAllGlobals()
 })
 
@@ -172,17 +186,30 @@ describe("the chat switcher in the Coordinator's header", () => {
     expect(menu()).toBeNull()
   })
 
-  it("Enter on a project opens its Captain in Zen's side panel with the composer focused", async () => {
+  it("Enter on a project pins it to the project bar and shows it in this chat, its Captain's box focused, without opening the side panel", async () => {
     render()
     click(switcher(chatPanel()))
     key("ArrowDown")
     key("ArrowDown")
     key("Enter")
     expect(menu()).toBeNull()
-    expect(zenPanelState()).toEqual({ path: "/projects/prj_night1?tab=captain" })
-    expect(panelTitle()).toBe("survive-the-night Captain")
+    expect(zenPanel()).toBeNull()
+    expect(location.pathname).toBe(ZEN_PATH)
+    expect(title()).toBe("survive-the-night Captain")
+    expect(pressedChip()).toBe("survive-the-night")
+    expect(readPins()).toEqual({ prj_night1: "pinned" })
     await frame()
-    expect(document.activeElement).toBe(captainBox(zenPanel()!))
+    expect(document.activeElement).toBe(chatPanel().querySelector("textarea"))
+    expect(chatPanel().querySelector("textarea")!.placeholder).toBe("Queue another message for the Captain…")
+  })
+
+  it("beside a page, a pick stays in the Coordinator too: no navigation to the Captain's tab", () => {
+    render("/")
+    click(switcher(chatPanel()))
+    click(items().find((el) => el.textContent!.startsWith("alpha"))!)
+    expect(location.pathname).toBe("/")
+    expect(title()).toBe("alpha Captain")
+    expect(pressedChip()).toBe("alpha")
   })
 
   it("Enter on the current chat just closes the menu and focuses its composer", async () => {
@@ -199,8 +226,7 @@ describe("the chat switcher in the Coordinator's header", () => {
 describe("the chat switcher in a Captain's header", () => {
   it("in Zen's side panel: the Coordinator stays first and this Captain is the checked one", async () => {
     render()
-    click(switcher(chatPanel()))
-    click(items().find((el) => el.textContent!.startsWith("alpha"))!)
+    act(() => openZenPanel(captainHref("prj_alpha1")))
     const button = switcher(zenPanel()!)
     expect(button.textContent).toContain("Captain")
     click(button)
@@ -213,10 +239,8 @@ describe("the chat switcher in a Captain's header", () => {
 
   it("switches to another Captain in the panel, and back to the Coordinator, focusing each composer", async () => {
     render()
-    click(switcher(chatPanel()))
-    click(items().find((el) => el.textContent!.startsWith("box-yard"))!)
-    await frame()
-    expect(document.activeElement).toBe(captainBox(zenPanel()!))
+    act(() => openZenPanel(captainHref("prj_yard01")))
+    expect(panelTitle()).toBe("box-yard Captain")
 
     click(switcher(zenPanel()!))
     click(items().find((el) => el.textContent!.startsWith("survive-the-night"))!)
@@ -234,13 +258,13 @@ describe("the chat switcher in a Captain's header", () => {
   })
 
   it("on the project page: picking a Captain goes to its tab, and the Coordinator opens beside it focused", async () => {
-    render("/")
-    // From the Coordinator panel beside the page.
-    click(switcher(chatPanel()))
+    render("/projects/prj_alpha1?tab=captain")
+    let captainChat = document.querySelector<HTMLElement>("[data-testid=captain-chat]")!
+    click(switcher(captainChat))
     click(items().find((el) => el.textContent!.startsWith("survive-the-night"))!)
     expect(location.pathname + location.search).toBe("/projects/prj_night1?tab=captain")
     await frame()
-    const captainChat = document.querySelector<HTMLElement>("[data-testid=captain-chat]")!
+    captainChat = document.querySelector<HTMLElement>("[data-testid=captain-chat]")!
     expect(document.activeElement).toBe(captainBox(captainChat))
 
     // From the project's Captain tab: the Coordinator stays first, this Captain is checked.
@@ -257,5 +281,97 @@ describe("the chat switcher in a Captain's header", () => {
     expect(location.pathname).toBe("/projects/prj_night1")
     await frame()
     expect(document.activeElement).toBe(coordinatorBox())
+  })
+})
+
+describe("the project picker hotkey (P)", () => {
+  it("names the key in the Coordinator's switcher title, and only there", () => {
+    render("/projects/prj_alpha1?tab=captain")
+    expect(switcher(chatPanel()).title).toBe("Switch to the Coordinator or a project (P)")
+    expect(switcher(chatPanel()).getAttribute("aria-keyshortcuts")).toBe("p")
+    const captainChat = document.querySelector<HTMLElement>("[data-testid=captain-chat]")!
+    expect(switcher(captainChat).title).toBe("Switch to the Coordinator or a project's Captain")
+    expect(switcher(captainChat).hasAttribute("aria-keyshortcuts")).toBe(false)
+  })
+
+  it("opens the Coordinator's switcher with the filter focused; typing picks the best match, Enter pins and shows it", async () => {
+    render()
+    expect(key("p", document.body).defaultPrevented).toBe(true)
+    expect(menu()).not.toBeNull()
+    expect(document.activeElement).toBe(filterBox())
+    // Before typing, the current chat is highlighted.
+    expect(highlighted()).toEqual(["Coordinator"])
+    type("stn")
+    expect(labels()).toEqual(["survive-the-night"])
+    expect(highlighted()).toEqual(["survive-the-night"])
+    expect(filterBox()!.getAttribute("aria-activedescendant")).toBe(items()[0]!.id)
+    key("Enter")
+    expect(menu()).toBeNull()
+    expect(title()).toBe("survive-the-night Captain")
+    expect(pressedChip()).toBe("survive-the-night")
+    expect(readPins()).toEqual({ prj_night1: "pinned" })
+    await frame()
+    expect(document.activeElement).toBe(chatPanel().querySelector("textarea"))
+  })
+
+  it("ranks prefix matches first, arrows move the highlight (wrapping), and Esc closes without a pick", () => {
+    render()
+    key("p", document.body)
+    type("a")
+    // "alpha" starts with it; the others only contain it.
+    expect(labels()[0]).toBe("alpha")
+    expect(highlighted()).toEqual(["alpha"])
+    expect(key("ArrowDown").defaultPrevented).toBe(true)
+    expect(highlighted()).toEqual([labels()[1]])
+    key("ArrowUp")
+    key("ArrowUp")
+    expect(highlighted()).toEqual([labels().at(-1)])
+    key("Escape")
+    expect(menu()).toBeNull()
+    expect(title()).toBe("Box Yard Coordinator")
+    expect(readPins()).toEqual({})
+    // Esc was the menu's, so Zen didn't leave.
+    expect(document.querySelector("[data-zen]")).not.toBeNull()
+  })
+
+  it("'all' finds the Coordinator, which shows the whole chat again", () => {
+    render()
+    act(() => pickProject("prj_yard01"))
+    key("p", document.body)
+    type("all")
+    expect(highlighted()).toEqual(["Coordinator"])
+    key("Enter")
+    expect(title()).toBe("Box Yard Coordinator")
+    expect(pressedChip()).toContain("All")
+  })
+
+  it("says so when nothing matches, and Enter does nothing (the menu stays, to fix the typing)", () => {
+    render()
+    key("p", document.body)
+    type("zzz")
+    expect(items()).toEqual([])
+    expect(menu()!.textContent).toContain("No match.")
+    key("Enter")
+    expect(menu()).not.toBeNull()
+    expect(title()).toBe("Box Yard Coordinator")
+  })
+
+  it("doesn't fire while typing in a field, with a modifier, or held down", () => {
+    render()
+    expect(key("p", coordinatorBox()).defaultPrevented).toBe(false)
+    for (const init of [{ metaKey: true }, { ctrlKey: true }, { altKey: true }, { repeat: true }]) {
+      expect(key("p", document.body, init).defaultPrevented).toBe(false)
+      expect(menu()).toBeNull()
+    }
+  })
+
+  it("typing on a menu item (opened by a click) goes to the filter", () => {
+    render()
+    click(switcher(chatPanel()))
+    expect(focused()).toBe("Coordinator")
+    key("b")
+    expect(document.activeElement).toBe(filterBox())
+    expect(filterBox()!.value).toBe("b")
+    expect(labels()[0]).toBe("box-yard")
   })
 })
