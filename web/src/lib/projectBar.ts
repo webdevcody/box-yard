@@ -63,6 +63,21 @@ export function projectBarRows(
   return { rows, active, hidden }
 }
 
+/**
+ * The bar's scrollLeft that puts `chip` in its middle, kept within what the bar can scroll (a chip near either end
+ * goes as far as it can). Rects are viewport ones, as getBoundingClientRect gives them.
+ */
+export function centredScrollLeft(
+  bar: Pick<DOMRect, "left">,
+  chip: Pick<DOMRect, "left" | "width">,
+  scrollLeft: number,
+  clientWidth: number,
+  scrollWidth: number,
+): number {
+  const target = scrollLeft + chip.left - bar.left + chip.width / 2 - clientWidth / 2
+  return Math.round(Math.max(0, Math.min(scrollWidth - clientWidth, target)))
+}
+
 /** "2 needs you · 3 running · 1 queued · 1 PR ready", leaving out the zeros. */
 export function barCounts(row: BarRow): { key: string; n: number; label: string }[] {
   return [
