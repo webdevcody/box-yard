@@ -181,6 +181,9 @@ const machineDraft = (m: ProjectGpuMachine, provider: GpuProvider | null): Machi
   minVcpus: m.minVcpus?.toString() ?? "",
 })
 
+/** A project's own on/off over a setting, as a select's value: "" follows Settings. */
+const onOff = (v: boolean | null | undefined): "" | "on" | "off" => (v === null || v === undefined ? "" : v ? "on" : "off")
+
 /** A number field's value, or null when it's blank (use the default). */
 function optionalInt(text: string): number | null {
   const n = optionalNumber(text)
@@ -866,6 +869,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
   const [depCache, setDepCache] = useState<"" | "on" | "off">(project.depCache === null || project.depCache === undefined ? "" : project.depCache ? "on" : "off")
+  const [autoDoneOnMerge, setAutoDoneOnMerge] = useState<"" | "on" | "off">(onOff(project.autoDoneOnMerge))
+  const [closeIssuesOnMerge, setCloseIssuesOnMerge] = useState<"" | "on" | "off">(onOff(project.closeIssuesOnMerge))
   const [agentsPerBox, setAgentsPerBox] = useState(project.agentsPerBox?.toString() ?? "")
   const [wholeMachine, setWholeMachine] = useState(project.wholeMachine ?? false)
   const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
@@ -898,7 +903,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const defaults = settings.data?.settings
   const defaultAgentCli: AgentCli = defaults?.agentCli ?? DEFAULT_AGENT_CLI
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, runner === "ssh" ? machineLabel : "", agentCli, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, runner === "ssh" ? machineLabel : "", agentCli, boxSize, partialClone, pushAtTurnEnd, depCache, autoDoneOnMerge, closeIssuesOnMerge, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -945,6 +950,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           partialClone: partialClone ? partialClone === "on" : null,
           pushAtTurnEnd: pushAtTurnEnd ? pushAtTurnEnd === "on" : null,
           depCache: depCache ? depCache === "on" : null,
+          autoDoneOnMerge: autoDoneOnMerge ? autoDoneOnMerge === "on" : null,
+          closeIssuesOnMerge: closeIssuesOnMerge ? closeIssuesOnMerge === "on" : null,
           agentsPerBox: optionalInt(agentsPerBox),
           wholeMachine,
           tasksPerBox: optionalInt(tasksPerBox),
@@ -1163,6 +1170,26 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           <option value="">Default ({settings.data?.settings.depCacheEnabled ? "on" : "off"}: Settings → Dependency cache)</option>
           <option value="on">On: restore node_modules from the box cache</option>
           <option value="off">Off: agents install dependencies</option>
+        </Select>
+      </Field>
+      <Field
+        label="Done when its PR merges"
+        hint="On: when a task's pull request merges and its turn is over, it moves to done and its workspace is archived, as Mark done would. A task with queued messages or another open PR stays, and one set to stay open in its ⋯ menu always does."
+      >
+        <Select className="w-full sm:w-80" value={autoDoneOnMerge} onChange={(e) => setAutoDoneOnMerge(e.target.value as "" | "on" | "off")} data-testid="project-auto-done-on-merge">
+          <option value="">Default ({defaults?.autoDoneOnMerge === false ? "off" : "on"}: Settings → Done when its PR merges)</option>
+          <option value="on">On: a merged PR moves its task to done</option>
+          <option value="off">Off: you mark its tasks done yourself</option>
+        </Select>
+      </Field>
+      <Field
+        label="Close the issues it names"
+        hint="On: when a task's pull request merges into a branch other than the repo's default (an epic branch), Box Yard closes the open issues of this repo it names with Fixes, Closes or Resolves #N, and comments with a link to the PR. GitHub already does this for the default branch."
+      >
+        <Select className="w-full sm:w-80" value={closeIssuesOnMerge} onChange={(e) => setCloseIssuesOnMerge(e.target.value as "" | "on" | "off")} data-testid="project-close-issues-on-merge">
+          <option value="">Default ({defaults?.closeIssuesOnMerge === false ? "off" : "on"}: Settings → Close the issues it names)</option>
+          <option value="on">On: close them after a merge into an epic branch</option>
+          <option value="off">Off: leave issues to GitHub</option>
         </Select>
       </Field>
       <div className="grid gap-3 sm:max-w-xl sm:grid-cols-2">

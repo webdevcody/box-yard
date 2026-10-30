@@ -190,6 +190,11 @@ const iconSchema = z
 
 /** When a task's turns are pulled from the queue (shared/priority.ts); TASK_OPTIONS explains it. */
 const prioritySchema = z.enum(TASK_PRIORITIES).optional()
+/** A task that stays open when its PR merges (TaskManager.autoDoneOnMerge). */
+const stayOpenSchema = z
+  .boolean()
+  .optional()
+  .describe("true: it's never moved to done (nor archived) when its PR merges, for a long-running task such as a dev server or runner. Off by default: Settings › Done when its PR merges and its project decide.")
 
 /**
  * The tools the Coordinator and project Captains use to run Box Yard.
@@ -1168,7 +1173,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (m === lastAssistant && reply === m.content) return "[assistant] (latest reply: see lastReply)"
         return `[${m.role}] ${preview(m.content, 600, "call get_task with full_reply for the latest reply")}`
       })
-      return ok({ ...fields, prompt: t.prompt, branch: t.branch, messages })
+      return ok({ ...fields, prompt: t.prompt, branch: t.branch, stayOpenOnMerge: t.stayOpenOnMerge || undefined, messages })
     }),
   )
 
@@ -1190,10 +1195,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         agent: agentSchema,
         icon: iconSchema,
         priority: prioritySchema.describe('"high" or "normal" (the default): Task options'),
+        stay_open_on_merge: stayOpenSchema,
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; stay_open_on_merge?: boolean; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
       const where = placementOf(a.runs_on, a.machine_label)
@@ -1214,6 +1220,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         agentCli: a.agent ?? null,
         icon: a.icon ?? null,
         priority: a.priority ?? null,
+        stayOpenOnMerge: a.stay_open_on_merge,
       })
       return ok({ ...brief(t), ...viaLocal(where), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -1544,6 +1551,16 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const t = tasks.setTaskPriority(task(a.task).id, a.priority, prioritySetter)
       return ok({ ...brief(t), next: t.status === "queued" ? "pool_status's queued list shows where it is in the queue." : "It applies the next time the task waits for a slot." })
     }),
+  )
+
+  server.registerTool(
+    "set_task_stay_open",
+    {
+      description:
+        "Keep a task open when its PR merges (a long-running task, like a dev server or runner that must not be archived), or let Settings › Done when its PR merges and its project's setting decide again (Task options).",
+      inputSchema: { task: z.string(), stay_open_on_merge: stayOpenSchema.unwrap() },
+    },
+    safe(async (a: { task: string; stay_open_on_merge: boolean }) => ok(brief(tasks.setStayOpenOnMerge(task(a.task).id, a.stay_open_on_merge, prioritySetter)))),
   )
 
   server.registerTool(

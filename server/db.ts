@@ -950,6 +950,22 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE tasks ADD COLUMN machine_label TEXT;
   ALTER TABLE projects ADD COLUMN machine_label TEXT;
   `,
+  `
+  -- When a task's PR merges (server/mergeFollowUp.ts): a project's own "Close the issues it names" and "Done when its
+  -- PR merges" (NULL: Settings), and a task that stays open when its PR merges (a long-running runner).
+  ALTER TABLE projects ADD COLUMN close_issues_on_merge INTEGER;
+  ALTER TABLE projects ADD COLUMN auto_done_on_merge INTEGER;
+  ALTER TABLE tasks ADD COLUMN stay_open_on_merge INTEGER NOT NULL DEFAULT 0;
+  -- Merged PRs whose named issues Box Yard still has to close; a row leaves once that's done (or given up), so a
+  -- restart picks up where it stopped.
+  CREATE TABLE pr_issue_closes (
+    pr_url TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+  );
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

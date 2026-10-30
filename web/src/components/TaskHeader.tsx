@@ -9,6 +9,7 @@ import {
   CheckCircle2,
   CircleStop,
   Copy,
+  GitMerge,
   Globe,
   Loader2,
   Minimize2,
@@ -18,7 +19,7 @@ import {
   Trash2,
   Wrench,
 } from "lucide-react"
-import { useCloseTask, useCompactTask, useDeleteTask, useIdentities, useRetryTask, useStopTask } from "../lib/queries"
+import { useAgentSettings, useCloseTask, useCompactTask, useDeleteTask, useIdentities, useRetryTask, useSetStayOpenOnMerge, useStopTask } from "../lib/queries"
 import { api } from "../lib/api"
 import { primaryAction, type PrimaryAction } from "../lib/taskActions"
 import { toast } from "../lib/toast"
@@ -272,6 +273,15 @@ export function usePopover(portal?: RefObject<HTMLElement | null>) {
   return { open, setOpen, root, trigger }
 }
 
+/** A menu switch's knob (role="switch" on the row). */
+function Knob({ on }: { on: boolean }) {
+  return (
+    <span className={cx("relative h-4 w-7 shrink-0 rounded-full transition", on ? "bg-yard-500" : "bg-zinc-700")} aria-hidden>
+      <span className={cx("absolute top-0.5 h-3 w-3 rounded-full bg-zinc-950 transition-all", on ? "left-3.5" : "left-0.5")} />
+    </span>
+  )
+}
+
 export const menuItemBase = "flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm focus-visible:outline-none sm:min-h-0 sm:py-1.5"
 export const menuItem = cx(menuItemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus-visible:bg-zinc-800")
 
@@ -298,6 +308,10 @@ function TaskMenu({
   const compact = useCompactTask()
   const autoCompact = useAutoCompact("agent")
   const del = useDeleteTask()
+  const stayOpen = useSetStayOpenOnMerge()
+  // Done when its PR merges, as its project or Settings has it (the task's own switch only ever keeps it open).
+  const globalAutoDone = useAgentSettings({ enabled: open }).data?.settings.autoDoneOnMerge ?? true
+  const autoDone = project?.autoDoneOnMerge ?? globalAutoDone
 
   useEffect(() => {
     if (open) panel.current?.querySelector<HTMLElement>("button, a, input")?.focus()
@@ -427,9 +441,25 @@ function TaskMenu({
             <button type="button" role="switch" aria-checked={showTools} className={menuItem} onClick={() => onShowTools(!showTools)}>
               <Wrench className="h-3.5 w-3.5 text-zinc-500" />
               <span className="flex-1">Show tool calls</span>
-              <span className={cx("relative h-4 w-7 rounded-full transition", showTools ? "bg-yard-500" : "bg-zinc-700")} aria-hidden>
-                <span className={cx("absolute top-0.5 h-3 w-3 rounded-full bg-zinc-950 transition-all", showTools ? "left-3.5" : "left-0.5")} />
+              <Knob on={showTools} />
+            </button>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={Boolean(task.stayOpenOnMerge)}
+              className={menuItem}
+              onClick={() => stayOpen.mutate({ taskId: task.id, stayOpen: !task.stayOpenOnMerge })}
+              title="On: this task is never moved to done or archived when its PR merges, for a long-running task like a dev server or runner."
+              data-testid="task-stay-open-on-merge"
+            >
+              <GitMerge className="h-3.5 w-3.5 text-zinc-500" />
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span>Stay open when its PR merges</span>
+                {!task.stayOpenOnMerge && (
+                  <span className="text-xs text-zinc-500">{autoDone ? "Off: a merged PR moves it to done" : `Off, but ${project?.autoDoneOnMerge === false ? "its project" : "Settings"} leave${project?.autoDoneOnMerge === false ? "s" : ""} merged tasks open anyway`}</span>
+                )}
               </span>
+              <Knob on={Boolean(task.stayOpenOnMerge)} />
             </button>
             {portOpen ? (
               <OpenPortForm taskId={task.id} onDone={() => setOpen(false)} />

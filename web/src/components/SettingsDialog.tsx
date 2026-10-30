@@ -702,15 +702,30 @@ export function SettingsDialog({
                 hours
               </span>
             </Row>
+            <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">When a task's PR merges</h4>
+            <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+              Box Yard checks open PRs with GitHub about once a minute, with each project's own token. A project can turn either of these off (or on) in its settings, and a task can stay open from its ⋯ menu. Hooks on "PR merged" still run too, right after.
+            </p>
             <Row
               id={fid("adm")}
               label="Done when its PR merges"
-              help="When a task's pull request merges and its turn is over (it's idle or waiting for review, with nothing running or queued), it moves to done, as Mark done would leave it. Turning it on also moves resting tasks whose PR has already merged. Off: a merged PR leaves its task idle until you mark it done. Messaging a done task picks it back up."
+              help="When a task's pull request merges and its turn is over (it's idle or waiting for review), it moves to done and its workspace is archived, as Mark done does. It stays as it is while messages are queued for it, while it has another PR open, or when it's set to stay open. Turning it on also moves resting tasks whose PR has already merged. Off: a merged PR leaves its task idle until you mark it done. Messaging a done task picks it back up."
               hint={hint("autoDoneOnMerge")}
             >
               <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
                 <input id={fid("adm")} type="checkbox" checked={s.autoDoneOnMerge ?? true} onChange={(e) => set("autoDoneOnMerge", e.target.checked)} data-testid="auto-done-on-merge" />
                 {(s.autoDoneOnMerge ?? true) ? "On: a merged PR moves its task to done" : "Off: you mark tasks done yourself"}
+              </label>
+            </Row>
+            <Row
+              id={fid("cim")}
+              label="Close the issues it names"
+              help="GitHub closes the issues a PR names with Fixes, Closes or Resolves #N only when it merges into the repo's default branch. For a PR merged into any other branch (an epic branch), Box Yard closes them: open issues of the same repo only, never PRs or other repos' issues, each with a comment linking the PR."
+              hint={hint("closeIssuesOnMerge")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("cim")} type="checkbox" checked={s.closeIssuesOnMerge ?? true} onChange={(e) => set("closeIssuesOnMerge", e.target.checked)} data-testid="close-issues-on-merge" />
+                {(s.closeIssuesOnMerge ?? true) ? "On: closed after a merge into an epic branch, with a comment" : "Off: only GitHub closes them (default branch)"}
               </label>
             </Row>
           </Panel>

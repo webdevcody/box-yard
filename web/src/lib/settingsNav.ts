@@ -15,7 +15,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "orchestrator",
     label: "Coordinator",
-    description: "The agent and model behind the chat that runs the yard, the per-project Captains and the project notes they curate, when they compact their context, and how the chat's task cards fold away.",
+    description: "The agent and model behind the chat that runs the yard, the per-project Captains and the project notes they curate, when they compact their context, how the chat's task cards fold away, and what a merged PR does.",
     fields: [
       "startInZen",
       "orchestratorCli",
@@ -33,6 +33,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "notesMaxTokens",
       "cardsIdleHours",
       "autoDoneOnMerge",
+      "closeIssuesOnMerge",
     ],
   },
   {
