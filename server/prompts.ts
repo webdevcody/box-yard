@@ -1,4 +1,5 @@
 import { withOwner } from "../shared/owner.js"
+import { AGENT_CLI_LABEL, type AgentCli } from "../shared/agentCli.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { formatBytes } from "../shared/disk.js"
@@ -12,7 +13,7 @@ export interface DirectoryEntry {
   status: string
 }
 
-/** Appended to Claude's system prompt on every worker turn. */
+/** Appended to the agent's system prompt on every worker turn (Claude Code's, or Codex's developer instructions). */
 export function workerSystemPrompt(input: {
   project: Project
   task: Pick<Task, "id" | "title">
@@ -24,19 +25,22 @@ export function workerSystemPrompt(input: {
   pushAtTurnEnd?: boolean
   /** The box the turn runs on, so the agent paces heavy jobs. Keep it stable from turn to turn: it's in the cached system prompt. */
   box?: BoxPromptInfo
+  /** The CLI the agent runs on (Task.agentCli); Claude Code when unset. */
+  agent?: AgentCli
 }): string {
   const { project, task, branch, port } = input
+  const cli = AGENT_CLI_LABEL[input.agent ?? "claude"]
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
   const docker = Boolean(input.box?.docker)
   const header = [
     local
-      ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
+      ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
       : gpu
-      ? `You are a Box Yard agent: a headless Claude Code worker running on a RunPod GPU pod of your project's own (Linux, as root).`
+      ? `You are a Box Yard agent: a headless ${cli} worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : docker
-      ? withOwner(`You are a Box Yard agent: a headless Claude Code worker running in an isolated Docker container of your project's own (Linux) on Cody's computer.`, input.ownerName)
-      : `You are a Box Yard agent: a headless Claude Code worker running in an isolated Upstash Box.`,
+      ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running in an isolated Docker container of your project's own (Linux) on Cody's computer.`, input.ownerName)
+      : `You are a Box Yard agent: a headless ${cli} worker running in an isolated Upstash Box.`,
     `Your task: "${task.title}" (task id ${task.id}) in project "${project.name}".`,
     project.description ? `Project description: ${project.description}` : "",
   ]
