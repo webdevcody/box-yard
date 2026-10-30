@@ -41,6 +41,9 @@ import {
 } from "./compactions.js"
 import { compactionTaskSnapshots, liveTaskLines, mentionedTaskIds } from "./compactionTasks.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
+import { MISSING_SESSION, codexErrorText } from "./codex.js"
+import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
+import { codexModel, type AgentCli } from "../shared/agentCli.js"
 import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
@@ -58,6 +61,8 @@ type RunKind = "turn" | "summary" | "compact" | "context"
 interface RunAsk {
   trigger?: string | null
   requestedAt?: number | null
+  /** Images attached to the messages it answers: a Codex run gets them with the prompt (Claude Code opens them with Read). */
+  images?: string[]
 }
 /** Which sender a turn counts as started by when it answers several: the highest-ranked. */
 const TRIGGER_RANK: CaptainSource[] = ["cody", "coordinator", "agent", "schedule", "hook"]
@@ -71,6 +76,8 @@ interface RunResult {
 
 const sessionKey = (projectId: string) => `captain_session:${projectId}`
 const startedKey = (projectId: string) => `captain_session_started:${projectId}`
+/** The CLI the session belongs to (null: Claude Code, from before Codex). Another CLI can't resume it. */
+const sessionCliKey = (projectId: string) => `captain_session_cli:${projectId}`
 const usageKey = (projectId: string) => `captain_usage:${projectId}`
 /** A hash of the notes this Captain's session last saw, so an unchanged list isn't repeated every turn. */
 const notesSeenKey = (projectId: string) => `captain_notes_seen:${projectId}`
@@ -413,8 +420,20 @@ class Captain {
   private readonly workdir: string
   private readonly mcpConfigPath: string
   private readonly mcpConfig: string
+  private readonly mcp: { url: string; token: string }
   private readonly handshakes: McpHandshakes | null
   readonly compactionsDir: string
+
+  /** The CLI every Captain runs on now (Settings › Coordinator › Captains). */
+  private cli(): AgentCli {
+    return this.settings.get().captainCli
+  }
+
+  /** Its model: Settings › Captain model, or the Captains' Codex model on Codex (null: Codex's default). */
+  private model(): string | null {
+    const st = this.settings.get()
+    return st.captainCli === "codex" ? codexModel(null, st.captainCodexModel) : st.captainModel
+  }
 
   constructor(
     private readonly c: Config,
@@ -434,6 +453,7 @@ class Captain {
     private readonly prs: () => PrLookup | null = () => null,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
+    this.mcp = mcp
     this.handshakes = mcp.handshakes ?? null
     this.workdir = path.join(c.dataDir, "captains", project.id)
     this.compactionsDir = captainCompactionsDir(c.dataDir, project.id)
@@ -651,7 +671,8 @@ class Captain {
       session: () => ({ id: this.store.getKv(sessionKey(id)) ?? "", started: this.store.getKv(startedKey(id)) === "1" }),
       systemPrompt: () => this.systemPrompt(),
       readRules: () => this.readRules(),
-      model: () => this.settings.get().captainModel,
+      cli: () => this.cli(),
+      model: () => this.model(),
       effort: () => this.settings.get().captainEffort,
       compactionsDir: this.compactionsDir,
       caller: { kind: "captain", projectId: id },
@@ -707,10 +728,14 @@ class Captain {
 
   private async turn() {
     const answering = this.unansweredUserMessages()
+    const codex = this.cli() === "codex"
+    const note = codex ? codexAttachmentNote : attachmentNote
     const messages = answering
-      .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${attachmentNote(m.meta?.attachments, this.owner())}`)
+      .map((m) => `[${sourceLabel(m, this.owner())}]\n${m.content}${note(m.meta?.attachments, this.owner())}`)
       .filter((text) => text.trim())
     if (!messages.length) return
+    // Codex sees attached images with the message itself; Claude Code opens them with Read.
+    const images = codex ? answering.flatMap((m) => attachedImages(m.meta?.attachments)) : []
     // Messages sent during the last turn move to now, right before this turn's reply.
     const moved = this.store.deliverQueued("captain_messages", answering.map((m) => m.id), this.project.id)
     for (const d of moved) {
@@ -730,7 +755,7 @@ class Captain {
       .filter(Boolean)
       .join("\n\n")
     const sources = new Set(answering.map(captainSourceOf))
-    const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)) }
+    const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)), images }
     const result = await this.runPrompt(prompt, false, ask)
     this.handled(entries, result.ok)
     this.replyUpward(answering, result)
@@ -862,8 +887,12 @@ class Captain {
     const recapFile = this.store.getKv(recapKey(this.project.id))
     const compacted = recapFile ? this.recap(recapFile) : null
     const s = this.session()
-    let result = await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started, "turn", ask)
-    if (!result.ok && s.started && /no conversation found|session.*not found/i.test(result.error)) {
+    // A session the other CLI started can't be resumed: start over the same way as when it's gone.
+    const switched = s.started && (this.store.getKv(sessionCliKey(this.project.id)) ?? "claude") !== this.cli()
+    let result: RunResult = switched
+      ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null }
+      : await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started, "turn", ask)
+    if (!result.ok && s.started && MISSING_SESSION.test(result.error)) {
       const fresh = randomUUID()
       this.store.setKv(sessionKey(this.project.id), fresh)
       // A new session hasn't seen the notes.
@@ -955,7 +984,8 @@ class Captain {
     try {
       const s = this.session()
       const before = this.usage().tokens
-      const model = this.settings.get().captainModel
+      const cli = this.cli()
+      const model = this.model() ?? "codex"
       this.compactionSystemPrompt = this.systemPrompt()
       const summary = await this.run(this.summaryPrompt(), s.id, true, "summary")
       const text = cleanSummary(summary.text)
@@ -964,17 +994,26 @@ class Captain {
       }
       const meta = { at: Date.now(), sessionId: s.id, model, trigger, tokensBefore: before, heading: `Captain compaction summary: ${this.project.name}` }
       const { markdownFile: file } = writeCompaction(this.compactionsDir, meta, text, this.compactionTaskSnapshots())
-      const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
-      if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
-      let id = s.id
-      if (compact.sessionId && compact.sessionId !== s.id) {
-        id = compact.sessionId
-        this.store.setKv(sessionKey(this.project.id), id)
+      let after: { tokens: number; window: number } | null = null
+      if (cli === "codex") {
+        // Codex has no /compact to run headless: the next turn starts a new session from this summary (recapKey).
+        this.store.setKv(sessionKey(this.project.id), randomUUID())
+        this.store.setKv(startedKey(this.project.id), null)
+        this.compactionSystemPrompt = null
+        this.setUsage(null)
+      } else {
+        const compact = await this.run(compactCommand(this.owner()), s.id, true, "compact")
+        if (!compact.ok) throw new Error(`/compact failed: ${compact.error}`)
+        let id = s.id
+        if (compact.sessionId && compact.sessionId !== s.id) {
+          id = compact.sessionId
+          this.store.setKv(sessionKey(this.project.id), id)
+        }
+        this.compactionSystemPrompt = null
+        const report = await this.run("/context", id, true, "context")
+        after = report.ok ? parseContextReport(report.raw) : null
+        this.setUsage(after?.tokens ?? null, after?.window)
       }
-      this.compactionSystemPrompt = null
-      const report = await this.run("/context", id, true, "context")
-      const after = report.ok ? parseContextReport(report.raw) : null
-      this.setUsage(after?.tokens ?? null, after?.window)
       finishCompaction(file, after?.tokens ?? null)
       // The summary may not carry every note: list them again on the next turn, after the summary itself.
       this.store.setKv(notesSeenKey(this.project.id), null)
@@ -1029,29 +1068,52 @@ class Captain {
   /** Box Yard's part of the system prompt. Settings are read here, so changes apply from the next run. */
   private systemPrompt(): string {
     const st = this.settings.get()
-    return `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)), this.statusOnly())}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
+    const base = `${captainPrompt(this.project, st.ownerName, noteBudgetOf(st, this.store.getProject(this.project.id)), this.statusOnly())}\n\n${routingInstructions(this.c.dataDir, st)}\n\n${withOwner(compactionsPrompt(this.compactionsDir), st.ownerName)}`
+    return st.captainCli === "codex" ? `${base}\n\n${codexManagerNote(st.ownerName)}` : base
   }
 
   private readRules(): string[] {
     return [`Read(/${this.compactionsDir}/**)`, `Read(/${uploadsDir(this.c.dataDir)}/**)`]
   }
 
+  /** How this run starts: Claude Code with its flags, or Codex (which has no /compact or /context: see doCompact). */
+  private launch(kind: RunKind, sessionId: string, resume: boolean, images: string[]): ChatLaunch {
+    const st = this.settings.get()
+    if (st.captainCli === "codex") {
+      // Codex logs in with Settings › Credentials' Codex login: project identities have no Codex login of their own.
+      return codexChatLaunch({
+        c: this.c,
+        credentials: this.settings.credentials,
+        mcp: this.mcp,
+        resume: resume ? sessionId : null,
+        model: this.model(),
+        effort: st.captainEffort,
+        instructions: (kind === "summary" ? this.compactionSystemPrompt : null) ?? this.systemPrompt(),
+        images,
+      })
+    }
+    this.writeMcpConfig()
+    const [bin, ...pre] = this.c.claudeBin.split(" ")
+    // Its project identity's own Claude login, else env vars or Settings › Credentials, read on every run so a
+    // saved token works without a restart.
+    const env = serverClaudeEnv(this.claudeLogin(), this.settings.credentials.claudeEnv())
+    return { cli: "claude", bin: bin!, args: [...pre, ...this.claudeArgs(kind, sessionId, resume)], env, translate: null, after() {} }
+  }
+
   private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", ask: RunAsk = {}): Promise<RunResult> {
     return new Promise((resolve) => {
-      this.writeMcpConfig()
-      const args = this.claudeArgs(kind, sessionId, resume)
+      // Codex compacts on its own and has no /context: doCompact starts a fresh session from the summary instead.
+      if (this.cli() === "codex" && (kind === "compact" || kind === "context")) return resolve({ ok: true, error: "", text: "", raw: "", sessionId: null })
+      const launch = this.launch(kind, sessionId, resume, ask.images ?? [])
+      const cliName = launch.cli === "codex" ? `codex (${this.c.codexBin})` : `claude (${this.c.claudeBin})`
       const effort = this.settings.get().captainEffort
       const clock = new TurnClock()
-      const [bin, ...pre] = this.c.claudeBin.split(" ")
-      // Its project identity's own Claude login, else env vars or Settings › Credentials, read on every run so a
-      // saved token works without a restart.
-      const env = serverClaudeEnv(this.claudeLogin(), this.settings.credentials.claudeEnv())
 
       let child: ChildProcess
       try {
-        child = spawn(bin!, [...pre, ...args], { cwd: this.workdir, env, stdio: ["pipe", "pipe", "pipe"] })
+        child = spawn(launch.bin, launch.args, { cwd: this.workdir, env: launch.env, stdio: ["pipe", "pipe", "pipe"] })
       } catch (err) {
-        resolve({ ok: false, error: `Couldn't start claude: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
+        resolve({ ok: false, error: `Couldn't start ${launch.cli}: ${(err as Error).message}`, text: "", raw: "", sessionId: null })
         return
       }
       this.child = child
@@ -1074,18 +1136,30 @@ class Captain {
       let reply: CaptainMessage | null = null
 
       const onLine = (line: string) => {
-        // stop() closed the database; the run's last lines have nowhere to go.
-        if (this.stopped) return
+        if (launch.translate) {
+          for (const m of launch.translate(line)) onMsg(m)
+          return
+        }
         let msg: any
         try {
           msg = JSON.parse(line)
         } catch {
           return
         }
+        onMsg(msg)
+      }
+      const onMsg = (msg: any) => {
+        // stop() closed the database; the run's last lines have nowhere to go.
+        if (this.stopped) return
         if (typeof msg.session_id === "string") seenSession = msg.session_id
         clock.line(msg)
         if (msg.type === "system" && msg.subtype === "init") {
-          if (kind === "turn") this.store.setKv(startedKey(this.project.id), "1")
+          if (kind === "turn") {
+            // Codex names its own thread: that's the session the next turn resumes.
+            if (launch.cli === "codex" && seenSession) this.store.setKv(sessionKey(this.project.id), seenSession)
+            this.store.setKv(startedKey(this.project.id), "1")
+            this.store.setKv(sessionCliKey(this.project.id), launch.cli)
+          }
           return
         }
         if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
@@ -1148,6 +1222,7 @@ class Captain {
         clearTimeout(timer)
         if (buf.trim()) onLine(buf)
         this.child = null
+        launch.after()
         if (this.stopped) return resolve({ text: said, raw, sessionId: seenSession, ok: false, error: "Box Yard stopped." })
         // Captain runs get their own usage line and count toward the project's totals.
         if (resultUsage || typeof resultCostUsd === "number" || typeof resultDurationMs === "number") {
@@ -1155,8 +1230,8 @@ class Captain {
             source: "captain",
             runKind: kind,
             projectId: this.project.id,
-            sessionId,
-            model: resultModel ?? this.settings.get().captainModel,
+            sessionId: seenSession ?? sessionId,
+            model: resultModel ?? this.model() ?? "codex",
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,
@@ -1165,11 +1240,11 @@ class Captain {
             resumed: resume,
           })
         }
-        if (kind !== "context") this.recordTiming(clock, { kind, sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
+        if (kind !== "context") this.recordTiming(clock, { kind, sessionId: seenSession ?? sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
         const base = { text: said, raw, sessionId: seenSession }
-        if (err) return resolve({ ...base, ok: false, error: `Couldn't run claude (${this.c.claudeBin}): ${err.message}` })
-        if (code === 0 && !resultError) return resolve({ ...base, ok: true, error: "" })
-        resolve({ ...base, ok: false, error: resultError ?? (stderr.trim() || `claude exited with code ${code}${sawResult ? "" : " before answering"}`) })
+        if (err) return resolve({ ...base, ok: false, error: `Couldn't run ${cliName}: ${err.message}` })
+        if (code === 0 && !resultError && (sawResult || launch.cli === "claude")) return resolve({ ...base, ok: true, error: "" })
+        resolve({ ...base, ok: false, error: resultError ?? ((launch.cli === "codex" ? codexErrorText(stderr) : stderr.trim()) || `${launch.cli} exited with code ${code}${sawResult ? "" : " before answering"}`) })
       }
       child.on("error", (err) => finish(null, err))
       child.on("close", (code) => finish(code))

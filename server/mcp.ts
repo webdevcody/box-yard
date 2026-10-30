@@ -38,6 +38,7 @@ import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
 import { KEY_REF_HELP, labelPhrase, MACHINE_LIMITS, resolveRunsOn, THIS_COMPUTER, type MachineKeyRef, type MachineStatus } from "../shared/machines.js"
 import type { MachineActions } from "./machines/actions.js"
+import { AGENT_CLIS, type AgentCli } from "../shared/agentCli.js"
 import { TASK_PRIORITIES, byQueueOrder, type TaskPriority } from "../shared/priority.js"
 import fs from "node:fs"
 import type { Artifact, CompactionTaskSnapshot, OrchestratorCompactionRecord } from "../shared/types.js"
@@ -209,6 +210,12 @@ const machineLabelSchema = z
     'An SSH machine label or machine name, e.g. "gpu" or "laptops" (list_machines lists them): the task runs on a free SSH machine with it, and waits while every one of them is busy. Goes with runs_on "ssh", or alone (it means runs_on "ssh"). A label no machine has fails the call.',
   )
 const envSchema = z.record(z.string(), z.string()).optional().describe("Env vars as NAME: value")
+const agentSchema = z
+  .enum(AGENT_CLIS)
+  .optional()
+  .describe(
+    'The agent CLI it runs on, for good: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to follow the project\'s Agent (else Settings › Box agents); a gpt-* or o* model picks "codex" on its own. Pass "codex" when Cody asks for Codex, GPT or OpenAI.',
+  )
 const iconSchema = z
   .enum(TASK_ICONS)
   .optional()
@@ -692,6 +699,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     repo: p.repo,
     baseBranch: p.baseBranch,
     envKeys: p.envKeys,
+    // The CLI its new tasks run on (its own, else Settings › Box agents'); each task keeps the one it started on.
+    agent: p.agentCli ?? `${(deps.settings?.get() ?? DEFAULT_SETTINGS).agentCli} (Settings)`,
     boxSettings: tasks.projectBoxSettings(p),
     // Its RunPod pods and $/hr caps, when it runs on RunPod GPU.
     ...(p.runner === "gpu" && tasks ? { gpu: await tasks.projectGpuSettings(p, true) } : {}),
@@ -785,12 +794,13 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           repo: z.string().optional(),
           base_branch: z.string().optional(),
           env: envSchema,
+          agent: agentSchema.describe('The agent CLI its tasks run on: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to use Settings › Box agents.'),
           ...boxSettingsInput,
         },
       },
-      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string> } & BoxSettingsArgs) => {
+      safe(async (a: { name: string; description?: string; repo?: string; base_branch?: string; env?: Record<string, string>; agent?: AgentCli } & BoxSettingsArgs) => {
         if (store.findProject(a.name)) return fail(`A project named "${a.name}" already exists.`)
-        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), ...boxSettingsPatch(a) })
+        const p = store.createProject({ name: a.name, description: a.description, repo: a.repo, baseBranch: a.base_branch, env: a.env, runner: deps.defaultRunner?.(), agentCli: a.agent ?? null, ...boxSettingsPatch(a) })
         hub.broadcast({ type: "project", project: p })
         return ok(await projectView(p))
       }),
@@ -814,6 +824,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             base_branch: z.string().optional(),
             env: envSchema,
             remove_env: z.array(z.string()).optional(),
+            agent: z
+              .enum(AGENT_CLIS)
+              .nullable()
+              .optional()
+              .describe('The agent CLI its new tasks run on: "claude" or "codex"; null goes back to Settings › Box agents. Its existing tasks keep theirs.'),
             ...boxSettingsInput,
             notes_max: z
               .number()
@@ -856,6 +871,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           base_branch?: string
           env?: Record<string, string>
           remove_env?: string[]
+          agent?: AgentCli | null
           notes_max?: number | null
           notes_max_tokens?: number | null
           color?: ProjectColor | null
@@ -868,7 +884,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         if (a.machine_label !== undefined && !scopeId) {
           const current = store.getProject(id)!
           if (current.runner !== "ssh") return fail(owner(`${current.name} doesn't run on SSH machines (its Runs on is ${current.runner ?? "box"}). Cody picks Runs on in the project's settings; for one task, pass runs_on "label:<label>" to create_task.`))
-          if (a.machine_label) await tasks.requireRunner("ssh", id, {}, a.machine_label)
+          if (a.machine_label) await tasks.requireRunner("ssh", id, {}, { machineLabel: a.machine_label })
         }
         const p = store.updateProject(
           id,
@@ -881,6 +897,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 baseBranch: a.base_branch,
                 env: a.env,
                 removeEnv: a.remove_env,
+                agentCli: a.agent,
                 ...box,
                 notesMaxCount: a.notes_max,
                 notesMaxTokens: a.notes_max_tokens,
@@ -1161,7 +1178,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_task",
     {
       description:
-        "Start a NEW agent (a fresh Claude Code session) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
+        "Start a NEW agent (a fresh Claude Code or Codex session, see agent) on a task in a project. It gets its own folder on the project's worker box (repo cloned if the project has one). " +
         "Use this for new, independent work. For follow-ups on work an agent already did, use send_to_task instead so it keeps its context. Write a self-contained prompt. If Cody attached files (a screenshot of a bug, a spec) that the agent needs, pass them in attachments.",
       inputSchema: {
         project: z.string().describe("Project id or name"),
@@ -1172,16 +1189,17 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         attachments: attachmentsSchema,
         runs_on: runsOnSchema,
         machine_label: machineLabelSchema,
+        agent: agentSchema,
         icon: iconSchema,
         priority: prioritySchema.describe(`"high" or "normal" (the default). ${PRIORITY_HELP}`),
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: RunsOn; machine_label?: string; agent?: AgentCli; icon?: TaskIconName; priority?: TaskPriority; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
       const where = placementOf(a.runs_on, a.machine_label)
-      await tasks.requireRunner(where.runner, projectId, a.env, where.machineLabel)
+      await tasks.requireRunner(where.runner, projectId, a.env, { agentCli: a.agent, model: a.model, machineLabel: where.machineLabel })
       const t = tasks.createTask({
         projectId,
         title: a.title,
@@ -1195,6 +1213,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         source: inputSource,
         runsOn: where.runner,
         machineLabel: where.machineLabel,
+        agentCli: a.agent ?? null,
         icon: a.icon ?? null,
         priority: a.priority ?? null,
       })
@@ -1212,6 +1231,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       'Where this task runs, over the shared runs_on and the project\'s "Runs on": "local", "this_computer", "box", "gpu", "docker", "ssh" or "label:<label>", as in create_task. An item\'s own runs_on and machine_label, when it gives either, replace the shared pair.',
     ),
     machine_label: machineLabelSchema,
+    agent: agentSchema.describe('"claude" or "codex" for this task, over the shared agent and the project\'s Agent'),
     icon: iconSchema,
     priority: prioritySchema.describe('"high" or "normal" for this task, over the shared priority. See create_task.'),
     ...routeParams,
@@ -1222,9 +1242,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "create_tasks",
     {
       description:
-        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh Claude Code session exactly like create_task. ` +
+        `Start MANY new agents in one call (fan-out): 1 to ${MAX_TASK_BATCH} tasks in one project, each a fresh agent session exactly like create_task. ` +
         "Use it instead of a series of create_task calls whenever you start two or more independent tasks at once: every create_task call costs you a whole step, so dozens of them take minutes before the last task even exists, while create_tasks queues them all at once and Box Yard creates the boxes they need in parallel. " +
-        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, priority, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, priority, model, effort and routing_* win. " +
+        "Write what the tasks share once, in common_prompt (it goes before each task's own prompt). attachments, related_tasks, env, runs_on, agent, priority, model, effort and routing_* at the top apply to every task; an item's own attachments, related_tasks and env are added to them, and its own runs_on, agent, priority, model, effort and routing_* win. " +
         "All or nothing: every item is checked before anything is created (project scope, a non-empty title and prompt, titles unique within the call, attachment and related-task ids, and that a runs_on runner can run). If any item is invalid, NO task is created and the error lists every problem by item number (#1 is the first), so fix those and call create_tasks again with the whole list. " +
         "Returns the new tasks' ids in the order given.",
       inputSchema: {
@@ -1243,7 +1263,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             '"box" = an Upstash box, "gpu" = the project\'s RunPod GPU pod, "docker" = the project\'s isolated Docker container on this computer. Omit it to follow the project. Pass "local" when Cody says to do it "locally", "on my machine" or "on this computer", and "label:<label>" when Cody names a group of their machines.',
         ),
         machine_label: machineLabelSchema.describe("An SSH machine label or name for every task (with runs_on \"ssh\", or alone), as in create_task. Each task takes a free machine with it; the rest wait."),
-        model: modelSchema.describe("Claude model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
+        agent: agentSchema.describe('The agent CLI every task runs on, "claude" or "codex" (an item\'s own agent wins). Omit it to follow the project\'s Agent.'),
+        model: modelSchema.describe("Model for every task (an item's own model wins). Omit it to use the project route, Settings or routing defaults."),
         effort: effortSchema.describe("Reasoning effort for every task (an item's own effort wins). Omit it to use the project route, Settings or routing defaults; see create_task for the levels."),
         priority: prioritySchema.describe(`"high" or "normal" (the default) for every task (an item's own priority wins). ${PRIORITY_HELP}`),
         routing_rule: routingRuleSchema,
@@ -1260,6 +1281,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         env?: Record<string, string>
         runs_on?: RunsOn
         machine_label?: string
+        agent?: AgentCli
         priority?: TaskPriority
         model?: string
         effort?: Effort
@@ -1308,8 +1330,9 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             if (!r) return null
             const label = places[i]!.machineLabel
             const env = { ...a.env, ...item.env }
-            const key = `${r} ${label ?? ""} ${tasks.turnCredentials(p.id, env).claudeFrom}`
-            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env, label).then(() => null, (err: unknown) => errorMessage(err)))
+            const agent = { agentCli: item.agent ?? a.agent, model: item.model ?? a.model }
+            const key = `${r} ${label ?? ""} ${tasks.turnCredentials(p.id, env).claudeFrom} ${tasks.codexCredentials(p.id, env).kind} ${agent.agentCli ?? ""} ${agent.model ?? ""}`
+            if (!runners.has(key)) runners.set(key, tasks.requireRunner(r, p.id, env, { ...agent, machineLabel: label }).then(() => null, (err: unknown) => errorMessage(err)))
             return runners.get(key)!
           }),
         )
@@ -1344,6 +1367,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             source: inputSource,
             runsOn: places[i]!.runner,
             machineLabel: places[i]!.machineLabel,
+            agentCli: item.agent ?? a.agent ?? null,
             icon: item.icon ?? null,
             priority: item.priority ?? a.priority ?? null,
           }
@@ -1395,7 +1419,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       const risk = a.interrupt && !a.allow_merge_interrupt ? tasks.mergeInterruptRisk(store.getTaskRow(before.id)!) : null
       if (risk) return fail(`${risk} Nothing was sent. Send it without interrupt (it goes out when the turn ends), or pass allow_merge_interrupt: true if it can't wait.`)
       const where = placementOf(a.runs_on, a.machine_label)
-      await tasks.requireRunner(where.runner, before.projectId, store.taskEnv(before.id), where.machineLabel)
+      await tasks.requireRunner(where.runner, before.projectId, store.taskEnv(before.id), { agentCli: before.agentCli, machineLabel: where.machineLabel })
       if (where.runner) tasks.setRunsOn(before.id, where.runner, where.machineLabel)
       // Before the message: queuing it runs the scheduler, which must already see the new priority.
       if (a.priority) tasks.setTaskPriority(before.id, a.priority, prioritySetter)

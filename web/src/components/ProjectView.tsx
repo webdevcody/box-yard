@@ -52,6 +52,7 @@ import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, RUNNER_PHRASE, type Runner } from "../../../shared/runner"
 import { DOCKERFILE_TEMPLATE, type ProjectDocker } from "../../../shared/docker"
+import { AGENT_CLIS, AGENT_CLI_LABEL, DEFAULT_AGENT_CLI, type AgentCli } from "../../../shared/agentCli"
 import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
@@ -808,6 +809,8 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [removeKeys, setRemoveKeys] = useState<string[]>([])
   const [runner, setRunner] = useState<Runner>(project.runner ?? "box")
   const [machineLabel, setMachineLabel] = useState(project.machineLabel ?? "")
+  // "" follows Settings › Box agents › Agent.
+  const [agentCli, setAgentCli] = useState<AgentCli | "">(project.agentCli ?? "")
   const [boxSize, setBoxSize] = useState<BoxSize | "">(project.boxSize ?? "")
   const [partialClone, setPartialClone] = useState<"" | "on" | "off">(project.partialClone === null ? "" : project.partialClone ? "on" : "off")
   const [pushAtTurnEnd, setPushAtTurnEnd] = useState<"" | "on" | "off">(project.pushAtTurnEnd === null ? "" : project.pushAtTurnEnd ? "on" : "off")
@@ -840,8 +843,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const noMachines = useMachines().data?.machines.length === 0
   const openSettings = useOpenSettings()
   const defaults = settings.data?.settings
+  const defaultAgentCli: AgentCli = defaults?.agentCli ?? DEFAULT_AGENT_CLI
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, runner === "ssh" ? machineLabel : "", boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, runner === "ssh" ? machineLabel : "", agentCli, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -898,6 +902,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
           ...(identityId !== project.identityId ? { identityId } : {}),
+          ...(agentCli !== (project.agentCli ?? "") ? { agentCli: agentCli || null } : {}),
           ...(color !== (project.color ?? null) ? { color } : {}),
         })
         onDone()
@@ -982,6 +987,26 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
             {runner === "ssh" ? "Your own computers, reached over SSH from this one. Agents there aren't sandboxed." : "Old laptops or a GPU tower around? Add them as SSH machines and run projects on them."}{" "}
             <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("machines")}>
               Settings › Machines
+            </button>
+          </p>
+        )}
+      </div>
+      <div className="space-y-2">
+        <Field label="Agent" hint="The coding agent its new tasks run on. Tasks it already has keep theirs.">
+          <Select className="w-full sm:w-80" value={agentCli} onChange={(e) => setAgentCli(e.target.value as AgentCli | "")} data-testid="project-agent-cli">
+            <option value="">Settings default ({AGENT_CLI_LABEL[defaultAgentCli]})</option>
+            {AGENT_CLIS.map((c) => (
+              <option key={c} value={c}>
+                {AGENT_CLI_LABEL[c]}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {(agentCli || defaultAgentCli) === "codex" && setup.data?.codex?.state === "unset" && (
+          <p className="text-xs text-zinc-500" data-testid="project-codex-login">
+            Codex needs a login first.{" "}
+            <button type="button" className="text-yard-400 underline-offset-2 hover:underline" onClick={() => openSettings("credentials")}>
+              Settings › Credentials
             </button>
           </p>
         )}

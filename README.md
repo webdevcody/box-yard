@@ -68,6 +68,7 @@ git clone https://github.com/webdevcody/box-yard && cd box-yard
 | Variable | What it's for |
 | --- | --- |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Claude Code login for the Coordinator, Captains and every agent. Run `claude setup-token` to get one. `ANTHROPIC_API_KEY` works too. |
+| `CODEX_AUTH_JSON` / `CODEX_API_KEY` | Optional. A Codex login, for whatever you set to run on Codex instead of Claude Code: your `~/.codex/auth.json` (ChatGPT plan) or an OpenAI API key. Settings › Credentials takes them too. See [docs/codex.md](docs/codex.md). |
 | `UPSTASH_BOX_API_KEY` | Worker boxes. Without it, agents run in folders on this machine (`BOX_PROVIDER=local`). |
 | `GITHUB_TOKEN` | Clone private repos, push branches, open PRs. A fine-grained token with Contents and Pull requests (read/write) is enough. |
 | `UPSTASH_REDIS_REST_URL` / `_TOKEN` | Optional. A faster event bus between boxes and Box Yard. |
@@ -229,6 +230,8 @@ A project whose box has all its slots busy gets a second box while there's room.
 - The built-in **On PR ready → merge** template sends the Merge PR button's standard merge message once per head commit. It goes through the button's path, so it never runs while another merge of that PR is pending. New hooks start off.
 - A hook fires once per event: per head commit for `task.pr_ready`, per PR for `pr.merged`, and per turn otherwise. It never fires on a turn its own prompt started, or on a task it created, unless it allows that. Each hook fires at most N times per task (3 by default), all hooks together at most 10 times per task a day, and at most 30 times across the yard every 10 minutes.
 - Every fire goes through the normal queue, so box slots and limits apply. It shows on the task's transcript as "Hook: <name>", reaches both the Captain and the Coordinator as a 🪝 update, and is logged with its rendered prompt under Recent runs (`GET /api/hooks/runs`).
+
+**Codex.** The Coordinator, the Captains and each project's agents can run on OpenAI's Codex instead of Claude Code (Settings › Coordinator, Settings › Box agents, a project's Agent setting, or `agent: "codex"` on one task); Claude Code stays the default. Box Yard hands Codex your ChatGPT login or an API key per turn and keeps the copy Codex refreshes, so one `codex login` serves every box. See [docs/codex.md](docs/codex.md).
 
 **Identities.** One Box Yard can work for several GitHub accounts: each project has an identity (an account's tokens, the git author its commits carry, an SSH signing key, a Claude login, the runners it may use), and every project starts on Default, which is Settings › Credentials. The Coordinator sets them up from this computer: `detect_identities` reads `gh`'s accounts, git's global and `includeIf` authors and the signing keys here, asks GitHub which account can push to each repo, and proposes a setup; `import_detected_identity` makes it once Cody agrees. Tokens and keys go by reference (`gh:<login>`, `file:~/.ssh/<key>`), so no value passes through the model. Or do it in Settings › Identities (Import from this computer, Add, Test) and pick each project's identity in its settings. See [docs/identities.md](docs/identities.md).
 

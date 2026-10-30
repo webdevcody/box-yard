@@ -3,7 +3,7 @@
 import type { SettingSource } from "./types.js"
 import type { Runner } from "./runner.js"
 
-export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "githubToken", "runpodApiKey"] as const
+export const CREDENTIAL_KEYS = ["upstashBoxApiKey", "claudeOauthToken", "anthropicApiKey", "codexAuthJson", "codexApiKey", "githubToken", "runpodApiKey"] as const
 export type CredentialKey = (typeof CREDENTIAL_KEYS)[number]
 
 /**
@@ -38,6 +38,15 @@ export interface SetupStatus {
     /** The credential agents use. With both set, Claude Code uses the API key. */
     using: "claudeOauthToken" | "anthropicApiKey" | null
   }
+  /**
+   * Codex (docs/codex.md): needed only when the Coordinator, the Captains or a project's agents run on it. `using` is
+   * the login Box Yard hands Codex: the ChatGPT login when both are set. `required`: the Coordinator runs on Codex.
+   */
+  codex: {
+    required: boolean
+    state: "set" | "unset"
+    using: "codexAuthJson" | "codexApiKey" | null
+  }
   github: { state: "set" | "unset" }
   owner: { name: string; source: SettingSource }
   runner: {
@@ -62,7 +71,7 @@ export interface LocalTool {
   version: string | null
 }
 
-export const LOCAL_TOOL_KEYS = ["node", "claude", "gh", "chrome"] as const
+export const LOCAL_TOOL_KEYS = ["node", "claude", "codex", "gh", "chrome"] as const
 export type LocalToolKey = (typeof LOCAL_TOOL_KEYS)[number]
 
 /** The local runner's prerequisites (#120), as the setup card and Settings › Credentials list them. */
@@ -73,6 +82,12 @@ export const LOCAL_TOOL_INFO: Record<LocalToolKey, { label: string; required: bo
     required: true,
     help: "The agents themselves.",
     link: { href: "https://code.claude.com/docs/en/setup", label: "Install Claude Code" },
+  },
+  codex: {
+    label: "Codex",
+    required: false,
+    help: "Only for agents set to run on Codex. Signed in (codex login), it needs no key here.",
+    link: { href: "https://developers.openai.com/codex/cli", label: "Install Codex" },
   },
   gh: {
     label: "GitHub CLI",
@@ -93,6 +108,8 @@ export interface LocalCheck {
   tools: LocalTool[]
   /** `claude auth status` says this computer's claude is signed in; null when it couldn't tell (older CLI, mock). */
   claudeLogin: boolean | null
+  /** `codex login status` says this computer's codex is signed in; null when it couldn't tell (not installed, mock). */
+  codexLogin?: boolean | null
   /** `gh auth status` succeeded. */
   ghLogin: boolean
   checkedAt: number
@@ -144,6 +161,20 @@ export const CREDENTIAL_INFO: Record<
     help: "Pay per use, billed to your Claude Console account.",
     link: { href: "https://platform.claude.com/settings/keys", label: "Create one in the Claude Console" },
   },
+  codexAuthJson: {
+    label: "Codex ChatGPT login",
+    env: "CODEX_AUTH_JSON",
+    placeholder: '{"auth_mode":"chatgpt","tokens":{…}} (paste all of ~/.codex/auth.json)',
+    help: "Uses your ChatGPT plan for agents that run on Codex. Box Yard keeps the copy Codex refreshes, so log in once.",
+    link: { href: "https://developers.openai.com/codex/auth", label: "How Codex logins work" },
+  },
+  codexApiKey: {
+    label: "OpenAI API key for Codex",
+    env: "CODEX_API_KEY",
+    placeholder: "sk-proj-…",
+    help: "Pay per use instead, billed to your OpenAI Platform account. Used when there's no ChatGPT login.",
+    link: { href: "https://platform.openai.com/api-keys", label: "Create one on the OpenAI Platform" },
+  },
   githubToken: {
     label: "GitHub token",
     env: "GITHUB_TOKEN",
@@ -165,6 +196,11 @@ export const CREDENTIAL_INFO: Record<
 
 /** The repository permissions a GitHub token needs, as GitHub's fine-grained token form names them. */
 export const GITHUB_TOKEN_SCOPES = "Contents and Pull requests: read and write · Metadata: read"
+
+/** The command that signs Codex in and writes ~/.codex/auth.json. */
+export const CODEX_LOGIN_COMMAND = "codex login"
+/** Where that login lands. */
+export const CODEX_AUTH_FILE = "~/.codex/auth.json"
 
 /** The command that prints a Claude subscription token. */
 export const SETUP_TOKEN_COMMAND = "claude setup-token"

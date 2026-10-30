@@ -916,6 +916,12 @@ export const MIGRATIONS: string[] = [
   -- Task priority (shared/priority.ts): 'high' tasks are pulled from the queue before normal ones. NULL: normal.
   ALTER TABLE tasks ADD COLUMN priority TEXT;
   `,
+  // Which CLI an agent runs on (shared/agentCli.ts, docs/codex.md): a project's choice for its new tasks (null:
+  // Settings › Box agents), and the one each task started on (null on older rows: Claude Code).
+  `
+  ALTER TABLE projects ADD COLUMN agent_cli TEXT;
+  ALTER TABLE tasks ADD COLUMN agent_cli TEXT;
+  `,
   `
   -- SSH machines (shared/machines.ts, docs/machines.md): computers of the owner's that agents run on over SSH. The
   -- key is a reference (file:~/.ssh/<key>, agent, agent:<fingerprint>, default), never the key itself.

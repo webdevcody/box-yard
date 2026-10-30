@@ -1,11 +1,12 @@
 import { useState } from "react"
 import { useLocation } from "wouter"
 import { ShieldAlert } from "lucide-react"
-import { newClientId, useCreateProject, useMachines, useSetup } from "../lib/queries"
+import { newClientId, useAgentSettings, useCreateProject, useMachines, useSetup } from "../lib/queries"
 import { Modal } from "./Modal"
 import { MachineLabelPicker } from "./MachineSettings"
 import { Button, Field, LineIcon, Select, inputClass, parseEnv } from "./ui"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, type Runner } from "../../../shared/runner"
+import { AGENT_CLIS, AGENT_CLI_LABEL, DEFAULT_AGENT_CLI, type AgentCli } from "../../../shared/agentCli"
 
 export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [, navigate] = useLocation()
@@ -23,17 +24,20 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
   const noMachines = useMachines().data?.machines.length === 0
   const [machineLabel, setMachineLabel] = useState("")
+  // "" follows Settings › Box agents › Agent.
+  const [agentCli, setAgentCli] = useState<AgentCli | "">("")
+  const defaultAgentCli = useAgentSettings().data?.settings.agentCli ?? DEFAULT_AGENT_CLI
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim()) return
     const id = newClientId("prj")
-    create.mutate({ id, name: name.trim(), description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), ...(runner && { runner }), ...(runner === "ssh" ? { machineLabel: machineLabel || null } : {}) })
+    create.mutate({ id, name: name.trim(), description, repo: repo.trim() || null, baseBranch, env: parseEnv(env), ...(runner && { runner }), ...(runner === "ssh" ? { machineLabel: machineLabel || null } : {}), ...(agentCli && { agentCli }) })
     onClose()
     navigate(`/projects/${id}`)
   }
 
-  const dirty = Boolean(name || description || repo || env || baseBranch !== "main" || picked || machineLabel)
+  const dirty = Boolean(name || description || repo || env || baseBranch !== "main" || picked || machineLabel || agentCli)
 
   return (
     <Modal
@@ -110,6 +114,16 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
           )}
         </div>
       )}
+      <Field label="Agent" hint="Claude Code or Codex for its tasks. Change it any time in the project's Settings.">
+        <Select className="w-full sm:w-80" value={agentCli} onChange={(e) => setAgentCli(e.target.value as AgentCli | "")} data-testid="new-project-agent-cli">
+          <option value="">Settings default ({AGENT_CLI_LABEL[defaultAgentCli]})</option>
+          {AGENT_CLIS.map((c) => (
+            <option key={c} value={c}>
+              {AGENT_CLI_LABEL[c]}
+            </option>
+          ))}
+        </Select>
+      </Field>
       <Field label="Env vars (optional)" hint="KEY=value, one per line. Every task in the project gets them.">
         <textarea className={`${inputClass} font-mono text-xs`} rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder="DATABASE_URL=..." />
       </Field>
