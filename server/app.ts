@@ -455,6 +455,8 @@ export function createBoxYard(
   // and their Captains are told to answer it with state, not content.
   orchestrator.statusOnly = (projectId) => identities.statusOnly(projectId)
   captains.statusOnly = (projectId) => identities.statusOnly(projectId)
+  orchestrator.prs = tasks.prs
+  captains.prs = tasks.prs
   const hooks = new HookEngine({
     store,
     hooks: new HookStore(db),

@@ -505,6 +505,42 @@ export function SettingsDialog({
               />
             </Row>
             <Row
+              id={fid("orl")}
+              label="Relay turns"
+              help="Runs the Coordinator's relay-only turns (woken by task updates and Captain replies, with no message from you) on this model and effort. Off by default: another model or effort can't reuse the last turn's prompt cache, so each relay turn sends the whole context again. That's quick and cheap on a small model, slow and costly on a big one. Your own messages always use the model above."
+              hint={hint("orchestratorRelay")}
+            >
+              <div className="space-y-2">
+                <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                  <input
+                    id={fid("orl")}
+                    type="checkbox"
+                    checked={s.orchestratorRelay.enabled}
+                    onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, enabled: e.target.checked })}
+                    data-testid="orchestrator-relay"
+                  />
+                  {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
+                </label>
+                <input
+                  className={cx(inputClass, "disabled:opacity-50")}
+                  list="boxyard-models"
+                  disabled={!s.orchestratorRelay.enabled}
+                  aria-label="Relay turn model"
+                  value={s.orchestratorRelay.model}
+                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, model: e.target.value })}
+                />
+                <Select
+                  className="w-full"
+                  disabled={!s.orchestratorRelay.enabled}
+                  aria-label="Relay turn effort"
+                  value={s.orchestratorRelay.effort}
+                  onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: e.target.value as Settings["orchestratorEffort"] })}
+                >
+                  <EffortOptions />
+                </Select>
+              </div>
+            </Row>
+            <Row
               id={fid("pc1h")}
               label="1-hour prompt cache"
               help="Keeps the Coordinator's and every Captain's context in Claude's prompt cache for an hour instead of 5 minutes, so the first reply after a quiet spell of 5–60 minutes reads it from the cache instead of writing it all again. With an Anthropic API key, 1-hour cache writes cost 2× the input price instead of 1.25×, while a cache read costs 0.1×: it pays off when a few turns in a hundred come after such a gap. A Claude subscription already uses the 1-hour cache, so off makes it 5 minutes there too."

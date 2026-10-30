@@ -697,6 +697,18 @@ export const SIZE_DEFAULTS: Record<WorkerSize, { slotsPerBox: number; maxResiden
   large: { slotsPerBox: 4, maxResidentPerBox: 18 },
 }
 
+/**
+ * Relay-only Coordinator turns (woken by task updates and Captain replies, with no message from Cody) on another
+ * model or effort. Off by default: a different model or effort can't read the turn before's prompt cache, so each
+ * relay turn writes the whole context again (cheap and quick on a small model, slow on a big one).
+ */
+export interface RelayModel {
+  enabled: boolean
+  model: string
+  effort: Effort
+}
+export const DEFAULT_RELAY_MODEL: RelayModel = { enabled: false, model: "claude-haiku-5-5", effort: "low" }
+
 export interface AutoCompact {
   enabled: boolean
   unit: "percent" | "tokens"
@@ -737,6 +749,8 @@ export interface Settings {
    * writes cost 2× the input price (5-minute ones 1.25×); a Claude subscription already defaults to 1 hour.
    */
   promptCache1h: boolean
+  /** A lighter model or effort for the Coordinator's relay-only turns (task updates, no message from Cody); off by default. */
+  orchestratorRelay: RelayModel
   /** Model for the per-project Captains, separate from the Coordinator's. */
   captainModel: string
   captainEffort: Effort
