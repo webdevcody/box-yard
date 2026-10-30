@@ -2173,7 +2173,6 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   if (machines) {
     const gb = (bytes: number | null) => (bytes === null ? "?" : `${(bytes / 1024 ** 3).toFixed(bytes < 10 * 1024 ** 3 ? 1 : 0)} GB`)
     const toolLine = (t: { found: boolean; version: string | null }) => (t.found ? (t.version ?? "found") : "not installed")
-    const loginLine = (login: boolean | null | undefined) => (login === true ? "logged in" : login === false ? "not logged in" : "login unknown")
     const machineView = (m: MachineStatus) => {
       const t = m.lastTest
       return {
@@ -2200,8 +2199,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 disk: `${gb(t.diskFreeBytes)} free of ${gb(t.diskTotalBytes)}`,
                 git: toolLine(t.tools.git),
                 node: toolLine(t.tools.node),
-                claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${loginLine(t.claudeLogin)}` : "not installed: no Claude Code tasks here",
-                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)}, ${loginLine(t.codexLogin)}` : "not installed: no Codex tasks here (Box Yard never installs it on a machine)",
+                claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${t.claudeLogin === true ? "logged in" : t.claudeLogin === false ? "not logged in" : "login unknown"}` : "not installed",
+                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)} (found; Box Yard runs Claude Code only)` : "not installed",
                 ...(t.problems.length ? { problems: t.problems } : {}),
                 ...(t.notes.length ? { notes: t.notes } : {}),
               },
@@ -2254,7 +2253,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         description:
           "Cody's SSH machines: computers of Cody's (old laptops, a GPU tower) that Box Yard reaches over SSH and runs agents on, like this computer but elsewhere. " +
           "Each has labels; runs_on \"label:<label>\" (or machine_label) on create_task, create_tasks and send_to_task, or a project's Runs on: SSH machine, picks a free machine with that label, and tasks wait while every one is busy. " +
-          "Shows each machine's state (ready, busy, offline, problem, off, untested), tasks running at once, its labels and its last connection test (OS, CPUs, memory, disk, git, node, and claude and codex with whether each is logged in), every label in use, and what runs_on \"local\" means.",
+          "Shows each machine's state (ready, busy, offline, problem, off, untested), tasks running at once, its labels and its last connection test (OS, CPUs, memory, disk, git, node, claude and whether it's logged in, codex), every label in use, and what runs_on \"local\" means.",
         inputSchema: { machine: z.string().optional().describe("Only this machine (id or name)") },
       },
       safe(async (a: { machine?: string }) => {
@@ -2274,8 +2273,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         "add_machine",
         {
           description:
-            "Add one of Cody's own computers as an SSH machine agents can run on, when Cody asks to and gives its address, user and SSH key reference; then Box Yard tests the connection (OS, CPUs, memory, disk, git, node, claude and codex with their logins) and the reply shows the result. " +
-            "Never ask Cody to paste a private key: ssh_key is a reference (file:~/.ssh/<key> or the SSH agent). The machine needs node 18+, git, and Claude Code or Codex (Box Yard never installs either there; a task goes only to a machine with its agent), each with a login on it or one Box Yard forwards (Settings › Credentials or the project's identity); docs/machines.md is the setup guide. Agents there are not sandboxed: they run as that user.",
+            "Add one of Cody's own computers as an SSH machine agents can run on, when Cody asks to and gives its address, user and SSH key reference; then Box Yard tests the connection (OS, CPUs, memory, disk, git, node, claude and its login, codex) and the reply shows the result. " +
+            "Never ask Cody to paste a private key: ssh_key is a reference (file:~/.ssh/<key> or the SSH agent). The machine needs node 18+, git and Claude Code, and either a claude login on it or a Claude key Box Yard forwards (Settings › Credentials or the project's identity); docs/machines.md is the setup guide. Agents there are not sandboxed: they run as that user.",
           inputSchema: { ...machineInput, test: z.boolean().optional().describe("false: add it without testing (default: test now)") },
         },
         safe(async (a: MachineArgs & { name: string; host: string; user: string; ssh_key: string; test?: boolean }) => {
@@ -2317,7 +2316,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         "test_machine",
         {
           description:
-            "Test an SSH machine's connection now: log in, make Box Yard's work folder, and report its OS, CPUs, memory, disk, git, node, and claude and codex (and whether each is logged in). Use it after Cody fixes something there, or when a machine shows offline. It takes a few seconds (up to a minute and a half on a slow one).",
+            "Test an SSH machine's connection now: log in, make Box Yard's work folder, and report its OS, CPUs, memory, disk, git, node, claude (and whether it's logged in) and codex. Use it after Cody fixes something there, or when a machine shows offline. It takes a few seconds (up to a minute and a half on a slow one).",
           inputSchema: { machine: z.string().describe("Machine id or name") },
         },
         safe(async (a: { machine: string }) => {

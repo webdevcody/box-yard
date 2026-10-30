@@ -193,10 +193,10 @@ describe("Test connection's probe", () => {
     expect(t.tools.codex.found).toBe(false)
   })
 
-  it("says what's missing or old, and notes a claude or codex that isn't logged in", () => {
+  it("says what's missing or old, and notes codex (detected, not used) and a claude that isn't logged in", () => {
     const t = testFromProbe({
       first: parseProbe("BOXYARD_PROBE\nworkdir_error=can't make ~/boxyard\nmissing=base64\ndisk=1000 2000\n"),
-      tools: parseProbe('BOXYARD_PROBE\npath_node=/usr/bin/node\nversion_node=v16.20.0\npath_claude=/usr/bin/claude\nclaude_auth="loggedIn":false\npath_codex=/usr/bin/codex\nversion_codex=codex-cli 0.40.0\ncodex_auth=1\n'),
+      tools: parseProbe('BOXYARD_PROBE\npath_node=/usr/bin/node\nversion_node=v16.20.0\npath_claude=/usr/bin/claude\nclaude_auth="loggedIn":false\npath_codex=/usr/bin/codex\nversion_codex=codex-cli 0.40.0\n'),
       pathDirs: [],
       latencyMs: 1,
       at: 1,
@@ -207,22 +207,10 @@ describe("Test connection's probe", () => {
     expect(t.problems.join("\n")).toMatch(/base64 isn't installed/)
     expect(t.claudeLogin).toBe(false)
     expect(t.notes.join("\n")).toMatch(/claude isn't logged in/)
-    expect(t.codexLogin).toBe(false)
-    expect(t.notes.join("\n")).toMatch(/codex isn't logged in on it/)
+    expect(t.notes.join("\n")).toMatch(/codex is installed \(codex-cli 0.40.0\).*isn't used/)
     expect(t.notes.join("\n")).toMatch(/under 2 GB free/)
     expect(t.tools.codex).toMatchObject({ found: true })
-    expect(testFromProbe({ first, tools: tools("").set("path_claude", []), pathDirs: [], latencyMs: 1, at: 1 }).problems.join()).toMatch(/neither claude \(Claude Code\) nor codex is installed/)
-  })
-
-  it("takes a machine with only codex, for Codex tasks; reads codex's login from its exit code", () => {
-    const only = (auth: string) => tools(`path_codex=/usr/bin/codex\nversion_codex=codex-cli 0.40.0\n${auth}`).set("path_claude", []).set("claude_auth", [])
-    const t = testFromProbe({ first, tools: only("codex_auth=0\n"), pathDirs: [], latencyMs: 1, at: 1 })
-    expect(t).toMatchObject({ problems: [], codexLogin: true, claudeLogin: null })
-    expect(t.notes.join("\n")).toMatch(/claude \(Claude Code\) isn't installed, so only Codex tasks run on it/)
-    // A timeout (124) or no answer says nothing about the login.
-    expect(testFromProbe({ first, tools: only("codex_auth=124\n"), pathDirs: [], latencyMs: 1, at: 1 }).codexLogin).toBeNull()
-    expect(testFromProbe({ first, tools: only(""), pathDirs: [], latencyMs: 1, at: 1 }).codexLogin).toBeNull()
-    expect(testFromProbe({ first, tools: tools(""), pathDirs: [], latencyMs: 1, at: 1 }).codexLogin).toBeNull()
+    expect(testFromProbe({ first, tools: tools("").set("path_claude", []), pathDirs: [], latencyMs: 1, at: 1 }).problems.join()).toMatch(/claude \(Claude Code\) isn't installed/)
   })
 
   it("keeps a failed test's reason and nothing else", () => {
@@ -242,20 +230,6 @@ describe("Test connection's probe", () => {
     const second = parseProbe(remote(scriptFor(toolsScript()), { home }).stdout)
     expect(second.get("path_node")?.[0]).toMatch(/\/node$/)
     expect(second.get("version_node")?.[0]).toMatch(/^v\d+\./)
-  })
-
-  it("reads codex's login from `codex login status`'s exit code alone, never its words", () => {
-    const home = dir("by-ssh-probe-")
-    const bin = dir("by-ssh-codex-")
-    const fake = (exit: number) =>
-      fs.writeFileSync(path.join(bin, "codex"), `#!/bin/sh\nif [ "$1" = login ]; then echo "Logged in using an API key - sk-proj-secret"; exit ${exit}; fi\necho "codex-cli 0.40.0"\n`, { mode: 0o755 })
-    fake(1)
-    const out = remote(scriptFor(toolsScript(), [bin]), { home }).stdout
-    expect(out).not.toMatch(/sk-proj/)
-    expect(parseProbe(out).get("codex_auth")).toEqual(["1"])
-    expect(parseProbe(out).get("version_codex")).toEqual(["codex-cli 0.40.0"])
-    fake(0)
-    expect(parseProbe(remote(scriptFor(toolsScript(), [bin]), { home }).stdout).get("codex_auth")).toEqual(["0"])
   })
 })
 

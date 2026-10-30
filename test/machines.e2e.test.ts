@@ -13,7 +13,7 @@ import { Uploads, uploadsDir } from "../server/uploads.js"
 import { machineBoxId, type MachineStatus, type MachinesStatus } from "../shared/machines.js"
 import { placementView } from "../shared/placement.js"
 import type { Project, Task } from "../shared/types.js"
-import { FAKE_CLAUDE, FAKE_CODEX, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
+import { FAKE_CLAUDE, freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
 // Cody's SSH machines end to end. In mock mode a machine is a folder (FolderTransport): a project set to "Runs on:
 // SSH machine" with a label runs its tasks on a free machine with that label and never on a pool box, they queue
@@ -261,16 +261,9 @@ function fakeSsh(root: string) {
   fs.mkdirSync(tools, { recursive: true })
   fs.mkdirSync(home, { recursive: true })
   const [node, script] = FAKE_CLAUDE.split(" ")
-  const codexScript = FAKE_CODEX.split(" ")[1]
-  const codexLog = path.join(root, "codex.jsonl")
-  // Neither claude nor codex is logged in on the machine: Box Yard hands each turn its login. The made-up codex
-  // fails without one (FAKE_CODEX_LOGIN), refreshes a ChatGPT login like codex does, and logs each run.
+  // claude on the machine isn't logged in (Box Yard forwards its Claude key for the turn); codex is there, unused.
   fs.writeFileSync(path.join(tools, "claude"), `#!/bin/sh\nif [ "$1" = auth ]; then echo '{"loggedIn": false}'; exit 0; fi\nexec '${node}' '${script}' "$@"\n`, { mode: 0o755 })
-  fs.writeFileSync(
-    path.join(tools, "codex"),
-    `#!/bin/sh\ncase "$1" in --version) echo "codex-cli 0.40.0"; exit 0;; login) exit 1;; esac\nFAKE_CODEX_LOG='${codexLog}' FAKE_CODEX_LOGIN=required FAKE_CODEX_REFRESH=1 exec '${node}' '${codexScript}' "$@"\n`,
-    { mode: 0o755 },
-  )
+  fs.writeFileSync(path.join(tools, "codex"), `#!/bin/sh\necho "codex-cli 0.40.0"\n`, { mode: 0o755 })
   fs.writeFileSync(
     path.join(bin, "ssh"),
     `#!/usr/bin/env bash
@@ -294,16 +287,7 @@ tee -a '${stdin}' | sh -c "$*"
     { mode: 0o755 },
   )
   const read = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8") : "")
-  const codexRuns = () => read(codexLog).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { home: string | null; login: string | null; secret: string | null })
-  return { ssh: path.join(bin, "ssh"), home, argv: () => read(log), stdin: () => read(stdin), codexRuns }
-}
-
-/** A machine for the stand-in ssh, with the key Box Yard is told to use (by reference) in a stand-in ~/.ssh. */
-function fakeMachineKey(root: string) {
-  const me = path.join(root, "me")
-  fs.mkdirSync(path.join(me, ".ssh"), { recursive: true, mode: 0o700 })
-  execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", path.join(me, ".ssh", "id_tower")])
-  return me
+  return { ssh: path.join(bin, "ssh"), home, argv: () => read(log), stdin: () => read(stdin) }
 }
 
 /** Every file under `dir` whose content has `text`. */
@@ -320,7 +304,10 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     const root = tmpDir("by-fake-ssh-")
     cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }))
     const fake = fakeSsh(root)
-    const me = fakeMachineKey(root)
+    // This computer's ~/.ssh, with the key Box Yard is told to use (by reference).
+    const me = path.join(root, "me")
+    fs.mkdirSync(path.join(me, ".ssh"), { recursive: true, mode: 0o700 })
+    execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", path.join(me, ".ssh", "id_tower")])
     const secrets = { claude: "sk-ant-oat01-fakeclaudetoken0123456789", github: "ghp_fakegithubtoken0123456789abcdef" }
     const r = await start({
       config: { claudeOauthToken: secrets.claude, githubToken: secrets.github },
@@ -333,7 +320,7 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     expect(machine.lastTest!.tools.claude.path).toBe(path.join(root, "machine-tools", "claude"))
     expect(machine.lastTest!.tools.codex).toMatchObject({ found: true, version: "codex-cli 0.40.0" })
     expect(machine.lastTest!.notes.join("\n")).toMatch(/claude isn't logged in on it/)
-    expect(machine.lastTest!.notes.join("\n")).toMatch(/codex isn't logged in on it/)
+    expect(machine.lastTest!.notes.join("\n")).toMatch(/codex is installed/)
 
     const p = await call<Project>(r, "POST", "/api/projects", { name: "on-the-tower", runner: "ssh", machineLabel: "gpu" })
     const t = r.yard.tasks.createTask({ projectId: p.id, title: "haiku", prompt: "write a haiku" })
@@ -384,78 +371,6 @@ describe("SSH machines over ssh (a stand-in ssh: no sshd here)", () => {
     const next = r.yard.tasks.createTask({ projectId: p.id, title: "later", prompt: "write a haiku" })
     expect((await until(r, next.id, (x) => Boolean(x.waitReason), "to wait")).waitReason).toMatch(/none of SSH machines labelled "gpu" can take tasks now/)
     expect(getTask(r, next.id).boxId).toBeNull()
-    expect(r.boxes.created).toBe(0)
-  })
-
-  it("runs Codex tasks on a machine's own codex: Box Yard's ChatGPT login only in its memory folder, else an API key for one turn; nothing installed", { timeout: 200_000 }, async () => {
-    const root = tmpDir("by-fake-ssh-")
-    cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }))
-    const fake = fakeSsh(root)
-    // Not mock mode: placement and the login hand-over go by the machine's test, as with a real machine.
-    const r = await start({ config: { mock: false }, machines: { mock: null, sshBin: fake.ssh, keys: { home: fakeMachineKey(root) } } })
-    const refresh = "rt_first_tower_0000000000"
-    const login = JSON.stringify({ auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { id_token: "id_0000000000", access_token: "at_0000000000", refresh_token: refresh, account_id: "acct-tower-1" }, last_refresh: "2026-01-01T00:00:00Z" })
-    r.yard.settings.credentials.update({ codexAuthJson: login })
-    const { machine } = await addMachine(r, { name: "tower", host: "tower.lan", user: "cody", keyRef: "file:~/.ssh/id_tower", labels: ["gpu"] })
-    expect(machine.lastTest).toMatchObject({ ok: true, codexLogin: false, problems: [] })
-    const shm = machine.lastTest!.secretsDir
-    const ids: string[] = []
-    if (shm) {
-      cleanup.push(() => {
-        for (const f of fs.existsSync(shm) ? fs.readdirSync(shm) : []) if (ids.some((id) => f.startsWith(id))) fs.rmSync(path.join(shm, f), { force: true })
-        try {
-          fs.rmdirSync(shm)
-        } catch {}
-      })
-    }
-    const p = await call<Project>(r, "POST", "/api/projects", { name: "codex-on-the-tower", runner: "ssh", machineLabel: "gpu", agentCli: "codex" })
-    const create = (title: string) => {
-      const t = r.yard.tasks.createTask({ projectId: p.id, title, prompt: "write a haiku" })
-      ids.push(t.id)
-      return t
-    }
-    const waitsForLogin = async (id: string) =>
-      expect((await until(r, id, (x) => Boolean(x.waitReason), "to wait")).waitReason).toMatch(/^Waiting for a Codex login for SSH machines labelled "gpu": run codex login on tower/)
-
-    const first = create("chatgpt")
-    if (shm) {
-      await done(r, first.id)
-      const dir = r.yard.tasks.taskDir(machineBoxId(machine.id), first.id)
-      // The machine's own codex, in the task's Codex home, signed in with the login Box Yard handed over.
-      expect(fake.codexRuns()).toMatchObject([{ home: path.join(dir, "codex"), login: "chatgpt" }])
-      expect(fake.stdin()).not.toMatch(/npm install -g @openai\/codex/)
-      // Between turns the login is only in the memory folder, linked from the task's Codex home; the hand-over copy is gone.
-      const held = fs.realpathSync(path.join(dir, "codex", "auth.json"))
-      expect(held).toBe(path.join(fs.realpathSync(shm), `${first.id}.codex-auth.json`))
-      expect(fs.readdirSync(shm).filter((f) => f.startsWith(first.id))).toEqual([`${first.id}.codex-auth.json`])
-      expect(fs.existsSync(path.join(dir, "codex-auth.json"))).toBe(false)
-      expect(filesWith(fake.home, "acct-tower-1")).toEqual([])
-      expect(fake.argv()).not.toContain(refresh)
-      // Box Yard took back the copy Codex refreshed there: the one it handed over is spent.
-      const kept = JSON.parse(r.yard.settings.credentials.codexAuth())
-      expect(kept.tokens.refresh_token).not.toBe(refresh)
-      expect(kept.tokens.refresh_token).toBe(JSON.parse(fs.readFileSync(held, "utf8")).tokens.refresh_token)
-      // Deleting the task takes its copy out of the memory folder too.
-      await r.yard.tasks.deleteTask(first.id)
-      expect(fs.readdirSync(shm).filter((f) => f.startsWith(first.id))).toEqual([])
-    } else {
-      await waitsForLogin(first.id)
-      await r.yard.tasks.deleteTask(first.id)
-    }
-
-    // A machine without a memory folder (macOS, or no /dev/shm) never gets the ChatGPT login: the task waits for one…
-    r.yard.machines.registry.setTest(machine.id, { ...r.yard.machines.get(machine.id)!.lastTest!, secretsDir: null })
-    const second = create("api key")
-    await waitsForLogin(second.id)
-    expect(getTask(r, second.id).boxId).toBeNull()
-    // …or uses Settings' OpenAI API key for Codex in its place, which goes in for one turn and doesn't stay.
-    const key = "sk-proj-towerkey00000000000000000"
-    r.yard.settings.credentials.update({ codexApiKey: key })
-    await done(r, second.id)
-    expect(fake.codexRuns().at(-1)).toMatchObject({ login: "api_key", secret: key })
-    expect(fake.stdin()).not.toContain(key)
-    expect(fake.argv()).not.toContain(key)
-    expect(filesWith(fake.home, key)).toEqual([])
     expect(r.boxes.created).toBe(0)
   })
 })

@@ -3389,17 +3389,9 @@ export class TaskManager {
     return turnEnv(own, this.identities.base(projectId, this.store.getProject(projectId)?.repo ?? null))
   }
 
-  /**
-   * What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login.
-   * On `boxId`, when that box can't be handed Settings' ChatGPT login (`codexHandOver`), Settings' API key if it has one.
-   */
-  codexCredentials(projectId: string, taskEnv: Record<string, string> = {}, boxId?: string | null): CodexTurnLogin {
-    let global = this.settings.credentials.codexLogin()
-    if (global?.kind === "chatgpt" && boxId && !this.codexHandOver(boxId)) {
-      const key = this.settings.credentials.get("codexApiKey")
-      global = key ? { kind: "api_key", key } : null
-    }
-    return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, global)
+  /** What a Codex turn of this project logs in with: its own CODEX_API_KEY, else Settings › Credentials' Codex login. */
+  codexCredentials(projectId: string, taskEnv: Record<string, string> = {}): CodexTurnLogin {
+    return codexTurnLogin({ ...this.store.projectEnv(projectId), ...taskEnv }, this.settings.credentials.codexLogin())
   }
 
   /** The credential set its project's tasks use (`credentialSet`): tasks of two sets never share a pool box. */
@@ -3895,10 +3887,9 @@ export class TaskManager {
   /**
    * Which SSH machine a task's next turn takes (`pickMachine`, shared/machines.ts), or null with the reason: one with
    * the label it runs on (its own machine_label, else its project's; none: any machine), that works (enabled, tested,
-   * answered lately), has the task's agent installed (Box Yard never installs one there) with a login to use
-   * (`machineAgent`) and a free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole
-   * machine (`limitBlock`). Its workspace's machine first; it moves to another only when nothing would be lost
-   * (`moveBlock`, no upload limit).
+   * answered lately), has a Claude login to use (a Claude key Box Yard forwards, else the machine's own login) and a
+   * free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole machine (`limitBlock`).
+   * Its workspace's machine first; it moves to another only when nothing would be lost (`moveBlock`, no upload limit).
    */
   private async machineTarget(row: TaskRow): Promise<string | null> {
     if (!this.machines) {
@@ -3908,8 +3899,6 @@ export class TaskManager {
     const current = isMachineBox(row.box_id) ? machineOfBox(row.box_id) : null
     // A turn-end archive being written right now: it can move in a moment, so it doesn't count as stuck there.
     const canMove = !current || !row.session_started || (!this.archiving.has(row.id) && this.moveBlock(row, Infinity) === null)
-    const cli = taskAgentCli(row)
-    const agent = this.machineAgent(row)
     const machines = this.machines.list().map((m): MachineCandidate => {
       const boxId = machineBoxId(m.id)
       const limit = this.limitBlock(row, boxId)
@@ -3919,44 +3908,19 @@ export class TaskManager {
         labels: m.labels,
         enabled: m.enabled,
         problem: m.enabled ? this.machines!.problem(m) : null,
-        ...agent(m),
+        claudeLogin: m.lastTest?.claudeLogin ?? null,
         maxTasks: m.maxTasks,
         running: this.runningOn(boxId),
         blocked: limit ? limit.text : null,
       }
     })
-    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, cli })
+    const claudeKey = this.c.mock || this.turnCredentials(row.project_id, this.store.taskEnv(row.id)).claudeFrom !== null
+    const pick = pickMachine({ machines, label: this.store.taskMachineLabel(row), current, canMove, claudeKey })
     if ("wait" in pick) {
       this.machineWait(row, pick)
       return null
     }
     return machineBoxId(pick.machineId)
-  }
-
-  /**
-   * Whether a task's agent can run on a machine, from its last test. Claude Code: installed, and a Claude key Box Yard
-   * forwards or the machine's own login. Codex: installed, and an OpenAI API key Box Yard forwards, Box Yard's ChatGPT
-   * login where the machine keeps it in memory (a tmpfs for secrets, `codexHandOver`), or the machine's own login.
-   */
-  private machineAgent(row: TaskRow): (m: Machine) => Pick<MachineCandidate, "agentFound" | "agentLogin"> {
-    const env = this.store.taskEnv(row.id)
-    if (taskAgentCli(row) === "codex") {
-      return (m) => ({
-        agentFound: this.c.mock || m.lastTest?.tools.codex.found === true,
-        agentLogin: this.c.mock || this.codexCredentials(row.project_id, env, machineBoxId(m.id)).kind !== null || m.lastTest?.codexLogin === true,
-      })
-    }
-    const claudeKey = this.c.mock || this.turnCredentials(row.project_id, env).claudeFrom !== null
-    return (m) => ({ agentFound: this.c.mock || m.lastTest?.tools.claude.found === true, agentLogin: claudeKey || m.lastTest?.claudeLogin === true })
-  }
-
-  /**
-   * Whether Settings' ChatGPT login for Codex may go to a box. An SSH machine gets it only when it keeps it in memory
-   * (its tmpfs for secrets, Linux's /dev/shm): it's a long-lived login that Codex refreshes, so it never lands on the
-   * machine's disk. Mock mode's machines are folders here.
-   */
-  private codexHandOver(boxId: string): boolean {
-    return !isMachineBox(boxId) || this.c.mock || Boolean(providerOf(this.provider, boxId).secretsDir)
   }
 
   /** Put a task on the machine `machineTarget` picked. One moving off another machine restores there from its archive. */
@@ -3974,8 +3938,7 @@ export class TaskManager {
 
   /**
    * A task waits for an SSH machine: the reason on the task, and its Captain hears it once per kind of wait when no
-   * machine can take it (none has the label, none works, none has its agent or a login for it). A busy one is only a
-   * queue: no notice.
+   * machine can take it (none has the label, none works, no Claude login). A busy one is only a queue: no notice.
    */
   private machineWait(row: TaskRow, pick: Extract<MachinePick, { wait: string }>) {
     this.setWaitReason(row.id, pick.wait)
@@ -5448,13 +5411,11 @@ export class TaskManager {
 
   /**
    * Codex on the box, installed the first time a Codex task lands on one that lacks it (Upstash and RunPod boxes start
-   * with Claude Code only; Box Yard's Docker image has both). On this computer and SSH machines it's the owner's to install.
+   * with Claude Code only; Box Yard's Docker image has both). On this computer it's the owner's to install.
    */
   private async ensureCodex(boxId: string) {
     const provider = providerOf(this.provider, boxId)
     if (this.codexReady.has(boxId) || provider.name === "local" || this.c.mock) return
-    // An SSH machine is the owner's own computer: Box Yard never installs on it. Placement only picks one whose test found codex.
-    if (provider.name === "ssh") return
     const install = "npm install -g @openai/codex --no-audit --no-fund >/dev/null 2>&1"
     const res = await this.provider.exec(boxId, `command -v codex >/dev/null 2>&1 || ${install} || sudo -n ${install}; command -v codex >/dev/null 2>&1 && codex --version`)
     if (res.exitCode !== 0) throw failedStep("installing Codex on the box (npm install -g @openai/codex)", new Error(errorTail(res.stderr || res.stdout) || `exit code ${res.exitCode}`))
@@ -5467,7 +5428,7 @@ export class TaskManager {
    */
   private async takeBackCodexAuth(row: TaskRow) {
     if (taskAgentCli(row) !== "codex" || !row.box_id || this.settings.credentials.codexLogin()?.kind !== "chatgpt") return
-    if (this.codexCredentials(row.project_id, this.store.taskEnv(row.id), row.box_id).kind !== "chatgpt") return
+    if (this.codexCredentials(row.project_id, this.store.taskEnv(row.id)).kind !== "chatgpt") return
     try {
       const file = await this.provider.readFile(row.box_id, `${this.taskDir(row.box_id, row.id)}/codex/auth.json`)
       if (this.settings.credentials.adoptCodexAuth(file.toString("utf8"))) console.log(`[box-yard] ${row.id}: kept the Codex login it refreshed`)
@@ -5545,7 +5506,7 @@ export class TaskManager {
     if (home) for (const [k, v] of Object.entries(identityHomeEnv(home))) if (!(k in env)) env[k] = v
     const [claudeBin, ...claudeArgs] = (local ? this.c.claudeBin : provider.claudeBin).split(" ")
     const agent = taskAgentCli(row)
-    const codex = agent === "codex" ? this.codexCredentials(project.id, this.store.taskEnv(row.id), boxId) : null
+    const codex = agent === "codex" ? this.codexCredentials(project.id, this.store.taskEnv(row.id)) : null
     if (codex) {
       // A Codex turn logs in with Codex's login: Settings' Claude login stays off its box (a project's own env stays).
       if (claudeFrom === "global") for (const k of CLAUDE_CREDENTIAL_VARS) delete env[k]
@@ -5573,8 +5534,7 @@ export class TaskManager {
             codexArgs,
             // "chatgpt": the login file comes as codex-auth.json for the turn (box-runner.mjs prepareCodexHome).
             codexLogin: codex.kind,
-            // The same rule for Codex: on this computer (or an SSH machine) with no Codex login to hand it, its own
-            // `codex login` (~/.codex). An SSH machine without a tmpfs never gets the ChatGPT login (`codexHandOver`).
+            // The same rule for Codex: on this computer (or an SSH machine) with no Codex login set, its own `codex login` (~/.codex).
             isolateCodex: !(local || machine) || this.c.mock || codex.kind !== null,
           }
         : {}),
@@ -7046,7 +7006,7 @@ export class TaskManager {
     const dir = this.taskDir(boxId, taskId)
     // The copies a tmpfs for secrets keeps (an SSH machine's lives as long as the machine, not the turn).
     const secrets = providerOf(this.provider, boxId).secretsDir
-    const held = secrets ? ["json", "signing.key", "codex-auth.json", "codex-login.json"].map((x) => ` ${q(`${secrets}/${taskId}.${x}`)}`).join("") : ""
+    const held = secrets ? ` ${q(`${secrets}/${taskId}.json`)} ${q(`${secrets}/${taskId}.signing.key`)}` : ""
     await this.provider.exec(boxId, `${turnKillScript(dir)}; rm -rf ${q(dir)}${held}`)
   }
 

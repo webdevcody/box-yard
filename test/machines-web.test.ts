@@ -58,18 +58,14 @@ describe("a machine's last test", () => {
     expect(hardwareLine(failedTest("x", 1))).toBe("")
   })
 
-  it("lists each tool with claude's and codex's logins; one of the two is enough", () => {
+  it("lists each tool, claude's login, and codex as found but not used", () => {
     expect(toolList(test)).toEqual([
       { name: "git", text: "2.43.0", ok: true },
       { name: "node", text: "20.11.1", ok: true },
       { name: "claude", text: "2.0.14, not logged in", ok: null },
-      { name: "codex", text: "0.40.0", ok: true },
+      { name: "codex", text: "0.40.0 (not used)", ok: null },
     ])
-    expect(toolList({ ...test, codexLogin: true }).at(-1)).toEqual({ name: "codex", text: "0.40.0, logged in", ok: true })
-    expect(toolList({ ...test, codexLogin: false }).at(-1)).toEqual({ name: "codex", text: "0.40.0, not logged in", ok: null })
-    const codexOnly = { ...test, tools: { ...test.tools, claude: { found: false, version: null, path: null } } }
-    expect(toolList(codexOnly)[2]).toEqual({ name: "claude", text: "missing (Codex tasks only)", ok: null })
-    expect(toolList(failedTest("x", 1)).map((t) => t.text)).toEqual(["missing", "missing", "missing", "not installed (Claude Code tasks only)"])
+    expect(toolList(failedTest("x", 1)).map((t) => t.text)).toEqual(["missing", "missing", "missing", "not installed"])
   })
 
   it("offers Forget host key only when ssh refused a changed host key", () => {

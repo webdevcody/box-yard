@@ -20,8 +20,6 @@ Codex needs a login wherever it runs. Box Yard hands it one of these, first matc
 3. **Settings › Credentials › OpenAI API key for Codex** (`CODEX_API_KEY` on the server). Pay per use. When both are set, Box Yard uses the ChatGPT login.
 4. **Nothing set, on this computer:** agents running here (Runs on: This computer) and the Coordinator use this computer's own `codex login` (`~/.codex`). Boxes, RunPod pods and Docker containers can't, so they need one of the above.
 
-On an SSH machine ([docs/machines.md](machines.md#codex)), the ChatGPT login goes only to a Linux machine, which keeps it in memory between turns. Elsewhere the API key is used in its place, or else the machine's own `codex login`.
-
 The Test button next to each runs a real one-word `codex exec` with only that login.
 
 ### The ChatGPT login is refreshed, so Box Yard keeps the newest copy
@@ -45,7 +43,7 @@ Project identities (docs/identities.md) have no Codex login of their own yet: a 
 - `--ignore-user-config`, so a `~/.codex/config.toml` on the box or this computer (its MCP servers, its model) doesn't leak in, and ChatGPT apps, plugins and computer use switched off.
 - The task's own Codex home in its folder (`<task>/codex`), so its sessions move with the task between boxes. Each turn resumes the thread Codex named on the first one.
 
-Codex is installed the first time a Codex task lands on an Upstash box or RunPod pod (`npm install -g @openai/codex`); Box Yard's Docker image and server image already have it. On This computer and on SSH machines it's yours to install: a Codex task only goes to a machine whose connection test found `codex`.
+Codex is installed the first time a Codex task lands on an Upstash box or RunPod pod (`npm install -g @openai/codex`); Box Yard's Docker image and server image already have it. On This computer it's yours to install.
 
 **The Coordinator and Captains** run `codex exec` on the server with Box Yard's MCP tools over HTTP (the token comes through an env var, never the command line), a read-only sandbox, and no shell: they act through Box Yard's tools, and a shell could read Box Yard's data folder past what a status-only project allows. Images you attach are attached to the message; small text files come inline.
 

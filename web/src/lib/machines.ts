@@ -110,9 +110,7 @@ const version = (name: string, t: MachineTool) =>
     .replace(/\s*\(Claude Code.*\)$/, "")
     .replace(/^v(?=\d)/, "") ?? "found"
 
-const loginText = (login: boolean | null | undefined) => (login === true ? ", logged in" : login === false ? ", not logged in" : "")
-
-/** Each tool the test looked for, found or not, with the claude and codex logins. One of claude and codex is enough. */
+/** Each tool the test looked for, found or not, with the claude login. */
 export function toolList(t: MachineTest): { name: string; text: string; ok: boolean | null }[] {
   const { git, node, claude, codex } = t.tools
   return [
@@ -120,13 +118,10 @@ export function toolList(t: MachineTest): { name: string; text: string; ok: bool
     { name: "node", text: node.found ? version("node", node) : "missing", ok: node.found },
     {
       name: "claude",
-      text: !claude.found ? (codex.found ? "missing (Codex tasks only)" : "missing") : `${version("claude", claude)}${loginText(t.claudeLogin)}`,
-      ok: !claude.found ? (codex.found ? null : false) : t.claudeLogin === false ? null : true,
+      text: !claude.found ? "missing" : `${version("claude", claude)}${t.claudeLogin === true ? ", logged in" : t.claudeLogin === false ? ", not logged in" : ""}`,
+      ok: !claude.found ? false : t.claudeLogin === false ? null : true,
     },
-    {
-      name: "codex",
-      text: !codex.found ? "not installed (Claude Code tasks only)" : `${version("codex", codex)}${loginText(t.codexLogin)}`,
-      ok: !codex.found || t.codexLogin === false ? null : true,
-    },
+    // Codex is only detected: Box Yard runs Claude Code.
+    { name: "codex", text: codex.found ? `${version("codex", codex)} (not used)` : "not installed", ok: null },
   ]
 }

@@ -169,13 +169,11 @@ export class MachineService {
     const second = await this.provider.run(m, { input: scriptFor(toolsScript(), pathDirs), timeoutMs: TEST_TIMEOUT_MS })
     const test = testFromProbe({ first: facts, tools: parseProbe(second.stdout.toString("utf8")), pathDirs, latencyMs, at })
     if (this.d.mock) {
-      // Mock mode: agents run the made-up claude and codex, which need no login.
+      // Mock mode: agents run the made-up claude, which needs no login.
       test.tools.claude = { found: true, version: "2.0.0 (Claude Code, mock)", path: "claude" }
-      test.tools.codex = { found: true, version: "codex-cli 0.0.0 (mock)", path: "codex" }
       test.claudeLogin = true
-      test.codexLogin = true
-      test.problems = test.problems.filter((p) => !/^(claude|neither claude)/.test(p))
-      test.notes = test.notes.filter((n) => !/^(claude|codex)/.test(n))
+      test.problems = test.problems.filter((p) => !p.startsWith("claude"))
+      test.notes = test.notes.filter((n) => !n.startsWith("claude"))
     }
     return test
   }

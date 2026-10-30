@@ -70,13 +70,11 @@ export interface MachineTest {
   tools: { git: MachineTool; node: MachineTool; claude: MachineTool; codex: MachineTool }
   /** `claude auth status` on the machine: its own Claude login. Null: claude isn't there, or it didn't say. */
   claudeLogin: boolean | null
-  /** `codex login status` on the machine: its own Codex login. Null (or missing, from before Codex): codex isn't there, or it didn't say. */
-  codexLogin?: boolean | null
   /** A folder in memory (a tmpfs) for each turn's task.json, or null: they're on disk in the task folder for the turn. */
   secretsDir: string | null
   /** Problems that stop tasks from running there (no node, no git, …); empty when it's ready. */
   problems: string[]
-  /** Worth knowing but not blocking (claude or codex not logged in while Box Yard forwards a key, claude missing where codex is there). */
+  /** Worth knowing but not blocking (claude not logged in while Box Yard forwards a key, codex missing). */
   notes: string[]
 }
 
@@ -233,10 +231,8 @@ export interface MachineCandidate {
   enabled: boolean
   /** Why it can't take tasks (failed test, missing node, offline), or null. */
   problem: string | null
-  /** The task's agent (claude or codex) is installed there, from the last test. */
-  agentFound: boolean
-  /** The task's agent has a login to use there: one Box Yard hands it for the turn, or the machine's own. */
-  agentLogin: boolean
+  /** Its own Claude login, from the last test; null: unknown. */
+  claudeLogin: boolean | null
   maxTasks: number
   running: number
   /** A project's Tasks running at once or Whole machine rules this task out there, or null. */
@@ -245,43 +241,25 @@ export interface MachineCandidate {
 
 export type MachinePick =
   | { machineId: string; moved: boolean }
-  | { wait: string; kind: "none" | "unusable" | "agent" | "login" | "busy" }
-
-/** What a task's agent needs on a machine, for the waits: how to install it, and how it gets a login. */
-const AGENT_NEEDS = {
-  claude: {
-    name: "Claude Code",
-    install: "npm install -g @anthropic-ai/claude-code",
-    login: (where: string) => `log in to claude on ${where} and test it again, or add a Claude key in Settings › Credentials`,
-  },
-  codex: {
-    name: "Codex",
-    install: "npm install -g @openai/codex",
-    login: (where: string) =>
-      `run codex login on ${where} and test it again, or add an OpenAI API key for Codex in Settings › Credentials (Box Yard's ChatGPT login only goes to Linux machines, which keep it in memory)`,
-  },
-} as const
+  | { wait: string; kind: "none" | "unusable" | "claude" | "busy" }
 
 /**
  * Which machine a task's next turn takes (pure, so it's unit-tested):
  * 1. a workspace that can't move without losing work (`canMove` false) stays on its machine: it runs there when that
- *    machine works, has its agent and has room, else it waits for it;
- * 2. the machine its workspace is on, while it matches the label, works, has its agent and has room;
- * 3. the matching working machine with its agent and the fewest agents running that has room (ties: by name);
- * 4. else a wait, with the reason as the task shows it ("Waiting for …", "Waiting: …"): no machine has that label,
- *    none of them works now, none has the task's agent (`cli`: Box Yard never installs one on a machine), none has a
- *    login for it, or every one is busy.
+ *    machine works and has room, else it waits for it;
+ * 2. the machine its workspace is on, while it matches the label, works and has room;
+ * 3. the matching working machine with the fewest agents running that has room (ties: by name);
+ * 4. else a wait, with the reason as the task shows it ("Waiting for …", "Waiting: …"): no machine has that label, none of them works now, none has a Claude login to
+ *    use (`claudeKey` false), or every one is busy.
  */
-export function pickMachine(i: { machines: MachineCandidate[]; label: string | null; current: string | null; canMove: boolean; cli: "claude" | "codex" }): MachinePick {
+export function pickMachine(i: { machines: MachineCandidate[]; label: string | null; current: string | null; canMove: boolean; claudeKey: boolean }): MachinePick {
   const room = (m: MachineCandidate) => m.running < m.maxTasks && !m.blocked
   const slots = (m: MachineCandidate) => m.blocked ?? `${m.running} of ${m.maxTasks} running`
-  const needs = AGENT_NEEDS[i.cli]
   const cur = i.current ? i.machines.find((m) => m.id === i.current) : undefined
   if (cur && !i.canMove) {
     const problem = !cur.enabled ? "it's turned off" : cur.problem
     if (problem) return { kind: "unusable", wait: `Waiting for ${cur.name}, where its workspace is: it can't take tasks now (${problem})` }
-    if (!cur.agentFound) return { kind: "agent", wait: `Waiting for ${needs.name} on ${cur.name}, where its workspace is: install it there (${needs.install}) and test it again` }
-    if (!cur.agentLogin) return { kind: "login", wait: `Waiting for a ${needs.name} login on ${cur.name}, where its workspace is: ${needs.login("it")}` }
+    if (!i.claudeKey && cur.claudeLogin !== true) return { kind: "claude", wait: `Waiting for a Claude login on ${cur.name}, where its workspace is: log in to claude there and test it again, or add a Claude key in Settings › Credentials` }
     if (!room(cur)) return { kind: "busy", wait: `Waiting for a free slot on ${cur.name}, where its workspace is (${slots(cur)})` }
     return { machineId: cur.id, moved: false }
   }
@@ -300,12 +278,13 @@ export function pickMachine(i: { machines: MachineCandidate[]; label: string | n
   }
   const working = matching.filter((m) => !m.problem)
   if (!working.length) return { kind: "unusable", wait: `Waiting: none of ${what} can take tasks now (${matching.map((m) => `${m.name}: ${m.problem}`).join("; ")})` }
-  const found = working.filter((m) => m.agentFound)
-  if (!found.length) {
-    return { kind: "agent", wait: `Waiting: none of ${what} has ${needs.name} installed: install it on ${working.length === 1 ? working[0]!.name : "one of them"} (${needs.install}) and test it again` }
+  const usable = i.claudeKey ? working : working.filter((m) => m.claudeLogin === true)
+  if (!usable.length) {
+    return {
+      kind: "claude",
+      wait: `Waiting for a Claude login for ${what}: log in to claude on ${working.length === 1 ? working[0]!.name : "one of them"} and test it again, or add a Claude key in Settings › Credentials`,
+    }
   }
-  const usable = found.filter((m) => m.agentLogin)
-  if (!usable.length) return { kind: "login", wait: `Waiting for a ${needs.name} login for ${what}: ${needs.login(found.length === 1 ? found[0]!.name : "one of them")}` }
   const here = cur && usable.includes(cur) ? cur : undefined
   if (here && room(here)) return { machineId: here.id, moved: false }
   const free = usable.filter((m) => m !== here && room(m)).sort((a, b) => a.running - b.running || a.name.localeCompare(b.name))
