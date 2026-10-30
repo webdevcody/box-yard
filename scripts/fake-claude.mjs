@@ -149,6 +149,8 @@ function httpClient(server) {
   return {
     async init() {
       await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-claude", version: "0" } })
+      // Like the real CLI, which lists the tools before it's ready.
+      await call("tools/list", {})
     },
     tool: (name, args) => call("tools/call", { name, arguments: args }),
     close() {},
@@ -181,6 +183,7 @@ function stdioClient(server) {
     async init() {
       await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-claude", version: "0" } })
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n")
+      await call("tools/list", {})
     },
     tool: (name, args) => call("tools/call", { name, arguments: args }),
     close: () => child.stdin.end(),
@@ -413,7 +416,6 @@ let prompt = ""
 process.stdin.on("data", (d) => (prompt += d))
 process.stdin.on("end", async () => {
   const started = Date.now()
-  out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
   const login = [process.env.CLAUDE_CODE_OAUTH_TOKEN, process.env.ANTHROPIC_API_KEY].filter(Boolean)
   const loginError = login.some((t) => t.includes("revoked"))
     ? "Invalid API key · Please run /login"
@@ -421,6 +423,7 @@ process.stdin.on("end", async () => {
       ? "Not logged in · Please run /login"
       : null
   if (loginError) {
+    out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
     out({ type: "result", subtype: "success", is_error: true, result: loginError, session_id: session.id })
     process.exit(1)
   }
@@ -434,9 +437,12 @@ process.stdin.on("end", async () => {
   if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   try {
     mcp = loadMcp()
-    await mcp?.init()
+    await mcp?.init().catch((err) => {
+      out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake", mcp_servers: [{ name: "boxyard", status: "failed" }] })
+      throw err
+    })
     // Like the real CLI: init comes once the MCP servers are connected (turn timings read start-up off it).
-    out({ type: "system", subtype: "init", session_id: session.id, model: "fake", mcp_servers: mcp ? [{ name: "boxyard", status: "connected" }] : [] })
+    out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake", mcp_servers: mcp ? [{ name: "boxyard", status: "connected" }] : [] })
     const isOrchestrator = mcp?.kind === "orchestrator"
     if (/^\s*\/compact\b/.test(prompt)) {
       // Like the real CLI: same session, much smaller context, nothing printed as a message.
