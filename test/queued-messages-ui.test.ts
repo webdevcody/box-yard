@@ -9,6 +9,7 @@ import { App } from "../web/src/App.js"
 import { CaptainTab } from "../web/src/components/CaptainTab.js"
 import { keys } from "../web/src/lib/queries.js"
 import { placeMessage, settleOptimistic, splitQueued } from "../web/src/lib/queued.js"
+import { setCoordinatorView } from "../web/src/lib/coordinatorView.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project, UiEvent } from "../shared/types"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -77,6 +78,8 @@ function type(text: string) {
 
 beforeEach(() => {
   localStorage.clear()
+  // The Timeline: these read the thread's rows in order (the Cards view puts the same under the Coordinator card).
+  setCoordinatorView("timeline")
   es = null
   server = [msg("chat_ask000001", "user", "Build the thing", now - 3000), msg("chat_tool00001", "tool", "list_tasks", now - 2000, { input: {} })]
   posted = null

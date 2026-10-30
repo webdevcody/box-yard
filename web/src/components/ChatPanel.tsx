@@ -15,15 +15,16 @@ import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { VoiceControl } from "./VoiceControl"
 import { CloudMeter, useShowCloudMeter } from "./CloudMeter"
-import { RunningTasksBadge } from "./RunningTasks"
 import { ChatLine } from "./ChatLine"
 import { ChatRows, useCoordinatorRows } from "./UpdateChips"
 import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider } from "./SideThread"
 import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
-import { chatProvenance, filterByProject, recentProjects, type Provenance } from "../lib/chatProvenance"
+import { chatProvenance, filterByProject, filterByTasks, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
+import { CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
+import { setCoordinatorView, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -120,11 +121,23 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const projectFilter = useChatProjectFilter()
   const prov = useMemo(() => chatProvenance(all, index, allRows), [all, index, allRows])
   const recent = useRecentProjects(all, prov)
-  const list = useMemo(() => (projectFilter ? (filterByProject(messages, prov, projectFilter) as ChatMessage[]) : messages), [messages, prov, projectFilter])
-  const filteredAll = useMemo(() => (projectFilter ? splitQueued(list).settled : NO_MESSAGES), [projectFilter, list])
+  // Cards, one per task, or the Timeline: every message, or one card's ("Show in timeline").
+  const view = useCoordinatorView()
+  const cardsOn = view === "cards"
+  const only = useTimelineCard()
+  const onlyTasks = cardsOn ? null : (only?.taskIds ?? null)
+  const filtered = Boolean(projectFilter || onlyTasks)
+  const list = useMemo(() => {
+    let l: readonly ChatMessage[] = messages
+    if (projectFilter) l = filterByProject(l, prov, projectFilter)
+    if (onlyTasks) l = filterByTasks(l, prov, onlyTasks)
+    return l as ChatMessage[]
+  }, [messages, prov, projectFilter, onlyTasks])
+  const filteredAll = useMemo(() => (filtered ? splitQueued(list).settled : NO_MESSAGES), [filtered, list])
   const filteredRows = useCoordinatorRows(filteredAll)
-  const rows = projectFilter ? filteredRows : allRows
-  const tail = useTail(list, projectFilter ? `chat:${projectFilter}` : "chat")
+  const rows = filtered ? filteredRows : allRows
+  const tail = useTail(list, filtered ? `chat:${projectFilter ?? ""}:${onlyTasks ? only!.key : ""}` : "chat")
+  const cards = useCards(allRows, prov, cardsOn && messages.length > 0, projectFilter)
   // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
   const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
   const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
@@ -146,13 +159,22 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   // Links to a chat message (e.g. a schedule run) may point above the rendered part of the thread.
   const reveal = tail.reveal
   useEffect(() => {
+    const again = (id: string) => requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(REVEAL_CHAT_EVENT, { detail: id }))))
     const onReveal = (e: Event) => {
       const id = (e as CustomEvent<string>).detail
+      if (cardsOn) {
+        // On a card (a reply's "from:" line): go to it there. Anything else is the Timeline's.
+        const there = panel.current?.querySelector(`[data-testid="chat-cards"] [data-chat-id="${CSS.escape(id)}"], [data-testid="chat-cards"] [id="chat-${CSS.escape(id)}"]`)
+        if (there) return void requestAnimationFrame(() => there.scrollIntoView({ block: "center", behavior: "smooth" }))
+        setCoordinatorView("timeline")
+        return void again(id)
+      }
       if (!reveal(id)) {
-        // A message the project filter hides: show the whole chat, then go to it.
-        if (projectFilter && messages.some((m) => m.id === id)) {
+        // A message the project filter or one card's timeline hides: show the whole chat, then go to it.
+        if ((projectFilter || onlyTasks) && messages.some((m) => m.id === id)) {
           setChatProjectFilter(null)
-          requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(REVEAL_CHAT_EVENT, { detail: id })))
+          showInTimeline(null)
+          again(id)
         }
         return
       }
@@ -165,7 +187,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     }
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
     return () => window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
-  }, [reveal, projectFilter, messages])
+  }, [reveal, projectFilter, onlyTasks, cardsOn, messages])
 
   return (
     <ThreadChatProvider value={COORDINATOR_CHAT}>
@@ -189,13 +211,13 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           >
             <div className="flex min-w-0 items-center gap-2">
               <AgentIcon busy={Boolean(busy.data)} />
-              {zen && <RunningTasksBadge />}
               {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
               <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
                 {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
                 {zen && <span className="max-sm:hidden">Box Yard </span>}
                 Coordinator
               </div>
+              <ViewToggle />
               {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">
                 {!autoCompact && <CoordinatorContext zen={zen} state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
@@ -251,7 +273,18 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
           <div className={showSetup ? "hidden" : "contents"}>
             <SelectionToTask source={selectionSource} onPrompt={submit}>
-              <StickyScroll handle={scroller} count={list.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+              <StickyScroll
+                handle={scroller}
+                count={cards ? cards.live.length + cards.done.length + cards.coordinator.length : list.length}
+                resetKey={view}
+                restoreKey={cardsOn ? "chat:cards" : "chat"}
+                hidden={cards ? 0 : tail.hidden}
+                onLoadEarlier={cards ? undefined : tail.loadEarlier}
+                onTrim={cards ? undefined : tail.trim}
+                overlay={cards && <NewCardsPill cards={cards.live} />}
+                className={zen ? "zen-column py-6" : "px-4 py-4"}
+                contentClassName="space-y-3"
+              >
                 {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
                   <TryFirst
                     ready={!setup.needed}
@@ -277,12 +310,22 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={!settled.length} />}
+                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
+                {onlyTasks && <TimelineCardBanner card={only!} empty={!settled.length} />}
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>
-                  <ChatRows rows={shown} onFollowUp={followUp} />
-                  <StreamingReply busy={Boolean(busy.data)} />
-                  {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                  {cards ? (
+                    <CardsView layout={cards} onFollowUp={followUp} active={Boolean(busy.data) || queued.length > 0}>
+                      <StreamingReply busy={Boolean(busy.data)} />
+                      {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                    </CardsView>
+                  ) : (
+                    <>
+                      <ChatRows rows={shown} onFollowUp={followUp} />
+                      <StreamingReply busy={Boolean(busy.data)} />
+                      {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                    </>
+                  )}
                 </InRepo>
               </StickyScroll>
             </SelectionToTask>

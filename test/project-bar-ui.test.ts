@@ -7,6 +7,7 @@ import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ChatPanel } from "../web/src/components/ChatPanel.js"
 import { setChatProjectFilter } from "../web/src/lib/projectBar.js"
+import { setCoordinatorView } from "../web/src/lib/coordinatorView.js"
 import { keys } from "../web/src/lib/queries.js"
 import { projectColors } from "../shared/projectColors.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
@@ -57,6 +58,7 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => setChatProjectFilter(null))
+  act(() => setCoordinatorView("cards"))
   act(() => root.unmount())
   host.remove()
   vi.unstubAllGlobals()
@@ -106,8 +108,9 @@ describe("project bar", () => {
   })
 
   it("leads task links and a task's update chip with its tile, in its project's colour", () => {
+    setCoordinatorView("timeline")
     render(createElement(ChatPanel))
-    // The reply's link, and the tool line's.
+    // The reply's link, and the tool line's (the Timeline's: the Cards view leaves tool calls out).
     const links = [...host.querySelectorAll(`a[href="/tasks/${LEVEL.id}"]`)]
     expect(links).toHaveLength(2)
     for (const link of links) {
