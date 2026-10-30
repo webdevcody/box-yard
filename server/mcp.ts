@@ -2156,6 +2156,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   if (machines) {
     const gb = (bytes: number | null) => (bytes === null ? "?" : `${(bytes / 1024 ** 3).toFixed(bytes < 10 * 1024 ** 3 ? 1 : 0)} GB`)
     const toolLine = (t: { found: boolean; version: string | null }) => (t.found ? (t.version ?? "found") : "not installed")
+    const loginLine = (login: boolean | null | undefined) => (login === true ? "logged in" : login === false ? "not logged in" : "login unknown")
     const machineView = (m: MachineStatus) => {
       const t = m.lastTest
       return {
@@ -2182,8 +2183,8 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 disk: `${gb(t.diskFreeBytes)} free of ${gb(t.diskTotalBytes)}`,
                 git: toolLine(t.tools.git),
                 node: toolLine(t.tools.node),
-                claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${t.claudeLogin === true ? "logged in" : t.claudeLogin === false ? "not logged in" : "login unknown"}` : "not installed",
-                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)} (found; Box Yard runs Claude Code only)` : "not installed",
+                claude: t.tools.claude.found ? `${toolLine(t.tools.claude)}, ${loginLine(t.claudeLogin)}` : "not installed: no Claude Code tasks here",
+                codex: t.tools.codex.found ? `${toolLine(t.tools.codex)}, ${loginLine(t.codexLogin)}` : "not installed: no Codex tasks here (Box Yard never installs it on a machine)",
                 ...(t.problems.length ? { problems: t.problems } : {}),
                 ...(t.notes.length ? { notes: t.notes } : {}),
               },

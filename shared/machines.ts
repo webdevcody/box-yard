@@ -70,11 +70,13 @@ export interface MachineTest {
   tools: { git: MachineTool; node: MachineTool; claude: MachineTool; codex: MachineTool }
   /** `claude auth status` on the machine: its own Claude login. Null: claude isn't there, or it didn't say. */
   claudeLogin: boolean | null
+  /** `codex login status` on the machine: its own Codex login. Null (or missing, from before Codex): codex isn't there, or it didn't say. */
+  codexLogin?: boolean | null
   /** A folder in memory (a tmpfs) for each turn's task.json, or null: they're on disk in the task folder for the turn. */
   secretsDir: string | null
   /** Problems that stop tasks from running there (no node, no git, …); empty when it's ready. */
   problems: string[]
-  /** Worth knowing but not blocking (claude not logged in while Box Yard forwards a key, codex missing). */
+  /** Worth knowing but not blocking (claude or codex not logged in while Box Yard forwards a key, claude missing where codex is there). */
   notes: string[]
 }
 

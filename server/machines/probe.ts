@@ -1,7 +1,7 @@
 // Test connection (MachineService.test): one script over SSH that reports what the machine has for agents. It reads
-// only facts (OS, CPUs, memory, disk, where git, node, claude and codex are and their versions, whether claude is
-// logged in) and makes Box Yard's work folder; it never prints a credential (`claude auth status` says only whether
-// there is a login, and its JSON is reduced to that here).
+// only facts (OS, CPUs, memory, disk, where git, node, claude and codex are and their versions, whether claude and
+// codex are logged in) and makes Box Yard's work folder; it never prints a credential (`claude auth status` says only
+// whether there is a login, and its JSON is reduced to that here; `codex login status` is reduced to its exit code).
 import { q } from "../providers/types.js"
 import type { MachineTest, MachineTool } from "../../shared/machines.js"
 
@@ -51,7 +51,7 @@ fi
 `.trim()
 }
 
-/** The second half, once the login shell's folders are known: each tool's path and version, and claude's login. */
+/** The second half, once the login shell's folders are known: each tool's path and version, and claude's and codex's logins. */
 export function toolsScript(): string {
   return `
 echo BOXYARD_PROBE
@@ -66,6 +66,11 @@ done
 if command -v claude >/dev/null 2>&1; then
   a=$(DISABLE_AUTOUPDATER=1 claude auth status </dev/null 2>/dev/null | tr -d '\\n' | grep -oE '"loggedIn"[[:space:]]*:[[:space:]]*(true|false)' | head -n 1)
   p claude_auth "$a"
+fi
+if command -v codex >/dev/null 2>&1; then
+  T=""; command -v timeout >/dev/null 2>&1 && T="timeout 20"
+  $T codex login status </dev/null >/dev/null 2>&1
+  p codex_auth "$?"
 fi
 if [ "$(uname -s)" = Linux ] && grep -qs '^[^ ]* /dev/shm tmpfs' /proc/mounts && [ -w /dev/shm ]; then p shm "/dev/shm/boxyard-$(id -u)"; fi
 `.trim()
@@ -111,6 +116,9 @@ export function testFromProbe(i: { first: Map<string, string[]>; tools: Map<stri
   const disk = one(first, "disk")?.split(" ") ?? []
   const auth = one(tools, "claude_auth")
   const claudeLogin = !all.claude.found || !auth ? null : /true$/.test(auth)
+  // `codex login status` exits 0 when it's signed in (ChatGPT or an API key), 1 when it isn't; anything else (a timeout) says nothing.
+  const codexAuth = one(tools, "codex_auth")
+  const codexLogin = !all.codex.found ? null : codexAuth === "0" ? true : codexAuth === "1" ? false : null
   const problems: string[] = []
   const notes: string[] = []
   const workDir = one(first, "workdir")
@@ -118,11 +126,13 @@ export function testFromProbe(i: { first: Map<string, string[]>; tools: Map<stri
   if (!all.node.found) problems.push(`node isn't installed (Node ${MIN_NODE_MAJOR} or later runs Box Yard's runner)`)
   else if (nodeMajor(all.node.version) < MIN_NODE_MAJOR) problems.push(`node ${all.node.version} is too old (Node ${MIN_NODE_MAJOR} or later)`)
   if (!all.git.found) problems.push("git isn't installed")
-  if (!all.claude.found) problems.push("claude (Claude Code) isn't installed: npm install -g @anthropic-ai/claude-code, or curl -fsSL https://claude.ai/install.sh | bash")
+  const installClaude = "npm install -g @anthropic-ai/claude-code, or curl -fsSL https://claude.ai/install.sh | bash"
+  if (!all.claude.found && !all.codex.found) problems.push(`neither claude (Claude Code) nor codex is installed: ${installClaude}`)
   const missing = first.get("missing") ?? []
   if (missing.length) problems.push(`${missing.join(", ")} ${missing.length === 1 ? "isn't" : "aren't"} installed`)
   if (all.claude.found && claudeLogin === false) notes.push("claude isn't logged in on it: its tasks need a Claude key from Box Yard (Settings › Credentials or the project's identity), or run claude there once and /login")
-  if (all.codex.found) notes.push(`codex is installed (${all.codex.version ?? "version unknown"}); Box Yard runs Claude Code only, so it isn't used`)
+  if (!all.claude.found && all.codex.found) notes.push(`claude (Claude Code) isn't installed, so only Codex tasks run on it: ${installClaude}`)
+  if (all.codex.found && codexLogin === false) notes.push("codex isn't logged in on it: its Codex tasks need an OpenAI API key from Box Yard (Settings › Credentials), Box Yard's ChatGPT login (Linux machines only, kept in memory), or run codex login there")
   const free = num(disk[0] ?? null)
   if (free !== null && free < 2 * 1024 ** 3) notes.push("under 2 GB free in its work folder's disk")
   return {
@@ -142,6 +152,7 @@ export function testFromProbe(i: { first: Map<string, string[]>; tools: Map<stri
     pathDirs: i.pathDirs,
     tools: all,
     claudeLogin,
+    codexLogin,
     secretsDir: one(tools, "shm"),
     problems,
     notes,
@@ -168,6 +179,7 @@ export function failedTest(error: string, at: number, latencyMs: number | null =
     pathDirs: [],
     tools: { git: none, node: none, claude: none, codex: none },
     claudeLogin: null,
+    codexLogin: null,
     secretsDir: null,
     problems: [],
     notes: [],
