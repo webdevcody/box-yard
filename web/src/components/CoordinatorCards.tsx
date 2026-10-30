@@ -1322,7 +1322,7 @@ function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entr
   }
   return (
     <section ref={card} id="card-coordinator" data-testid="coordinator-card" aria-label="Coordinator" className={cx(CARD, "border-l-yard-500 bg-zinc-900/25")}>
-      <div data-testid="coordinator-card-head" className="sticky top-0 z-10 flex items-start gap-2 rounded-t-[10px] bg-zinc-950/95 py-2 pr-2 pl-3 backdrop-blur">
+      <div data-testid="coordinator-card-head" className="sticky top-[calc(-1*var(--chat-pad,0px))] z-20 flex items-start gap-2 rounded-t-[10px] bg-zinc-950/95 py-2 pr-2 pl-3 backdrop-blur">
         <span aria-hidden className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-md bg-yard-400/15 text-yard-400">
           <Bot className="h-[13px] w-[13px]" />
         </span>
@@ -1330,7 +1330,7 @@ function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entr
           <div className="text-[13.5px] leading-[22px] font-semibold text-zinc-100">
             Coordinator <span className="text-xs font-normal text-zinc-500">· your main chat</span>
           </div>
-          <div className="text-[11.5px] text-zinc-500">What you type below lands here. Each task it starts gets a card above.</div>
+          <div className="truncate text-[11.5px] text-zinc-500">What you type below lands here. Each task it starts gets a card above.</div>
         </div>
         {unfolded && (
           <button type="button" onClick={fold} data-testid="coordinator-fold" title={`Fold its history back to the newest ${COORDINATOR_SHOW}`} className={cx(FOOT, "shrink-0")}>
@@ -1450,13 +1450,13 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
   )
 })
 
-/** The card the pill goes to: its icon and title, cut short. */
+/** The card the pill goes to: its icon and title, cut short. A phone has room for the icon only; the title is still read out. */
 function PillTarget({ card, where }: { card: ChatCard; where: string }) {
   const { first, title } = useCardHead(card)
   return (
     <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(first?.color)}>
       <CardIcon card={card} />
-      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100">
+      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 max-[26rem]:sr-only">
         {title}
       </span>
       <span className="sr-only">, {where}</span>

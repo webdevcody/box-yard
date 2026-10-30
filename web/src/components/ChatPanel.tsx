@@ -298,7 +298,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 onLoadEarlier={cards ? undefined : tail.loadEarlier}
                 onTrim={cards ? undefined : tail.trim}
                 overlay={cards && <NewCardsPill cards={cards.live} />}
-                className={zen ? "zen-column py-6" : "px-4 py-4"}
+                // --chat-pad: its top padding, which a card's sticky header pulls up over (CoordinatorCards).
+                className={zen ? "zen-column py-6 [--chat-pad:1.5rem]" : "px-4 py-4 [--chat-pad:1rem]"}
                 contentClassName="space-y-3"
               >
                 {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
