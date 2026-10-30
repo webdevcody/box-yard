@@ -5,6 +5,8 @@ import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
 import { AppLink, InRepo, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
+import { useTaskTile } from "../lib/taskTiles"
+import { showCard } from "../lib/coordinatorView"
 import { routes, toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type NoticeKind } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
@@ -16,7 +18,7 @@ import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
 import { ReplySources } from "./ReplySources"
 import { TurnTimingChip, timingOf } from "./TurnTimingChip"
-import type { UpdateSource } from "../lib/chatUpdates"
+import { isSent, noticeText, type UpdateSource } from "../lib/chatUpdates"
 import type { ChatMessage } from "../../../shared/types"
 
 /** Markdown that folds behind "Show more" when it's long. */
@@ -378,12 +380,80 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
  * the threads it has show as markers under it (SideThread.tsx; nothing outside a chat with threads).
  * `sources`: on a Coordinator reply, the updates it read (lib/chatUpdates.ts), named in a "from:" line under it.
  * `next`: whether its suggested next steps show (the Coordinator chat shows only the newest reply's).
+ * `inCard`: it's in a task's card (CoordinatorCards.tsx), so what Cody sent from there needn't name the task.
  */
-export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources, next = true }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next?: boolean }) {
+export const ChatLine = memo(function ChatLine({
+  m,
+  onFollowUp,
+  sources,
+  next = true,
+  inCard = false,
+}: {
+  m: ChatMessage
+  onFollowUp: (message: string) => void
+  sources?: UpdateSource[] | null
+  next?: boolean
+  inCard?: boolean
+}) {
   return (
     <div data-chat-id={m.id}>
-      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} next={next} />
+      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} next={next} inCard={inCard} />
       {m.role !== "tool" && <ThreadMarkers m={m} />}
+    </div>
+  )
+})
+
+const USER_BUBBLE = "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100"
+
+/** The tasks a question was asked about from their card (Orchestrator.send's meta.about). */
+const aboutTasks = (m: ChatMessage): string[] => (Array.isArray(m.meta?.about) ? m.meta.about.filter((t): t is string => typeof t === "string") : [])
+
+/**
+ * Over a message Cody sent from a card: where it went. In the card, "to this task" or "to the Coordinator"; in the
+ * Timeline, the task it went to or is about, and the way to its card.
+ */
+function SentFrom({ taskIds, coordinator, inCard }: { taskIds: readonly string[]; coordinator: boolean; inCard: boolean }) {
+  const tile = useTaskTile(taskIds[0])
+  const label = "flex max-w-[85%] min-w-0 items-center gap-1 text-[11px] text-zinc-500"
+  if (inCard)
+    return (
+      <div data-testid="sent-from" className={label}>
+        {coordinator ? <Bot className="h-3 w-3 shrink-0 text-yard-400" aria-hidden /> : <TaskTile id={taskIds[0]} bare />}
+        {coordinator ? "to the Coordinator" : "to this task"}
+      </div>
+    )
+  const name = taskIds.length > 1 ? `${taskIds.length} tasks` : (tile?.title ?? "a task")
+  return (
+    <div data-testid="sent-from" className={label}>
+      <span className="shrink-0">{coordinator ? "about" : "to"}</span>
+      <TaskTile id={taskIds[0]} bare />
+      <span className="min-w-0 truncate text-zinc-400">{name}</span>
+      <span aria-hidden className="text-zinc-700">
+        ·
+      </span>
+      <button
+        type="button"
+        onClick={() => showCard(taskIds[0]!)}
+        className="shrink-0 rounded-sm font-medium text-yard-400 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
+      >
+        Open card ›
+      </button>
+    </div>
+  )
+}
+
+/** Cody's message to a task from its card (a sent notice, TaskManager.sentFromChat): his bubble, saying where it went. */
+const SentLine = memo(function SentLine({ m, inCard }: { m: ChatMessage; inCard: boolean }) {
+  const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
+  const text = useMemo(() => noticeText(m).text, [m])
+  return (
+    <div id={`chat-${m.id}`} data-testid="sent-message" className="flex flex-col items-end gap-1">
+      {taskId && <SentFrom taskIds={[taskId]} coordinator={false} inCard={inCard} />}
+      <div className={cx(MESSAGE_BLOCK, USER_BUBBLE)}>
+        {text}
+        <AttachmentList files={m.meta?.attachments} />
+        <MessageActions text={text} anchorId={m.id} />
+      </div>
     </div>
   )
 })
@@ -400,7 +470,19 @@ function ReplyFooter({ m, sources }: { m: ChatMessage; sources?: UpdateSource[] 
   )
 }
 
-function ChatLineBody({ m, onFollowUp, sources, next }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next: boolean }) {
+function ChatLineBody({
+  m,
+  onFollowUp,
+  sources,
+  next,
+  inCard,
+}: {
+  m: ChatMessage
+  onFollowUp: (message: string) => void
+  sources?: UpdateSource[] | null
+  next: boolean
+  inCard: boolean
+}) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
@@ -440,14 +522,16 @@ function ChatLineBody({ m, onFollowUp, sources, next }: { m: ChatMessage; onFoll
   }
   if (m.role === "user") {
     const bubble = (
-      <div className={cx(MESSAGE_BLOCK, "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yard-500/15 px-3 py-2 text-sm whitespace-pre-wrap wrap-anywhere text-zinc-100", m.meta?.pending ? "opacity-70" : "")}>
+      <div className={cx(MESSAGE_BLOCK, USER_BUBBLE, m.meta?.pending ? "opacity-70" : "")}>
         {m.content}
         <AttachmentList files={m.meta?.attachments} />
         {!m.meta?.pending && m.meta?.queued !== true && <MessageActions text={m.content} anchorId={m.id} />}
       </div>
     )
+    const about = aboutTasks(m)
     return (
       <div id={`chat-${m.id}`} className="flex flex-col items-end gap-1">
+        {about.length > 0 && <SentFrom taskIds={about} coordinator inCard={inCard} />}
         {m.meta?.queued === true ? (
           <QueuedChatMessage m={m} projectId={null} who="the Coordinator">
             {bubble}
@@ -459,6 +543,7 @@ function ChatLineBody({ m, onFollowUp, sources, next }: { m: ChatMessage; onFoll
     )
   }
   if (m.role === "tool") return <ToolLine m={m} />
+  if (isSent(m)) return <SentLine m={m} inCard={inCard} />
   if (m.role === "notice") return <NoticeLine m={m} />
   if (m.role === "error") {
     return (

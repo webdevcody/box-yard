@@ -228,3 +228,139 @@ describe("Coordinator cards", () => {
     expect(card(DOCS.id).textContent).toContain("Done")
   })
 })
+
+describe("Reply in a card", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  beforeEach(() => {
+    posts = []
+    // Sends stay in flight: what was sent, and what shows meanwhile, is the test.
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+  })
+
+  const composer = (scope: Element) => scope.querySelector('[data-testid="card-composer"]') as HTMLElement
+  /** Types in the box and sends; the mutation reaches fetch after its onMutate. */
+  const send = async (scope: Element, text: string) => {
+    const box = scope.matches('[data-testid="card-composer"]') ? scope : composer(scope)
+    const textarea = box.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, text)
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void box.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    // Its onMutate, then the query cache telling the chat.
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+  }
+  const sent = (t: Task, text: string) => msg("notice", `✉️ **${t.title}** got a message from Cody: ${text}`, { taskId: t.id, projectId: t.projectId, sent: true })
+  const setBusy = (busy: boolean) =>
+    act(async () => {
+      qc.setQueryData(keys.chatBusy, busy)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+  it("sends to the task by default, and shows the message and the agent's answer in the card and the timeline", async () => {
+    render()
+    click(head(LOGIN.id))
+    const box = composer(card(LOGIN.id))
+    expect(box.dataset.to).toBe("task")
+    expect(box.querySelector("textarea")!.placeholder).toBe("Answer the agent…")
+    expect(button(box, "This task").getAttribute("aria-pressed")).toBe("true")
+    await send(card(LOGIN.id), "The new one")
+    expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
+
+    // The server's line about it, then the turn it started.
+    const message = sent(LOGIN, "The new one")
+    const answer = notice(LOGIN, "💬 **Fix login** finished its turn: Switched to **the new page**.")
+    await setChat([...CHAT, message, answer])
+    const body = card(LOGIN.id).querySelector('[data-testid="chat-card-body"]')!
+    const bubble = body.querySelector('[data-testid="sent-message"]')!
+    expect(bubble.textContent).toContain("to this task")
+    expect(bubble.textContent).toContain("The new one")
+    expect(bubble.textContent).not.toContain("got a message")
+    // It answers Cody, so it reads as the agent's reply, not a chip.
+    const reply = body.querySelector('[data-testid="agent-reply"]')!
+    expect(reply.textContent).toContain("Fix login")
+    expect(reply.textContent).toContain("Switched to the new page.")
+    expect(reply.querySelector("strong")?.textContent).toBe("the new page")
+    expect([...body.querySelectorAll('[data-testid="update-chip"]')].some((c) => c.textContent?.includes("Switched"))).toBe(false)
+    // Closed, the card's latest line is the answer.
+    click(head(LOGIN.id))
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toContain("Switched to the new page.")
+
+    // The Timeline says which task it went to, and goes back to its card.
+    click(viewButton("Timeline"))
+    const line = host.querySelector('[data-testid="sent-message"]')!
+    expect(line.querySelector('[data-testid="sent-from"]')!.textContent).toBe("toFix login·Open card ›")
+    click(button(line, "Open card"))
+    expect(viewButton("Cards").getAttribute("aria-pressed")).toBe("true")
+    await act(async () => await new Promise((r) => requestAnimationFrame(r)))
+    expect(card(LOGIN.id).dataset.open).toBe("true")
+  })
+
+  it("asks the Coordinator about the task instead, and the question waits for its answer in the card", async () => {
+    render()
+    click(head(CARDS.id))
+    expect(composer(card(CARDS.id)).querySelector("textarea")!.placeholder).toBe("Reply to this task…")
+    click(button(composer(card(CARDS.id)), "Coordinator"))
+    const box = composer(card(CARDS.id))
+    expect(box.dataset.to).toBe("coordinator")
+    expect(box.querySelector("textarea")!.placeholder).toBe("Ask the Coordinator about this…")
+    expect(box.querySelector('[data-testid="card-composer-hint"]')!.textContent).toBe("Goes to the Coordinator, with this task as context")
+    await send(card(CARDS.id), "Is it blocking anything?")
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.url).toBe("/api/chat")
+    expect(posts[0]!.body).toMatchObject({ content: "Is it blocking anything?", about: [CARDS.id] })
+
+    // It shows in the card at once, not in the Coordinator card.
+    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
+    expect(body.textContent).toContain("Is it blocking anything?")
+    expect(body.querySelector('[data-testid="sent-from"]')!.textContent).toBe("to the Coordinator")
+    expect(coordinator().textContent).not.toContain("Is it blocking anything?")
+    expect(body.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
+    await setBusy(false)
+    expect(body.querySelector('[data-testid="card-working"]')).toBeNull()
+
+    // The choice holds when the card closes and opens again.
+    click(head(CARDS.id))
+    click(head(CARDS.id))
+    expect(composer(card(CARDS.id)).dataset.to).toBe("coordinator")
+  })
+
+  it("shows a question queued mid-turn in its card, and the Timeline says what it's about", async () => {
+    qc.setQueryData(keys.chatBusy, true)
+    const queued = msg("user", "Can it wait?", { about: [CARDS.id], queued: true })
+    qc.setQueryData(keys.chat, [...CHAT, queued])
+    render()
+    click(head(CARDS.id))
+    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
+    expect(body.textContent).toContain("Can it wait?")
+    expect(body.querySelector('[data-testid="card-working"]')!.textContent).toBe("The Coordinator is working")
+    expect(coordinator().textContent).not.toContain("Can it wait?")
+    click(viewButton("Timeline"))
+    const label = [...host.querySelectorAll('[data-testid="sent-from"]')].map((l) => l.textContent)
+    expect(label).toEqual(["aboutCoordinator cards·Open card ›"])
+  })
+
+  it("gives each of a batch's tasks its own box, and the batch one for the Coordinator about all of them", async () => {
+    render()
+    click(head(`batch:${B}`))
+    const batch = card(`batch:${B}`)
+    const rows = [...batch.querySelectorAll('[data-testid="batch-task"]')] as HTMLElement[]
+    click(rows[1]!.querySelector("button")!)
+    click(rows[2]!.querySelector("button")!)
+    expect(rows[1]!.querySelector('[data-testid="card-working"]')!.textContent).toBe("#406: The Hollow cave is working")
+    expect(composer(rows[1]!).querySelector("textarea")!.placeholder).toBe("Queue another message…")
+    expect(rows[2]!.querySelector('[data-testid="card-working"]')).toBeNull()
+    await send(rows[2]!, "Shoot it at dusk")
+    expect(posts).toEqual([{ url: `/api/tasks/${DAM.id}/messages`, body: { content: "Shoot it at dusk", attachments: [], inChat: true } }])
+
+    const own = [...batch.querySelectorAll('[data-testid="card-composer"]')].at(-1) as HTMLElement
+    expect(own.closest('[data-testid="batch-task"]')).toBeNull()
+    expect(own.dataset.to).toBe("coordinator")
+    await send(own, "How far along is the batch?")
+    expect(posts[1]!.body).toMatchObject({ content: "How far along is the batch?", about: [CAMP.id, HOLLOW.id, DAM.id] })
+  })
+})
