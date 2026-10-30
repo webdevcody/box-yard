@@ -5,8 +5,11 @@ import { useLocation } from "wouter"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowUpRight, Bot, Box, Check, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
-import { followAppLink, githubRef, linkTarget, remarkEntityLinks, shortGithubLabel, type EntityIndex } from "../lib/linkify"
+import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
+import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
+import { clickImage, imageTarget, openLightbox } from "../lib/lightbox"
+import { openPreview } from "../lib/preview"
 import { api } from "../lib/api"
 import { keys } from "../lib/queries"
 import { copyText } from "../lib/clipboard"
@@ -187,58 +190,65 @@ export function Button({ variant = "subtle", size = "md", loading, className, ch
 // Parsed markdown by source text. Long threads re-mount messages (switching tasks, loading earlier ones),
 // and parsing + GFM + entity links is the most expensive part of rendering a message. Linked output
 // depends on the entity index, which only changes when an entity is added, removed or renamed, so
-// there's one cache per index (plus one for markdown without entity links).
-type Parser = { plugins: Options["remarkPlugins"]; cache: Map<string, ReactNode> }
+// there's one cache per index (plus one for markdown without entity links), keyed by the repo GitHub
+// references link to (InRepo) and the text.
+type Parser = { plugins: Options["remarkPlugins"]; cache: Map<string, ReactNode>; prefix: string }
 const MARKDOWN_CACHE_MAX = 3000
-const plainParser: Parser = { plugins: [remarkGfm], cache: new Map() }
-let linkedParser: Parser & { index: EntityIndex | null } = { index: null, plugins: [], cache: new Map() }
+const plainParser: Parser = { plugins: [remarkGfm], cache: new Map(), prefix: "" }
+let linked: { index: EntityIndex | null; cache: Map<string, ReactNode>; parsers: Map<string, Parser> } = { index: null, cache: new Map(), parsers: new Map() }
 
-function parserFor(index: EntityIndex | null): Parser {
+function parserFor(index: EntityIndex | null, repo: RepoScope = null): Parser {
   if (!index) return plainParser
-  if (linkedParser.index !== index) linkedParser = { index, plugins: [remarkGfm, [remarkEntityLinks, index]], cache: new Map() }
-  return linkedParser
+  if (linked.index !== index) linked = { index, cache: new Map(), parsers: new Map() }
+  const prefix = repo ? `${repo}\u0000` : ""
+  let parser = linked.parsers.get(prefix)
+  if (!parser) linked.parsers.set(prefix, (parser = { plugins: [remarkGfm, [remarkEntityLinks, index, repo]], cache: linked.cache, prefix }))
+  return parser
 }
 
-function parsedMarkdown(text: string, index: EntityIndex | null): ReactNode {
-  const { plugins, cache } = parserFor(index)
-  let out = cache.get(text)
+function parsedMarkdown(text: string, index: EntityIndex | null, repo: RepoScope = null): ReactNode {
+  const { plugins, cache, prefix } = parserFor(index, repo)
+  const key = prefix + text
+  let out = cache.get(key)
   if (out !== undefined) {
     // Refresh its spot so the cache drops the least recently used entry first.
-    cache.delete(text)
+    cache.delete(key)
   } else {
     out = renderMarkdown({ children: text, remarkPlugins: plugins, components: MARKDOWN_COMPONENTS })
     if (cache.size >= MARKDOWN_CACHE_MAX) cache.delete(cache.keys().next().value!)
   }
-  cache.set(text, out)
+  cache.set(key, out)
   return out
 }
 
-// Texts waiting to be parsed in idle time, and the index to link them with.
+// Texts waiting to be parsed in idle time, and the index and repo to link them with.
 const warmQueue = new Set<string>()
 let warmIndex: EntityIndex | null = null
+let warmRepo: RepoScope = null
 let warming = false
 const idle: (cb: (deadline?: { timeRemaining(): number }) => void) => void =
   typeof requestIdleCallback === "function" ? (cb) => requestIdleCallback(cb, { timeout: 2000 }) : (cb) => setTimeout(cb, 50)
 
 /**
  * Parse markdown that isn't on screen yet (older messages) while the browser is idle,
- * so scrolling up into them only costs building the DOM.
+ * so scrolling up into them only costs building the DOM. `repo` is the thread's useRepoScope(), as <Markdown> sees it.
  */
-export function warmMarkdown(texts: string[], index: EntityIndex) {
-  if (warmIndex !== index) warmQueue.clear()
+export function warmMarkdown(texts: string[], index: EntityIndex, repo: RepoScope = null) {
+  if (warmIndex !== index || warmRepo !== repo) warmQueue.clear()
   warmIndex = index
-  const { cache } = parserFor(index)
+  warmRepo = repo
+  const { cache, prefix } = parserFor(index, repo)
   // Newest first: those are the next ones scrolled into.
-  for (let i = texts.length - 1; i >= 0; i--) if (!cache.has(texts[i]!)) warmQueue.add(texts[i]!)
+  for (let i = texts.length - 1; i >= 0; i--) if (!cache.has(prefix + texts[i]!)) warmQueue.add(texts[i]!)
   if (warming || !warmQueue.size) return
   warming = true
   const step = (deadline?: { timeRemaining(): number }) => {
     const until = performance.now() + (deadline ? Math.min(deadline.timeRemaining(), 12) : 8)
-    const { cache } = parserFor(warmIndex)
+    const { cache, prefix } = parserFor(warmIndex, warmRepo)
     for (const text of warmQueue) {
       if (performance.now() >= until) break
       warmQueue.delete(text)
-      if (!cache.has(text) && cache.size < MARKDOWN_CACHE_MAX - 100) parsedMarkdown(text, warmIndex)
+      if (!cache.has(prefix + text) && cache.size < MARKDOWN_CACHE_MAX - 100) parsedMarkdown(text, warmIndex, warmRepo)
     }
     if (warmQueue.size) idle(step)
     else warming = false
@@ -246,20 +256,65 @@ export function warmMarkdown(texts: string[], index: EntityIndex) {
   idle(step)
 }
 
+/** The repo <Markdown> under this component links GitHub references to (see InRepo). */
+export function useRepoScope(): RepoScope {
+  const index = useEntityIndex()
+  return resolveRepoScope(useRepoScopeKey(), index)
+}
+
 /**
- * Rendered markdown, with Box Yard entity mentions linked unless `linkify` is off. Memoized on the
- * text, and the parsed output is cached across mounts. `live` text (a reply still streaming in)
- * changes on every chunk, so it skips the cache.
+ * Says which repo the text under it is about, so "PR #406", "#12" and "head 8269e827" in its <Markdown> and
+ * <LinkedText> link there: a task's (its project's repo), a project's, or `mentions` for text that spans projects
+ * (the Coordinator's replies), where each paragraph links only when the entities it mentions share one repo.
+ */
+export function InRepo({ taskId, projectId, mentions, children }: { taskId?: string | null; projectId?: string | null; mentions?: boolean; children: ReactNode }) {
+  return <RepoContext.Provider value={repoScopeKey({ taskId, projectId, mentions })}>{children}</RepoContext.Provider>
+}
+
+/**
+ * Rendered markdown, with Box Yard entity mentions and GitHub references (to the InRepo's repo) linked unless
+ * `linkify` is off. Memoized on the text, and the parsed output is cached across mounts. `live` text (a reply still
+ * streaming in) changes on every chunk, so it skips the cache.
  */
 export const Markdown = memo(function Markdown({ children, linkify = true, live }: { children: string; linkify?: boolean; live?: boolean }) {
   const index = useEntityIndex()
+  const scope = useRepoScopeKey()
   const parser = linkify ? index : null
+  const repo = linkify ? resolveRepoScope(scope, index) : null
   return (
     <div className="prose-chat wrap-anywhere" {...PREVIEW_GROUP}>
-      {live ? renderMarkdown({ children, remarkPlugins: parserFor(parser).plugins, components: MARKDOWN_COMPONENTS }) : parsedMarkdown(children, parser)}
+      {live ? renderMarkdown({ children, remarkPlugins: parserFor(parser, repo).plugins, components: MARKDOWN_COMPONENTS }) : parsedMarkdown(children, parser, repo)}
     </div>
   )
 })
+
+/** How a link to another site looks outside `.prose-chat` (styles.css): sky and underlined. */
+const EXTERNAL_TEXT_LINK = "text-sky-400 underline decoration-sky-400/40 underline-offset-2 hover:decoration-sky-400"
+
+/**
+ * Plain text (a card's summary, a question, a chip's preview) with its GitHub references linked to the InRepo's
+ * repo, for places that don't render markdown. `inLink`: it sits inside a card that is a link itself (TaskCard), so
+ * each reference is a button that opens GitHub in a new tab (no nested anchors), like WaitReason's.
+ */
+export const LinkedText = memo(function LinkedText({ text, inLink }: { text: string; inLink?: boolean }) {
+  // Most text has no reference: skip the entity index (a card grid has hundreds of these).
+  return mayHaveGithubRef(text) ? <GithubRefText text={text} inLink={inLink} /> : text
+})
+
+function GithubRefText({ text, inLink }: { text: string; inLink?: boolean }) {
+  const repo = useRepoScope()
+  const parts = splitGithubRefs(text, repo === MENTIONS ? null : repo)
+  if (parts.length === 1 && !parts[0]!.url) return text
+  return parts.map((p, i) =>
+    p.url ? (
+      <GithubTextLink key={i} href={p.url} inLink={inLink} className={EXTERNAL_TEXT_LINK}>
+        {p.text}
+      </GithubTextLink>
+    ) : (
+      p.text
+    ),
+  )
+}
 
 const MARKDOWN_COMPONENTS: Components = {
   a: ({ href = "", title, children }) => (
@@ -269,6 +324,33 @@ const MARKDOWN_COMPONENTS: Components = {
     </AppLink>
   ),
   pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
+  img: ({ src, alt, title }) => <ChatImage src={typeof src === "string" ? src : ""} alt={alt} title={title} />,
+}
+
+const OPEN_IMAGE = { preview: (src: string) => openPreview({ url: src }), lightbox: openLightbox }
+
+/**
+ * An image in a chat or a transcript: a click opens it in the lightbox, or in the file preview when Box Yard
+ * hosts it (lib/lightbox.ts). An image inside a link stays the link's.
+ */
+function ChatImage({ src, alt, title }: { src: string; alt?: string; title?: string }) {
+  const opens = imageTarget(src) !== null
+  return (
+    <img
+      src={src}
+      alt={alt ?? ""}
+      title={title}
+      loading="lazy"
+      decoding="async"
+      data-lightbox={opens || undefined}
+      className={opens ? "cursor-zoom-in" : undefined}
+      onClick={(e) => {
+        if (!clickImage(e.nativeEvent, { src, alt }, OPEN_IMAGE)) return
+        // Inside a clickable card (a notice), open the image and not the card.
+        e.stopPropagation()
+      }}
+    />
+  )
 }
 
 const isRawUrl = (text: string, href: string) => text === href || text.replace(/\/$/, "") === href.replace(/\/$/, "")
@@ -443,28 +525,57 @@ const PR_TEXT: Record<PrState, string> = {
   closed: "text-red-400/80!",
 }
 
-const samePr = (a: string, b: string) => a.replace(/\/$/, "") === b.replace(/\/$/, "")
+/** "owner/repo#12" for a GitHub PR or issue URL, lower case: "/issues/12" is the same number as "/pull/12". */
+const prKey = (url: string) => {
+  const ref = githubRef(url)
+  return ref ? `${ref.owner}/${ref.repo}#${ref.number}`.toLowerCase() : null
+}
+const taskWithPr = (tasks: Task[] | undefined, url: string) => {
+  const key = prKey(url)
+  return key ? tasks?.find((t) => t.prUrl && prKey(t.prUrl) === key) : undefined
+}
 function prStateOfUrl(tasks: Task[], url: string): PrState | null {
-  const t = tasks.find((t) => t.prUrl && samePr(t.prUrl, url))
+  const t = taskWithPr(tasks, url)
   return t ? prStateOf(t) : null
 }
 
 /**
- * A GitHub pull request mentioned in text: the PR glyph and, when a task has that PR, GitHub's state colors (merged is
- * purple) like PrChip, then the ↗. Hovering shows the state and the URL.
+ * A GitHub pull request or issue mentioned in text. A PR (or an "#12" that a task's PR has) gets the PR glyph and,
+ * when a task has it, GitHub's state colors (merged is purple) like PrChip, then the ↗; hovering shows the state and
+ * the URL. Any other issue is a plain NewTabLink.
  */
-function PrTextLink({ href, title, className, children }: { href: string; title?: string; className?: string; children: ReactNode }) {
+function GithubTextLink({
+  href,
+  title,
+  className,
+  inLink,
+  children,
+}: {
+  href: string
+  title?: string
+  className?: string
+  /** Inside a card that is a link: a button (NewTabButton), not a nested anchor. */
+  inLink?: boolean
+  children: ReactNode
+}) {
   const qc = useQueryClient()
   const state = usePrStateFor(href)
+  const Link = inLink ? NewTabButton : NewTabLink
+  if (githubRef(href)?.kind !== "pull" && !state)
+    return (
+      <Link href={href} title={title} className={className}>
+        {children}
+      </Link>
+    )
   const Icon = state ? PR_STYLE[state].icon : GitPullRequest
-  const onMouseEnter = (e: MouseEvent<HTMLAnchorElement>) => {
+  const onMouseEnter = (e: MouseEvent<HTMLElement>) => {
     if (title) return
-    const task = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.prUrl && samePr(t.prUrl, href))
+    const task = taskWithPr(qc.getQueryData<Task[]>(keys.tasks), href)
     const tip = task ? prTooltip(task) : null
     if (tip) e.currentTarget.title = tip
   }
   return (
-    <NewTabLink
+    <Link
       href={href}
       title={title}
       data-pr-link={state || "unknown"}
@@ -478,7 +589,34 @@ function PrTextLink({ href, title, className, children }: { href: string; title?
     >
       <Icon aria-hidden className="mr-0.5 inline-block h-[0.95em] w-[0.95em] align-[-0.125em]" />
       {children}
-    </NewTabLink>
+    </Link>
+  )
+}
+
+/**
+ * NewTabLink for inside a link card (TaskCard is an <a>): a button that reads like the link, ↗ and URL tooltip
+ * included, and opens `href` in a new tab without opening the card.
+ */
+function NewTabButton({ href, title, className, children, ...rest }: Omit<ComponentProps<"button">, "onClick"> & { href: string }) {
+  const open = (e: MouseEvent<HTMLButtonElement>) => {
+    if (e.button > 1) return
+    e.preventDefault()
+    e.stopPropagation()
+    window.open(href, "_blank", "noopener,noreferrer")
+  }
+  return (
+    <button
+      {...rest}
+      type="button"
+      title={title && !title.includes(href) ? `${title}\n${href}` : (title ?? href)}
+      data-external=""
+      data-href={href}
+      onClick={open}
+      onAuxClick={open}
+      className={cx("inline cursor-pointer text-left", className)}
+    >
+      {glueMark(children, <ExternalMark />)}
+    </button>
   )
 }
 
@@ -503,11 +641,11 @@ export function AppLink({ href, title, className, children }: { href: string; ti
       </FileLink>
     )
   if (target.kind !== "app") {
-    if (githubRef(target.href)?.kind === "pull")
+    if (githubRef(target.href))
       return (
-        <PrTextLink href={target.href} title={title} className={className}>
+        <GithubTextLink href={target.href} title={title} className={className}>
           {children}
-        </PrTextLink>
+        </GithubTextLink>
       )
     return (
       <NewTabLink href={target.href} title={title} className={className}>

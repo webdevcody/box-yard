@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { openDb } from "../server/db.js"
 import { Store } from "../server/store.js"
-import { forkPoint, sessionLineMeta, summaryContext, threadPrompt } from "../server/sideThreads.js"
+import { forkPoint, replyPrompt, sessionLineMeta, summaryContext, threadPrompt } from "../server/sideThreads.js"
 import type { ChatMessage } from "../shared/types.js"
 import { tmpDir } from "./helpers.js"
 
@@ -114,5 +114,51 @@ describe("side thread context", () => {
     expect(prompt).toMatch(/Sam's question:\nWhy\?$/)
     expect(prompt).not.toContain("started fresh")
     expect(threadPrompt({ quote: "q", question: "Why?", anchorText: "the user message", context: "the summary", ownerName: "Sam" })).toContain("started fresh, from your notes.]\n\nthe summary")
+  })
+})
+
+describe("reply threads", () => {
+  it("count Cody's messages and the answers, mark answers after the last look unread, and resolve", () => {
+    const store = memStore()
+    const a = store.addChat("assistant", "Coordinator reply")
+    const t = store.createSideThread({ projectId: null, anchorId: a.id, quote: a.content, sessionId: "s-1", kind: "reply" })
+    expect(t).toMatchObject({ kind: "reply", replies: 0, unread: false, resolvedAt: null })
+    // An older thread (before the kind column) is an ask.
+    expect(store.createSideThread({ projectId: null, anchorId: a.id, quote: "x", sessionId: "s-2" }).kind).toBe("ask")
+    expect(store.replyThreadOn(null, a.id)!.id).toBe(t.id)
+    expect(store.replyThreadOn(null, "chat_other")).toBeNull()
+
+    const ask = store.addSideThreadMessage(t.id, "user", "Why?")
+    store.seeSideThread(t.id, ask.createdAt)
+    expect(store.getSideThread(t.id)).toMatchObject({ replies: 1, unread: false })
+    store.addSideThreadMessage(t.id, "tool", "get_task")
+    // Tool lines aren't replies, and don't make it unread.
+    expect(store.getSideThread(t.id)).toMatchObject({ replies: 1, unread: false })
+    const answer = store.addSideThreadMessage(t.id, "assistant", "Because.")
+    // Same millisecond as the look: bump the answer so it's after it.
+    if (answer.createdAt <= ask.createdAt) store.db.prepare("UPDATE side_thread_messages SET created_at = ? WHERE id = ?").run(ask.createdAt + 1, answer.id)
+    expect(store.getSideThread(t.id)).toMatchObject({ replies: 2, unread: true })
+    store.seeSideThread(t.id, ask.createdAt + 5)
+    expect(store.getSideThread(t.id)!.unread).toBe(false)
+    // Seeing never goes back in time.
+    store.seeSideThread(t.id, 0)
+    expect(store.getSideThread(t.id)!.unread).toBe(false)
+    expect(store.listSideThreads(null).find((x) => x.id === t.id)).toMatchObject({ replies: 2 })
+
+    store.resolveSideThread(t.id, true)
+    expect(store.getSideThread(t.id)!.resolvedAt).toEqual(expect.any(Number))
+    store.resolveSideThread(t.id, false)
+    expect(store.getSideThread(t.id)!.resolvedAt).toBeNull()
+  })
+
+  it("prompt with the whole original message, quoted, and the reply", () => {
+    const p = replyPrompt({ original: "Line one\nLine two", reply: "And then?", context: null, ownerName: "Sam" })
+    expect(p).toMatch(/^\[Box Yard side thread\] Sam replied/)
+    expect(p).toContain("The message Sam is replying to:\n> Line one\n> Line two")
+    expect(p).toContain("read-only")
+    expect(p.endsWith("Sam's reply:\nAnd then?")).toBe(true)
+    // The original and the reply are Sam's content: never renamed.
+    expect(replyPrompt({ original: "Cody said hi", reply: "Cody?", context: null, ownerName: "Sam" })).toContain("> Cody said hi")
+    expect(replyPrompt({ original: "x", reply: "y", context: "the summary", ownerName: "Sam" })).toContain("started fresh, from your notes.]\n\nthe summary")
   })
 })

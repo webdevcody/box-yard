@@ -1,11 +1,13 @@
-// The small toolbar on a chat message's top-right edge (as on claude.ai): respond, copy and a ··· menu. Respond opens
+// The small toolbar on a chat message's top-right edge (as on claude.ai): reply, ask, respond, copy and a ··· menu.
+// Reply (on the Coordinator's and Captains' replies) opens the message's reply thread (SideThread.tsx). Respond opens
 // the same New task popover a text selection does (SelectionToTask), with the whole message as the quote. With a mouse
 // it shows on hover and keyboard focus; on touch a tap on the message shows it and a tap anywhere else hides it. It's
 // absolutely placed inside the message (no overlay, no portal), so it never moves the layout or catches other taps.
 import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject, type SyntheticEvent } from "react"
 import { createPortal } from "react-dom"
-import { Check, Copy, MessageCircleQuestion, MessageSquarePlus, MoreHorizontal, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
+import { Check, Copy, MessageCircleQuestion, MessageSquarePlus, MoreHorizontal, Reply, SlidersHorizontal, TextQuote, type LucideIcon } from "lucide-react"
 import { useAskAbout, useQuoteToTask } from "./SelectionToTask"
+import { useReplyTo } from "./SideThread"
 import { toast } from "../lib/toast"
 import { onSuspend } from "../lib/resume"
 import { cx } from "./ui"
@@ -22,11 +24,16 @@ const BUTTON =
 /** Keeps the toolbar's clicks and keys from the row under it (a notice card opens its task, a notice row folds). */
 const stop = (e: SyntheticEvent) => e.stopPropagation()
 
-/** `anchorId`: the chat message's id, so Ask can start a side thread on it (in a chat that has them). */
-export const MessageActions = memo(function MessageActions({ text, anchorId, className }: { text: string; anchorId?: string; className?: string }) {
+/**
+ * `anchorId`: the chat message's id, so Ask can start a side thread on it (in a chat that has them). `reply`: it's
+ * the agent's reply, so it gets Reply too (a reply thread under it).
+ */
+export const MessageActions = memo(function MessageActions({ text, anchorId, reply, className }: { text: string; anchorId?: string; reply?: boolean; className?: string }) {
   const quote = useQuoteToTask()
   const askAbout = useAskAbout()
+  const replyTo = useReplyTo()
   const ask = anchorId ? askAbout : null
+  const replyHere = anchorId && reply ? replyTo : null
   const askButton = useRef<HTMLButtonElement>(null)
   const [asking, setAsking] = useState(false)
   const respond = useRef<HTMLButtonElement>(null)
@@ -103,6 +110,22 @@ export const MessageActions = memo(function MessageActions({ text, anchorId, cla
         className,
       )}
     >
+      {replyHere && (
+        <button
+          type="button"
+          data-testid="message-reply"
+          aria-label="Reply in a thread"
+          title="Reply in a thread: it stays out of the main chat"
+          onClick={() => {
+            setMenu(false)
+            setTapped(false)
+            replyHere(anchorId!, text)
+          }}
+          className={BUTTON}
+        >
+          <Reply className="h-3.5 w-3.5" />
+        </button>
+      )}
       {ask && (
         <button
           ref={askButton}
@@ -171,14 +194,14 @@ export const MessageActions = memo(function MessageActions({ text, anchorId, cla
   )
 })
 
-interface MenuItem {
+export interface MenuItem {
   icon: LucideIcon
   label: string
   run: () => void
 }
 
 /** The ··· menu: in a portal (a transcript's scroller would clip it), under the button or above it when there's no room. */
-function MessageMenu({ trigger, items, onClose }: { trigger: RefObject<HTMLButtonElement | null>; items: MenuItem[]; onClose: () => void }) {
+export function MessageMenu({ trigger, items, onClose }: { trigger: RefObject<HTMLButtonElement | null>; items: MenuItem[]; onClose: () => void }) {
   const panel = useRef<HTMLDivElement>(null)
   const [style, setStyle] = useState<CSSProperties>({ visibility: "hidden" })
   const closeRef = useRef(onClose)

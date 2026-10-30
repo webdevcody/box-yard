@@ -3,7 +3,7 @@
 import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
-import { AppLink, LineIcon, Markdown, cx } from "./ui"
+import { AppLink, InRepo, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { routes, toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type NoticeKind } from "../lib/captainTranscript"
@@ -104,7 +104,9 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
           {v.message && (
             <div>
               <div className="mb-0.5 text-[11px] font-semibold tracking-wide text-sky-400/90 uppercase">Sent to the Captain</div>
-              <CollapsibleMarkdown className="text-sm text-zinc-300">{v.message}</CollapsibleMarkdown>
+              <InRepo projectId={v.project?.id}>
+                <CollapsibleMarkdown className="text-sm text-zinc-300">{v.message}</CollapsibleMarkdown>
+              </InRepo>
             </div>
           )}
           {v.waits && (
@@ -113,7 +115,9 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
                 Captain replied{v.finished === false ? " (still working)" : ""}
               </div>
               {v.reply ? (
-                <CollapsibleMarkdown className="text-sm text-zinc-300">{v.reply}</CollapsibleMarkdown>
+                <InRepo projectId={v.project?.id}>
+                  <CollapsibleMarkdown className="text-sm text-zinc-300">{v.reply}</CollapsibleMarkdown>
+                </InRepo>
               ) : (
                 <div className="text-zinc-500">{pending ? "Waiting for the Captain…" : "No reply yet. The Captain reports back when it's done."}</div>
               )}
@@ -351,13 +355,15 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
   const accent = NOTICE_ACCENT[n.kind]
   return (
     <div id={`chat-${m.id}`} data-testid="notice-card" data-attention={accent ? n.kind : undefined} className={MESSAGE_BLOCK}>
-      {taskId ? (
-        <NoticeCard taskId={taskId} className={accent}>
-          {body}
-        </NoticeCard>
-      ) : (
-        <div className={cx(NOTICE_CLASS, accent)}>{body}</div>
-      )}
+      <InRepo taskId={taskId} projectId={projectId}>
+        {taskId ? (
+          <NoticeCard taskId={taskId} className={accent}>
+            {body}
+          </NoticeCard>
+        ) : (
+          <div className={cx(NOTICE_CLASS, accent)}>{body}</div>
+        )}
+      </InRepo>
       <MessageActions text={m.content} anchorId={m.id} />
     </div>
   )
@@ -451,7 +457,7 @@ function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: 
       <Markdown>{m.content}</Markdown>
       {sources && <ReplySources sources={sources} />}
       <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
-      <MessageActions text={m.content} anchorId={m.id} />
+      <MessageActions text={m.content} anchorId={m.id} reply />
     </div>
   )
 }

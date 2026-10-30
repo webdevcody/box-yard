@@ -46,6 +46,7 @@ import type {
   ScheduleRunStatus,
   ScheduleTarget,
   SideThread,
+  SideThreadKind,
   SideThreadMessage,
   SideThreadRole,
   Task,
@@ -68,11 +69,22 @@ interface SideThreadRow {
   id: string
   project_id: string | null
   anchor_id: string
+  kind: string
   quote: string
   created_at: number
   updated_at: number
   context: string | null
+  resolved_at: number | null
+  seen_at: number | null
+  replies: number
+  last_answer_at: number | null
 }
+
+/** A thread row with its reply count and newest answer, for sideThreadFrom. */
+const SIDE_THREAD_SELECT = `SELECT t.*,
+  (SELECT COUNT(*) FROM side_thread_messages m WHERE m.thread_id = t.id AND m.role IN ('user', 'assistant')) AS replies,
+  (SELECT MAX(m.created_at) FROM side_thread_messages m WHERE m.thread_id = t.id AND m.role IN ('assistant', 'error')) AS last_answer_at
+  FROM side_threads t`
 
 /** busy is the runner's to say (SideThreads.decorate); a row alone is never busy. */
 function sideThreadFrom(r: SideThreadRow): SideThread {
@@ -80,9 +92,13 @@ function sideThreadFrom(r: SideThreadRow): SideThread {
     id: r.id,
     projectId: r.project_id,
     anchorId: r.anchor_id,
+    kind: r.kind === "reply" ? "reply" : "ask",
     quote: r.quote,
     context: r.context === "fork" || r.context === "summary" ? r.context : null,
     busy: false,
+    replies: r.replies ?? 0,
+    unread: r.last_answer_at !== null && r.last_answer_at > (r.seen_at ?? 0),
+    resolvedAt: r.resolved_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
@@ -2159,18 +2175,38 @@ export class Store {
     return rows.map((r) => ({ id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
   }
 
-  createSideThread(input: { id?: string; projectId: string | null; anchorId: string; quote: string; sessionId: string }): SideThread {
+  createSideThread(input: { id?: string; projectId: string | null; anchorId: string; quote: string; sessionId: string; kind?: SideThreadKind }): SideThread {
     const now = Date.now()
     const id = input.id ?? newId("thr")
     this.db
-      .prepare("INSERT INTO side_threads (id, project_id, anchor_id, quote, session_id, started, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)")
-      .run(id, input.projectId, input.anchorId, input.quote, input.sessionId, now, now)
+      .prepare("INSERT INTO side_threads (id, project_id, anchor_id, kind, quote, session_id, started, context, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)")
+      .run(id, input.projectId, input.anchorId, input.kind ?? "ask", input.quote, input.sessionId, now, now, now)
     return this.getSideThread(id)!
   }
 
   getSideThread(id: string): SideThread | null {
-    const r = this.db.prepare("SELECT * FROM side_threads WHERE id = ?").get(id) as SideThreadRow | undefined
+    const r = this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.id = ?`).get(id) as SideThreadRow | undefined
     return r ? sideThreadFrom(r) : null
+  }
+
+  /** The reply thread on a chat message, if it has one. */
+  replyThreadOn(projectId: string | null, anchorId: string): SideThread | null {
+    const r = (
+      projectId
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId)
+    ) as SideThreadRow | undefined
+    return r ? sideThreadFrom(r) : null
+  }
+
+  /** Resolve a thread (folded away under its message), or reopen it. */
+  resolveSideThread(id: string, resolved: boolean) {
+    this.db.prepare("UPDATE side_threads SET resolved_at = ? WHERE id = ?").run(resolved ? Date.now() : null, id)
+  }
+
+  /** Cody has seen the thread up to now: its answers so far aren't unread. */
+  seeSideThread(id: string, at = Date.now()) {
+    this.db.prepare("UPDATE side_threads SET seen_at = MAX(COALESCE(seen_at, 0), ?) WHERE id = ?").run(at, id)
   }
 
   /** The thread's Claude session, and whether a run has created it yet. */
@@ -2183,8 +2219,8 @@ export class Store {
   listSideThreads(projectId: string | null): SideThread[] {
     const rows = (
       projectId
-        ? this.db.prepare("SELECT * FROM side_threads WHERE project_id = ? ORDER BY created_at ASC, rowid ASC").all(projectId)
-        : this.db.prepare("SELECT * FROM side_threads WHERE project_id IS NULL ORDER BY created_at ASC, rowid ASC").all()
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.project_id = ? ORDER BY t.created_at ASC, t.rowid ASC`).all(projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.project_id IS NULL ORDER BY t.created_at ASC, t.rowid ASC`).all()
     ) as SideThreadRow[]
     return rows.map(sideThreadFrom)
   }
