@@ -8,6 +8,7 @@ import { keys } from "../web/src/lib/queries.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { ZEN_PATH } from "../web/src/lib/zen.js"
 import { closeZenPanel, zenPanelState } from "../web/src/lib/zenPanel.js"
+import { projectColors } from "../shared/projectColors.js"
 import type { Project } from "../shared/types"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -113,6 +114,17 @@ describe("the chat switcher in the Coordinator's header", () => {
     expect(labels()).toEqual(["Coordinator", "box-yard", "survive-the-night", "alpha"])
     expect(checked()).toEqual(["Coordinator"])
     expect(menu()!.querySelector("[role=group]")!.getAttribute("aria-label")).toBe("Captains")
+  })
+
+  it("marks each project with its colour, as its sidebar row does", () => {
+    render()
+    click(switcher(chatPanel()))
+    const colors = projectColors(PROJECTS)
+    for (const p of PROJECTS) {
+      const mark = items().find((el) => el.dataset.chat === p.id)!.querySelector("svg")!
+      expect(mark.getAttribute("data-color")).toBe(colors.get(p.id))
+      expect(mark.getAttribute("style")).toContain("--pc")
+    }
   })
 
   it("shows each chat's busy dot from what's cached, and none for a Captain it hasn't heard about", () => {

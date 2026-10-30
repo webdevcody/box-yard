@@ -14,6 +14,8 @@ import { focusComposer, openCoordinator } from "../lib/chatSwitch"
 import { closeZenPanel, zenPanelState } from "../lib/zenPanel"
 import { menuItemBase, usePopover } from "./TaskHeader"
 import { usePlacement } from "./TurnTimingChip"
+import { projectColorStyle } from "./TaskIcon"
+import { projectColors, type ProjectColor } from "../../../shared/projectColors"
 import { cx } from "./ui"
 import type { CaptainState, Project } from "../../../shared/types"
 
@@ -59,6 +61,7 @@ interface Item {
   chat: string
   label: string
   project: Project | null
+  color: ProjectColor | null
   busy: boolean | null
 }
 
@@ -90,13 +93,15 @@ function SwitcherMenu({
       staleTime: Infinity,
     })),
   })
+  // Each project's colour, as its sidebar row and its tasks' tiles show it.
+  const colors = useMemo(() => projectColors(projects ?? []), [projects])
   const items: Item[] = useMemo(
     () => [
       // Always first, from every header.
-      { chat: COORDINATOR_CHAT, label: "Coordinator", project: null, busy: coordinatorBusy ?? null },
-      ...(projects ?? []).map((p, i) => ({ chat: p.id, label: p.name, project: p, busy: captains[i]?.data?.busy ?? null })),
+      { chat: COORDINATOR_CHAT, label: "Coordinator", project: null, color: null, busy: coordinatorBusy ?? null },
+      ...(projects ?? []).map((p, i) => ({ chat: p.id, label: p.name, project: p, color: colors.get(p.id) ?? null, busy: captains[i]?.data?.busy ?? null })),
     ],
-    [projects, captains, coordinatorBusy],
+    [projects, colors, captains, coordinatorBusy],
   )
   const style = usePlacement(trigger, panel, true, items.length, MENU_WIDTH)
 
@@ -179,7 +184,7 @@ function SwitcherItem({ item, current, onPick }: { item: Item; current: boolean;
       onClick={() => onPick(item.chat)}
       className={cx(menuItemBase, "text-zinc-300 hover:bg-zinc-800 hover:text-zinc-50 focus:bg-zinc-800 focus:text-zinc-50 focus:outline-none", current && "text-zinc-50")}
     >
-      {item.project ? <ProjectMark project={item.project} /> : <Bot className="h-4 w-4 shrink-0 text-yard-400" aria-hidden />}
+      {item.project ? <ProjectMark project={item.project} color={item.color} /> : <Bot className="h-4 w-4 shrink-0 text-yard-400" aria-hidden />}
       <span className="min-w-0 flex-1 truncate">{item.label}</span>
       {item.busy !== null && (
         <span
@@ -196,11 +201,8 @@ function SwitcherItem({ item, current, onPick }: { item: Item; current: boolean;
   )
 }
 
-/**
- * The project's mark, the sidebar row's folder. Once projects have colours (Coordinator cards, PR #187) it takes the
- * project's, as the sidebar does: `style={projectColorStyle(colors.get(project.id))}` and `text-(--pc)`.
- */
-function ProjectMark({ project }: { project: Project }) {
+/** The project's mark: the sidebar row's folder, in the project's colour. */
+function ProjectMark({ project, color }: { project: Project; color: ProjectColor | null }) {
   const Icon = project.repo ? FolderGit2 : FolderOpen
-  return <Icon className="h-4 w-4 shrink-0 text-zinc-500" aria-hidden />
+  return <Icon style={projectColorStyle(color)} data-color={color ?? undefined} className="h-4 w-4 shrink-0 text-(--pc)" aria-hidden />
 }
