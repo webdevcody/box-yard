@@ -54,6 +54,8 @@ const CLOUD_LIMIT_UPGRADE_KEY = "settings_upgrade_cloud_limit"
 export const DEFAULT_SETTINGS: Settings = {
   ownerName: DEFAULT_OWNER_NAME,
   startInZen: true,
+  // Off: not every install uses boxes. The Boxes page always shows the same reading.
+  showCloudMeter: false,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorEffort: DEFAULT_EFFORT,
   // A fixed token count, not a share of the window: 80% of a 1M window let every Coordinator and Captain turn
@@ -178,6 +180,7 @@ export const settingsPatch = z
   .object({
     ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
     startInZen: z.boolean(),
+    showCloudMeter: z.boolean(),
     orchestratorModel: model,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
