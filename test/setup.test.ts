@@ -79,6 +79,7 @@ describe("GET /api/setup", () => {
       codexApiKey: { state: "unset", source: null },
       githubToken: { state: "unset", source: null },
       runpodApiKey: { state: "unset", source: null },
+      vastApiKey: { state: "unset", source: null },
     })
     expect(body.boxes).toEqual({ provider: "local", required: true })
     expect(body.claude).toEqual({ required: true, state: "unset", using: null })
@@ -272,6 +273,22 @@ describe("POST /api/setup/test/:key", () => {
     expect(await test(json, "githubToken", GH)).toMatchObject({ ok: true, message: "Works: signed in to GitHub as @cody." })
     expect((await test(json, "githubToken", ENV_GH)).message).toBe("Works: signed in to GitHub as @cody. Classic token scopes: read:user, gist (agents need repo).")
     expect(await test(json, "githubToken", "ghp_wrongwrongwrongwrongwrong")).toMatchObject({ ok: false, message: "GitHub rejected the token (HTTP 401): Bad credentials" })
+  })
+
+  it("Vast.ai: GET /users/current/ with the key as a bearer token, naming the credit", async () => {
+    const VAST = "vk_secret_vast_key_0123456789abcdef"
+    const calls: string[] = []
+    const fetch = (async (url: string, init?: RequestInit) => {
+      calls.push(String(url))
+      if (new Headers(init?.headers).get("authorization") === `Bearer ${VAST}`) return new Response('{"id":1,"credit":12.5}', { status: 200 })
+      return new Response('{"success":false,"error":"invalid_api_key","msg":"Invalid API key"}', { status: 401, statusText: "Unauthorized" })
+    }) as typeof globalThis.fetch
+    const { json } = await boot(firstRun({ port: await freePort() }), { setup: { fetch } })
+    expect(await test(json, "vastApiKey", VAST)).toMatchObject({ ok: true, message: "Works: Vast.ai accepted the key ($12.50 credit)." })
+    const bad = await test(json, "vastApiKey", "vk_wrong_wrong_wrong_wrong_wrong")
+    expect(bad.ok).toBe(false)
+    expect(bad.message).toMatch(/^Vast\.ai rejected the key \(HTTP 401\)/)
+    expect(calls).toEqual(["https://console.vast.ai/api/v0/users/current/", "https://console.vast.ai/api/v0/users/current/"])
   })
 
   it("Claude subscription token: one tiny `claude` call logged in with only that token", async () => {

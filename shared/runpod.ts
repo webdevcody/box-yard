@@ -1,21 +1,23 @@
 // RunPod GPU pods as a runner ("Runs on: RunPod GPU", shared/runner.ts). A GPU project gets up to its Max boxes
 // pods at a time, within the $/hr caps; pod #1 mounts the project's network volume. Pods come and go, the volume
 // stays (docs/runpod.md).
+import { GPU_BOX_PREFIXES, GPU_PROVIDER_LABEL, anyGpuBoxIndex, anyGpuBoxProject, gpuBoxIdOn, gpuBoxProvider, isAnyGpuBox } from "./gpu.js"
 
 /**
  * A GPU project's virtual boxes, one per pod: `runpod-<projectId>` is pod #1 (the only one before projects could
  * have several), `runpod-<projectId>-<n>` pod #n. They're never `boxes` rows (like the local runner's box).
- * Project ids never end in `-<digits>` (`newId` makes `prj_<hex>`), so the suffix is unambiguous.
+ * Vast.ai's are `vastai-<projectId>[-<n>]` (shared/gpu.ts): the helpers below read both, `gpuBoxId` makes RunPod's.
  */
-export const GPU_BOX_PREFIX = "runpod-"
-const POD_SUFFIX = /-(\d+)$/
-export const gpuBoxId = (projectId: string, n = 1) => `${GPU_BOX_PREFIX}${projectId}${n > 1 ? `-${n}` : ""}`
-export const isGpuBox = (id: string | null | undefined): id is string => Boolean(id?.startsWith(GPU_BOX_PREFIX))
-export const gpuBoxProject = (id: string) => id.slice(GPU_BOX_PREFIX.length).replace(POD_SUFFIX, "")
+export const GPU_BOX_PREFIX = GPU_BOX_PREFIXES.runpod
+export const gpuBoxId = (projectId: string, n = 1) => gpuBoxIdOn("runpod", projectId, n)
+/** Any GPU cloud's box: RunPod's `runpod-…` or Vast.ai's `vastai-…`. */
+export const isGpuBox = isAnyGpuBox
+export const gpuBoxProject = anyGpuBoxProject
 /** Which of its project's pods a GPU box is: 1 for `runpod-<projectId>`. */
-export const gpuBoxIndex = (id: string) => Number(POD_SUFFIX.exec(id.slice(GPU_BOX_PREFIX.length))?.[1] ?? 1)
-/** "GPU pod #2 · survive-the-night". */
-export const gpuPodLabel = (id: string, projectName: string | null) => `GPU pod #${gpuBoxIndex(id)} · ${projectName ?? gpuBoxProject(id)}`
+export const gpuBoxIndex = anyGpuBoxIndex
+/** "GPU pod #2 · survive-the-night" on RunPod, "Vast.ai GPU #2 · survive-the-night" on Vast.ai. */
+export const gpuPodLabel = (id: string, projectName: string | null) =>
+  `${gpuBoxProvider(id) === "vast" ? `${GPU_PROVIDER_LABEL.vast} GPU` : "GPU pod"} #${gpuBoxIndex(id)} · ${projectName ?? gpuBoxProject(id)}`
 /** The most pods one project may have: its Max boxes when lower, and the bound when it sets none (the $/hr caps apply too). */
 export const MAX_GPU_PODS = 20
 

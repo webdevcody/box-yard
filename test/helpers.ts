@@ -40,6 +40,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     codexAuthJson: "",
     codexApiKey: "",
     githubToken: "",
+    vastApiKey: "",
     elevenlabsApiKey: "",
     openaiApiKey: "",
     ttsProvider: "",

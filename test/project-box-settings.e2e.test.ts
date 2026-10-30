@@ -181,7 +181,7 @@ describe("project box settings: API", () => {
     const captain = await mcpAs(r, { kind: "captain", projectId: a.id })
     const tools = (await captain.client.listTools()).tools
     const schema = tools.find((t) => t.name === "update_project")!.inputSchema.properties!
-    expect(Object.keys(schema).sort()).toEqual(["agents_per_box", "box_size", "gpu_cloud", "gpu_max_hourly_usd", "gpu_min_ram_gb", "gpu_min_vcpus", "gpu_types", "max_boxes", "project", "tasks_per_box", "whole_machine"])
+    expect(Object.keys(schema).sort()).toEqual(["agents_per_box", "box_size", "gpu_cloud", "gpu_max_hourly_usd", "gpu_min_ram_gb", "gpu_min_vcpus", "gpu_provider", "gpu_types", "max_boxes", "project", "tasks_per_box", "whole_machine"])
     // whole_machine is a box setting it sets too, and list_projects says so.
     expect((await captain.tool("update_project", { whole_machine: true })).isError).not.toBe(true)
     expect(r.yard.store.getProject(a.id)!.wholeMachine).toBe(true)

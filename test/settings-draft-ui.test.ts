@@ -241,6 +241,25 @@ describe("Settings drafts", () => {
     expect(saveButton().disabled).toBe(true)
   })
 
+  it("the Coordinator's task card settings (Idle after, Done when its PR merges) wait for Save", async () => {
+    section = "orchestrator"
+    render()
+    const hours = document.querySelector<HTMLInputElement>("[data-testid=cards-idle-hours]")!
+    const auto = document.querySelector<HTMLInputElement>("[data-testid=auto-done-on-merge]")!
+    expect(hours.value).toBe("3")
+    expect(auto.checked).toBe(true)
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!
+    act(() => {
+      set.call(hours, "8")
+      hours.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    await click(auto)
+    expect(writes()).toEqual([])
+    expect(unsaved()).toBe("2 unsaved changes")
+    await click(saveButton())
+    expect(writes()).toMatchObject([{ method: "PUT", url: "/api/agent-settings", body: { cardsIdleHours: 8, autoDoneOnMerge: false } }])
+  })
+
   it("hook switches in Settings wait for Save", async () => {
     section = "hooks"
     render()

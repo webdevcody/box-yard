@@ -42,7 +42,7 @@ import { formatTokens } from "./usage.js"
 import { errorMessage, failedStep, isRateLimited } from "./util/retry.js"
 import { isUploadTooBig, putFile, uploadSize } from "./upload.js"
 import { capReply, preview } from "./replies.js"
-import { PrTracker, prNumber, type PrChange } from "./prs.js"
+import { AUTO_DONE_FROM, PrTracker, prNumber, restingStatus, type PrChange } from "./prs.js"
 import { prMark, quietAgentWake, taskTrigger, turnTrigger } from "./turnTrigger.js"
 import { isCopiedDefaultRoute, loadRouting, resolveAgentRoute } from "./routing.js"
 import { NEXT_STEPS_META_KEY, parseNextSteps } from "../shared/nextSteps.js"
@@ -57,7 +57,8 @@ import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../s
 import type { TaskIconName } from "../shared/taskIcons.js"
 import { parsePriority, queueOrder, type QueueEntry, type TaskPriority } from "../shared/priority.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
-import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
+import { POD_HTTP_PORTS, shortGpu } from "./providers/runpod.js"
+import { GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, gpuBoxIdOn, gpuBoxProvider, type GpuProvider } from "../shared/gpu.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import type { DockerContainerState } from "./providers/docker.js"
 import { SleepWatch, sleepLength } from "./sleep.js"
@@ -169,9 +170,9 @@ const FANOUT_ALLOWED_KEY = "box_fanout_allowed_until"
 const FANOUT_WINDOW_MS = 60 * 60_000
 /** The fan-out question is posted at most this often while boxes wait on it. */
 const FANOUT_NOTICE_MS = 30 * 60_000
-const GPU_SLOT_WAIT = "Waiting for a free slot on its project's GPU pod (its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)"
+const gpuSlotWait = (kind: GpuProvider) => `Waiting for a free slot on its project's GPU pod (its Tasks running at once, or ${GPU_SETTINGS_PATH[kind]} › Tasks running at once per pod)`
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
-const GPU_CAP_HOW = "raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; Settings › RunPod GPU › Max per project is the default"
+const gpuCapHow = (kind: GpuProvider) => `raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; ${GPU_SETTINGS_PATH[kind]} › Max per project is the default`
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
 const DOCKER_SLOT_WAIT = "Waiting for a free slot in its project's Docker container (its Tasks running at once, or Settings › Docker › Tasks running at once per container)"
@@ -235,8 +236,10 @@ export interface TaskManagerDeps {
   uploads: Uploads
   /** Tests: a fake GitHub for the PR tracker, and the token it gets (even in mock mode). */
   github?: { fetch?: typeof fetch; token?: (projectId: string) => string | null }
-  /** RunPod GPU pods (Runs on: RunPod GPU), when this install has the runner. */
+  /** RunPod GPU pods (Runs on: GPU), when this install has the runner. */
   gpu?: GpuRunner | null
+  /** Vast.ai GPU instances (Runs on: GPU, for projects on Vast.ai), when this install has the runner. */
+  vast?: GpuRunner | null
   /** Docker containers on this computer (Runs on: Docker container), when this install has the runner. */
   docker?: DockerRunner | null
   identities: Identities
@@ -260,15 +263,45 @@ export interface DockerRunner {
   problem(): Promise<string | null>
 }
 
-/** What TaskManager needs of the RunPod GPU runner (server/runpod/service.ts). */
-/** What TaskManager uses of the GPU pods' provider: RunPodProvider, or a stand-in in tests. */
-export type GpuPodProvider = BoxProvider & Pick<RunPodProvider, "listPods" | "cached" | "nextPodPrice" | "capOf">
-type GpuPods = Awaited<ReturnType<GpuPodProvider["listPods"]>>
+/** A GPU cloud's pod as TaskManager reads it, in RunPod's words (Vast.ai's instances are mapped to them). */
+export interface GpuPod {
+  id: string
+  status: string
+  /** $/hr. */
+  cost?: number
+  gpu?: { id?: string } | null
+  dataCenterId?: string | null
+  startedAt?: string | null
+}
 
+/** What TaskManager uses of a GPU cloud's provider: RunPodProvider, VastProvider, or a stand-in in tests. */
+export type GpuPodProvider = BoxProvider & {
+  /** This install's pods, cached for a few seconds unless `fresh`. */
+  listPods(fresh?: boolean): Promise<{ boxId: string; pod: GpuPod }[]>
+  /** The pod as last listed (no API call). */
+  cached(boxId: string): GpuPod | null
+  /** The cheapest GPU a new pod of the project would get under its cap, or null when none fits. */
+  nextPodPrice(projectId: string): Promise<{ gpu: string; usd: number } | null>
+  /** The project's $/hr cap on its pods together (0: none of its own). */
+  capOf(projectId: string): number
+}
+type GpuPods = { boxId: string; pod: GpuPod }[]
+
+/** What TaskManager reads of a GPU cloud's settings (Settings › RunPod GPU, Settings › Vast.ai GPU). */
+export type GpuRunnerSettings = Pick<RunPodSettings, "agentsPerPod" | "idleMinutes" | "maxHourlyUsd" | "totalMaxHourlyUsd" | "gpuTypes" | "minRamGb" | "minVcpus"> & {
+  /** RunPod only: Secure or Community Cloud. */
+  cloud?: RunPodSettings["cloud"]
+  /** Vast.ai only: GPU projects without a cloud of their own run there. */
+  defaultForGpu?: boolean
+}
+
+/** What TaskManager needs of a GPU runner: RunPod's (server/runpod/service.ts) or Vast.ai's (server/vast/service.ts). */
 export interface GpuRunner {
+  /** Which cloud; unset is RunPod (test stand-ins). */
+  kind?: GpuProvider
   provider: GpuPodProvider
-  settings(): RunPodSettings
-  /** A RunPod API key is set. */
+  settings(): GpuRunnerSettings
+  /** Its API key is set. */
   enabled(): boolean
   /** The owner asked to keep this box's pod up until then, even idle (ms since epoch), or null. */
   keepWarmUntil(boxId: string): number | null
@@ -579,18 +612,20 @@ export class TaskManager {
    * Why a task can't be pinned to a runner right now (Setup.runnerProblem), or null when it can. Unset: always can.
    * `key` says whether the task's turns would have a key for `cli` (turnCredentials, codexCredentials); undefined: the global one.
    */
-  runnerProblem: ((runner: Runner, key?: boolean, cli?: AgentCli) => Promise<string | null>) | null = null
+  runnerProblem: ((runner: Runner, key?: boolean, cli?: AgentCli, gpuCloud?: GpuProvider) => Promise<string | null>) | null = null
   /** Agents waiting mid-turn for their Captain's reply, by task. */
   private captainWaits = new Map<string, CaptainWait[]>()
   /** RunPod GPU pods, or null when this install has no GPU runner. */
   private readonly gpu: GpuRunner | null
+  /** Vast.ai GPU instances, or null when this install doesn't have that runner. */
+  private readonly vast: GpuRunner | null
   /** When each GPU pod's heartbeat was last touched by the idle sweep, and when the sweep last ran. */
   private gpuTouchedAt = new Map<string, number>()
   /** Pods stopGpuPod is terminating, with the provider's own line about it once it came (one history row, not two). */
   private gpuTerminating = new Map<string, string | null>()
   private lastGpuSweepAt = 0
-  /** The pods as placement or the sweep last listed them, for list_projects (which doesn't call RunPod). */
-  private gpuSeen: GpuPods = []
+  /** Each cloud's pods as placement or the sweep last listed them, for list_projects (which doesn't call the clouds). */
+  private gpuSeenBy = new Map<GpuProvider, GpuPods>()
   /** Tasks whose Captain heard why they wait for a GPU pod (a $/hr cap), by the kind of wait: a notice once. */
   private gpuWaitNoticed = new Map<string, string>()
   /** Docker containers on this computer, or null when this install has no Docker runner. */
@@ -605,6 +640,7 @@ export class TaskManager {
 
   constructor(deps: TaskManagerDeps) {
     this.gpu = deps.gpu ?? null
+    this.vast = deps.vast ?? null
     this.docker = deps.docker ?? null
     this.identities = deps.identities
     this.c = deps.config
@@ -622,6 +658,7 @@ export class TaskManager {
       token: deps.github?.token ?? ((projectId) => (this.c.mock ? null : this.githubToken(projectId) || null)),
       fetch: deps.github?.fetch,
       onChange: (change) => this.prChanged(change),
+      autoDone: () => this.settings.get().autoDoneOnMerge,
       log: (msg) => console.warn(msg),
     })
     fs.mkdirSync(path.join(this.c.dataDir, "archives"), { recursive: true })
@@ -678,6 +715,7 @@ export class TaskManager {
     }
     this.timers.push(setInterval(() => void this.poll(), this.c.pollMs))
     this.timers.push(setInterval(() => void this.maintain(), 20_000))
+    this.doneMergedResting()
     this.publishDirectory()
     void this.cleanupOrphanBoxes()
     this.prs.start()
@@ -822,7 +860,7 @@ export class TaskManager {
     // The CLI the task runs on decides which key counts: a Codex task needs a Codex login, not a Claude one.
     const cli = project ? this.agentCliFor(agent ?? {}, project) : (agent?.agentCli ?? this.settings.get().agentCli)
     const key = !project ? undefined : cli === "codex" ? this.codexCredentials(project.id, taskEnv).kind !== null : this.turnCredentials(project.id, taskEnv).claudeFrom !== null
-    const problem = await this.runnerProblem(runner, key, cli)
+    const problem = await this.runnerProblem(runner, key, cli, project && runner === "gpu" ? this.gpuCloudOf(project.id) : undefined)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
   }
 
@@ -1241,6 +1279,28 @@ export class TaskManager {
   }
 
   /**
+   * Settings' autoDoneOnMerge: resting tasks (pr_ready or idle, no turn running) whose PR already merged move to done,
+   * as the PR tracker does for a merge it sees. Catches merges seen while the setting was off; runs at start and on
+   * every settings save. Returns how many moved.
+   */
+  doneMergedResting(): number {
+    if (!this.settings.get().autoDoneOnMerge) return 0
+    let moved = 0
+    for (const t of this.store.listTasks({ status: [...AUTO_DONE_FROM] })) {
+      if (t.prState !== "merged") continue
+      const row = this.store.getTaskRow(t.id)
+      if (!row || restingStatus(row, "merged", true) !== "done") continue
+      // Not new activity: an old task stays where "recent" lists had it.
+      this.store.updateTask(row.id, { status: "done" }, { quiet: true, touch: false })
+      this.addEvent(row.id, `Moved to done: its pull request #${prNumber(row.pr_url) ?? "?"} is merged (Settings › Done when its PR merges).`)
+      this.emitTask(row.id)
+      moved++
+    }
+    if (moved) this.publishDirectory()
+    return moved
+  }
+
+  /**
    * Compact a task's Claude session. Runs as its own turn (`/compact` on the
    * resumed session), right away if the task is idle, or right after the
    * current turn if it is busy. Queued messages wait until it is done.
@@ -1326,6 +1386,31 @@ export class TaskManager {
     return { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes }
   }
 
+  /** The GPU runners this install has: RunPod's, then Vast.ai's. */
+  private gpuRunners(): GpuRunner[] {
+    return [this.gpu, this.vast].filter((g): g is GpuRunner => Boolean(g))
+  }
+
+  private gpuKind(g: GpuRunner): GpuProvider {
+    return g.kind ?? "runpod"
+  }
+
+  /** The runner a GPU box belongs to, by its id's prefix, or null (not a GPU box, or this install lacks that cloud). */
+  private gpuFor(boxId: string | null | undefined): GpuRunner | null {
+    const kind = gpuBoxProvider(boxId)
+    return kind === "vast" ? this.vast : kind === "runpod" ? this.gpu : null
+  }
+
+  /** The cloud a GPU project's new pods come from: its own pick, else Settings › Vast.ai GPU › Use for GPU projects. */
+  gpuCloudOf(projectId: string): GpuProvider {
+    return effectiveGpuProvider(this.store.projectGpuProvider(projectId), Boolean(this.vast?.settings().defaultForGpu))
+  }
+
+  /** Every cloud's pods as last listed. */
+  private get gpuSeen(): GpuPods {
+    return [...this.gpuSeenBy.values()].flat()
+  }
+
   /** Tasks running at once and task folders kept per box for a box of this size: Settings when set there, else the size's defaults. */
   sizeLimits(size: BoxSize): { slotsPerBox: number; maxResidentPerBox: number } {
     const o = this.settings.boxLimitOverrides()
@@ -1335,7 +1420,7 @@ export class TaskManager {
   /** Turns that may run at once on this box (its own size decides the default). */
   private slotsFor(boxId: string) {
     if (isLocalRunnerBox(boxId)) return this.settings.get().localAgents
-    if (isGpuBox(boxId)) return this.store.projectBoxLimits(gpuBoxProject(boxId)).agentsPerBox ?? this.gpu?.settings().agentsPerPod ?? 1
+    if (isGpuBox(boxId)) return this.store.projectBoxLimits(gpuBoxProject(boxId)).agentsPerBox ?? this.gpuFor(boxId)?.settings().agentsPerPod ?? 1
     if (isDockerBox(boxId)) return this.store.projectBoxLimits(dockerBoxProject(boxId)).agentsPerBox ?? this.docker?.settings().agentsPerContainer ?? 1
     return this.sizeLimits(normalizeBoxSize(this.store.getBox(boxId)?.size)).slotsPerBox
   }
@@ -1447,29 +1532,37 @@ export class TaskManager {
   }
 
   /**
-   * A project's RunPod GPU pods and caps as they apply now (list_projects, pool_status), from the pods as last listed
-   * (`fresh` lists them again). Null when this Box Yard has no GPU runner.
+   * A project's GPU pods and caps as they apply now (list_projects, pool_status), from the pods as last listed
+   * (`fresh` lists them again), on the cloud its new pods come from. Pods it still has on the other cloud (its cloud
+   * changed) are listed too, so their spend shows. Null when this Box Yard has no runner for that cloud.
    */
-  async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes" | "gpuMachine">, fresh = false) {
-    if (!this.gpu) return null
-    if (fresh && this.gpu.enabled()) await this.gpuPods()
-    const s = this.gpu.settings()
+  async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes" | "gpuMachine"> & { gpuProvider?: GpuProvider | null }, fresh = false) {
+    const kind = this.gpuCloudOf(p.id)
+    const gpu = kind === "vast" ? this.vast : this.gpu
+    if (!gpu) return null
+    if (fresh) for (const g of this.gpuRunners()) if (g.enabled()) await this.gpuPods(g)
+    const s = gpu.settings()
+    const where = GPU_SETTINGS_PATH[kind]
     const usd = (n: number) => `$${Math.round(n * 100) / 100}/hr`
     const pods = this.gpuSeen.filter((x) => gpuBoxProject(x.boxId) === p.id).sort((a, b) => gpuBoxIndex(a.boxId) - gpuBoxIndex(b.boxId))
     const own = p.gpuMaxHourlyUsd
     const m = p.gpuMachine
-    const from = (mine: unknown, global: string) => (mine !== null ? "this project" : `global: Settings › RunPod GPU › ${global}`)
+    const from = (mine: unknown, global: string) => (mine !== null ? "this project" : `global: ${where} › ${global}`)
+    const ownCloud = p.gpuProvider !== undefined ? p.gpuProvider : this.store.projectGpuProvider(p.id)
+    const other = pods.filter((x) => gpuBoxProvider(x.boxId) !== kind)
     return {
+      provider: `${GPU_PROVIDER_LABEL[kind]} (${ownCloud ? "this project" : "global: Settings › Vast.ai GPU › Use for GPU projects"})`,
       gpuTypes: `${(m.gpuTypes ?? s.gpuTypes).map(shortGpu).join(", ")} (${from(m.gpuTypes, "GPU types")})`,
-      cloud: `${m.cloud ?? s.cloud} (${from(m.cloud, "Cloud")})`,
+      ...(kind === "runpod" ? { cloud: `${m.cloud ?? s.cloud} (${from(m.cloud, "Cloud")})` } : {}),
       minRamGb: `${m.minRamGb ?? s.minRamGb} (${from(m.minRamGb, "Min RAM")})`,
       minVcpus: `${m.minVcpus ?? s.minVcpus} (${from(m.minVcpus, "Min vCPUs")})`,
-      maxHourlyUsd: own !== null ? `${own ? usd(own) : "none"} (this project)` : `global: ${usd(s.maxHourlyUsd)} (Settings › RunPod GPU › Max per project)`,
-      totalMaxHourlyUsd: `${usd(s.totalMaxHourlyUsd)} for every project's pods together (Settings › RunPod GPU › Max for all pods)`,
+      maxHourlyUsd: own !== null ? `${own ? usd(own) : "none"} (this project)` : `global: ${usd(s.maxHourlyUsd)} (${where} › Max per project)`,
+      totalMaxHourlyUsd: `${usd(s.totalMaxHourlyUsd)} for every project's pods together (${where} › Max for all pods)`,
       maxPods: p.maxBoxes !== null ? `${Math.min(p.maxBoxes, MAX_GPU_PODS)} (its Max boxes)` : `${MAX_GPU_PODS} (no Max boxes set; the $/hr caps bound it)`,
-      agentsPerPod: this.slotsFor(gpuBoxId(p.id)),
+      agentsPerPod: this.slotsFor(gpuBoxIdOn(kind, p.id)),
       pods: pods.map(({ boxId, pod }) => `#${gpuBoxIndex(boxId)} ${boxId}: ${pod.status.toLowerCase()}${pod.gpu?.id ? ` ${shortGpu(pod.gpu.id)}` : ""}${pod.cost ? ` ${usd(pod.cost)}` : ""}, ${this.runningOn(boxId)}/${this.slotsFor(boxId)} tasks running`),
       spend: usd(pods.reduce((sum, x) => sum + (x.pod.cost ?? 0), 0)),
+      ...(other.length ? { otherCloud: `${other.length} on ${GPU_PROVIDER_LABEL[gpuBoxProvider(other[0]!.boxId)!]} from before its cloud changed: they stop when idle` } : {}),
     }
   }
 
@@ -1587,8 +1680,9 @@ export class TaskManager {
     if (!box && !pod && !container) throw new NotFoundError(`Box ${boxId} not found`)
     let up = box?.status === "ready"
     if (pod) {
-      if (!this.gpu) throw new NotFoundError(`Box ${boxId} not found`)
-      up = Boolean((await this.gpuPods())?.some((p) => p.boxId === boxId && p.pod.status === "RUNNING"))
+      const gpu = this.gpuFor(boxId)
+      if (!gpu) throw new NotFoundError(`Box ${boxId} not found`)
+      up = Boolean((await this.gpuPods(gpu))?.some((p) => p.boxId === boxId && p.pod.status === "RUNNING"))
       if (!up && !rows.length) throw new NotFoundError(`GPU pod ${boxId} isn't running`)
     }
     if (container) {
@@ -1750,7 +1844,7 @@ export class TaskManager {
       try {
         lateCheck()
         if (stopAgents) await this.stopAgentsOn(boxId)
-        const reason = opts.reason?.trim() || (owner ? "Terminated from Settings › RunPod GPU." : "No reason given.")
+        const reason = opts.reason?.trim() || (owner ? `Terminated from ${GPU_SETTINGS_PATH[gpuBoxProvider(boxId) ?? "runpod"]}.` : "No reason given.")
         await this.stopGpuPod(boxId, { actor, reason: `${reason}${overridden}` })
         // stopGpuPod archived every started workspace (a pod's tasks keep its id and restore on its next start).
         result.archived = this.store.listTaskRows({ boxId }).filter((r) => r.session_started).map((r) => r.id)
@@ -1891,7 +1985,8 @@ export class TaskManager {
    * Not Docker containers: they cost nothing idle and stop on their own (sweepDocker); delete_box deletes one.
    */
   async deleteCandidates(projectId?: string): Promise<string[]> {
-    const pods = this.gpu?.enabled() ? ((await this.gpuPods()) ?? []).filter((p) => p.pod.status === "RUNNING").map((p) => p.boxId) : []
+    const pods: string[] = []
+    for (const g of this.gpuRunners()) if (g.enabled()) pods.push(...((await this.gpuPods(g)) ?? []).filter((p) => p.pod.status === "RUNNING").map((p) => p.boxId))
     const ids = [...this.store.listBoxes().filter((b) => b.status === "ready").map((b) => b.id), ...pods]
     return projectId ? ids.filter((id) => this.onlyProjectOn(id, projectId)) : ids
   }
@@ -2323,7 +2418,10 @@ export class TaskManager {
     if (!project) throw new NotFoundError(`Project ${projectId} not found`)
     if (project.runner === "local") throw new BadRequestError(`${project.name} runs on this computer, so it has no boxes to snapshot.`)
     if (isLocalRunnerBox(boxId)) throw new BadRequestError("This computer (the local runner) is never snapshotted.")
-    if (project.runner === "gpu" || isGpuBox(boxId)) throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
+    if (project.runner === "gpu" || isGpuBox(boxId)) {
+      if (this.gpuCloudOf(projectId) === "vast") throw new BadRequestError(`${project.name} runs on Vast.ai GPU instances, which start fresh each time, so it has no box snapshot.`)
+      throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
+    }
     if (project.runner === "docker" || isDockerBox(boxId)) throw new BadRequestError(`${project.name} runs in a Docker container: its volume keeps caches between runs, so it has no box snapshot.`)
     const box = this.store.getBox(boxId)
     if (!box) throw new NotFoundError(`Box ${boxId} not found`)
@@ -2765,7 +2863,7 @@ export class TaskManager {
       if (!claimed) {
         if (row.status !== "queued") this.store.updateTask(row.id, { status: "queued" })
         const local = isLocalRunnerBox(boxId) ? (this.localWait(row) ?? { text: LOCAL_SLOT_WAIT, by: [] }) : null
-        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? GPU_SLOT_WAIT : isDockerBox(boxId) ? DOCKER_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
+        this.setWaitReason(row.id, local?.text ?? (isGpuBox(boxId) ? gpuSlotWait(gpuBoxProvider(boxId)!) : isDockerBox(boxId) ? DOCKER_SLOT_WAIT : `Waiting for a free slot on ${boxId}`), null, local?.by)
         this.emitTask(row.id)
         continue
       }
@@ -3383,33 +3481,51 @@ export class TaskManager {
   }
 
   /**
-   * Which of its project's pods a GPU task's next turn takes, or null with the reason:
+   * Which of its project's pods a GPU task's next turn takes, or null with the reason, on the cloud its project's new
+   * pods come from (`gpuCloudOf`: RunPod or Vast.ai):
    * 1. its own pod while that's up: its workspace is there (it moves only when nothing would be lost, `canMove`),
    * 2. another of the project's pods that is up (or starting) and has a free slot,
    * 3. a new pod, while the project has fewer than its Max boxes (MAX_GPU_PODS when unset) and one more fits under
    *    the per-project and total $/hr caps (`gpuCapBlock`). Pods are `runpod-<projectId>` (#1), then `-2`, `-3`, …
-   * Slots per pod are its project's Agents per box, else Settings › RunPod GPU › Agents per pod (`slotsFor`).
+   *    (`vastai-…` on Vast.ai).
+   * Slots per pod are its project's Agents per box, else its cloud's Agents per pod (`slotsFor`). A task whose pod is
+   * on the other cloud (its project's cloud changed) moves when nothing would be lost, else keeps running there.
    */
   private async gpuTarget(row: TaskRow): Promise<string | null> {
-    if (!this.gpu) {
-      this.setWaitReason(row.id, "Waiting: RunPod GPU isn't available on this Box Yard")
-      return null
-    }
-    if (!this.gpu.enabled()) {
-      this.setWaitReason(row.id, "Waiting: RunPod GPU isn't set up (add a RunPod API key in Settings › RunPod GPU)")
-      return null
-    }
-    const pods = await this.gpuPods(row.id)
-    if (!pods) return null
     const projectId = row.project_id
-    const live = new Set(pods.map((p) => p.boxId))
+    const kind = this.gpuCloudOf(projectId)
+    const gpu = kind === "vast" ? this.vast : this.gpu
+    const cloud = GPU_PROVIDER_LABEL[kind]
+    if (!gpu) {
+      this.setWaitReason(row.id, `Waiting: ${cloud} GPU isn't available on this Box Yard`)
+      return null
+    }
+    if (!gpu.enabled()) {
+      this.setWaitReason(row.id, kind === "vast" ? "Waiting: Vast.ai GPU isn't set up (add a Vast.ai API key in Settings › Credentials)" : "Waiting: RunPod GPU isn't set up (add a RunPod API key in Settings › RunPod GPU)")
+      return null
+    }
     const own = isGpuBox(row.box_id) && gpuBoxProject(row.box_id) === projectId ? row.box_id : null
-    const onPod = own && live.has(own) ? own : null
+    const ownKind = gpuBoxProvider(own)
+    if (own && ownKind !== kind) {
+      // Its workspace is on the project's pod on the other cloud: it stays there until it can move without loss.
+      const old = this.gpuFor(own)
+      const oldPods = old?.enabled() ? await this.gpuPods(old, row.id) : null
+      if (old?.enabled() && !oldPods) return null
+      if (oldPods?.some((p) => p.boxId === own) && !this.canMove(row)) {
+        this.noteOnce(row.id, `${row.id}:${own}:${kind}`, `Its project now runs on ${cloud}, but its workspace stays on ${GPU_PROVIDER_LABEL[ownKind!]} GPU pod #${gpuBoxIndex(own)} until it can move safely (${this.moveBlock(row) ?? "it's being archived"}).`)
+        return this.gpuRoom(row, own) ? own : null
+      }
+    }
+    const pods = await this.gpuPods(gpu, row.id)
+    if (!pods) return null
+    const live = new Set(pods.map((p) => p.boxId))
+    const mine = ownKind === kind ? own : null
+    const onPod = mine && live.has(mine) ? mine : null
     if (onPod) {
       if (this.gpuRoom(row, onPod)) return onPod
       if (!this.canMove(row)) return null
     }
-    const up = this.gpuBoxesUp(projectId, live)
+    const up = this.gpuBoxesUp(kind, projectId, live)
     const free = up.find((id) => id !== onPod && this.runningOn(id) < this.slotsFor(id) && !this.limitBlock(row, id))
     if (free) return free
     const max = this.gpuMaxPods(projectId)
@@ -3417,18 +3533,18 @@ export class TaskManager {
       const set = this.store.projectBoxLimits(projectId).maxBoxes !== null
       this.setWaitReason(
         row.id,
-        `Waiting for a free slot on its project's ${up.length === 1 ? "GPU pod" : `${up.length} GPU pods`} (${set ? `its Max boxes is ${max}` : `at most ${max} pods`}; its Tasks running at once, or Settings › RunPod GPU › Tasks running at once per pod)`,
+        `Waiting for a free slot on its project's ${up.length === 1 ? "GPU pod" : `${up.length} GPU pods`} (${set ? `its Max boxes is ${max}` : `at most ${max} pods`}; its Tasks running at once, or ${GPU_SETTINGS_PATH[kind]} › Tasks running at once per pod)`,
       )
       return null
     }
-    const block = await this.gpuCapBlock(projectId, pods, up)
+    const block = await this.gpuCapBlock(gpu, projectId, pods, up)
     if (block) {
       this.gpuWait(row, block.kind, block.reason)
       return null
     }
     // A new pod: the task's old one when it's in range (its number stays), else the first unused number.
-    if (own && !up.includes(own) && gpuBoxIndex(own) <= max) return own
-    for (let n = 1; n <= max; n++) if (!up.includes(gpuBoxId(projectId, n))) return gpuBoxId(projectId, n)
+    if (mine && !up.includes(mine) && gpuBoxIndex(mine) <= max) return mine
+    for (let n = 1; n <= max; n++) if (!up.includes(gpuBoxIdOn(kind, projectId, n))) return gpuBoxIdOn(kind, projectId, n)
     return null
   }
 
@@ -3440,7 +3556,16 @@ export class TaskManager {
     if (isGpuBox(from)) {
       this.store.updateTask(row.id, { boxId: null, portBase: null, previews: [] })
       if (this.gpuSeen.some((p) => p.boxId === from)) void this.removeTaskDir(from, row.id).catch(() => {})
-      if (row.session_started) this.addEvent(row.id, `Moved from GPU pod #${gpuBoxIndex(from)} to #${gpuBoxIndex(target)} of its project.`)
+      const a = gpuBoxProvider(from)
+      const b = gpuBoxProvider(target)
+      if (row.session_started) {
+        this.addEvent(
+          row.id,
+          a === b
+            ? `Moved from GPU pod #${gpuBoxIndex(from)} to #${gpuBoxIndex(target)} of its project.`
+            : `Moved from ${GPU_PROVIDER_LABEL[a!]} GPU pod #${gpuBoxIndex(from)} to ${GPU_PROVIDER_LABEL[b!]} GPU pod #${gpuBoxIndex(target)}: its project now runs on ${GPU_PROVIDER_LABEL[b!]}.`,
+        )
+      }
     }
     // The pod exposes one preview port per task folder (POD_HTTP_PORTS): park an archived, resting one for room.
     if (this.store.listTaskRows({ boxId: target }).length >= POD_HTTP_PORTS.length) this.evictOne(target, row.id)
@@ -3449,7 +3574,7 @@ export class TaskManager {
 
   private gpuRoom(row: TaskRow, boxId: string): boolean {
     if (this.runningOn(boxId) >= this.slotsFor(boxId)) {
-      this.setWaitReason(row.id, GPU_SLOT_WAIT)
+      this.setWaitReason(row.id, gpuSlotWait(gpuBoxProvider(boxId) ?? "runpod"))
       return false
     }
     const limit = this.limitBlock(row, boxId)
@@ -3457,21 +3582,23 @@ export class TaskManager {
     return !limit
   }
 
-  /** This install's GPU pods (cached for a few seconds by the provider), or null with the reason when RunPod can't say. */
-  private async gpuPods(taskId?: string): Promise<GpuPods | null> {
+  /** This install's pods on one cloud (cached for a few seconds by the provider), or null with the reason when the cloud can't say. */
+  private async gpuPods(gpu: GpuRunner, taskId?: string): Promise<GpuPods | null> {
+    const kind = this.gpuKind(gpu)
     try {
-      this.gpuSeen = await this.gpu!.provider.listPods()
-      return this.gpuSeen
+      const pods = await gpu.provider.listPods()
+      this.gpuSeenBy.set(kind, pods)
+      return pods
     } catch (err) {
-      if (taskId) this.setWaitReason(taskId, `Waiting: couldn't list the RunPod pods (${errorMessage(err)})`)
+      if (taskId) this.setWaitReason(taskId, `Waiting: couldn't list the ${kind === "vast" ? "Vast.ai instances" : "RunPod pods"} (${errorMessage(err)})`)
       return null
     }
   }
 
-  /** The project's pods that are up or on their way (a turn holds a slot on it), by number. */
-  private gpuBoxesUp(projectId: string, live: Set<string>): string[] {
+  /** The project's pods on one cloud that are up or on their way (a turn holds a slot on it), by number. */
+  private gpuBoxesUp(kind: GpuProvider, projectId: string, live: Set<string>): string[] {
     const ids = new Set([...live].filter((id) => gpuBoxProject(id) === projectId))
-    for (const id of this.store.gpuBoxesInUse()) if (gpuBoxProject(id) === projectId) ids.add(id)
+    for (const id of this.store.gpuBoxesInUse()) if (gpuBoxProject(id) === projectId && gpuBoxProvider(id) === kind) ids.add(id)
     return [...ids].sort((a, b) => gpuBoxIndex(a) - gpuBoxIndex(b))
   }
 
@@ -3481,13 +3608,14 @@ export class TaskManager {
   }
 
   /**
-   * Why the project can't have another pod now: it would take its pods over their $/hr cap (its own, else Settings ›
-   * RunPod GPU › Max per project), or every pod of this install over the total cap. A pod counts at its RunPod price,
-   * one still starting at the next pod's list price. Null when it fits, or when RunPod's prices can't be read (the
-   * pod start checks the caps again).
+   * Why the project can't have another pod now: it would take its pods over their $/hr cap (its own, else its cloud's
+   * Max per project), or every pod of this install on that cloud over the cloud's total cap. A pod counts at its
+   * cloud's price, one still starting at the next pod's price. Null when it fits, or when the prices can't be read
+   * (the pod start checks the caps again).
    */
-  private async gpuCapBlock(projectId: string, pods: GpuPods, up: string[]): Promise<{ kind: string; reason: string } | null> {
-    const gpu = this.gpu!
+  private async gpuCapBlock(gpu: GpuRunner, projectId: string, pods: GpuPods, up: string[]): Promise<{ kind: string; reason: string } | null> {
+    const cloudKind = this.gpuKind(gpu)
+    const cloud = GPU_PROVIDER_LABEL[cloudKind]
     let next: Awaited<ReturnType<GpuPodProvider["nextPodPrice"]>>
     try {
       next = await gpu.provider.nextPodPrice(projectId)
@@ -3497,20 +3625,29 @@ export class TaskManager {
     const cap = gpu.provider.capOf(projectId)
     const name = this.store.getProjectName(projectId) ?? projectId
     if (!next) {
-      return { kind: "cap", reason: `RunPod cap $${cap}/hr is below the price of every GPU type in Settings › RunPod GPU (${GPU_CAP_HOW})` }
+      return {
+        kind: "cap",
+        reason:
+          cloudKind === "vast"
+            ? `Vast.ai cap $${cap}/hr is below every offer for the GPU types in Settings › Vast.ai GPU, or none is rentable right now (${gpuCapHow(cloudKind)})`
+            : `RunPod cap $${cap}/hr is below the price of every GPU type in Settings › RunPod GPU (${gpuCapHow(cloudKind)})`,
+      }
     }
     const cost = (id: string) => pods.find((p) => p.boxId === id)?.pod.cost ?? next.usd
     const usd = (n: number) => `$${Math.round(n * 100) / 100}/hr`
     const mine = up.reduce((sum, id) => sum + cost(id), 0)
     const pods_ = (n: number) => (n === 1 ? "pod costs" : `${n} pods cost`)
     if (cap && mine + next.usd > cap + 1e-9) {
-      return { kind: "cap", reason: `RunPod cap $${cap}/hr reached: ${name}'s ${pods_(up.length)} ${usd(mine)} and another ${next.gpu} is ${usd(next.usd)} (${GPU_CAP_HOW})` }
+      return { kind: "cap", reason: `${cloud} cap $${cap}/hr reached: ${name}'s ${pods_(up.length)} ${usd(mine)} and another ${next.gpu} is ${usd(next.usd)} (${gpuCapHow(cloudKind)})` }
     }
     const total = gpu.settings().totalMaxHourlyUsd
-    const all = new Set([...pods.map((p) => p.boxId), ...this.store.gpuBoxesInUse()])
+    const all = new Set([...pods.map((p) => p.boxId), ...this.store.gpuBoxesInUse().filter((id) => gpuBoxProvider(id) === cloudKind)])
     const spend = [...all].reduce((sum, id) => sum + cost(id), 0)
     if (total && spend + next.usd > total + 1e-9) {
-      return { kind: "total", reason: `RunPod total cap $${total}/hr reached: this Box Yard's ${pods_(all.size)} ${usd(spend)} and another ${next.gpu} is ${usd(next.usd)} (Settings › RunPod GPU › Max for all pods)` }
+      return {
+        kind: "total",
+        reason: `${cloud} total cap $${total}/hr reached: this Box Yard's ${pods_(all.size)} ${usd(spend)} and another ${next.gpu} is ${usd(next.usd)} (${GPU_SETTINGS_PATH[cloudKind]} › Max for all pods)`,
+      }
     }
     return null
   }
@@ -3715,7 +3852,7 @@ export class TaskManager {
     }
   }
 
-  /** A GPU pod started or was terminated (by RunPodProvider), for the box history. */
+  /** A GPU pod started or was terminated (by RunPodProvider or VastProvider), for the box history. */
   gpuPodEvent(e: { boxId: string; kind: "started" | "terminated"; detail: string; actor?: BoxActor; reason?: string }) {
     // Box Yard is terminating it (stopGpuPod): that one row, with who and why, takes the provider's detail.
     if (e.kind === "terminated" && !e.actor && this.gpuTerminating.has(e.boxId)) {
@@ -3727,18 +3864,21 @@ export class TaskManager {
       boxName: gpuPodLabel(e.boxId, this.store.getProjectName(gpuBoxProject(e.boxId))),
       type: e.kind === "started" ? "created" : "deleted",
       actor: e.actor ?? { kind: e.kind === "started" ? "scheduler" : "provider" },
-      reason: e.reason ?? (e.kind === "started" ? "A task of a RunPod GPU project needed its pod." : "The pod was terminated."),
+      reason: e.reason ?? (e.kind === "started" ? `A task of a ${GPU_PROVIDER_LABEL[gpuBoxProvider(e.boxId) ?? "runpod"]} GPU project needed its pod.` : "The pod was terminated."),
       detail: e.detail,
       size: null,
     })
   }
 
   /**
-   * Terminate a GPU pod now (Terminate pod, delete_box, or the idle sweep); its network volume stays. Its workspaces
-   * must be in their archives: running turns are never stopped, and a task without a fresh archive is archived first.
+   * Terminate a GPU pod now (Terminate pod, delete_box, or the idle sweep); a RunPod pod's network volume stays, a
+   * Vast.ai instance's disk goes with it. Its workspaces must be in their archives: running turns are never stopped,
+   * and a task without a fresh archive is archived first.
    */
   async stopGpuPod(boxId: string, opts: { actor: BoxActor; reason: string; force?: boolean }): Promise<void> {
-    if (!this.gpu) throw new BadRequestError("RunPod GPU isn't available on this Box Yard")
+    const gpu = this.gpuFor(boxId)
+    const vast = gpuBoxProvider(boxId) === "vast"
+    if (!gpu) throw new BadRequestError(`${vast ? "Vast.ai" : "RunPod"} GPU isn't available on this Box Yard`)
     const residents = this.store.listTaskRows({ boxId })
     if (!opts.force && residents.some((r) => r.current_turn_id || r.status === "starting")) throw new ConflictError("An agent is running on that pod; stop it first")
     for (const r of residents) if (r.session_started) await this.archiveUnlessHeld(r.id).catch(() => {})
@@ -3747,49 +3887,59 @@ export class TaskManager {
     this.gpuTerminating.set(boxId, null)
     let detail: string | null = null
     try {
-      await this.gpu.provider.destroy(boxId)
+      await gpu.provider.destroy(boxId)
     } finally {
       detail = this.gpuTerminating.get(boxId) ?? null
       this.gpuTerminating.delete(boxId)
     }
     this.gpuTouchedAt.delete(boxId)
-    this.gpuPodEvent({ boxId, kind: "terminated", detail: `${detail ? `${detail}. ` : ""}Its network volume stays.`, actor: opts.actor, reason: opts.reason })
+    const after = vast ? "Its disk went with it; every workspace is in its archive." : "Its network volume stays."
+    this.gpuPodEvent({ boxId, kind: "terminated", detail: `${detail ? `${detail}. ` : ""}${after}`, actor: opts.actor, reason: opts.reason })
   }
 
   /**
-   * Once a minute: stop GPU pods idle for Settings › RunPod GPU › Stop when idle (no turn running or waiting, every
-   * workspace archived, past any keep-warm), and touch the heartbeat of the others, so a pod's own watchdog
-   * (runpod/watchdog.sh) only fires when this Box Yard has gone quiet (the computer slept).
+   * Once a minute: stop GPU pods idle for their cloud's Stop when idle (no turn running or waiting, every workspace
+   * archived, past any keep-warm), and touch the heartbeat of the others, so a pod's own watchdog (runpod/watchdog.sh,
+   * vast/watchdog.sh) only fires when this Box Yard has gone quiet (the computer slept).
    */
   private async sweepGpuPods(now: number) {
-    if (!this.gpu?.enabled() || now - this.lastGpuSweepAt < 60_000) return
+    const runners = this.gpuRunners().filter((g) => g.enabled())
+    if (!runners.length || now - this.lastGpuSweepAt < 60_000) return
     this.lastGpuSweepAt = now
-    const s = this.gpu.settings()
-    let pods: Awaited<ReturnType<RunPodProvider["listPods"]>>
+    for (const gpu of runners) await this.sweepGpuCloud(gpu, now)
+  }
+
+  private async sweepGpuCloud(gpu: GpuRunner, now: number) {
+    const kind = this.gpuKind(gpu)
+    const where = GPU_SETTINGS_PATH[kind]
+    const s = gpu.settings()
+    let pods: GpuPods
     try {
-      pods = await this.gpu.provider.listPods(true)
+      pods = await gpu.provider.listPods(true)
     } catch (err) {
-      console.warn(`[box-yard] RunPod pods: ${errorMessage(err)}`)
+      console.warn(`[box-yard] ${kind === "vast" ? "Vast.ai instances" : "RunPod pods"}: ${errorMessage(err)}`)
       return
     }
-    this.gpuSeen = pods
-    const live = new Set(pods.map((p) => p.boxId))
+    this.gpuSeenBy.set(kind, pods)
+    const live = new Set(this.gpuSeen.map((p) => p.boxId))
     for (const { boxId, pod } of pods) {
       if (pod.status !== "RUNNING") continue
       const residents = this.store.listTaskRows({ boxId })
       const busy = residents.some((r) => r.current_turn_id || r.status === "starting")
       // Each pod stops on its own: it stays for a task of its own that waits, or for one of its project's that waits
-      // for any pod (not one whose workspace is on another pod) while it has a free slot.
+      // for any pod on this cloud (not one whose workspace is on another pod) while it has a free slot.
       const room = this.runningOn(boxId) < this.slotsFor(boxId)
+      const projectId = gpuBoxProject(boxId)
       const waiting =
         residents.some((r) => this.wantsTurn(r)) ||
         (room &&
+          this.gpuCloudOf(projectId) === kind &&
           this.store
-            .listTaskRows({ projectId: gpuBoxProject(boxId) })
+            .listTaskRows({ projectId })
             .some((r) => this.wantsTurn(r) && this.store.taskRunner(r) === "gpu" && !(isGpuBox(r.box_id) && r.box_id !== boxId && live.has(r.box_id))))
       const started = pod.startedAt ? Date.parse(pod.startedAt) : now
       const lastUse = Math.max(started || 0, ...residents.map((r) => r.last_active_at))
-      const warm = this.gpu.keepWarmUntil(boxId) ?? 0
+      const warm = gpu.keepWarmUntil(boxId) ?? 0
       const idleMs = now - lastUse
       if (!busy && !waiting && warm < now && idleMs >= s.idleMinutes * 60_000) {
         const unsaved = residents.filter((r) => r.session_started && !this.archiveHoldsWorkspace(r))
@@ -3799,7 +3949,7 @@ export class TaskManager {
           console.log(`[box-yard] stopping idle GPU pod ${pod.id} (${boxId})`)
           await this.stopGpuPod(boxId, {
             actor: { kind: "janitor" },
-            reason: `Idle for ${Math.round(idleMs / 60_000)} min (Settings › RunPod GPU stops pods after ${s.idleMinutes} min); every workspace was archived.`,
+            reason: `Idle for ${Math.round(idleMs / 60_000)} min (${where} stops pods after ${s.idleMinutes} min); every workspace was archived.`,
           }).catch((err) => console.warn(`[box-yard] stop GPU pod ${boxId}: ${errorMessage(err)}`))
           continue
         }
@@ -4086,8 +4236,9 @@ export class TaskManager {
     const alone = project.wholeMachine && slots === 1
     if (isLocalRunnerBox(boxId)) return { memoryBytes: os.totalmem(), slots, alone, local: true }
     if (isGpuBox(boxId)) {
-      const pod = this.gpu?.provider.cached(boxId)
-      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU" } }
+      const pod = this.gpuFor(boxId)?.provider.cached(boxId)
+      const cloud = gpuBoxProvider(boxId) ?? "runpod"
+      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU", ...(cloud === "vast" ? { cloud } : {}) } }
     }
     if (isDockerBox(boxId)) {
       const d = this.docker?.settings()
@@ -5797,7 +5948,8 @@ export class TaskManager {
     } else if (flags.asked) status = "needs_input"
     else if (flags.done) status = "done"
     else if (flags.waitingOn?.length) status = "waiting"
-    else if (pr === "merged") status = "done"
+    // Settings' autoDoneOnMerge off: the task rests idle until it's marked done.
+    else if (pr === "merged" && this.settings.get().autoDoneOnMerge) status = "done"
     else if (openPr) status = "pr_ready"
     else status = "idle"
 
@@ -6638,11 +6790,12 @@ export class TaskManager {
         idleHeld: this.idleHeld.get(b.id) ?? null,
       }
     })
-    let gpu: CloudStatus["gpu"] = null
-    if (this.gpu?.enabled()) {
-      const pods = await this.gpu.provider.listPods().catch(() => null)
-      if (pods) gpu = { pods: pods.length, hourlyUsd: pods.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0), capUsd: this.gpu.settings().totalMaxHourlyUsd }
+    const gpuSpend = async (g: GpuRunner | null): Promise<CloudStatus["gpu"]> => {
+      if (!g?.enabled()) return null
+      const pods = await g.provider.listPods().catch(() => null)
+      return pods ? { pods: pods.length, hourlyUsd: pods.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0), capUsd: g.settings().totalMaxHourlyUsd } : null
     }
+    const [gpu, vast] = await Promise.all([gpuSpend(this.gpu), gpuSpend(this.vast)])
     return {
       spend,
       hourlyUsd: (recent * 3_600_000) / CLOUD_RATE_WINDOW_MS,
@@ -6656,6 +6809,7 @@ export class TaskManager {
       idleDeleteMinutes: idleDelete,
       list,
       gpu,
+      vast,
       fanout: this.boxFanout(now),
     }
   }
@@ -6911,8 +7065,9 @@ export class TaskManager {
       if (isGpuBox(row.box_id) && (h === "paused" || h === "gone" || h === "error")) {
         // The pod went away under a running turn (terminated in RunPod's console, its watchdog, a host failure).
         // Its workspace comes back from the archive on the next turn, on a new pod.
-        if (h === "error") await this.gpu?.provider.destroy(row.box_id).catch(() => {})
-        this.gpuPodEvent({ boxId: row.box_id, kind: "terminated", detail: `Pod ${h}`, actor: { kind: "provider" }, reason: `RunPod reports the pod ${h === "paused" ? "stopped" : h} while a turn ran.` })
+        if (h === "error") await this.gpuFor(row.box_id)?.provider.destroy(row.box_id).catch(() => {})
+        const cloud = GPU_PROVIDER_LABEL[gpuBoxProvider(row.box_id) ?? "runpod"]
+        this.gpuPodEvent({ boxId: row.box_id, kind: "terminated", detail: `Pod ${h}`, actor: { kind: "provider" }, reason: `${cloud} reports the pod ${h === "paused" ? "stopped" : h} while a turn ran.` })
         this.interrupt(this.requireRow(row.id), `its GPU pod ${h === "paused" ? "stopped" : `is ${h}`}`)
         continue
       }

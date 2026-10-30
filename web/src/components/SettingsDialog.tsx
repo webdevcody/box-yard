@@ -24,6 +24,7 @@ import { HooksPanel } from "./Hooks"
 import { CredentialsPanel } from "./Setup"
 import { IdentitiesPanel } from "./Identities"
 import { RunPodPanel } from "./RunPodSettings"
+import { VastPanel } from "./VastSettings"
 import { DockerPanel } from "./DockerSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
@@ -38,6 +39,7 @@ import {
   AUTOCOMPACT_MIN_TOKENS,
   BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
+  CARDS_IDLE_HOURS,
   DEFAULT_AUTOCOMPACT_TOKENS,
   SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
@@ -52,10 +54,10 @@ import {
 } from "../../../shared/types"
 
 
-const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, docker: Container, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
+const SECTION_ICON: Record<SettingsSection, LucideIcon> = { orchestrator: Network, agents: Bot, credentials: KeyRound, identities: Fingerprint, runpod: Cpu, vast: Cpu, docker: Container, hooks: Webhook, limits: Boxes, costs: DollarSign, notifications: Bell, voice: Volume2, about: Info }
 
 /** Sections whose controls keep their own drafts (useDraft). They stay mounted once opened, so the drafts survive. */
-const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "docker", "hooks", "notifications", "voice"]
+const DRAFT_SECTIONS: SettingsSection[] = ["credentials", "identities", "runpod", "vast", "docker", "hooks", "notifications", "voice"]
 
 // ------------------------------------------------------------------ open state (URL)
 
@@ -471,6 +473,8 @@ export function SettingsDialog({
                 <IdentitiesPanel fid={fid} />
               ) : k === "runpod" ? (
                 <RunPodPanel fid={fid} active={section === "runpod"} />
+              ) : k === "vast" ? (
+                <VastPanel fid={fid} active={section === "vast"} />
               ) : k === "docker" ? (
                 <DockerPanel fid={fid} active={section === "docker"} />
               ) : (
@@ -669,6 +673,42 @@ export function SettingsDialog({
                 value={s.notesMaxTokens}
                 onChange={(e) => set("notesMaxTokens", Math.trunc(Number(e.target.value)))}
               />
+            </Row>
+            <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Task cards</h4>
+            <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
+              The chat's Cards view keeps active and recent work in its list. Finished tasks fold into "done today", quiet ones into "idle"; Mark done on a card closes its task.
+            </p>
+            <Row
+              id={fid("cih")}
+              label="Idle after"
+              help="A card whose task rests (nothing running, queued or waiting on you) with no activity for this long folds into the Idle group at the top of the Cards view. 0: never."
+              hint={hint("cardsIdleHours")}
+            >
+              <span className="flex items-center gap-2 text-sm text-zinc-400">
+                <input
+                  id={fid("cih")}
+                  type="number"
+                  min={CARDS_IDLE_HOURS.min}
+                  max={CARDS_IDLE_HOURS.max}
+                  step={0.5}
+                  className={inputClass}
+                  value={s.cardsIdleHours ?? CARDS_IDLE_HOURS.default}
+                  onChange={(e) => set("cardsIdleHours", Number(e.target.value))}
+                  data-testid="cards-idle-hours"
+                />
+                hours
+              </span>
+            </Row>
+            <Row
+              id={fid("adm")}
+              label="Done when its PR merges"
+              help="When a task's pull request merges and its turn is over (it's idle or waiting for review, with nothing running or queued), it moves to done, as Mark done would leave it. Turning it on also moves resting tasks whose PR has already merged. Off: a merged PR leaves its task idle until you mark it done. Messaging a done task picks it back up."
+              hint={hint("autoDoneOnMerge")}
+            >
+              <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                <input id={fid("adm")} type="checkbox" checked={s.autoDoneOnMerge ?? true} onChange={(e) => set("autoDoneOnMerge", e.target.checked)} data-testid="auto-done-on-merge" />
+                {(s.autoDoneOnMerge ?? true) ? "On: a merged PR moves its task to done" : "Off: you mark tasks done yourself"}
+              </label>
             </Row>
           </Panel>
         ) : section === "agents" ? (
@@ -1328,7 +1368,7 @@ function CostsPanel({
         {money(s.costRates.boxStorageGbMonthUsd, (n) => set("costRates", { ...s.costRates, boxStorageGbMonthUsd: n }), fid("storage"))}
       </Row>
       <div className="mt-2 rounded-xl border border-zinc-900 bg-zinc-900/40 p-4 text-xs leading-relaxed text-zinc-400">
-        Claude Code costs come from the CLI's result JSON and don't count against the cloud limits. A box's cost is Upstash's own charge when its API reports one, its measured CPU at these rates when that's more, and the time a turn ran (labeled an estimate) while neither is known. RunPod GPU pods have their own hourly caps (Settings › RunPod GPU).
+        Claude Code costs come from the CLI's result JSON and don't count against the cloud limits. A box's cost is Upstash's own charge when its API reports one, its measured CPU at these rates when that's more, and the time a turn ran (labeled an estimate) while neither is known. RunPod GPU pods and Vast.ai instances have their own hourly caps (Settings › RunPod GPU, Settings › Vast.ai GPU).
       </div>
     </Panel>
   )

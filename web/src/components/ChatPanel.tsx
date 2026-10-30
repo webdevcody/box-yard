@@ -345,7 +345,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             <SelectionToTask source={selectionSource} onPrompt={submit}>
               <StickyScroll
                 handle={scroller}
-                count={(cards ? cards.live.length + cards.done.length + cards.coordinator.length : list.length) + (captainId ? (captainMessages.data?.length ?? 0) + (talking.busy ? 1 : 0) : 0)}
+                count={(cards ? cards.live.length + cards.idle.length + cards.done.length + cards.coordinator.length : list.length) + (captainId ? (captainMessages.data?.length ?? 0) + (talking.busy ? 1 : 0) : 0)}
                 resetKey={view}
                 restoreKey={cardsOn ? "chat:cards" : "chat"}
                 hidden={cards ? 0 : tail.hidden}
@@ -380,7 +380,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
+                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.idle.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
                 {onlyTasks && <TimelineCardBanner card={only!} empty={!settled.length} />}
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>

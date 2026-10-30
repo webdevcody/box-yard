@@ -6,6 +6,7 @@ import {
   AUTOCOMPACT_MIN_TOKENS,
   BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
+  CARDS_IDLE_HOURS,
   DEFAULT_AUTOCOMPACT_TOKENS,
   DEFAULT_CAPTAIN_EFFORT,
   DEFAULT_CAPTAIN_MODEL,
@@ -58,6 +59,9 @@ export const DEFAULT_SETTINGS: Settings = {
   startInZen: true,
   // Off: not every install uses boxes. The Boxes page always shows the same reading.
   showCloudMeter: false,
+  cardsIdleHours: CARDS_IDLE_HOURS.default,
+  // On, as before this setting: a merged PR already moved a pr_ready task to done; this adds idle ones.
+  autoDoneOnMerge: true,
   orchestratorCli: DEFAULT_AGENT_CLI,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorCodexModel: "",
@@ -192,6 +196,8 @@ export const settingsPatch = z
     ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
     startInZen: z.boolean(),
     showCloudMeter: z.boolean(),
+    cardsIdleHours: z.number().min(CARDS_IDLE_HOURS.min).max(CARDS_IDLE_HOURS.max),
+    autoDoneOnMerge: z.boolean(),
     orchestratorCli: z.enum(AGENT_CLIS),
     orchestratorModel: model,
     orchestratorCodexModel: codexModelSetting,
