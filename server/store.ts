@@ -681,6 +681,8 @@ export interface PendingInput {
   source: string
   content: string
   attachments: string[]
+  /** When it was sent: a task turn's timings measure its queue wait from the oldest. */
+  createdAt: number
 }
 
 /** A queued input as stored, for the queue list and its edits. `content` is the editable text (no prefix). */
@@ -713,7 +715,7 @@ export interface QueuedChatRow {
 export type QueuedChatChange = { ok: true; row: QueuedChatRow } | { ok: false; reason: "delivered" | "deleted" | "missing" }
 
 const inputAttachments = (r: InputRow) => (r.attachments ? (JSON.parse(r.attachments) as string[]) : [])
-const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r) })
+const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r), createdAt: r.created_at })
 const queuedInputRow = (r: InputRow): QueuedInputRow => ({
   id: r.id,
   taskId: r.task_id,

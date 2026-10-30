@@ -19,7 +19,8 @@ import { SettingsStore, TtsSettingsStore, parseSettingKeys } from "./settings.js
 import { SettingsTools } from "./settingsTools.js"
 import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
-import { McpHandshakes } from "./turnTimings.js"
+import { McpHandshakes, timingReport } from "./turnTimings.js"
+import { TURN_ROLES, type TurnRole } from "../shared/turnTimings.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -1294,6 +1295,30 @@ export function createBoxYard(
     tasks.allowMoreBoxes("user")
     res.json(await tasks.cloudStatus())
   })
+  // Per-turn timings (shared/turnTimings.ts): one run's stages and steps (the chat's timing popover), and the summary.
+  api.get("/turn-timings/:id", (req, res) => {
+    const t = store.getTurnTiming(String(req.params.id))
+    if (!t) throw new NotFoundError("No timings for that turn (they're kept 30 days).")
+    res.json(t)
+  })
+  api.get("/turn-timings", (req, res) => {
+    const str = (v: unknown) => (typeof v === "string" && v ? v : undefined)
+    const role = str(req.query.role)
+    if (role && !TURN_ROLES.includes(role as TurnRole)) throw new BadRequestError(`role must be one of ${TURN_ROLES.join(", ")}`)
+    const days = req.query.days === undefined ? undefined : Number(req.query.days)
+    if (days !== undefined && !(days > 0)) throw new BadRequestError("days must be a positive number")
+    res.json(
+      timingReport((f) => store.listTurnTimings(f), {
+        role: role as TurnRole | undefined,
+        projectId: str(req.query.projectId),
+        taskId: str(req.query.taskId),
+        kind: str(req.query.kind),
+        days,
+        recent: req.query.recent === undefined ? undefined : Number(req.query.recent),
+      }),
+    )
+  })
+
   api.get("/boxes", (_req, res) => {
     // Boxes deleted outside Box Yard drop out in the background (throttled); the SSE "boxes" update follows.
     void tasks.reconcileBoxes()

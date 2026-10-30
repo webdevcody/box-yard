@@ -435,6 +435,8 @@ process.stdin.on("end", async () => {
   try {
     mcp = loadMcp()
     await mcp?.init()
+    // Like the real CLI: init comes once the MCP servers are connected (turn timings read start-up off it).
+    out({ type: "system", subtype: "init", session_id: session.id, model: "fake", mcp_servers: mcp ? [{ name: "boxyard", status: "connected" }] : [] })
     const isOrchestrator = mcp?.kind === "orchestrator"
     if (/^\s*\/compact\b/.test(prompt)) {
       // Like the real CLI: same session, much smaller context, nothing printed as a message.
@@ -470,6 +472,7 @@ process.stdin.on("end", async () => {
     result,
     session_id: session.id,
     duration_ms: Date.now() - started,
+    duration_api_ms: 0,
     num_turns: 1,
     total_cost_usd: 0,
     usage: usageNow(),

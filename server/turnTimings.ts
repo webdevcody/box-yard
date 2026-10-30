@@ -1,7 +1,7 @@
 // Per-turn timings (shared/turnTimings.ts): the clock that reads them off one CLI run's stream-json, and the MCP
 // handshakes the server saw. The box runner keeps a copy of TurnClock (runner/box-runner.mjs, same algorithm, checked
 // by test/turn-timings.test.ts): it runs on the box, which never calls the server.
-import { TURN_TIMING_MAX_STEPS, type TurnClockReading, type TurnStep, type TurnTiming } from "../shared/turnTimings.js"
+import { TURN_TIMING_MAX_STEPS, summarizeTimings, type TurnClockReading, type TurnStep, type TurnTiming } from "../shared/turnTimings.js"
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null)
 const toolName = (name: unknown) => String(name ?? "?").replace(/^mcp__boxyard__/, "")
@@ -239,4 +239,56 @@ export function turnTiming(r: TurnClockReading, ctx: TimingContext): TurnTiming 
     ...shake,
     totalMs: Math.max(0, Math.max(r.endedAt, ctx.seenAt ?? 0) - (requestedAt ?? begin)),
   }
+}
+
+/** One run in a timing report's recent list: its stages and tokens, without every step. */
+export function briefTiming(t: TurnTiming) {
+  const slowest = t.steps.filter((s) => s.k === "tool").sort((a, b) => b.ms - a.ms)[0]
+  return {
+    id: t.id,
+    role: t.role,
+    kind: t.kind,
+    projectId: t.projectId,
+    taskId: t.taskId,
+    trigger: t.trigger,
+    model: t.model,
+    effort: t.effort,
+    ok: t.ok,
+    endedAt: t.endedAt,
+    totalMs: t.totalMs,
+    queueMs: t.queueMs,
+    setupMs: t.setupMs,
+    startupMs: t.startupMs,
+    mcpMs: t.mcpMs,
+    firstTokenMs: t.firstTokenMs,
+    modelMs: t.modelMs,
+    toolMs: t.toolMs,
+    tailMs: t.tailMs,
+    modelCalls: t.modelCalls,
+    toolCalls: t.toolCalls,
+    slowestTool: slowest ? { name: slowest.name ?? "?", ms: slowest.ms } : null,
+    tokens: { input: t.inputTokens, output: t.outputTokens, cacheRead: t.cacheReadTokens, cacheWrite: t.cacheWriteTokens, context: t.contextTokens },
+  }
+}
+
+export interface TimingReportQuery {
+  role?: TurnTiming["role"]
+  projectId?: string
+  taskId?: string
+  /** Only kind "turn" (not compaction passes) unless set. */
+  kind?: string
+  days?: number
+  recent?: number
+}
+
+/** p50/p95 per role and stage over the last `days` (default 7), and the newest runs: the turn_timings MCP tool and API. */
+export function timingReport(
+  list: (filter: { since: number; role?: TurnTiming["role"]; projectId?: string; taskId?: string; kind?: string }) => TurnTiming[],
+  q: TimingReportQuery,
+  now = Date.now(),
+) {
+  const days = Math.min(30, Math.max(1 / 24, q.days ?? 7))
+  const since = now - days * 24 * 3_600_000
+  const rows = list({ since, role: q.role, projectId: q.projectId, taskId: q.taskId, kind: q.kind ?? "turn" })
+  return { days, summary: summarizeTimings(rows, since), recent: rows.slice(0, Math.min(50, Math.max(0, q.recent ?? 10))).map(briefTiming) }
 }
