@@ -1,13 +1,12 @@
 // @vitest-environment happy-dom
-// The Coordinator chat's project bar: a chip per busy project in its colour, filtering the chat to that project, and
-// task tiles leading task links and update chips.
+// The Coordinator chat's project bar: a chip per busy project in its colour, filtering the cards to that project, and
+// task tiles leading task links.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement, type ReactNode } from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { ChatPanel } from "../web/src/components/ChatPanel.js"
 import { setChatProjectFilter } from "../web/src/lib/projectBar.js"
-import { setCoordinatorView } from "../web/src/lib/coordinatorView.js"
 import { keys } from "../web/src/lib/queries.js"
 import { projectColors } from "../shared/projectColors.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
@@ -58,7 +57,6 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => setChatProjectFilter(null))
-  act(() => setCoordinatorView("cards"))
   act(() => root.unmount())
   host.remove()
   vi.unstubAllGlobals()
@@ -83,48 +81,42 @@ describe("project bar", () => {
     expect(colors.get(MAP.id)).toBe("orange")
   })
 
-  it("a chip shows only its project's part of the chat; the chip again or Show all brings it all back", () => {
-    // The Timeline: the Cards view shows the Coordinator's own card only under All (coordinator-cards-ui.test.ts).
-    setCoordinatorView("timeline")
+  it("a chip shows only its project's cards, its Captain's card in the Coordinator's place; the chip again or Show all brings it all back", () => {
     render(createElement(ChatPanel))
-    expect(text()).toContain("Started Level 7 terrain")
-    expect(text()).toContain("is asking you something")
+    const ids = () => [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
+    const coordinator = () => host.querySelector('[data-testid="coordinator-card"]')
+    expect(ids()).toEqual([LEVEL.id, CARDS.id])
+    expect(coordinator()!.textContent).toContain("is asking you something")
     click(chip("Map 3"))
     expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
     expect(allChip().getAttribute("aria-pressed")).toBe("false")
-    expect(text()).toContain("Started Level 7 terrain")
-    expect(text()).not.toContain("is asking you something")
+    expect(ids()).toEqual([LEVEL.id])
+    expect(coordinator()).toBeNull()
     expect(text()).not.toContain("hook fired")
     expect(host.querySelector('[data-testid="project-filter-banner"]')?.textContent).toContain("Only Map 3")
     click(chip("box-yard"))
-    expect(text()).not.toContain("Started Level 7 terrain")
-    expect(text()).toContain("is asking you something")
+    expect(ids()).toEqual([CARDS.id])
     expect(text()).toContain("Coordinator cards")
     click(chip("box-yard"))
-    expect(text()).toContain("Started Level 7 terrain")
+    expect(ids()).toEqual([LEVEL.id, CARDS.id])
     click(chip("Map 3"))
     const showAll = [...host.querySelectorAll('[data-testid="project-filter-banner"] button')].find((b) => b.textContent?.includes("Show all"))!
     click(showAll)
     expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
-    expect(text()).toContain("is asking you something")
+    expect(coordinator()!.textContent).toContain("is asking you something")
   })
 
-  it("leads task links and a task's update chip with its tile, in its project's colour", () => {
-    setCoordinatorView("timeline")
+  it("leads task links with their tile, in their project's colour", () => {
     render(createElement(ChatPanel))
-    // The reply's link, and the tool line's (the Timeline's: the Cards view leaves tool calls out).
+    // The reply's link, in the Coordinator card.
     const links = [...host.querySelectorAll(`a[href="/tasks/${LEVEL.id}"]`)]
-    expect(links).toHaveLength(2)
+    expect(links).toHaveLength(1)
     for (const link of links) {
       const tile = link.querySelector('[data-testid="task-tile"]')!
       expect(tile.getAttribute("data-color")).toBe("orange")
       expect(tile.getAttribute("data-icon")).toBe("map")
       expect(link.textContent).toBe("Level 7 terrain")
     }
-    const update = host.querySelector('[data-testid="update-chip"]')!
-    const lead = update.querySelector('[data-testid="task-tile"]')!
-    expect(lead.getAttribute("data-icon")).toBe("layers")
-    expect(lead.getAttribute("data-color")).toBe(projectColors([YARD, MAP, QUIET]).get(YARD.id))
   })
 
   it("re-colours as soon as a project gets a colour of its own", () => {

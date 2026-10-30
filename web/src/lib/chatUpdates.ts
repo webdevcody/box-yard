@@ -244,12 +244,6 @@ export function sourceNames(sources: readonly UpdateSource[], kindLabel: (kind: 
   return [...out].map(([label, taskId]) => ({ label, taskId }))
 }
 
-/** The distinct sources a group's chip previews: "box-yard Captain, Fix login +2". */
-export function groupPreview(items: readonly UpdateItem[], max = 2): string {
-  const names = [...new Set(items.map((item) => (item.type === "files" ? item.group.taskTitle : (chipView(item.message).source?.label ?? chipView(item.message).preview))))]
-  return names.slice(0, max).join(", ") + (names.length > max ? ` +${names.length - max}` : "")
-}
-
 const sameList = <T>(a: readonly T[], b: readonly T[], eq: (x: T, y: T) => boolean = Object.is) => a.length === b.length && a.every((x, i) => eq(x, b[i]!))
 const sameSource = (a: UpdateSource, b: UpdateSource) => a.id === b.id && a.rowId === b.rowId && a.label === b.label && a.kind === b.kind && a.taskId === b.taskId
 
@@ -270,14 +264,4 @@ export function stableRows(prev: readonly CoordinatorRow[], next: CoordinatorRow
     const p = byId.get(r.id)
     return p && sameRow(p, r) ? p : r
   })
-}
-
-/**
- * The rows from the one holding message `id` on: the rendered tail of the thread (lib/tail.ts). The rows are worked
- * out over the whole thread, so a group or a reply's sources don't change as the tail grows or trims.
- */
-export function rowsFrom(rows: CoordinatorRow[], id: string | undefined): CoordinatorRow[] {
-  if (id === undefined) return []
-  const at = rows.findIndex((r) => rowMessages(r).some((m) => m.id === id))
-  return at <= 0 ? rows : rows.slice(at)
 }

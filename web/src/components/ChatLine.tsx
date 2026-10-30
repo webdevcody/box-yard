@@ -408,7 +408,7 @@ export const USER_BUBBLE = "max-w-[85%] min-w-0 rounded-2xl rounded-br-md bg-yar
 export const SENT_LABEL = "flex max-w-[85%] min-w-0 items-center gap-1 text-[11px] text-zinc-500"
 
 /**
- * Over a message Cody sent to a task from its card: where it went. In the card, "to this task"; in the Timeline, the
+ * Over a message Cody sent to a task from its card: where it went. In the card, "to this task"; anywhere else, the
  * task, and the way to its card.
  */
 function SentFrom({ taskId, inCard }: { taskId: string; inCard: boolean }) {
