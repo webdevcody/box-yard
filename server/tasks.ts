@@ -6672,8 +6672,12 @@ export class TaskManager {
       console.warn(`[box-yard] archive ${taskId} failed: ${errorMessage(err)}`)
     } finally {
       fs.rmSync(part, { force: true })
-      const stages = [...keepPackStages(this.provider.root(boxId), taskId), ...gitStages(this.provider.root(boxId), taskId)]
-      await this.provider.exec(boxId, `rm -rf ${stages.map(q).join(" ")}`).catch(() => {})
+      // An SSH machine's root comes from its record, which may be gone by now (removed, or Box Yard stopping).
+      try {
+        const root = this.provider.root(boxId)
+        const stages = [...keepPackStages(root, taskId), ...gitStages(root, taskId)]
+        await this.provider.exec(boxId, `rm -rf ${stages.map(q).join(" ")}`).catch(() => {})
+      } catch {}
       this.archiving.delete(taskId)
     }
   }
