@@ -46,13 +46,16 @@ function ChipLine({ open, onToggle, title, children }: { open: boolean; onToggle
   )
 }
 
-/** One update: its chip, and once opened its whole text (or a files card) under it. */
+/**
+ * One update: its chip, and once opened its whole text (or a files card) under it. `own`: inside its task's card
+ * (components/CoordinatorCards.tsx), which already names the task, so the chip leads with what happened.
+ */
 export const UpdateChip = memo(
-  function UpdateChip({ item }: { item: UpdateItem }) {
-    return item.type === "files" ? <FilesChip item={item} /> : <NoticeChip m={item.message} />
+  function UpdateChip({ item, own = false }: { item: UpdateItem; own?: boolean }) {
+    return item.type === "files" ? <FilesChip item={item} own={own} /> : <NoticeChip m={item.message} own={own} />
   },
   // Rows are rebuilt as messages arrive; an update with the very same messages is the same chip.
-  (a, b) => a.item === b.item || (a.item.id === b.item.id && sameMessages(itemMessages(a.item), itemMessages(b.item))),
+  (a, b) => a.own === b.own && (a.item === b.item || (a.item.id === b.item.id && sameMessages(itemMessages(a.item), itemMessages(b.item)))),
 )
 
 const sameMessages = (a: ChatMessage[], b: ChatMessage[]) => a.length === b.length && a.every((m, i) => m === b[i])
@@ -68,31 +71,33 @@ function Verb({ icon: Icon, className, label, verb }: { icon: LucideIcon | null;
   )
 }
 
-const NoticeChip = memo(function NoticeChip({ m }: { m: ChatMessage }) {
+const NoticeChip = memo(function NoticeChip({ m, own }: { m: ChatMessage; own: boolean }) {
   const [open, toggle] = useChipOpen(m.id)
   const v = chipView(m)
   const { icon, className, label } = v.captain ? { icon: Bot, className: "text-sky-400", label: "Captain" } : NOTICE_ICON[v.kind]
   const Icon = icon
   // A task's update leads with its tile, and its kind's icon moves to the verb.
   const taskId = v.captain ? null : typeof m.meta?.taskId === "string" ? m.meta.taskId : null
-  const tile = useTaskTile(taskId)
+  const tile = useTaskTile(taskId) && !own
+  // In its task's card, a task's update needn't name it; a Captain's still says whose report it is.
+  const source = own && !v.captain ? null : v.source
   return (
     <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="update-chip" data-open={open || undefined} className={MESSAGE_BLOCK}>
       <ChipLine open={open} onToggle={toggle} title={[v.source?.label, v.verb, v.preview].filter(Boolean).join(" ")}>
         {tile ? <TaskTile id={taskId} /> : <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />}
-        {v.source &&
-          (v.source.href ? (
-            <AppLink href={v.source.href} className={SOURCE_LINK}>
-              {v.source.label}
+        {source &&
+          (source.href ? (
+            <AppLink href={source.href} className={SOURCE_LINK}>
+              {source.label}
             </AppLink>
           ) : (
-            <span className="min-w-0 max-w-[55%] shrink truncate font-medium text-zinc-300">{v.source.label}</span>
+            <span className="min-w-0 max-w-[55%] shrink truncate font-medium text-zinc-300">{source.label}</span>
           ))}
         {tile ? <Verb icon={Icon} className={className} label={label} verb={v.verb} /> : v.verb && <span className="max-w-[45%] min-w-0 shrink-[0.5] truncate text-zinc-400">{v.verb}</span>}
         {/* Open, the text is right below: no preview. */}
         {v.preview && !open && (
-          <span data-testid="update-chip-preview" className={cx("min-w-0 flex-1 truncate", v.source ? "text-zinc-600" : "text-zinc-400")}>
-            {v.source || v.verb ? "· " : ""}
+          <span data-testid="update-chip-preview" className={cx("min-w-0 flex-1 truncate", source ? "text-zinc-600" : "text-zinc-400")}>
+            {source || v.verb ? "· " : ""}
             <InRepo taskId={typeof m.meta?.taskId === "string" ? m.meta.taskId : null} projectId={typeof m.meta?.projectId === "string" ? m.meta.projectId : null}>
               <LinkedText text={v.preview} />
             </InRepo>
@@ -135,16 +140,16 @@ function NoticeBody({ m }: { m: ChatMessage }) {
   )
 }
 
-const FilesChip = memo(function FilesChip({ item }: { item: Extract<UpdateItem, { type: "files" }> }) {
+const FilesChip = memo(function FilesChip({ item, own }: { item: Extract<UpdateItem, { type: "files" }>; own: boolean }) {
   const [open, toggle] = useChipOpen(item.id)
   const g = item.group
   const { icon: Icon, className, label } = NOTICE_ICON.artifact
-  const tile = useTaskTile(g.taskId)
+  const tile = useTaskTile(g.taskId) && !own
   return (
     <div id={`chat-${item.id}`} data-testid="update-chip" data-open={open || undefined}>
       <ChipLine open={open} onToggle={toggle} title={`${g.taskTitle} ${publishedLabel(g.files.length)}`}>
         {tile ? <TaskTile id={g.taskId} /> : <Icon className={cx("h-3.5 w-3.5 shrink-0", className)} aria-label={label} />}
-        {g.taskId ? (
+        {own ? null : g.taskId ? (
           <AppLink href={`/tasks/${g.taskId}`} className={SOURCE_LINK}>
             {g.taskTitle}
           </AppLink>

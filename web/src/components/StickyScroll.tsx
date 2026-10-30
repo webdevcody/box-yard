@@ -51,6 +51,7 @@ export type StickyScrollHandle = { scrollToEnd: () => void }
 // With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
 // (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
 // `handle.scrollToEnd()` (after a send) re-pins it and smooth-scrolls to the bottom, even from far up.
+// `overlay` floats bottom-center over the list, beside "Jump to latest" (the Coordinator cards' "↓ N new").
 export function StickyScroll({
   handle,
   count,
@@ -61,6 +62,7 @@ export function StickyScroll({
   onTrim,
   className,
   contentClassName,
+  overlay,
   children,
 }: {
   handle?: Ref<StickyScrollHandle>
@@ -72,6 +74,7 @@ export function StickyScroll({
   onTrim?: () => void
   className?: string
   contentClassName?: string
+  overlay?: ReactNode
   children: ReactNode
 }) {
   const scroller = useRef<HTMLDivElement>(null)
@@ -480,14 +483,19 @@ export function StickyScroll({
           {children}
         </div>
       </div>
-      {away && (
-        <button
-          onClick={jump}
-          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/95 px-3 py-1.5 text-xs font-medium text-zinc-100 shadow-lg hover:bg-zinc-800"
-        >
-          <ArrowDown className="h-3.5 w-3.5" />
-          {unread > 0 ? `${unread} new message${unread === 1 ? "" : "s"}` : "Jump to latest"}
-        </button>
+      {(away || overlay) && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 *:pointer-events-auto">
+          {overlay}
+          {away && (
+            <button
+              onClick={jump}
+              className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/95 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-zinc-100 shadow-lg hover:bg-zinc-800"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+              {unread > 0 ? `${unread} new message${unread === 1 ? "" : "s"}` : "Jump to latest"}
+            </button>
+          )}
+        </div>
       )}
     </div>
   )

@@ -155,6 +155,18 @@ describe("create_tasks", () => {
     expect([bakery.effort, library.effort, tower.effort]).toEqual(["medium", "high", "medium"])
     expect(library.model).toBe("claude-sonnet-5-5")
     expect(bakery.model).not.toBe("claude-sonnet-5-5")
+
+    // One call is one batch (the Coordinator's cards view shows it as one card); a task started on its own has none.
+    expect(bakery.batchId).toMatch(/^batch_[a-f0-9]{12}$/)
+    expect([library.batchId, tower.batchId]).toEqual([bakery.batchId, bakery.batchId])
+    expect(earlier.batchId).toBeNull()
+    const single = await coordinator.json("create_tasks", { project: p.id, tasks: [{ title: "Well", prompt: "Dig the well." }] })
+    expect(store.getTask(single.tasks[0].id)!.batchId).toBeNull()
+    const next = await coordinator.json("create_tasks", { project: p.id, tasks: [{ title: "Mill", prompt: "a" }, { title: "Gate", prompt: "b" }] })
+    const nextBatch = store.getTask(next.tasks[0].id)!.batchId
+    expect(nextBatch).toMatch(/^batch_/)
+    expect(nextBatch).not.toBe(bakery.batchId)
+    expect(store.getTask(next.tasks[1].id)!.batchId).toBe(nextBatch)
   })
 
   it("creates nothing when any item is bad, and lists every problem by item number", async () => {

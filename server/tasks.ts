@@ -838,7 +838,7 @@ export class TaskManager {
    * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
    * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
    * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
-   * per call.
+   * per call. Two or more share a batch id (Task.batchId), which the Coordinator's cards view shows as one card.
    */
   createTasks(inputs: NewTask[]): Task[] {
     const projects = inputs.map((input) => {
@@ -849,11 +849,13 @@ export class TaskManager {
       if (input.runsOn) this.requireIdentityRunner(project.id, input.runsOn)
       return project
     })
+    const batchId = inputs.length > 1 ? `batch_${randomUUID().replace(/-/g, "").slice(0, 12)}` : null
     const ids = this.store.db.transaction(() =>
       inputs.map((input, i) => {
         const route = this.initialRoute(input)
         const task = this.store.createTask({
           ...input,
+          batchId,
           startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
           model: route.model,
           effort: route.effort,

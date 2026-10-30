@@ -187,6 +187,19 @@ body.resizing iframe {
   }
 }
 
+/* A Coordinator card that "↓ N new" or "Back to its card" just went to (components/CoordinatorCards.tsx). */
+@keyframes card-flash {
+  0% {
+    box-shadow: 0 0 0 2px rgb(251 191 36 / 0.6);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgb(251 191 36 / 0);
+  }
+}
+.card-flash {
+  animation: card-flash 1.4s ease-out;
+}
+
 /* Passages that have a side thread (lib/threadHighlight.ts), tinted in place; the open thread's is stronger. */
 ::highlight(side-thread) {
   background-color: color-mix(in oklab, var(--color-yard-400) 14%, transparent);

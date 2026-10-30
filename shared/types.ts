@@ -240,6 +240,8 @@ export interface Task {
   pushState?: PushState | null
   /** The icon it was given (shared/taskIcons.ts: create_task's `icon`); null: one from its title (taskIcon()). */
   icon?: TaskIconName | null
+  /** Shared by the tasks one create_tasks call started (the Coordinator's cards view shows them as one card); null when started on its own. */
+  batchId?: string | null
   createdAt: number
   updatedAt: number
 }

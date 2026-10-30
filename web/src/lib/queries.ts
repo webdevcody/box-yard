@@ -21,7 +21,7 @@ import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
 import { playSendSound } from "./sendSound"
-import { runningCount } from "./runningTasks"
+import { badgeStatus, type BadgeStatus } from "./prState"
 import type {
   BoxCleanup,
   BoxContents,
@@ -163,13 +163,19 @@ export function useRunningTask(projectId: string) {
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
 }
 
-/** How many tasks are running (lib/runningTasks). Re-renders only when the count changes, not on every task update. */
-export const useRunningCount = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: runningCount })
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
 }
+/** These tasks (a chat card's), in this order. Re-renders only when one of them changes. */
+export function useTasksIn(ids: readonly string[]) {
+  const select = useCallback((list: Task[]) => ids.flatMap((id) => list.find((t) => t.id === id) ?? []), [ids])
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
+}
+const selectBadgeStatuses = (list: Task[]): Record<string, BadgeStatus> => Object.fromEntries(list.map((t) => [t.id, badgeStatus(t)]))
+/** Every task's status as its badge shows it (Merged once its PR merged), by id. Re-renders only when one changes. */
+export const useBadgeStatuses = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: selectBadgeStatuses })
 /**
  * A task's queued messages (the task page's Queued rows). Refetched when the task's queueRev changes, which only
  * this hook's component reads, so live task updates don't re-render the transcript.
