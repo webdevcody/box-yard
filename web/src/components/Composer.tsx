@@ -30,6 +30,8 @@ let nextKey = 0
 export interface ComposerHandle {
   /** Replace the draft with `text` and focus the box, selecting `select` (e.g. a placeholder) if it's in the text. */
   fill(text: string, select?: string): void
+  /** Send the draft as Enter would (a hint's one-tap "send it there" after the parent switched its target). */
+  submit(): void
 }
 
 /**
@@ -63,6 +65,7 @@ export function Composer({
   historyKey,
   files: allowFiles = true,
   tools,
+  hint,
 }: {
   onSubmit: (text: string, attachments: Attachment[]) => void | Promise<unknown>
   placeholder: string
@@ -77,6 +80,8 @@ export function Composer({
   files?: boolean
   /** More controls in the button row, after the mic: where a card's message goes (CardComposer). */
   tools?: ReactNode
+  /** A line above the buttons that depends on the draft (a task's "send this to the Captain?"). Called on every keystroke, so keep it cheap. */
+  hint?: (draft: string) => ReactNode
 }) {
   const [value, setValue] = useState("")
   // An older prompt shown as a gray ghost while browsing with Up/Down; the value stays empty until Enter takes it.
@@ -260,6 +265,7 @@ export function Composer({
         if (at >= 0) el.setSelectionRange(at, at + select!.length)
         else el.setSelectionRange(text.length, text.length)
       },
+      submit: () => submitRef.current(),
     }),
     [],
   )
@@ -443,6 +449,7 @@ export function Composer({
             </div>
           )}
         </div>
+        {hint && !browse && <div className="px-1.5 empty:hidden">{hint(value)}</div>}
         <div className="flex items-center gap-1 px-1.5 pb-1.5">
           <input
             ref={picker}

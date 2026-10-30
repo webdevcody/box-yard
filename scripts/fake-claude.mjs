@@ -24,6 +24,8 @@
 // Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
 // [reply] (reply_to_agent) or [reply-task] (send_to_task), after any [slow:<seconds>]; otherwise it doesn't reply.
+// A Captain reads Cody's message forwarded from a task's chat ("[From Cody, sent from the chat of task … (task_…) …]")
+// and says which queued ids came with it; with [cancel-queued] it cancels the first one (cancel_queued_message).
 // A Captain's "📝 Notes retro" wake accepts every suggestion it lists (resolve_suggestion, with a reason) and
 // replies "(no update)"; FAKE_RETRO=reject rejects them instead, and FAKE_RETRO=skip leaves them all pending.
 // Worker prompts understand these markers anywhere in the text:
@@ -343,6 +345,16 @@ async function orchestrator(mcp, prompt) {
   }
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
+  }
+  // Cody's messages forwarded from a task's chat (TaskManager.forwardToCaptain): the task's queue comes with each.
+  const forwardRe = /^\[From Cody, sent from the chat of task .*?\((task_[\w-]+)\)[^\n]*\]\n([\s\S]*?)(?=\n\[From |(?![\s\S]))/gm
+  while ((m = forwardRe.exec(prompt))) {
+    const ids = [...m[2].matchAll(/^- (in_[\w-]+) /gm)].map((x) => x[1])
+    lines.push(`Forwarded from ${m[1]} with ${ids.length ? `queued ${ids.join(", ")}` : "no queued messages"}.`)
+    if (/\[cancel-queued\]/i.test(m[2]) && ids[0]) {
+      const r = await useTool(mcp, "cancel_queued_message", { task: m[1], message_id: ids[0] })
+      lines.push(`Cancelled ${ids[0]}: ${r.slice(0, 200)}`)
+    }
   }
   if (!lines.length && named) {
     lines.push(`Here's what you asked about:\n${named[1].trim()}`)
