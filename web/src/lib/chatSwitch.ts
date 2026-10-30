@@ -4,6 +4,7 @@
 // The picked chat may not be on screen yet (a Captain tab the navigation is about to render, the Coordinator drawer
 // sliding in), so the switcher leaves a request here and each chat takes its own when it mounts or hears about it.
 import { useEffect, type RefObject } from "react"
+import { normalizeQuery, scoreText } from "./paletteRank"
 
 /** App opens the Coordinator drawer on this (docked or in Zen it's already on screen). */
 export const OPEN_COORDINATOR_EVENT = "box-yard:open-coordinator"
@@ -41,4 +42,54 @@ export function useComposerFocus(chat: string, box: RefObject<HTMLTextAreaElemen
     window.addEventListener(FOCUS_EVENT, onFocus)
     return () => window.removeEventListener(FOCUS_EVENT, onFocus)
   }, [chat, box])
+}
+
+/** A word-initials match ("stn" → "survive-the-night") ranks between a prefix and a word start. */
+const INITIALS_SCORE = 700
+/** Aliases count less than the name, as in the palette (FIELD_WEIGHT.alias). */
+const ALIAS_WEIGHT = 0.75
+
+/**
+ * The switcher's filter: the chats whose name matches `query`, best first (lib/paletteRank.ts's tiers: exact, prefix,
+ * word start, substring, then a fuzzy subsequence), with word initials ("stn" → "survive-the-night") just under a
+ * prefix; a tie keeps the menu's order. An empty query keeps them all, in order. `aliases` match too, a little
+ * weaker ("All" for the Coordinator, as the project bar says).
+ */
+export function rankChats<T extends { label: string; aliases?: readonly string[] }>(items: readonly T[], query: string): T[] {
+  const q = normalizeQuery(query)
+  if (!q) return [...items]
+  const scored: { item: T; score: number; at: number }[] = []
+  items.forEach((item, at) => {
+    let score = scoreName(item.label, q)
+    for (const alias of item.aliases ?? []) {
+      const s = scoreName(alias, q)
+      if (s !== null && (score === null || s * ALIAS_WEIGHT > score)) score = s * ALIAS_WEIGHT
+    }
+    if (score !== null) scored.push({ item, score, at })
+  })
+  return scored.sort((a, b) => b.score - a.score || a.at - b.at).map((s) => s.item)
+}
+
+function scoreName(name: string, q: string): number | null {
+  const s = scoreText(name, q)
+  const initials = name
+    .toLowerCase()
+    .split(/[\s\-_/.:]+/)
+    .filter(Boolean)
+    .map((w) => w[0])
+    .join("")
+  if (q.length >= 2 && !q.includes(" ") && initials.startsWith(q)) return Math.max(s ?? 0, INITIALS_SCORE)
+  return s
+}
+
+/**
+ * The project picker's hotkey: P, with no modifier, from anywhere but a text field, opens the Coordinator's chat
+ * switcher with its filter focused. Free of the other hotkeys: ⌘K/Ctrl+K and "/" (palette), 1-4 (Yard tabs), ←/→ and
+ * Z (file preview), ⌥⇧Z (Zen), ⌥⇧V (voice), Alt/Ctrl(+Shift)+Space (dictation), Ctrl+N/P (palette rows, in its field).
+ */
+export const PROJECT_PICKER_KEY_LABEL = "P"
+export function isProjectPickerKey(e: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "defaultPrevented" | "repeat" | "isComposing" | "target">) {
+  if (e.key.toLowerCase() !== "p" || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || e.repeat || e.isComposing) return false
+  const el = e.target instanceof Element ? e.target : null
+  return !el?.closest("input, textarea, select, [contenteditable=''], [contenteditable=true]")
 }

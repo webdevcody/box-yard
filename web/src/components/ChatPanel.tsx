@@ -27,7 +27,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPc
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
 import { ChatSwitcher } from "./ChatSwitcher"
-import { useComposerFocus } from "../lib/chatSwitch"
+import { focusComposer, useComposerFocus } from "../lib/chatSwitch"
 import { VoiceControl } from "./VoiceControl"
 import { CloudMeter, useShowCloudMeter } from "./CloudMeter"
 import { ChatLine } from "./ChatLine"
@@ -36,7 +36,7 @@ import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider, type CardPanelProps } from "./SideThread"
 import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
 import { chatProvenance, recentProjects, type Provenance } from "../lib/chatProvenance"
-import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
+import { pickProject, setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { CardPanel, CardsView, NewCardsPill, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
 import { CaptainCard } from "./BottomCard"
 import { projectColorStyle } from "./TaskIcon"
@@ -143,6 +143,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         if (!content && !attachments.length) return
         sending = sendCaptain.mutateAsync({ id: newClientId("chat"), content, attachments })
         sending.catch(() => {}) // onError already says so; the Composer puts the text back.
+        // Its answer lands in the Captain card: "Tasks only" shows it again.
+        setTasksOnly(false, true)
         scroller.current?.scrollToEnd()
       } else sending = followUp(text, attachments)
       box.current?.focus()
@@ -177,10 +179,12 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const talking = captainId
     ? { busy: Boolean(captainState.data?.busy), state: captainState.data, queued: compactCaptain.isPending, compact: compactCaptain.mutate, who: "the Captain's" }
     : { busy: Boolean(busy.data), state: orch.data, queued: compact.isPending, compact: compactNow, who: "the Coordinator's" }
-  // Back to the Coordinator from a Captain: the whole chat again.
+  // The chat switcher stays in this chat: a project goes on the project bar and the chat shows only it, its Captain
+  // in the box below (rather than opening the Captain's own tab or Zen panel); the Coordinator shows it all again.
   const pickHere = useCallback((chat: string) => {
-    if (chat !== COORDINATOR_CHAT) return false
-    setChatProjectFilter(null)
+    if (chat === COORDINATOR_CHAT) setChatProjectFilter(null)
+    else pickProject(chat)
+    focusComposer(COORDINATOR_CHAT)
     return true
   }, [])
 
@@ -217,7 +221,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               {/* The title opens the chat switcher: the Coordinator, then every project's Captain. Too narrow for the word
                   beside "Tasks only" (a 320px phone), the icon says it alone and the switcher keeps its chevron. */}
               <div className="flex min-w-0 flex-1">
-                <ChatSwitcher current={captainId ?? COORDINATOR_CHAT} onLeave={onClose} onPick={pickHere}>
+                <ChatSwitcher current={captainId ?? COORDINATOR_CHAT} onPick={pickHere} hotkey>
                   {captainId ? (
                     <span data-testid="chat-title" style={projectColorStyle(captainColor)} className="flex min-w-0 items-center gap-1.5 @max-[23rem]:sr-only">
                       <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-(--pc)" />

@@ -1,11 +1,15 @@
 // The Coordinator chat's project bar, under its header: "All · 6 active", then a chip per project in its colour with
 // what its tasks are doing ("1 needs you · 3 running"). A chip shows only that project's part of the chat; "All" (or
 // the pressed chip again) shows everything. One row that scrolls sideways at any width (lib/projectBar.ts).
+//
+// A chip's × takes its project off the bar (it shows on hover or focus in the chip's right padding, so nothing moves,
+// and always on touch screens). It stays off until it's picked in the chat switcher again;
+// meanwhile a task of its asking Cody something shows in the "+1 needs you" chip at the end, which puts it back.
 import { memo, useEffect, useMemo, useRef } from "react"
 import { X } from "lucide-react"
 import { useProjects, useTasks } from "../lib/queries"
 import { useTiles } from "../lib/taskTiles"
-import { barCounts, projectBarRows, setChatProjectFilter, useChatProjectFilter, type BarRow } from "../lib/projectBar"
+import { barCounts, centredScrollLeft, pickProject, pinProject, projectBarRows, setChatProjectFilter, unpinProject, useBarPins, useChatProjectFilter, type BarRow } from "../lib/projectBar"
 import { projectColorStyle } from "./TaskIcon"
 import { cx } from "./ui"
 import type { ProjectColor } from "../../../shared/projectColors"
@@ -14,24 +18,37 @@ const CHIP =
   "inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border pr-2.5 pl-2 text-xs whitespace-nowrap transition focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:h-9"
 const CHIP_OFF = "border-zinc-800 bg-zinc-900/60 text-zinc-300 hover:border-zinc-700"
 const CHIP_ON = "border-(--pc)/70 bg-(--pc)/15 text-zinc-50"
+/** A project's chip: the pill around its button and its ×, ringed when either has keyboard focus. */
+const PILL =
+  "group/pill relative inline-flex h-7 shrink-0 items-center rounded-full border text-xs whitespace-nowrap transition has-focus-visible:ring-2 has-focus-visible:ring-yard-500/50 pointer-coarse:h-9"
 
 /** `recent`: the projects the chat talked about lately (lib/chatProvenance.ts), shown even with nothing running. */
 export const ProjectBar = memo(function ProjectBar({ recent, className }: { recent: ReadonlySet<string>; className?: string }) {
   const projects = useProjects()
   const tasks = useTasks()
   const filter = useChatProjectFilter()
+  const pins = useBarPins()
   const { colors } = useTiles()
-  const { rows, active } = useMemo(() => projectBarRows(projects.data ?? [], tasks.data ?? [], recent, filter), [projects.data, tasks.data, recent, filter])
+  const { rows, active, hidden } = useMemo(
+    () => projectBarRows(projects.data ?? [], tasks.data ?? [], recent, filter, pins),
+    [projects.data, tasks.data, recent, filter, pins],
+  )
   const bar = useRef<HTMLDivElement>(null)
   // A project that's gone (deleted) can't stay the filter.
   useEffect(() => {
     if (filter && projects.data && !projects.data.some((p) => p.id === filter)) setChatProjectFilter(null)
   }, [filter, projects.data])
-  // The pressed chip stays in view on a narrow bar.
+  // The pressed chip scrolls to the bar's middle whenever the pick changes (the switcher, P, a chip, +N needs you), or
+  // the bar first shows. Only the bar scrolls: scrollIntoView would move the page and the panel too.
+  const shown = rows.length > 0 || hidden.length > 0
+  const centred = useRef(false)
   useEffect(() => {
-    bar.current?.querySelector('[aria-pressed="true"]')?.scrollIntoView?.({ block: "nearest", inline: "nearest" })
-  }, [filter])
-  if (!rows.length) return null
+    const el = bar.current
+    if (!el) return
+    centreSelected(el, centred.current)
+    centred.current = true
+  }, [filter, shown])
+  if (!rows.length && !hidden.length) return null
   return (
     <div
       ref={bar}
@@ -56,35 +73,87 @@ export const ProjectBar = memo(function ProjectBar({ recent, className }: { rece
       {rows.map((row) => (
         <ProjectChip key={row.id} row={row} color={colors.get(row.id)} on={filter === row.id} />
       ))}
+      {hidden.length > 0 && <HiddenNeedsChip rows={hidden} />}
     </div>
   )
 })
 
+/** Scrolls `bar` sideways so its pressed chip is centred: smoothly once it's on screen, unless motion is reduced. */
+export function centreSelected(bar: HTMLElement, smooth: boolean) {
+  const pressed = bar.querySelector<HTMLElement>('[aria-pressed="true"]')
+  const chip = pressed?.closest<HTMLElement>("[data-project]") ?? pressed
+  if (!chip) return
+  const left = centredScrollLeft(bar.getBoundingClientRect(), chip.getBoundingClientRect(), bar.scrollLeft, bar.clientWidth, bar.scrollWidth)
+  if (Math.abs(left - bar.scrollLeft) < 1) return
+  const reduced = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches
+  if (typeof bar.scrollTo === "function") bar.scrollTo({ left, behavior: smooth && !reduced ? "smooth" : "auto" })
+  else bar.scrollLeft = left
+}
+
 function ProjectChip({ row, color, on }: { row: BarRow; color: ProjectColor | undefined; on: boolean }) {
   const counts = barCounts(row)
   return (
+    <span data-project={row.id} style={projectColorStyle(color)} className={cx(PILL, on ? CHIP_ON : CHIP_OFF)}>
+      <button
+        type="button"
+        aria-pressed={on}
+        data-testid="project-chip"
+        onClick={() => setChatProjectFilter(on ? null : row.id)}
+        title={on ? "Show the whole chat" : `Only ${row.name}`}
+        // Room on the right for the × (laid over it with a mouse, beside it on touch).
+        className="inline-flex h-full items-center gap-1.5 rounded-l-full pr-[18px] pl-2 focus-visible:outline-none pointer-coarse:pr-0.5"
+      >
+        <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-(--pc)" />
+        {row.name}
+        {counts.length > 0 && (
+          <span className="text-zinc-400">
+            {counts.map((c) => (
+              <span key={c.key} className={c.key === "needs" ? "text-amber-300" : undefined}>
+                {" · "}
+                <b className={cx("font-semibold tabular-nums", c.key === "needs" ? "text-amber-300" : "text-zinc-200")}>{c.n}</b> {c.label}
+              </span>
+            ))}
+          </span>
+        )}
+      </button>
+      <button
+        type="button"
+        data-testid="project-unpin"
+        aria-label={`Unpin ${row.name}`}
+        title={`Take ${row.name} off the bar (pick it in the chat switcher to bring it back)`}
+        onClick={() => unpinProject(row.id)}
+        className={cx(
+          "grid shrink-0 place-items-center rounded-full text-zinc-500 transition hover:bg-zinc-700/70 hover:text-zinc-100 focus-visible:outline-none",
+          // With a mouse: in the chip's right padding, so the bar doesn't shift when it shows on hover or focus.
+          "absolute top-1/2 right-[3px] h-4 w-4 -translate-y-1/2 opacity-0 group-hover/pill:opacity-100 group-has-focus-visible/pill:opacity-100",
+          // On touch: always there, a bigger target beside the name.
+          "pointer-coarse:static pointer-coarse:mr-1 pointer-coarse:h-7 pointer-coarse:w-7 pointer-coarse:translate-y-0 pointer-coarse:opacity-100",
+        )}
+      >
+        <X className="h-2.5 w-2.5 pointer-coarse:h-3 pointer-coarse:w-3" aria-hidden />
+      </button>
+    </span>
+  )
+}
+
+/** Unpinned projects with a task asking Cody: one chip at the end that puts them back on the bar (and shows a lone one). */
+function HiddenNeedsChip({ rows }: { rows: BarRow[] }) {
+  const n = rows.reduce((sum, r) => sum + r.needs, 0)
+  const names = rows.map((r) => r.name).join(", ")
+  return (
     <button
       type="button"
-      aria-pressed={on}
-      data-testid="project-chip"
-      data-project={row.id}
-      onClick={() => setChatProjectFilter(on ? null : row.id)}
-      title={on ? "Show the whole chat" : `Only ${row.name}`}
-      style={projectColorStyle(color)}
-      className={cx(CHIP, on ? CHIP_ON : CHIP_OFF)}
+      data-testid="project-bar-hidden"
+      onClick={() => {
+        for (const r of rows) pinProject(r.id)
+        if (rows.length === 1) pickProject(rows[0]!.id)
+      }}
+      title={`Unpinned, with a task asking you: ${names}. Put ${rows.length === 1 ? "it" : "them"} back on the bar`}
+      className={cx(CHIP, "border-zinc-800 bg-zinc-900/60 pl-2.5 text-amber-300 hover:border-zinc-700")}
     >
-      <span aria-hidden className="h-2 w-2 shrink-0 rounded-full bg-(--pc)" />
-      {row.name}
-      {counts.length > 0 && (
-        <span className="text-zinc-400">
-          {counts.map((c) => (
-            <span key={c.key} className={c.key === "needs" ? "text-amber-300" : undefined}>
-              {" · "}
-              <b className={cx("font-semibold tabular-nums", c.key === "needs" ? "text-amber-300" : "text-zinc-200")}>{c.n}</b> {c.label}
-            </span>
-          ))}
-        </span>
-      )}
+      <span>
+        <b className="font-semibold tabular-nums">+{n}</b> needs you
+      </span>
     </button>
   )
 }
