@@ -14,6 +14,8 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
+// A quick question whose prompt carries the state of what it names ("[What this message names …]", server/handoff.ts)
+// is answered from that block with no tool call, as the prompt tells a model to.
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
 // Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
@@ -57,6 +59,39 @@ const flag = (name) => {
 if (args.includes("--version")) {
   console.log("0.0.0 (fake claude for Box Yard)")
   process.exit(0)
+}
+
+// The model list Box Yard's pickers ask for (server/claudeModels.ts): answer stream-json's `initialize` control
+// request like the real CLI. FAKE_CLAUDE_MODELS=<json array> replaces the rows; "fail" exits without answering.
+if (args.includes("--input-format") && flag("--input-format") === "stream-json") {
+  if (process.env.FAKE_CLAUDE_MODELS === "fail") process.exit(1)
+  const all = ["low", "medium", "high", "xhigh", "max"]
+  const models = process.env.FAKE_CLAUDE_MODELS
+    ? JSON.parse(process.env.FAKE_CLAUDE_MODELS)
+    : [
+        { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", supportsEffort: true, supportedEffortLevels: all },
+        { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", supportsEffort: true, supportedEffortLevels: all },
+        { value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable", supportsEffort: true, supportedEffortLevels: all },
+        { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: all },
+        { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku", supportsEffort: true, supportedEffortLevels: all },
+      ]
+  let buf = ""
+  process.stdin.setEncoding("utf8").on("data", (d) => {
+    buf += d
+    for (let nl; (nl = buf.indexOf("\n")) >= 0; buf = buf.slice(nl + 1)) {
+      let msg
+      try {
+        msg = JSON.parse(buf.slice(0, nl))
+      } catch {
+        continue
+      }
+      if (msg.type === "control_request" && msg.request?.subtype === "initialize") {
+        process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: msg.request_id, response: { commands: [], models } } }) + "\n")
+      }
+    }
+  })
+  process.stdin.on("end", () => process.exit(0))
+  await new Promise(() => {})
 }
 
 const partial = args.includes("--include-partial-messages")
@@ -254,13 +289,22 @@ async function sideThread(mcp, prompt) {
   return lines.join("\n")
 }
 
+const NAMED_BLOCK = /^\[(?:What|Tasks) this message names[^\n]*\]\n((?:(?:- |  |Projects it names).*(?:\n|$))*)/m
+
 async function orchestrator(mcp, prompt) {
   if (prompt.includes("📝 **Notes retro**")) return notesRetro(mcp, prompt)
   if (prompt.includes("[Box Yard side thread]") || session.thread) {
     session.thread = true
     return sideThread(mcp, prompt)
   }
-  const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
+  // The state of what the message names (server/handoff.ts): a model answers a quick question from it, without a lookup.
+  const named = prompt.match(NAMED_BLOCK)
+  const text = prompt
+    .replace(NAMED_BLOCK, "")
+    .split("\n")
+    .filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]"))
+    .join("\n")
+    .trim()
   const lines = []
   let m
   if ((m = text.match(/create project\s+"?([\w .-]+?)"?(?:\s+repo\s+(\S+))?\s*$/im))) {
@@ -296,7 +340,9 @@ async function orchestrator(mcp, prompt) {
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
   }
-  if (!lines.length || /status|what.*(up|going)/i.test(text)) {
+  if (!lines.length && named) {
+    lines.push(`Here's what you asked about:\n${named[1].trim()}`)
+  } else if (!lines.length || /status|what.*(up|going)/i.test(text)) {
     const r = await useTool(mcp, "list_tasks", {})
     let tasks = []
     try {
@@ -472,7 +518,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  session.turns.push({ prompt, result, at: Date.now(), uuids, ...(session.thread ? { thread: true } : {}) })
+  session.turns.push({ prompt, result, at: Date.now(), uuids, model: flag("--model") ?? null, effort: flag("--effort") ?? null, ...(session.thread ? { thread: true } : {}) })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
     type: "result",

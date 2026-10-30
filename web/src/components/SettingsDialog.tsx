@@ -27,7 +27,7 @@ import { RunPodPanel } from "./RunPodSettings"
 import { DockerPanel } from "./DockerSettings"
 import { Modal } from "./Modal"
 import { confirmDialog } from "../lib/confirm"
-import { EFFORT_LABEL, MODELS } from "../lib/models"
+import { EffortPicker, ModelPicker } from "./ModelPicker"
 import { Button, NewTabLink, Select, cx, inputClass } from "./ui"
 import { BOX_SIZE_SPECS } from "../../../shared/boxSizes"
 import { NOTE_BUDGET_LIMITS } from "../../../shared/notes"
@@ -38,7 +38,6 @@ import {
   BOX_CREATE_CONCURRENCY,
   BOX_SIZES,
   DEFAULT_AUTOCOMPACT_TOKENS,
-  EFFORTS,
   SIZE_DEFAULTS,
   UPSTASH_FREE_CONCURRENT_BOXES,
   WORKER_SIZES,
@@ -100,16 +99,19 @@ export function SourceHint({ source, env, changed }: { source?: SettingSource; e
 /** One setting: label and help text on the left, the control and where its value comes from on the right. */
 export function Row({ id, label, help, hint, children }: { id?: string; label: string; help: ReactNode; hint?: ReactNode; children: ReactNode }) {
   return (
-    <div className="grid gap-x-8 gap-y-2 border-t border-zinc-900 py-4 first:border-t-0 first:pt-0 sm:grid-cols-[minmax(0,1fr)_17rem]">
-      <div>
-        <label htmlFor={id} className="text-sm font-medium text-zinc-200">
-          {label}
-        </label>
-        <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
-      </div>
-      <div className="space-y-1.5">
-        {children}
-        {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+    // Two columns by the row's own width, not the window's: at 125% zoom the sidebar leaves the help text a sliver.
+    <div className="@container border-t border-zinc-900 py-4 first:border-t-0 first:pt-0">
+      <div className="grid gap-x-8 gap-y-2 @md:grid-cols-[minmax(0,1fr)_17rem]">
+        <div>
+          <label htmlFor={id} className="text-sm font-medium text-zinc-200">
+            {label}
+          </label>
+          <div className="mt-1 text-xs leading-relaxed text-zinc-500">{help}</div>
+        </div>
+        <div className="space-y-1.5">
+          {children}
+          {hint && <div className="flex flex-wrap gap-1">{hint}</div>}
+        </div>
       </div>
     </div>
   )
@@ -175,14 +177,6 @@ function AutoCompactControl({
       </div>
     </div>
   )
-}
-
-function EffortOptions() {
-  return EFFORTS.map((x) => (
-    <option key={x} value={x}>
-      {EFFORT_LABEL[x]}
-    </option>
-  ))
 }
 
 // ------------------------------------------------------------------ dialog
@@ -390,7 +384,7 @@ export function SettingsDialog({
         aria-label="Settings categories"
         aria-orientation="vertical"
         onKeyDown={onNavKey}
-        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-visible sm:border-r sm:border-b-0 sm:p-3"
+        className="scroll-thin flex shrink-0 gap-1 overflow-x-auto border-b border-zinc-900 p-2 sm:w-52 sm:flex-col sm:overflow-x-hidden sm:overflow-y-auto sm:border-r sm:border-b-0 sm:p-3"
       >
         {SETTINGS_SECTIONS.map((sec) => {
           const Icon = SECTION_ICON[sec.key]
@@ -469,26 +463,19 @@ export function SettingsDialog({
             <Row
               id={fid("om")}
               label="Model"
-              help="The Claude model the Coordinator chat runs on. Type any model id, or pick one."
+              help="The Claude model the Coordinator chat and its side threads run on. Pick a model or alias, or enter a custom model ID."
               hint={hint("orchestratorModel")}
             >
-              <input
-                id={fid("om")}
-                className={inputClass}
-                list="boxyard-models"
-                value={s.orchestratorModel}
-                onChange={(e) => set("orchestratorModel", e.target.value)}
-              />
+              <ModelPicker id={fid("om")} value={s.orchestratorModel} onChange={(v) => set("orchestratorModel", v)} testId="orchestrator-model" />
             </Row>
             <Row id={fid("oe")} label="Effort" help="How hard it thinks before answering. Higher is slower and costs more." hint={hint("orchestratorEffort")}>
-              <Select
+              <EffortPicker
                 id={fid("oe")}
-                className="w-full"
+                model={s.orchestratorModel}
                 value={s.orchestratorEffort}
-                onChange={(e) => set("orchestratorEffort", e.target.value as Settings["orchestratorEffort"])}
-              >
-                <EffortOptions />
-              </Select>
+                onChange={(v) => set("orchestratorEffort", v as Settings["orchestratorEffort"])}
+                testId="orchestrator-effort"
+              />
             </Row>
             <Row
               id={fid("oac")}
@@ -504,6 +491,40 @@ export function SettingsDialog({
                 tokens={DEFAULT_AUTOCOMPACT_TOKENS}
               />
             </Row>
+            <Row
+              id={fid("orl")}
+              label="Relay turns"
+              help="Runs the Coordinator's relay-only turns (woken by task updates and Captain replies, with no message from you) on this model and effort. Off by default: another model or effort can't reuse the last turn's prompt cache, so each relay turn sends the whole context again. That's quick and cheap on a small model, slow and costly on a big one. Your own messages always use the model above."
+              hint={hint("orchestratorRelay")}
+            >
+              <div className="space-y-2">
+                <label className="flex min-h-11 items-center gap-2 text-sm text-zinc-300 sm:min-h-0">
+                  <input
+                    id={fid("orl")}
+                    type="checkbox"
+                    checked={s.orchestratorRelay.enabled}
+                    onChange={(e) => set("orchestratorRelay", { ...s.orchestratorRelay, enabled: e.target.checked })}
+                    data-testid="orchestrator-relay"
+                  />
+                  {s.orchestratorRelay.enabled ? "On: relay turns use this" : "Off: every turn uses the model above"}
+                </label>
+                <ModelPicker
+                  value={s.orchestratorRelay.model}
+                  onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, model: v })}
+                  disabled={!s.orchestratorRelay.enabled}
+                  ariaLabel="Relay turn model"
+                  testId="orchestrator-relay-model"
+                />
+                <EffortPicker
+                  value={s.orchestratorRelay.effort}
+                  onChange={(v) => set("orchestratorRelay", { ...s.orchestratorRelay, effort: v as Settings["orchestratorEffort"] })}
+                  model={s.orchestratorRelay.model}
+                  disabled={!s.orchestratorRelay.enabled}
+                  ariaLabel="Relay turn effort"
+                  testId="orchestrator-relay-effort"
+                />
+              </div>
+            </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project Captains</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
               Each project's Captain wakes on its task events, so it runs far more often than the Coordinator. Set its model and effort separately to tune that cost. Captains
@@ -512,15 +533,19 @@ export function SettingsDialog({
             <Row
               id={fid("cm")}
               label="Captain model"
-              help="The Claude model every project Captain runs on. Type any model id, or pick one."
+              help="The Claude model every project Captain and its side threads run on. Pick a model or alias, or enter a custom model ID."
               hint={hint("captainModel")}
             >
-              <input id={fid("cm")} className={inputClass} list="boxyard-models" value={s.captainModel} onChange={(e) => set("captainModel", e.target.value)} />
+              <ModelPicker id={fid("cm")} value={s.captainModel} onChange={(v) => set("captainModel", v)} testId="captain-model" />
             </Row>
             <Row id={fid("ce")} label="Captain effort" help="How hard Captains think before answering. Lower is faster and cheaper." hint={hint("captainEffort")}>
-              <Select id={fid("ce")} className="w-full" value={s.captainEffort} onChange={(e) => set("captainEffort", e.target.value as Settings["captainEffort"])}>
-                <EffortOptions />
-              </Select>
+              <EffortPicker
+                id={fid("ce")}
+                model={s.captainModel}
+                value={s.captainEffort}
+                onChange={(v) => set("captainEffort", v as Settings["captainEffort"])}
+                testId="captain-effort"
+              />
             </Row>
             <h4 className="mt-6 border-t border-zinc-900 pt-5 text-sm font-semibold text-zinc-100">Project notes</h4>
             <p className="mt-1 mb-4 text-xs leading-relaxed text-zinc-500">
@@ -578,7 +603,7 @@ export function SettingsDialog({
               <input id={fid("on")} className={inputClass} value={s.ownerName} maxLength={40} onChange={(e) => set("ownerName", e.target.value)} />
             </Row>
             <Row id={fid("am")} label="Model" help="The Claude model each task's agent runs on, unless the task or its project's Routing YAML entry picks one. Once saved here or set by an env var, it wins over the YAML's defaults and fallback." hint={hint("agentModel")}>
-              <input id={fid("am")} className={inputClass} list="boxyard-models" value={s.agentModel} onChange={(e) => set("agentModel", e.target.value)} />
+              <ModelPicker id={fid("am")} value={s.agentModel} onChange={(v) => set("agentModel", v)} testId="agent-model" />
             </Row>
             <Row
               id={fid("ae")}
@@ -590,10 +615,14 @@ export function SettingsDialog({
               }
               hint={hint("agentEffort")}
             >
-              <Select id={fid("ae")} className="w-full" value={s.agentEffort} onChange={(e) => set("agentEffort", e.target.value as AgentEffort)}>
-                <option value="orchestrator">Let the Coordinator decide</option>
-                <EffortOptions />
-              </Select>
+              <EffortPicker
+                id={fid("ae")}
+                model={s.agentModel}
+                value={s.agentEffort}
+                onChange={(v) => set("agentEffort", v as AgentEffort)}
+                lead={<option value="orchestrator">Let the Coordinator decide</option>}
+                testId="agent-effort"
+              />
             </Row>
             <Row
               id={fid("arc")}
@@ -637,11 +666,6 @@ export function SettingsDialog({
         )}
       </div>
 
-      <datalist id="boxyard-models">
-        {MODELS.map((m) => (
-          <option key={m} value={m} />
-        ))}
-      </datalist>
     </Modal>
   )
 }
