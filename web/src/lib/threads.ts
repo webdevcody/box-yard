@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tansta
 import { api } from "./api"
 import { newClientId, upsert } from "./queries"
 import { toast } from "./toast"
-import type { SideThread, SideThreadMessage, UiEvent } from "../../../shared/types"
+import type { SideThread, SideThreadKind, SideThreadMessage, UiEvent } from "../../../shared/types"
 
 /** Which chat a thread hangs off: "coordinator", or the project id of a Captain's chat. */
 export type ThreadChat = string
@@ -55,20 +55,38 @@ export function useThreadStream(id: string) {
   return useQuery({ queryKey: threadKeys.stream(id), queryFn: () => "", initialData: "", staleTime: Infinity })
 }
 
-const setBusy = (qc: QueryClient, chat: ThreadChat, id: string, busy: boolean) =>
-  qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => list?.map((t) => (t.id === id ? { ...t, busy } : t)))
+const patch = (qc: QueryClient, chat: ThreadChat, id: string, change: (t: SideThread) => Partial<SideThread>) =>
+  qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => list?.map((t) => (t.id === id ? { ...t, ...change(t) } : t)))
 
 const pendingMessage = (threadId: string, id: string, content: string): SideThreadMessage => ({ id, threadId, role: "user", content, meta: { pending: true }, createdAt: Date.now() })
 
-/** Start a thread on a highlighted passage with its first question, and open it. */
+/**
+ * Start a thread on a message with its first message, and open it: a question about a highlighted passage, or (kind
+ * "reply") a reply to the whole message, whose quote is the message.
+ */
 export function useAskThread(chat: ThreadChat) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (input: { id: string; messageId: string; anchorId: string; quote: string; question: string }) =>
-      api<{ thread: SideThread; message: SideThreadMessage }>("/api/threads", { body: { ...input, projectId: projectOf(chat) } }),
+    mutationFn: (input: { id: string; messageId: string; anchorId: string; quote: string; question: string; kind?: SideThreadKind }) =>
+      api<{ thread: SideThread; message: SideThreadMessage }>("/api/threads", {
+        body: { ...input, quote: input.kind === "reply" ? undefined : input.quote, projectId: projectOf(chat) },
+      }),
     onMutate: (input) => {
       const now = Date.now()
-      const thread: SideThread = { id: input.id, projectId: projectOf(chat), anchorId: input.anchorId, quote: input.quote.trim(), context: null, busy: true, createdAt: now, updatedAt: now }
+      const thread: SideThread = {
+        id: input.id,
+        projectId: projectOf(chat),
+        anchorId: input.anchorId,
+        kind: input.kind ?? "ask",
+        quote: input.quote.trim(),
+        context: null,
+        busy: true,
+        replies: 1,
+        unread: false,
+        resolvedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      }
       qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => upsert(list ?? [], thread))
       qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(input.id), [pendingMessage(input.id, input.messageId, input.question.trim())])
       openThread(chat, input.id)
@@ -79,9 +97,14 @@ export function useAskThread(chat: ThreadChat) {
       if (openThreadId(chat) === input.id) closeThread(chat)
       toast.error("Couldn't ask", err.message)
     },
-    onSuccess: ({ thread, message }) => {
+    onSuccess: ({ thread, message }, input) => {
+      // A reply to a message that already had a reply thread went to that one.
+      if (thread.id !== input.id) {
+        dropThread(qc, chat, input.id)
+        if (openThreadId(chat) === input.id) openThread(chat, thread.id)
+        qc.removeQueries({ queryKey: threadKeys.messages(thread.id) })
+      } else qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), (list) => upsert(list ?? [], message))
       qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => upsert(list ?? [], thread))
-      qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), (list) => upsert(list ?? [], message))
     },
   })
 }
@@ -92,7 +115,8 @@ export function useSendThreadMessage(chat: ThreadChat, id: string) {
     mutationFn: (input: { id: string; content: string }) => api<SideThreadMessage>(`/api/threads/${id}/messages`, { body: input }),
     onMutate: (input) => {
       qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(id), (list) => upsert(list ?? [], pendingMessage(id, input.id, input.content)))
-      setBusy(qc, chat, id, true)
+      // Busy, and a new message reopens a resolved thread.
+      patch(qc, chat, id, (t) => ({ busy: true, resolvedAt: null, replies: t.replies + 1 }))
     },
     onError: (err: Error, input) => {
       qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(id), (list) => list?.filter((m) => m.id !== input.id))
@@ -107,6 +131,24 @@ export const newThreadIds = () => ({ id: newClientId("thr"), messageId: newClien
 export function useThreadControl(chat: ThreadChat) {
   const qc = useQueryClient()
   return {
+    /** Resolve (fold it away under its message and close it) or reopen. */
+    resolve: async (id: string, resolved: boolean) => {
+      const before = qc.getQueryData<SideThread[]>(threadKeys.list(chat))?.find((t) => t.id === id)
+      patch(qc, chat, id, () => ({ resolvedAt: resolved ? Date.now() : null }))
+      if (resolved && openThreadId(chat) === id) closeThread(chat)
+      try {
+        const thread = await api<SideThread>(`/api/threads/${id}/resolve`, { body: { resolved } })
+        qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => (list ? upsert(list, thread) : list))
+      } catch (err) {
+        if (before) patch(qc, chat, id, () => ({ resolvedAt: before.resolvedAt }))
+        toast.error(resolved ? "Couldn't resolve the thread" : "Couldn't reopen the thread", (err as Error).message)
+      }
+    },
+    /** The thread is open: its answers are read. */
+    seen: (id: string) => {
+      patch(qc, chat, id, () => ({ unread: false }))
+      void api(`/api/threads/${id}/seen`, { body: {} }).catch(() => {})
+    },
     stop: (id: string) => void api(`/api/threads/${id}/stop`, { body: {} }).catch((err: Error) => toast.error("Couldn't stop", err.message)),
     remove: async (id: string) => {
       try {
@@ -151,10 +193,16 @@ export function applyThreadEvent(qc: QueryClient, ev: UiEvent): boolean {
 
 // ---------------------------------------------------------------- the open thread, per chat
 
-/** A chat's open thread. `closing`: it's sliding away (the chat already takes the room back). */
+/**
+ * A chat's open thread. `closing`: it's sliding away (the chat already takes the room back). `draft`: a reply thread
+ * not started yet (Reply on a message with no replies): the panel shows the message and a composer, and the first
+ * reply creates the thread with this id. `expanded`: the panel covers the whole chat.
+ */
 export interface OpenThread {
   id: string
   closing: boolean
+  draft?: { anchorId: string; text: string }
+  expanded?: boolean
 }
 
 let open = new Map<ThreadChat, OpenThread>()
@@ -173,7 +221,20 @@ const set = (chat: ThreadChat, value: OpenThread | null) => {
 }
 
 export const openThreadId = (chat: ThreadChat) => open.get(chat)?.id ?? null
-export const openThread = (chat: ThreadChat, id: string) => set(chat, { id, closing: false })
+export const openThread = (chat: ThreadChat, id: string) => set(chat, { id, closing: false, expanded: open.get(chat)?.expanded })
+/** Reply to a message: open its reply thread, or a draft of one when it has none yet. */
+export function openReply(qc: QueryClient, chat: ThreadChat, anchorId: string, text: string) {
+  const existing = qc.getQueryData<SideThread[]>(threadKeys.list(chat))?.find((t) => t.kind === "reply" && t.anchorId === anchorId)
+  if (existing) return openThread(chat, existing.id)
+  const cur = open.get(chat)
+  if (cur?.draft?.anchorId === anchorId && !cur.closing) return
+  set(chat, { id: newClientId("thr"), closing: false, draft: { anchorId, text }, expanded: cur?.expanded })
+}
+/** The open thread covers the whole chat, or goes back beside it. */
+export const toggleExpanded = (chat: ThreadChat) => {
+  const cur = open.get(chat)
+  if (cur) set(chat, { ...cur, expanded: !cur.expanded })
+}
 /** Slide the thread away; the panel calls `forgetThread` once it's gone. */
 export const closeThread = (chat: ThreadChat) => {
   const cur = open.get(chat)
