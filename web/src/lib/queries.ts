@@ -9,6 +9,7 @@ import type { ProjectSnapshotState } from "./projectSnapshot"
 import type { SnapshotJob } from "../../../shared/snapshots"
 import type { ProjectAutoSize } from "../../../shared/autoSize"
 import { DEFAULT_OWNER_NAME } from "../../../shared/owner"
+import { BUILTIN_MODELS, type ClaudeModel, type ModelCatalog } from "../../../shared/models"
 import { DEFAULT_IDENTITY_ID, type Identity, type IdentityCheckResult, type IdentityDetection, type IdentityInput, type IdentitySigningInput, type IdentityClaudeKind } from "../../../shared/identities"
 import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
@@ -16,11 +17,12 @@ import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../s
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { Runner } from "../../../shared/runner"
 import type { AgentCli } from "../../../shared/agentCli"
+import type { ProjectColor } from "../../../shared/projectColors"
 import { setTtsInfo } from "./tts"
 import { applyOrder } from "./projectOrder"
 import { settleOptimistic } from "./queued"
 import { playSendSound } from "./sendSound"
-import { runningCount } from "./runningTasks"
+import { badgeStatus, type BadgeStatus } from "./prState"
 import type {
   BoxCleanup,
   BoxContents,
@@ -86,6 +88,7 @@ export const keys = {
   captainMessages: (projectId: string) => ["captain-messages", projectId] as const,
   captainCompactions: (projectId: string) => ["captain-compactions", projectId] as const,
   agentSettings: ["agent-settings"] as const,
+  models: ["models"] as const,
   tts: ["tts-settings"] as const,
   setup: ["setup"] as const,
   runpod: ["runpod"] as const,
@@ -161,13 +164,19 @@ export function useRunningTask(projectId: string) {
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
 }
 
-/** How many tasks are running (lib/runningTasks). Re-renders only when the count changes, not on every task update. */
-export const useRunningCount = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: runningCount })
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
   return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
 }
+/** These tasks (a chat card's), in this order. Re-renders only when one of them changes. */
+export function useTasksIn(ids: readonly string[]) {
+  const select = useCallback((list: Task[]) => ids.flatMap((id) => list.find((t) => t.id === id) ?? []), [ids])
+  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
+}
+const selectBadgeStatuses = (list: Task[]): Record<string, BadgeStatus> => Object.fromEntries(list.map((t) => [t.id, badgeStatus(t)]))
+/** Every task's status as its badge shows it (Merged once its PR merged), by id. Re-renders only when one changes. */
+export const useBadgeStatuses = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: selectBadgeStatuses })
 /**
  * A task's queued messages (the task page's Queued rows). Refetched when the task's queueRev changes, which only
  * this hook's component reads, so live task updates don't re-render the transcript.
@@ -336,6 +345,10 @@ export const useCaptainCompactions = (projectId: string) =>
   useQuery({ queryKey: keys.captainCompactions(projectId), queryFn: () => api<CaptainCompaction[]>(`/api/projects/${projectId}/captain/compactions`) })
 export const useAgentSettings = (o: { enabled?: boolean } = {}) =>
   useQuery({ queryKey: keys.agentSettings, queryFn: () => api<SettingsInfo>("/api/agent-settings"), staleTime: Infinity, enabled: o.enabled })
+/** Every model and effort picker's list: the installed CLI's own (GET /api/models), or the built-in one until then. */
+export const useModelCatalog = () =>
+  useQuery({ queryKey: keys.models, queryFn: () => api<ModelCatalog>("/api/models"), staleTime: 30 * 60_000, retry: false })
+export const useModels = (): ClaudeModel[] => useModelCatalog().data?.models ?? (BUILTIN_MODELS as ClaudeModel[])
 /** Settings › Voice text-to-speech choices; keys only as set/unset. Also feeds lib/speech's engine choice. */
 export const useTtsSettings = () =>
   useQuery({
@@ -625,6 +638,7 @@ export function useCreateProject() {
           docker: { image: null, dockerfile: null },
           identityId: DEFAULT_IDENTITY_ID,
           snapshot: null,
+          color: null,
           createdAt: now,
           updatedAt: now,
         }),
@@ -669,6 +683,8 @@ export function useUpdateProject() {
       /** Both fields: the optimistic update replaces the project's whole `docker`. */
       docker?: ProjectDocker
       identityId?: string
+      /** null goes back to the colour from its name. */
+      color?: ProjectColor | null
     }) =>
       api<Project>(`/api/projects/${id}`, { method: "PATCH", body: patch }),
     onMutate: async ({ id, env, removeEnv, ...patch }) => {

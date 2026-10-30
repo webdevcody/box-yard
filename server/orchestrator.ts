@@ -6,9 +6,10 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
+import { COORDINATOR_NAMED_HEADING, namedState, type PrLookup } from "./handoff.js"
 import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
-import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, OrchestratorState, ScheduleRun } from "../shared/types.js"
+import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun } from "../shared/types.js"
 import { uploadsDir } from "./uploads.js"
 import { BadRequestError, queuedChatError, type QueuedChatChange } from "./store.js"
 import { compactThreshold, type SettingsStore } from "./settings.js"
@@ -35,6 +36,7 @@ import { sessionLineMeta, type ThreadHost } from "./sideThreads.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
 import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
+import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
 /** Wait this long after a task update before waking the orchestrator, to batch updates. */
@@ -100,6 +102,17 @@ interface RunResult {
 }
 type RunKind = "turn" | "summary" | "compact" | "context"
 
+/** What asked for a run, for its timing row (shared/turnTimings.ts). */
+interface RunAsk {
+  /** Images attached to the messages it answers: a Codex run gets them with the prompt (Claude Code opens them with Read). */
+  images?: string[]
+  trigger?: string | null
+  /** The oldest message or update it answers. */
+  requestedAt?: number | null
+  /** Only task updates and Captain replies to relay, no message from Cody: Settings' relay model may run it. */
+  relay?: boolean
+}
+
 /** Tell the orchestrator where Cody's attached files are, and how to pass them on. */
 export function attachmentNote(files: unknown, ownerName?: string): string {
   if (!Array.isArray(files) || !files.length) return ""
@@ -141,10 +154,11 @@ export class Orchestrator {
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    mcp: { url: string; token: string },
+    mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
   ) {
     this.mcp = mcp
+    this.handshakes = mcp.handshakes ?? null
     this.workdir = path.join(c.dataDir, "orchestrator")
     this.compactionsDir = compactionsDir(c.dataDir)
     fs.mkdirSync(this.compactionsDir, { recursive: true })
@@ -167,12 +181,16 @@ export class Orchestrator {
     const st = this.settings.get()
     return st.orchestratorCli === "codex" ? codexModel(null, st.orchestratorCodexModel) : st.orchestratorModel
   }
+  /** The MCP handshakes /mcp saw, to split a run's start-up into process start and MCP connect. */
+  private readonly handshakes: McpHandshakes | null
 
   /**
    * Projects whose identity lets the Coordinator see their status only (app.ts wires Identities in). Its summaries,
    * recaps and compaction snapshots then keep their tasks' status and leave out their questions and replies.
    */
   statusOnly: StatusOnly = () => false
+  /** GitHub's PR states for the named-state block in front of Cody's messages (app.ts: TaskManager.prs). */
+  prs: PrLookup | null = null
 
   /**
    * Written before every turn rather than once at startup: the token is per
@@ -572,7 +590,7 @@ export class Orchestrator {
     ]
       .filter(Boolean)
       .join("\n\n")
-    const result = await this.runPrompt(prompt)
+    const result = await this.runPrompt(prompt, { trigger: "schedule", requestedAt: queued.dueAt })
     this.finishScheduledRun(queued.id, result.ok ? undefined : result.error.slice(0, 500))
   }
 
@@ -599,6 +617,7 @@ export class Orchestrator {
   /** A turn with only task updates in it: report them and keep Cody's work moving. */
   private async autoTurn() {
     if (this.autoTurns >= MAX_AUTO_TURNS) return
+    const requestedAt = this.store.oldestUnseenNoticeAt()
     const notices = this.store.takeUnseenNotices()
     if (!notices.length) return
     this.autoTurns++
@@ -612,6 +631,7 @@ export class Orchestrator {
           this.owner(),
         ),
       ].join("\n\n"),
+      { trigger: "updates", requestedAt, relay: true },
     )
   }
 
@@ -628,14 +648,41 @@ export class Orchestrator {
       this.hub.broadcast({ type: "chat.message", message: { ...m, createdAt: d.createdAt, meta: d.meta } })
     }
     this.store.setKv("orchestrator_last_turn_at", String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
+    const named = await this.namedState(answering.filter((m) => m.meta?.source !== "hook").map((m) => m.content).join("\n\n"))
     const notices = this.store.takeUnseenNotices()
     const prompt = [
       updatesBlock("Box Yard updates since your last turn", notices),
+      named,
       messages.join("\n\n"),
     ]
       .filter(Boolean)
       .join("\n\n")
-    await this.runPrompt(prompt, images)
+    const ask = {
+      trigger: answering.every((m) => m.meta?.source === "hook") ? "hook" : "cody",
+      requestedAt: Math.min(...answering.map((m) => m.createdAt)),
+    }
+    await this.runPrompt(prompt, { ...ask, images })
+  }
+
+  /** The tasks and projects Cody's message names, as they stand now (server/handoff.ts), so a quick question needs no lookup step. */
+  private namedState(text: string): Promise<string | null> {
+    const projects = this.store.listProjects()
+    return namedState(
+      text,
+      { tasks: this.store.listTasks(), projects },
+      { store: this.store, prs: this.prs, sealed: (t) => this.statusOnly(t.projectId), projectNames: new Map(projects.map((p) => [p.id, p.name])) },
+      COORDINATOR_NAMED_HEADING,
+    )
+  }
+
+  /** The model and effort a run uses: Settings' relay pair for a relay-only turn when it's on, else the Coordinator's. */
+  private modelFor(kind: RunKind, ask: RunAsk): { model: string; effort: Effort } {
+    const st = this.settings.get()
+    // On Codex every turn runs on its Codex model: the relay pair is a Claude model. "" is Codex's own default.
+    if (st.orchestratorCli === "codex") return { model: this.model() ?? "", effort: st.orchestratorEffort }
+    const relay = st.orchestratorRelay
+    if (kind === "turn" && ask.relay && relay.enabled) return { model: relay.model, effort: relay.effort }
+    return { model: st.orchestratorModel, effort: st.orchestratorEffort }
   }
 
   /** A one-glance view of the yard, so the orchestrator never works from stale memory. */
@@ -647,14 +694,14 @@ export class Orchestrator {
     return `[Yard now] ${lines.length ? `busy or waiting agents:\n${lines.join("\n")}` : "no agents are busy; every task is idle, done or failed."}`
   }
 
-  private async runPrompt(body: string, images: string[] = []): Promise<{ ok: boolean; error: string }> {
+  private async runPrompt(body: string, ask: RunAsk = {}): Promise<{ ok: boolean; error: string }> {
     const recapFile = this.store.getKv(RECAP_KEY)
     const compacted = recapFile ? this.recap(recapFile) : null
     const prompt = [compacted, this.yardNow(), body].filter(Boolean).join("\n\n")
     const s = this.session()
     // A session the other CLI started can't be resumed: start over the same way as when it's gone.
     const switched = s.started && (this.store.getKv(SESSION_CLI_KEY) ?? "claude") !== this.cli()
-    let result: RunResult = switched ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null } : await this.run(prompt, s.id, s.started, "turn", images)
+    let result: RunResult = switched ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null } : await this.run(prompt, s.id, s.started, "turn", ask)
     if (!result.ok && s.started && MISSING_SESSION.test(result.error)) {
       // Session file is gone (new machine, wiped data). Start over with the last summary and a recap.
       const fresh = randomUUID()
@@ -666,7 +713,7 @@ export class Orchestrator {
         .join("\n")
       const last = compacted ? null : this.latestSummary()
       const saved = last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false, "turn", images)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier conversation (your session was reset):\n${recap}\n\n---\n\n${prompt}`, fresh, false, "turn", ask)
     }
     if (result.ok && recapFile) this.store.setKv(RECAP_KEY, null)
     if (!result.ok) {
@@ -677,11 +724,44 @@ export class Orchestrator {
     return result
   }
 
+  /**
+   * The run's timings into turn_timings (shared/turnTimings.ts), and their id on the turn's reply, where the chat's
+   * timing chip opens them. Instrumentation only: it never fails the run.
+   */
+  private recordTiming(
+    clock: TurnClock,
+    r: { kind: RunKind; sessionId: string; model: string | null; effort: string; resume: boolean; ask: RunAsk; ok: boolean; reply: ChatMessage | null },
+  ) {
+    try {
+      const reading = clock.finish(r.ok)
+      const id = `tim_${randomUUID().slice(0, 12)}`
+      const timing = turnTiming(reading, {
+        id,
+        role: "coordinator",
+        kind: r.kind,
+        sessionId: r.sessionId,
+        model: r.model ?? this.settings.get().orchestratorModel,
+        effort: r.effort,
+        trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+        resumed: r.resume,
+        requestedAt: r.ask.requestedAt ?? null,
+        handshake: this.handshakes?.since("coordinator", reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+      })
+      this.store.recordTurnTiming(timing)
+      if (r.kind === "turn" && r.reply) {
+        const updated = this.store.setChatTiming(r.reply.id, id, timing.totalMs)
+        if (updated) this.hub.broadcast({ type: "chat.message", message: updated })
+      }
+    } catch (err) {
+      console.error("[orchestrator] couldn't record the turn's timings:", err)
+    }
+  }
+
   /** Arguments for the claude CLI, by kind of run. Settings are read here, so changes apply from the next run. */
-  private claudeArgs(kind: RunKind, sessionId: string, resume: boolean): string[] {
-    const st = this.settings.get()
+  private claudeArgs(kind: RunKind, sessionId: string, resume: boolean, ask: RunAsk = {}): string[] {
+    const { model: modelName, effort } = this.modelFor(kind, ask)
     const session = resume ? ["--resume", sessionId] : ["--session-id", sessionId]
-    const model = ["--model", st.orchestratorModel]
+    const model = ["--model", modelName]
     // Every kind of run sends the turn's tools, system prompt and effort, so the summary and /compact passes
     // reuse the prompt cache of the turn before them instead of writing the whole context to it again.
     return [
@@ -704,7 +784,7 @@ export class Orchestrator {
       ...session,
       ...model,
       "--effort",
-      st.orchestratorEffort,
+      effort,
     ]
   }
 
@@ -722,32 +802,35 @@ export class Orchestrator {
   }
 
   /** How this run starts: Claude Code with its flags, or Codex (which has no /compact or /context: see doCompact). */
-  private launch(kind: RunKind, sessionId: string, resume: boolean, images: string[]): ChatLaunch {
+  private launch(kind: RunKind, sessionId: string, resume: boolean, ask: RunAsk): ChatLaunch {
     const st = this.settings.get()
     if (st.orchestratorCli === "codex") {
+      const { model, effort } = this.modelFor(kind, ask)
       return codexChatLaunch({
         c: this.c,
         credentials: this.settings.credentials,
         mcp: this.mcp,
         resume: resume ? sessionId : null,
-        model: this.model(),
-        effort: st.orchestratorEffort,
+        model: model || null,
+        effort,
         instructions: (kind === "summary" ? this.compactionSystemPrompt : null) ?? this.systemPrompt(),
-        images,
+        images: ask.images,
       })
     }
     this.writeMcpConfig()
     const [bin, ...pre] = this.c.claudeBin.split(" ")
     // Env vars or Settings › Credentials, read on every run so a saved token works without a restart.
-    return { cli: "claude", bin: bin!, args: [...pre, ...this.claudeArgs(kind, sessionId, resume)], env: serverClaudeEnv(null, this.settings.credentials.claudeEnv()), translate: null, after() {} }
+    return { cli: "claude", bin: bin!, args: [...pre, ...this.claudeArgs(kind, sessionId, resume, ask)], env: serverClaudeEnv(null, this.settings.credentials.claudeEnv()), translate: null, after() {} }
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", images: string[] = []): Promise<RunResult> {
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", ask: RunAsk = {}): Promise<RunResult> {
     return new Promise((resolve) => {
       // Codex compacts on its own and has no /context: doCompact starts a fresh session from the summary instead.
       if (this.cli() === "codex" && (kind === "compact" || kind === "context")) return resolve({ ok: true, error: "", text: "", raw: "", sessionId: null })
-      const launch = this.launch(kind, sessionId, resume, images)
+      const launch = this.launch(kind, sessionId, resume, ask)
       const cliName = launch.cli === "codex" ? `codex (${this.c.codexBin})` : `claude (${this.c.claudeBin})`
+      const { model: runModel, effort } = this.modelFor(kind, ask)
+      const clock = new TurnClock()
 
       let child: ChildProcess
       try {
@@ -793,6 +876,7 @@ export class Orchestrator {
         // stop() closed the database; the run's last lines have nowhere to go.
         if (this.stopped) return
         if (typeof msg.session_id === "string") seenSession = msg.session_id
+        clock.line(msg)
         if (msg.type === "stream_event") {
           if (quiet) return
           const ev = msg.event
@@ -894,7 +978,7 @@ export class Orchestrator {
             source: "orchestrator",
             runKind: kind,
             sessionId: seenSession ?? sessionId,
-            model: resultModel ?? this.model() ?? "codex",
+            model: resultModel ?? (runModel || "codex"),
             startedAt,
             endedAt: Date.now(),
             durationMs: resultDurationMs,
@@ -903,6 +987,7 @@ export class Orchestrator {
             resumed: resume,
           })
         }
+        if (kind !== "context") this.recordTiming(clock, { kind, sessionId: seenSession ?? sessionId, model: resultModel ?? (runModel || null), effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
         // Lets the client speak a one-line summary of the reply (lib/speech.ts).
         if (!quiet) this.hub.broadcast({ type: "chat.turn", startedAt, replyId: reply?.id ?? null })
         const base = { text: said, raw, sessionId: seenSession }

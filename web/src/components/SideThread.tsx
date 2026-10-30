@@ -1,15 +1,35 @@
 // Side threads in a chat: highlight text in the Coordinator's (or a Captain's) chat, Ask, and the question is answered
-// in a panel on the right, like a comment on a doc. The thread sees the chat up to the highlighted message
-// (server/sideThreads.ts) but shows only the highlight, the question and the replies.
+// in a panel on the right, like a comment on a doc. Or Reply to a whole message: the replies stay out of the chat,
+// which shows "↰ N replies" under the message, and open in the same panel (Slack's and Claude's threads). The thread
+// sees the chat up to that message (server/sideThreads.ts) but shows only the message or highlight and the replies.
 //
 // The panel lives inside the chat's section, which is a `coord` container: from 35.5rem wide (a 125%-zoomed laptop; a 560px phone stays a sheet) it's a column beside the
 // chat (the Coordinator's dock widens to make room, App.tsx), below that a full-height sheet over it.
-import { createContext, memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react"
 import { createPortal } from "react-dom"
-import { AlertTriangle, ChevronLeft, Loader2, MessageCircle, Search, Square, Trash2, X } from "lucide-react"
+import { useQueryClient } from "@tanstack/react-query"
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  CircleCheck,
+  Loader2,
+  Maximize2,
+  MessageCircle,
+  Minimize2,
+  MoreHorizontal,
+  Reply,
+  Search,
+  Square,
+  TextSearch,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react"
 import { COMPOSER_FOOTER, Composer } from "./Composer"
-import { StickyScroll } from "./StickyScroll"
+import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { Modal } from "./Modal"
+import { MessageMenu, type MenuItem } from "./MessageActions"
 import { Button, LineIcon, Markdown, cx, inputClass } from "./ui"
 import { quotePreview, trapKeys, useAnchor, useNarrow, type Align } from "./NewTask"
 import { confirmDialog } from "../lib/confirm"
@@ -18,7 +38,10 @@ import { newClientId } from "../lib/queries"
 import {
   closeThread,
   forgetThread,
+  openReply,
   openThread,
+  toggleExpanded,
+  useAskThread,
   useMessageThreads,
   useOpenThread,
   useSendThreadMessage,
@@ -26,6 +49,7 @@ import {
   useThreadControl,
   useThreadMessages,
   useThreadStream,
+  type OpenThread,
   type ThreadChat,
 } from "../lib/threads"
 import { caretAt, findQuoteRange, setOpenHighlight, setThreadRange, threadRange } from "../lib/threadHighlight"
@@ -37,6 +61,14 @@ const ThreadChatContext = createContext<ThreadChat | null>(null)
 export const ThreadChatProvider = ThreadChatContext.Provider
 /** The chat whose lines these are, or null where there are no threads (a task's transcript). */
 export const useThreadChat = () => useContext(ThreadChatContext)
+
+/** Reply to a whole message in its reply thread (MessageActions' Reply); null where the chat has no threads. */
+export function useReplyTo(): ((anchorId: string, text: string) => void) | null {
+  const chat = useThreadChat()
+  const qc = useQueryClient()
+  const reply = useCallback((anchorId: string, text: string) => chat && openReply(qc, chat, anchorId, text), [qc, chat])
+  return chat ? reply : null
+}
 
 /** How long the panel takes to slide in or out; it unmounts after this. */
 const SLIDE_MS = 300
@@ -151,14 +183,15 @@ export function AskPopover({
 // ---------------------------------------------------------------- the panel
 
 /**
- * The chat's open thread: a column on the right, or a sheet over the chat in a narrow panel. `headerClassName` sizes
- * its header like the chat's, so the two line up side by side.
+ * The chat's open thread: a column on the right, or a sheet over the chat in a narrow panel (or when expanded).
+ * `headerClassName` sizes its header like the chat's, so the two line up side by side.
  */
 export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: ThreadChat; headerClassName?: string }) {
   const cur = useOpenThread(chat)
   const [shown, setShown] = useState(false)
   const id = cur?.id ?? null
   const closing = cur?.closing ?? false
+  const expanded = Boolean(cur?.expanded)
 
   // Mounted closed, then opened a frame later, so it slides in.
   useEffect(() => {
@@ -180,12 +213,13 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: T
     return () => setOpenHighlight(id, false)
   }, [id, closing])
 
-  if (!id) return null
+  if (!id || !cur) return null
   return (
     <aside
       data-testid="side-thread"
       data-open={shown || undefined}
-      aria-label="Side thread"
+      data-expanded={expanded || undefined}
+      aria-label="Thread"
       onKeyDown={(e) => {
         if (e.key !== "Escape" || e.defaultPrevented) return
         e.stopPropagation()
@@ -195,13 +229,14 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: T
       className={cx(
         // A sheet over the chat, sliding in from the right...
         "absolute inset-0 z-30 flex translate-x-full flex-col bg-zinc-950 shadow-2xl shadow-black/60 transition-[translate,width] duration-300 ease-out data-open:translate-x-0 motion-reduce:transition-none",
-        // ...or, in a wide panel, a column beside it that grows from nothing (the chat slides left as it does).
-        "@min-[35.5rem]/coord:static @min-[35.5rem]/coord:w-0 @min-[35.5rem]/coord:shrink-0 @min-[35.5rem]/coord:translate-x-0 @min-[35.5rem]/coord:overflow-hidden @min-[35.5rem]/coord:border-l @min-[35.5rem]/coord:border-zinc-800 @min-[35.5rem]/coord:shadow-none @min-[35.5rem]/coord:data-open:w-(--thread-w)",
+        // ...or, in a wide panel, a column beside it that grows from nothing (the chat slides left as it does). Expanded, it stays a sheet over the whole chat.
+        !expanded &&
+          "@min-[35.5rem]/coord:static @min-[35.5rem]/coord:w-0 @min-[35.5rem]/coord:shrink-0 @min-[35.5rem]/coord:translate-x-0 @min-[35.5rem]/coord:overflow-hidden @min-[35.5rem]/coord:border-l @min-[35.5rem]/coord:border-zinc-800 @min-[35.5rem]/coord:shadow-none @min-[35.5rem]/coord:data-open:w-(--thread-w)",
       )}
     >
       {/* At its final width while the column grows, so the text doesn't reflow on every frame. */}
-      <div className="flex h-full min-h-0 w-full flex-col @min-[35.5rem]/coord:w-(--thread-w)">
-        <ThreadView key={id} chat={chat} id={id} headerClassName={headerClassName} />
+      <div className={cx("flex h-full min-h-0 w-full flex-col", !expanded && "@min-[35.5rem]/coord:w-(--thread-w)")}>
+        <ThreadView key={id} chat={chat} open={cur} headerClassName={headerClassName} />
       </div>
     </aside>
   )
@@ -209,57 +244,123 @@ export function SideThreadPane({ chat, headerClassName = "min-h-12" }: { chat: T
 
 const NO_MESSAGES: SideThreadMessage[] = []
 
-function ThreadView({ chat, id, headerClassName }: { chat: ThreadChat; id: string; headerClassName: string }) {
+/** A message's first line as a title: no Markdown marks, at most a line. */
+export function threadTitle(text: string) {
+  const line = text.split(/\r?\n/).find((l) => l.trim()) ?? ""
+  return quotePreview(line.replace(/^\s*(?:#+|>|[-*+]|\d+\.)\s+/, "").replace(/[*_`~]+/g, ""), 140)
+}
+
+export const repliesLabel = (n: number) => `${n} ${n === 1 ? "reply" : "replies"}`
+
+function ThreadView({ chat, open, headerClassName }: { chat: ThreadChat; open: OpenThread; headerClassName: string }) {
+  const id = open.id
+  const draft = open.draft ?? null
   const thread = useThread(chat, id)
-  const messages = useThreadMessages(id).data ?? NO_MESSAGES
+  const messages = useThreadMessages(id, Boolean(thread)).data ?? NO_MESSAGES
   const send = useSendThreadMessage(chat, id)
+  const start = useAskThread(chat)
   const control = useThreadControl(chat)
   const pane = useRef<HTMLDivElement>(null)
+  const input = useRef<HTMLTextAreaElement>(null)
+  const more = useRef<HTMLButtonElement>(null)
+  const list = useRef<StickyScrollHandle>(null)
+  const [menu, setMenu] = useState(false)
   const busy = Boolean(thread?.busy)
+  const reply = draft !== null || thread?.kind === "reply"
+  const anchorId = thread?.anchorId ?? draft?.anchorId ?? null
+  const original = thread?.quote ?? draft?.text ?? ""
+  const resolved = thread?.resolvedAt != null
   const close = () => closeThread(chat)
+
+  // Opened from Reply: straight to the composer.
+  useEffect(() => {
+    if (draft) input.current?.focus({ preventScroll: true })
+  }, [draft])
+
+  // Open: what it says is read (now, and as answers arrive).
+  const unread = Boolean(thread?.unread)
+  useEffect(() => {
+    if (unread && !open.closing) control.seen(id)
+  }, [unread, open.closing, id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = (text: string) => {
     const content = text.trim()
     if (!content) return
+    list.current?.scrollToEnd()
+    if (!thread && draft) return start.mutateAsync({ id, messageId: newClientId("thm"), anchorId: draft.anchorId, quote: draft.text, question: content, kind: "reply" })
     return send.mutateAsync({ id: newClientId("thm"), content })
   }
   const remove = async () => {
-    const ok = await confirmDialog({ title: "Delete this thread?", body: "Its question and replies are deleted, and the highlight goes. The main chat isn't affected.", confirmLabel: "Delete", danger: true })
+    const ok = await confirmDialog({
+      title: "Delete this thread?",
+      body: reply ? "Its replies are deleted. The main chat isn't affected." : "Its question and replies are deleted, and the highlight goes. The main chat isn't affected.",
+      confirmLabel: "Delete",
+      danger: true,
+    })
     if (ok) await control.remove(id)
   }
   const reveal = () => {
-    if (!thread) return
-    if (chat === "coordinator") return revealChatMessage(thread.anchorId)
-    document.querySelector(`[data-chat-id="${CSS.escape(thread.anchorId)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })
+    if (!anchorId) return
+    if (chat === "coordinator") return revealChatMessage(anchorId)
+    document.querySelector(`[data-chat-id="${CSS.escape(anchorId)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })
   }
+  const items: MenuItem[] = [
+    { icon: TextSearch, label: "Show in the chat", run: reveal },
+    ...(thread && busy ? [{ icon: Square, label: "Stop answering", run: () => control.stop(id) }] : []),
+    ...(thread ? [{ icon: Trash2, label: "Delete thread", run: () => void remove() }] : []),
+  ]
 
-  const icon = "grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 sm:h-8 sm:w-8"
+  const icon = "grid h-11 w-11 shrink-0 place-items-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 aria-expanded:bg-zinc-800 aria-pressed:text-yard-300 [@media(pointer:fine)]:h-8 [@media(pointer:fine)]:w-8"
+  const wide = "hidden @min-[35.5rem]/coord:grid"
   return (
     <div ref={pane} className="relative flex h-full min-h-0 flex-col">
       <header className={cx(headerClassName, "flex shrink-0 items-center gap-1 border-b border-zinc-900 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-2")}>
         {/* A sheet goes back to the chat; a column closes with the × on the right. */}
-        <button type="button" onClick={close} aria-label="Back to the chat" title="Back to the chat" className={cx(icon, "@min-[35.5rem]/coord:hidden")}>
+        <button type="button" onClick={close} aria-label="Back to the chat" title="Back to the chat" className={cx(icon, open.expanded ? "hidden" : "@min-[35.5rem]/coord:hidden")}>
           <ChevronLeft className="h-5 w-5" />
         </button>
-        <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-zinc-100 @min-[35.5rem]/coord:pl-2">
-          <MessageCircle className="h-4 w-4 shrink-0 text-yard-300" />
-          <span className="truncate">Side thread</span>
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-0.5">
-          {busy && (
-            <button type="button" onClick={() => control.stop(id)} aria-label="Stop" title="Stop" className={icon}>
-              <Square className="h-3.5 w-3.5" />
+        <nav aria-label="Breadcrumb" className="flex min-w-0 flex-1 items-center gap-1 text-sm @min-[35.5rem]/coord:pl-2">
+          <span className="shrink-0 font-semibold text-zinc-100">Threads</span>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+          <span data-testid="side-thread-title" title={quotePreview(original, 400)} className="min-w-0 truncate text-zinc-400">
+            {reply ? threadTitle(original) : `“${quotePreview(original, 140)}”`}
+          </span>
+        </nav>
+        <div className="flex shrink-0 items-center gap-0.5">
+          {thread && (
+            <button
+              type="button"
+              data-testid="side-thread-resolve"
+              onClick={() => void control.resolve(id, !resolved)}
+              aria-pressed={resolved}
+              aria-label={resolved ? "Reopen thread" : "Resolve thread"}
+              title={resolved ? "Resolved. Reopen it" : "Resolve: fold it away under the message"}
+              className={icon}
+            >
+              {resolved ? <Undo2 className="h-4 w-4" /> : <CircleCheck className="h-4 w-4" />}
             </button>
           )}
-          <button type="button" onClick={() => void remove()} aria-label="Delete thread" title="Delete thread" className={cx(icon, "hover:text-red-300")}>
-            <Trash2 className="h-3.5 w-3.5" />
+          <button ref={more} type="button" onClick={() => setMenu(!menu)} aria-haspopup="menu" aria-expanded={menu} aria-label="More thread actions" title="More" className={icon}>
+            <MoreHorizontal className="h-4 w-4" />
           </button>
-          <button type="button" onClick={close} aria-label="Close thread" title="Close (Esc). It stays on the highlight." className={cx(icon, "hidden @min-[35.5rem]/coord:grid")}>
+          {menu && <MessageMenu trigger={more} items={items} onClose={() => setMenu(false)} />}
+          <button
+            type="button"
+            data-testid="side-thread-expand"
+            onClick={() => toggleExpanded(chat)}
+            aria-pressed={Boolean(open.expanded)}
+            aria-label={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+            title={open.expanded ? "Back beside the chat" : "Expand over the chat"}
+            className={cx(icon, wide)}
+          >
+            {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+          </button>
+          <button type="button" onClick={close} aria-label="Close thread" title="Close (Esc). It stays under the message." className={cx(icon, open.expanded ? "grid" : wide)}>
             <X className="h-4 w-4" />
           </button>
         </div>
       </header>
-      {thread && (
+      {!reply && thread && (
         <div className="shrink-0 border-b border-zinc-900 px-3 py-2.5">
           <button
             type="button"
@@ -275,13 +376,32 @@ function ThreadView({ chat, id, headerClassName }: { chat: ThreadChat; id: strin
           )}
         </div>
       )}
-      <StickyScroll count={messages.length} resetKey={id} className="px-3 py-3" contentClassName="space-y-3">
+      <StickyScroll handle={list} count={messages.length} resetKey={id} className={cx("px-3 py-3", open.expanded && "mx-auto w-full max-w-3xl")} contentClassName="space-y-3">
+        {reply && (
+          <div data-testid="side-thread-original" className="space-y-2.5">
+            <div className="text-sm text-zinc-200">
+              <Markdown>{original}</Markdown>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+              <span className="shrink-0">{thread?.replies ? repliesLabel(thread.replies) : "No replies yet"}</span>
+              <span className="h-px flex-1 bg-zinc-800" />
+            </div>
+            {thread?.context === "summary" && <p className="text-[11px] leading-4 text-zinc-500">The chat was compacted since, so this thread started from the compaction summary and the messages up to this one.</p>}
+          </div>
+        )}
         {messages.map((m) => (
           <ThreadLine key={m.id} m={m} />
         ))}
         <ThreadStreaming id={id} busy={busy} />
       </StickyScroll>
-      <Composer onSubmit={submit} files={false} placeholder={busy ? "Queue a follow-up…" : "Reply in this thread…"} panelRef={pane} className={cx(COMPOSER_FOOTER, "px-3")} />
+      <Composer
+        onSubmit={submit}
+        files={false}
+        textareaRef={input}
+        placeholder={reply ? (busy ? "Queue another reply…" : "Reply…") : busy ? "Queue a follow-up…" : "Reply in this thread…"}
+        panelRef={pane}
+        className={cx(COMPOSER_FOOTER, "px-3", open.expanded && "mx-auto w-full max-w-3xl")}
+      />
     </div>
   )
 }
@@ -326,10 +446,13 @@ function ThreadStreaming({ id, busy }: { id: string; busy: boolean }) {
     )
   if (!busy) return null
   return (
-    <div className="flex gap-1 px-1 py-2" aria-label="Answering">
-      {[0, 1, 2].map((i) => (
-        <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" style={{ animationDelay: `${i * 120}ms` }} />
-      ))}
+    <div data-testid="side-thread-working" role="status" className="flex items-center gap-2 px-1 py-2 text-xs text-zinc-500">
+      <span className="flex gap-1" aria-hidden>
+        {[0, 1, 2].map((i) => (
+          <span key={i} className="h-1.5 w-1.5 animate-bounce rounded-full bg-yard-400/80" style={{ animationDelay: `${i * 120}ms` }} />
+        ))}
+      </span>
+      Claude is working
     </div>
   )
 }
@@ -337,8 +460,8 @@ function ThreadStreaming({ id, busy }: { id: string; busy: boolean }) {
 // ---------------------------------------------------------------- markers on the chat
 
 /**
- * Under a message with threads: a chip per thread that opens it, and the highlighted passages tinted in the text
- * (a click on one opens its thread too). Nothing at all for a message without threads.
+ * Under a message with threads: "↰ N replies" for its reply thread, a chip per question about a highlight, and the
+ * highlighted passages tinted in the text (a click on one opens its thread too). Nothing for a message without threads.
  */
 export const ThreadMarkers = memo(function ThreadMarkers({ m }: { m: ChatMessage }) {
   const chat = useThreadChat()
@@ -350,9 +473,11 @@ function Markers({ chat, m }: { chat: ThreadChat; m: ChatMessage }) {
   const threads = useMessageThreads(chat, m.id)
   const open = useOpenThread(chat)
   const row = useRef<HTMLDivElement>(null)
-  const quotes = useMemo(() => threads.map((t) => [t.id, t.quote] as const), [threads])
+  const asks = useMemo(() => threads.filter((t) => t.kind !== "reply"), [threads])
+  const replies = threads.find((t) => t.kind === "reply") ?? null
+  const quotes = useMemo(() => asks.map((t) => [t.id, t.quote] as const), [asks])
 
-  // Tint each thread's passage. After the text renders, and again when it changes.
+  // Tint each question's passage. After the text renders, and again when it changes.
   useLayoutEffect(() => {
     const root = row.current?.closest("[data-chat-id]")
     if (!root) return
@@ -387,12 +512,48 @@ function Markers({ chat, m }: { chat: ThreadChat; m: ChatMessage }) {
 
   if (!threads.length) return null
   const right = m.role === "user"
+  const isOpen = (t: SideThread) => open?.id === t.id && !open.closing
+  const toggle = (t: SideThread) => (isOpen(t) ? closeThread(chat) : openThread(chat, t.id))
   return (
-    <div ref={row} data-thread-markers className={cx("mt-1.5 flex flex-wrap gap-1.5", right && "justify-end")}>
-      {threads.map((t) => (
-        <ThreadChip key={t.id} t={t} active={open?.id === t.id && !open.closing} onOpen={() => (open?.id === t.id && !open.closing ? closeThread(chat) : openThread(chat, t.id))} />
+    <div ref={row} data-thread-markers className={cx("mt-1.5 flex flex-wrap items-center gap-1.5", right && "justify-end")}>
+      {replies && <RepliesButton t={replies} active={isOpen(replies)} onOpen={() => toggle(replies)} />}
+      {asks.map((t) => (
+        <ThreadChip key={t.id} t={t} active={isOpen(t)} onOpen={() => toggle(t)} />
       ))}
     </div>
+  )
+}
+
+/** "↰ 2 replies" under a message: opens its reply thread. It says when an answer is coming, unread or resolved. */
+function RepliesButton({ t, active, onOpen }: { t: SideThread; active: boolean; onOpen: () => void }) {
+  const resolved = t.resolvedAt != null
+  const state = t.busy ? "answering" : t.unread ? "new reply" : resolved ? "resolved" : null
+  return (
+    <button
+      type="button"
+      data-testid="thread-replies"
+      data-unread={(t.unread && !t.busy) || undefined}
+      data-resolved={resolved || undefined}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onOpen}
+      aria-pressed={active}
+      aria-label={`${repliesLabel(t.replies)}${state ? `, ${state}` : ""}`}
+      title={active ? "Close the replies" : "Open the replies"}
+      className={cx(
+        "-ml-1.5 inline-flex h-7 items-center gap-1.5 rounded-md px-1.5 text-xs [@media(pointer:coarse)]:h-9",
+        active ? "bg-yard-500/15 text-yard-100" : resolved && !t.unread && !t.busy ? "text-zinc-600 hover:bg-zinc-900 hover:text-zinc-300" : "text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100",
+      )}
+    >
+      <Reply className="h-3.5 w-3.5 shrink-0" />
+      <span className="whitespace-nowrap">{repliesLabel(t.replies)}</span>
+      {t.busy ? (
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-yard-300" aria-hidden />
+      ) : t.unread ? (
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-yard-400" aria-hidden />
+      ) : resolved ? (
+        <CircleCheck className="h-3 w-3 shrink-0" aria-hidden />
+      ) : null}
+    </button>
   )
 }
 

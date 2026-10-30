@@ -198,14 +198,14 @@ describe("Settings › Coordinator", () => {
     expect(cli.value).toBe("claude")
     expect([...cli.options].map((o) => o.textContent)).toEqual(["Claude Code", "Codex"])
     expect($("orchestrator-codex-model")).toBeNull()
-    expect(document.body.textContent).toContain("The Claude model the Coordinator chat runs on.")
+    expect(document.body.textContent).toContain("The Claude model the Coordinator chat and its side threads run on.")
 
     await choose(cli, "codex")
     const model = $<HTMLInputElement>("orchestrator-codex-model")!
     expect(model.placeholder).toBe("Codex's default")
     expect(model.getAttribute("list")).toBe("boxyard-codex-models")
     expect([...document.querySelectorAll("#boxyard-codex-models option")].map((o) => o.getAttribute("value"))).toEqual([...CODEX_MODEL_SUGGESTIONS])
-    expect(document.body.textContent).not.toContain("The Claude model the Coordinator chat runs on.")
+    expect(document.body.textContent).not.toContain("The Claude model the Coordinator chat and its side threads run on.")
 
     // A Claude model can't run on Codex: the field says so before the server does.
     type(model, "opus")

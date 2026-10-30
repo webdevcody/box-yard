@@ -11,6 +11,7 @@ import {
   DEFAULT_CAPTAIN_MODEL,
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  DEFAULT_RELAY_MODEL,
   EFFORTS,
   SIZE_DEFAULTS,
   WORKER_SIZES,
@@ -55,6 +56,8 @@ const CLOUD_LIMIT_UPGRADE_KEY = "settings_upgrade_cloud_limit"
 export const DEFAULT_SETTINGS: Settings = {
   ownerName: DEFAULT_OWNER_NAME,
   startInZen: true,
+  // Off: not every install uses boxes. The Boxes page always shows the same reading.
+  showCloudMeter: false,
   orchestratorCli: DEFAULT_AGENT_CLI,
   orchestratorModel: DEFAULT_MODEL,
   orchestratorCodexModel: "",
@@ -62,6 +65,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // A fixed token count, not a share of the window: 80% of a 1M window let every Coordinator and Captain turn
   // carry up to 800k tokens of history. A value saved in Settings wins (only changed keys are saved).
   orchestratorAutoCompact: { enabled: true, unit: "tokens", value: DEFAULT_AUTOCOMPACT_TOKENS },
+  orchestratorRelay: DEFAULT_RELAY_MODEL,
   captainCli: DEFAULT_AGENT_CLI,
   captainModel: DEFAULT_CAPTAIN_MODEL,
   captainCodexModel: "",
@@ -187,11 +191,16 @@ export const settingsPatch = z
   .object({
     ownerName: z.string().trim().min(1, "Name is required").max(40).regex(/^[^\n<>{}`]+$/, "Name has unsupported characters"),
     startInZen: z.boolean(),
+    showCloudMeter: z.boolean(),
     orchestratorCli: z.enum(AGENT_CLIS),
     orchestratorModel: model,
     orchestratorCodexModel: codexModelSetting,
     orchestratorEffort: z.enum(EFFORTS),
     orchestratorAutoCompact: autoCompact,
+    orchestratorRelay: z
+      .object({ enabled: z.boolean(), model, effort: z.enum(EFFORTS) })
+      .strict()
+      .describe("The Coordinator's relay-only turns (task updates, no message from Cody) on this model and effort when enabled. Off by default: another model or effort starts each such turn with a cold prompt cache."),
     captainCli: z.enum(AGENT_CLIS),
     captainModel: model,
     captainCodexModel: codexModelSetting,

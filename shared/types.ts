@@ -8,9 +8,12 @@ import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
 import type { AgentCli } from "./agentCli.js"
+import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
+import type { ProjectColor } from "./projectColors.js"
+import type { TaskIconName } from "./taskIcons.js"
 import type { ProjectGpuMachine, RunPodImageBuild } from "./runpod.js"
 import type { DockerImageBuild, ProjectDocker } from "./docker.js"
 export type { TaskOutcome } from "./quiet.js"
@@ -94,6 +97,8 @@ export interface Project {
   identityId: string
   /** The box snapshot its new boxes start from (shared/snapshots.ts), or null: they start cold. */
   snapshot: ProjectSnapshot | null
+  /** Its colour in the Coordinator chat and the sidebar (shared/projectColors.ts); null: one from its name. */
+  color: ProjectColor | null
   createdAt: number
   updatedAt: number
 }
@@ -238,6 +243,10 @@ export interface Task {
   mergeRequest?: MergeRequest | null
   /** The last turn-end push of the task's git work (repo projects with push at turn end on); null before the first. */
   pushState?: PushState | null
+  /** The icon it was given (shared/taskIcons.ts: create_task's `icon`); null: one from its title (taskIcon()). */
+  icon?: TaskIconName | null
+  /** Shared by the tasks one create_tasks call started (the Coordinator's cards view shows them as one card); null when started on its own. */
+  batchId?: string | null
   createdAt: number
   updatedAt: number
 }
@@ -397,17 +406,27 @@ export interface SideThread {
   id: string
   /** null: the Coordinator chat; else that project's Captain chat. */
   projectId: string | null
-  /** The chat message the highlight is in. */
+  /** The chat message the highlight is in (an ask), or the message replied to (a reply thread). */
   anchorId: string
-  /** The highlighted text, as selected. */
+  /** "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown as "N replies" under it. */
+  kind: SideThreadKind
+  /** The highlighted text, as selected; for a reply thread, the whole message replied to. */
   quote: string
   /** How the thread got the chat's context: a fork of its session at the message, or (after a compaction) its summary. null until the first answer. */
   context: "fork" | "summary" | null
   /** A turn is running. */
   busy: boolean
+  /** Cody's messages and the answers (not tool lines or errors). */
+  replies: number
+  /** An answer (or error) came after Cody last had the thread open. */
+  unread: boolean
+  /** When Cody resolved it, or null. A new message reopens it. */
+  resolvedAt: number | null
   createdAt: number
   updatedAt: number
 }
+
+export type SideThreadKind = "ask" | "reply"
 
 export type SideThreadRole = "user" | "assistant" | "tool" | "error"
 
@@ -610,6 +629,8 @@ export type UiEvent =
   | { type: "docker.build"; build: DockerImageBuild }
   /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
   | { type: "identities"; identities: Identity[] }
+  /** Settings › Connectors changed: a connector, its status, or its secrets' fingerprints (never a value). */
+  | { type: "connectors"; connectors: Connector[] }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }
@@ -689,6 +710,18 @@ export const SIZE_DEFAULTS: Record<WorkerSize, { slotsPerBox: number; maxResiden
   large: { slotsPerBox: 4, maxResidentPerBox: 18 },
 }
 
+/**
+ * Relay-only Coordinator turns (woken by task updates and Captain replies, with no message from Cody) on another
+ * model or effort. Off by default: a different model or effort can't read the turn before's prompt cache, so each
+ * relay turn writes the whole context again (cheap and quick on a small model, slow on a big one).
+ */
+export interface RelayModel {
+  enabled: boolean
+  model: string
+  effort: Effort
+}
+export const DEFAULT_RELAY_MODEL: RelayModel = { enabled: false, model: "claude-haiku-5-5", effort: "low" }
+
 export interface AutoCompact {
   enabled: boolean
   unit: "percent" | "tokens"
@@ -717,6 +750,8 @@ export interface Settings {
   ownerName: string
   /** A plain visit to / opens Zen (the Coordinator alone, full screen) unless Zen was left on purpose last time. */
   startInZen: boolean
+  /** The Coordinator's header shows the cloud meter (boxes, $/h, today's box spend). Off by default: not everyone uses boxes. */
+  showCloudMeter: boolean
   /** The CLI the Coordinator runs on (shared/agentCli.ts): Claude Code unless set to Codex. */
   orchestratorCli: AgentCli
   orchestratorModel: string
@@ -725,6 +760,8 @@ export interface Settings {
   orchestratorEffort: Effort
   /** Compacts between turns once usage passes the threshold; writes a log file first. */
   orchestratorAutoCompact: AutoCompact
+  /** A lighter model or effort for the Coordinator's relay-only turns (task updates, no message from Cody); off by default. */
+  orchestratorRelay: RelayModel
   /** The CLI every project's Captain runs on. */
   captainCli: AgentCli
   /** Model for the per-project Captains, separate from the Coordinator's. */

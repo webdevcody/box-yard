@@ -14,6 +14,8 @@
 //   ask captain <project>: <message>          (ask_captain, waits for the reply)
 //   wait captain <project>                    (wait_for_captain)
 //   status
+// A quick question whose prompt carries the state of what it names ("[What this message names …]", server/handoff.ts)
+// is answered from that block with no tool call, as the prompt tells a model to.
 //   [slow] / [slow:<seconds>]                 (takes 2 s / that long before replying)
 // Replies stream word by word, 15 ms apart; FAKE_CLAUDE_WORD_MS=<ms> slows that down (a long reply to type over).
 // A Captain answers an agent's message_captain ("[From task … (task_…), an agent …]") when the message has
@@ -57,6 +59,39 @@ const flag = (name) => {
 if (args.includes("--version")) {
   console.log("0.0.0 (fake claude for Box Yard)")
   process.exit(0)
+}
+
+// The model list Box Yard's pickers ask for (server/claudeModels.ts): answer stream-json's `initialize` control
+// request like the real CLI. FAKE_CLAUDE_MODELS=<json array> replaces the rows; "fail" exits without answering.
+if (args.includes("--input-format") && flag("--input-format") === "stream-json") {
+  if (process.env.FAKE_CLAUDE_MODELS === "fail") process.exit(1)
+  const all = ["low", "medium", "high", "xhigh", "max"]
+  const models = process.env.FAKE_CLAUDE_MODELS
+    ? JSON.parse(process.env.FAKE_CLAUDE_MODELS)
+    : [
+        { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)", supportsEffort: true, supportedEffortLevels: all },
+        { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus", supportsEffort: true, supportedEffortLevels: all },
+        { value: "fable", resolvedModel: "claude-fable-5-1", displayName: "Fable", supportsEffort: true, supportedEffortLevels: all },
+        { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet", supportsEffort: true, supportedEffortLevels: all },
+        { value: "haiku", resolvedModel: "claude-haiku-5-5", displayName: "Haiku", supportsEffort: true, supportedEffortLevels: all },
+      ]
+  let buf = ""
+  process.stdin.setEncoding("utf8").on("data", (d) => {
+    buf += d
+    for (let nl; (nl = buf.indexOf("\n")) >= 0; buf = buf.slice(nl + 1)) {
+      let msg
+      try {
+        msg = JSON.parse(buf.slice(0, nl))
+      } catch {
+        continue
+      }
+      if (msg.type === "control_request" && msg.request?.subtype === "initialize") {
+        process.stdout.write(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: msg.request_id, response: { commands: [], models } } }) + "\n")
+      }
+    }
+  })
+  process.stdin.on("end", () => process.exit(0))
+  await new Promise(() => {})
 }
 
 const partial = args.includes("--include-partial-messages")
@@ -149,6 +184,8 @@ function httpClient(server) {
   return {
     async init() {
       await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-claude", version: "0" } })
+      // Like the real CLI, which lists the tools before it's ready.
+      await call("tools/list", {})
     },
     tool: (name, args) => call("tools/call", { name, arguments: args }),
     close() {},
@@ -181,6 +218,7 @@ function stdioClient(server) {
     async init() {
       await call("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake-claude", version: "0" } })
       child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n")
+      await call("tools/list", {})
     },
     tool: (name, args) => call("tools/call", { name, arguments: args }),
     close: () => child.stdin.end(),
@@ -235,11 +273,14 @@ async function notesRetro(mcp, prompt) {
 /** A side thread's turn: what it can see of the chat it forked, and any tool its question asks to try. */
 async function sideThread(mcp, prompt) {
   const earlier = session.turns.filter((t) => !t.thread)
-  const question = prompt.includes("[Box Yard side thread]") ? (prompt.split(/'s question:\n/).pop() ?? prompt) : prompt
+  const question = prompt.includes("[Box Yard side thread]") ? (prompt.split(/'s (?:question|reply):\n/).pop() ?? prompt) : prompt
   const lines = [`Side thread answer (mock Claude). I can see ${earlier.length} earlier chat turn${earlier.length === 1 ? "" : "s"}${session.forkedFrom ? " (forked)" : ""}.`]
   const last = earlier.at(-1)
   if (last) lines.push(`The last one asked: "${last.prompt.split("\n").filter((l) => l.trim() && !l.startsWith("[Yard now]") && !l.startsWith("- ")).pop()?.slice(0, 120) ?? ""}"`)
   if (/Your session for this thread was started fresh/.test(prompt)) lines.push("I started fresh from the summary.")
+  // A reply thread's first prompt quotes the message replied to.
+  const original = prompt.match(/The message .+ is replying to:\n((?:> .*\n?)+)/)
+  if (original) lines.push(`Replying to: "${original[1].replace(/^> /gm, "").trim().split("\n")[0].slice(0, 120)}"`)
   lines.push(`You asked: ${question.trim().slice(0, 200)}`)
   const tool = question.match(/\btry (\w+)/i)
   if (tool) lines.push(`${tool[1]} said: ${(await useTool(mcp, tool[1], tool[1] === "create_task" ? { project: "demo", title: "From a side thread", prompt: "x" } : {})).slice(0, 300)}`)
@@ -248,13 +289,22 @@ async function sideThread(mcp, prompt) {
   return lines.join("\n")
 }
 
+const NAMED_BLOCK = /^\[(?:What|Tasks) this message names[^\n]*\]\n((?:(?:- |  |Projects it names).*(?:\n|$))*)/m
+
 async function orchestrator(mcp, prompt) {
   if (prompt.includes("📝 **Notes retro**")) return notesRetro(mcp, prompt)
   if (prompt.includes("[Box Yard side thread]") || session.thread) {
     session.thread = true
     return sideThread(mcp, prompt)
   }
-  const text = prompt.split("\n").filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]")).join("\n").trim()
+  // The state of what the message names (server/handoff.ts): a model answers a quick question from it, without a lookup.
+  const named = prompt.match(NAMED_BLOCK)
+  const text = prompt
+    .replace(NAMED_BLOCK, "")
+    .split("\n")
+    .filter((l) => !l.startsWith("- ") && !l.startsWith("[Box Yard") && !l.startsWith("[Yard now]"))
+    .join("\n")
+    .trim()
   const lines = []
   let m
   if ((m = text.match(/create project\s+"?([\w .-]+?)"?(?:\s+repo\s+(\S+))?\s*$/im))) {
@@ -290,7 +340,9 @@ async function orchestrator(mcp, prompt) {
   if ((m = text.match(/^delete schedule\s+(.+?)\s*$/im))) {
     lines.push(await useTool(mcp, "delete_schedule", { schedule: m[1] }))
   }
-  if (!lines.length || /status|what.*(up|going)/i.test(text)) {
+  if (!lines.length && named) {
+    lines.push(`Here's what you asked about:\n${named[1].trim()}`)
+  } else if (!lines.length || /status|what.*(up|going)/i.test(text)) {
     const r = await useTool(mcp, "list_tasks", {})
     let tasks = []
     try {
@@ -413,7 +465,6 @@ let prompt = ""
 process.stdin.on("data", (d) => (prompt += d))
 process.stdin.on("end", async () => {
   const started = Date.now()
-  out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
   const login = [process.env.CLAUDE_CODE_OAUTH_TOKEN, process.env.ANTHROPIC_API_KEY].filter(Boolean)
   const loginError = login.some((t) => t.includes("revoked"))
     ? "Invalid API key · Please run /login"
@@ -421,6 +472,7 @@ process.stdin.on("end", async () => {
       ? "Not logged in · Please run /login"
       : null
   if (loginError) {
+    out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake" })
     out({ type: "result", subtype: "success", is_error: true, result: loginError, session_id: session.id })
     process.exit(1)
   }
@@ -434,7 +486,12 @@ process.stdin.on("end", async () => {
   if (!/^\s*\/(compact|context)\b/.test(prompt)) session.tokens += PER_TURN
   try {
     mcp = loadMcp()
-    await mcp?.init()
+    await mcp?.init().catch((err) => {
+      out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake", mcp_servers: [{ name: "boxyard", status: "failed" }] })
+      throw err
+    })
+    // Like the real CLI: init comes once the MCP servers are connected (turn timings read start-up off it).
+    out({ type: "system", subtype: "init", session_id: session.id, tools: [], model: "fake", mcp_servers: mcp ? [{ name: "boxyard", status: "connected" }] : [] })
     const isOrchestrator = mcp?.kind === "orchestrator"
     if (/^\s*\/compact\b/.test(prompt)) {
       // Like the real CLI: same session, much smaller context, nothing printed as a message.
@@ -461,7 +518,7 @@ process.stdin.on("end", async () => {
   } finally {
     mcp?.close()
   }
-  session.turns.push({ prompt, result, at: Date.now(), uuids, ...(session.thread ? { thread: true } : {}) })
+  session.turns.push({ prompt, result, at: Date.now(), uuids, model: flag("--model") ?? null, effort: flag("--effort") ?? null, ...(session.thread ? { thread: true } : {}) })
   if (sessionFile) fs.writeFileSync(sessionFile, JSON.stringify(session))
   out({
     type: "result",
@@ -470,6 +527,7 @@ process.stdin.on("end", async () => {
     result,
     session_id: session.id,
     duration_ms: Date.now() - started,
+    duration_api_ms: 0,
     num_turns: 1,
     total_cost_usd: 0,
     usage: usageNow(),

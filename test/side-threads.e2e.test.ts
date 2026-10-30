@@ -22,9 +22,9 @@ const fakeSession = (id: string) =>
     forkedFrom?: string
   }
 
-async function start() {
+async function start(config?: ReturnType<typeof testConfig>) {
   const port = await freePort()
-  const yard = createBoxYard(testConfig({ port }), { webDir: "/nonexistent" })
+  const yard = createBoxYard(config ? { ...config, port } : testConfig({ port }), { webDir: "/nonexistent" })
   const server = await new Promise<Server>((resolve) => {
     const s = yard.app.listen(port, "127.0.0.1", () => resolve(s))
   })
@@ -53,6 +53,8 @@ async function start() {
     }, `${n} side thread answers`)
   return { yard, call, say, idle, answers }
 }
+
+const threadOf = async (call: <T>(url: string) => Promise<T>, id: string) => (await call<SideThread[]>("/api/threads")).find((t) => t.id === id)!
 
 describe("side threads", () => {
   it("fork the Coordinator's session at the highlighted message: nothing after it, and the chat is untouched", async () => {
@@ -156,5 +158,89 @@ describe("side threads", () => {
     await call(`/api/threads/${thread.id}`, undefined, "DELETE")
     expect(await call<SideThread[]>("/api/threads")).toEqual([])
     await expect(call(`/api/threads/${thread.id}/messages`)).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe("threaded replies", () => {
+  it("stay out of the main chat, answer with the original message as context, and count replies", async () => {
+    const { yard, call, say, idle, answers } = await start()
+    await say("status one")
+    await say("status two")
+    const chat = await call<ChatMessage[]>("/api/chat")
+    const replies = chat.filter((m) => m.role === "assistant")
+    const original = replies[0]!
+    const mainId = String(original.meta!.sessionId)
+
+    // A reply needs no quote: the thread quotes the whole message.
+    const { thread, message } = await call<{ thread: SideThread; message: SideThreadMessage }>("/api/threads", { kind: "reply", anchorId: original.id, question: "Thanks, and the next step?" })
+    expect(thread).toMatchObject({ kind: "reply", anchorId: original.id, quote: original.content, resolvedAt: null })
+    expect(message).toMatchObject({ role: "user", content: "Thanks, and the next step?" })
+    const [answer] = await answers(thread.id, 1)
+    // Forked at the original: it sees the one turn up to it, and its prompt quotes the message in full.
+    expect(answer!.content).toContain("I can see 1 earlier chat turn (forked)")
+    expect(answer!.content).toContain(`Replying to: "${original.content.split("\n")[0]!.slice(0, 120)}"`)
+    expect(answer!.content).toContain("You asked: Thanks, and the next step?")
+    const prompt = fakeSession(yard.store.sideThreadSession(thread.id)!.sessionId).turns.at(-1)!.prompt
+    expect(prompt).toContain("The message Cody is replying to:")
+    expect(prompt).toContain("Cody's reply:\nThanks, and the next step?")
+
+    // The reply and its answer: two replies, and the answer is unread until the thread is seen.
+    expect(await threadOf(call, thread.id)).toMatchObject({ replies: 2, unread: true, busy: false })
+    expect(await call<SideThread>(`/api/threads/${thread.id}/seen`, {})).toMatchObject({ unread: false })
+
+    // Nothing reached the main chat or the Coordinator's session, and its next turn doesn't see the thread.
+    expect(await call<ChatMessage[]>("/api/chat")).toEqual(chat)
+    await say("status three")
+    await idle()
+    const main = fakeSession(mainId).turns.map((t) => t.prompt).join("\n")
+    expect(main).not.toContain("Thanks, and the next step?")
+    expect((await call<ChatMessage[]>("/api/chat")).map((m) => m.content).join("\n")).not.toContain("Side thread answer")
+
+    // Replying to the same message again adds to its one thread.
+    const again = await call<{ thread: SideThread }>("/api/threads", { kind: "reply", anchorId: original.id, question: "One more" })
+    expect(again.thread.id).toBe(thread.id)
+    await answers(thread.id, 2)
+    expect(await threadOf(call, thread.id)).toMatchObject({ replies: 4 })
+    expect((await call<SideThread[]>("/api/threads")).filter((t) => t.kind === "reply")).toHaveLength(1)
+  })
+
+  it("resolve and reopen, and persist across a restart", async () => {
+    const config = testConfig()
+    const first = await start(config)
+    await first.say("status")
+    const original = (await first.call<ChatMessage[]>("/api/chat")).filter((m) => m.role === "assistant").at(-1)!
+    const { thread } = await first.call<{ thread: SideThread }>("/api/threads", { kind: "reply", anchorId: original.id, question: "Noted" })
+    await first.answers(thread.id, 1)
+
+    const resolved = await first.call<SideThread>(`/api/threads/${thread.id}/resolve`, { resolved: true })
+    expect(resolved.resolvedAt).toEqual(expect.any(Number))
+    expect(await threadOf(first.call, thread.id)).toMatchObject({ resolvedAt: expect.any(Number), replies: 2 })
+
+    // Box Yard restarts: the thread, its replies and its resolved state are still there.
+    const r = running.splice(0)[0]!
+    r.yard.stop()
+    await new Promise((res) => r.server.close(() => res(null)))
+    const second = await start(config)
+    expect(await threadOf(second.call, thread.id)).toMatchObject({ kind: "reply", replies: 2, resolvedAt: expect.any(Number) })
+    expect((await second.call<SideThreadMessage[]>(`/api/threads/${thread.id}/messages`)).map((m) => m.role)).toEqual(["user", "assistant"])
+
+    // A new reply reopens it, and resumes its own session.
+    await second.call(`/api/threads/${thread.id}/messages`, { content: "Actually, one thing" })
+    expect((await threadOf(second.call, thread.id)).resolvedAt).toBeNull()
+    const [, answer] = await second.answers(thread.id, 2)
+    expect(answer!.content).toContain("You asked: Actually, one thing")
+    // Reopen by hand works too.
+    await second.call(`/api/threads/${thread.id}/resolve`, { resolved: true })
+    expect((await second.call<SideThread>(`/api/threads/${thread.id}/resolve`, { resolved: false })).resolvedAt).toBeNull()
+  })
+
+  it("refuse a reply to a message from another chat", async () => {
+    const { call, say } = await start()
+    await say("status")
+    const reply = (await call<ChatMessage[]>("/api/chat")).filter((m) => m.role === "assistant").at(-1)!
+    const project = await call<{ id: string }>("/api/projects", { name: "demo" })
+    await expect(call("/api/threads", { kind: "reply", projectId: project.id, anchorId: reply.id, question: "y" })).rejects.toMatchObject({ status: 400 })
+    // An ask still needs its highlight.
+    await expect(call("/api/threads", { anchorId: reply.id, question: "y" })).rejects.toMatchObject({ status: 400 })
   })
 })

@@ -10,6 +10,7 @@ import { compactThreshold, noteBudgetOf, type SettingsStore } from "./settings.j
 import { contextTokens, contextWindowOf, formatTokens, parseContextReport, resultUsageObject } from "./usage.js"
 import { routingInstructions } from "./routing.js"
 import { updatesBlock } from "./noticeBatch.js"
+import { NAMED_TASKS_HEADING, namedState, type PrLookup } from "./handoff.js"
 import { uploadsDir } from "./uploads.js"
 import { captainPrompt } from "./prompts.js"
 import { DEFAULT_LOOP_GUARD, WakeLoopGuard, type LoopGuardOptions } from "./loopGuard.js"
@@ -43,6 +44,7 @@ import { serverClaudeEnv } from "./turnCredentials.js"
 import { MISSING_SESSION, codexErrorText } from "./codex.js"
 import { attachedImages, codexAttachmentNote, codexChatLaunch, codexManagerNote, type ChatLaunch } from "./chatAgent.js"
 import { codexModel, type AgentCli } from "../shared/agentCli.js"
+import { TurnClock, turnTiming, type McpHandshakes } from "./turnTimings.js"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, CompactionRecord, CompactionTaskSnapshot, ContextUsage, Project, Task } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 15 * 60_000
@@ -55,6 +57,15 @@ export const STATUS_ONLY_CAPTAIN = "Status only: you get this Captain's replies 
 const MAX_THRESHOLD_SHARE = 0.95
 
 type RunKind = "turn" | "summary" | "compact" | "context"
+/** What asked for a run, for its timing row (shared/turnTimings.ts). */
+interface RunAsk {
+  trigger?: string | null
+  requestedAt?: number | null
+  /** Images attached to the messages it answers: a Codex run gets them with the prompt (Claude Code opens them with Read). */
+  images?: string[]
+}
+/** Which sender a turn counts as started by when it answers several: the highest-ranked. */
+const TRIGGER_RANK: CaptainSource[] = ["cody", "coordinator", "agent", "schedule", "hook"]
 interface RunResult {
   ok: boolean
   error: string
@@ -174,6 +185,8 @@ export class CaptainManager {
   claudeLogin: ((projectId: string) => Record<string, string> | null) | null = null
   /** Whether a project's identity shows the Coordinator its status only (app.ts: Identities.statusOnly). */
   statusOnly: ((projectId: string) => boolean) | null = null
+  /** GitHub's PR states for the named-tasks block in front of a message (app.ts: TaskManager.prs). */
+  prs: PrLookup | null = null
   /** Read when a Captain is created; tests shorten these. */
   readonly tuning: CaptainTuning = { wakeDebounceMs: 3000, loopGuard: { ...DEFAULT_LOOP_GUARD } }
 
@@ -181,7 +194,7 @@ export class CaptainManager {
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    private readonly mcp: { url: string; token: string },
+    private readonly mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
   ) {}
 
@@ -190,7 +203,7 @@ export class CaptainManager {
     if (!project) throw new BadRequestError(`No project ${projectId}`)
     let captain = this.captains.get(project.id)
     if (!captain) {
-      const mcp = { url: this.mcp.url, token: this.tokenFor(project.id) }
+      const mcp = { url: this.mcp.url, token: this.tokenFor(project.id), handshakes: this.mcp.handshakes }
       captain = new Captain(
         this.c,
         this.store,
@@ -204,6 +217,7 @@ export class CaptainManager {
         (messages, reply) => this.onAgentMessagesHandled?.(project.id, messages, reply),
         () => this.claudeLogin?.(project.id) ?? null,
         () => this.statusOnly?.(project.id) ?? false,
+        () => this.prs,
       )
       this.captains.set(project.id, captain)
     }
@@ -407,6 +421,7 @@ class Captain {
   private readonly mcpConfigPath: string
   private readonly mcpConfig: string
   private readonly mcp: { url: string; token: string }
+  private readonly handshakes: McpHandshakes | null
   readonly compactionsDir: string
 
   /** The CLI every Captain runs on now (Settings › Coordinator › Captains). */
@@ -424,7 +439,7 @@ class Captain {
     private readonly c: Config,
     private readonly store: Store,
     private readonly hub: Hub,
-    mcp: { url: string; token: string },
+    mcp: { url: string; token: string; handshakes?: McpHandshakes },
     private readonly settings: SettingsStore,
     private readonly project: Project,
     private readonly report: (content: string, report?: CaptainReport) => void,
@@ -435,9 +450,11 @@ class Captain {
     private readonly claudeLogin: () => Record<string, string> | null = () => null,
     /** Its identity shows the Coordinator status only, so its replies to the Coordinator report state, not content. */
     private readonly statusOnly: () => boolean = () => false,
+    private readonly prs: () => PrLookup | null = () => null,
   ) {
     this.loopGuard = new WakeLoopGuard(tuning.loopGuard)
     this.mcp = mcp
+    this.handshakes = mcp.handshakes ?? null
     this.workdir = path.join(c.dataDir, "captains", project.id)
     this.compactionsDir = captainCompactionsDir(c.dataDir, project.id)
     fs.mkdirSync(this.workdir, { recursive: true })
@@ -728,10 +745,18 @@ class Captain {
     this.store.setKv(`captain_last_turn_at:${this.project.id}`, String(Math.max(Date.now(), ...moved.map((d) => d.createdAt)) + 1))
     const entries = this.store.takeUnseenCaptainNoticeEntries(this.project.id)
     const notices = entries.map((n) => n.content)
-    const prompt = [updatesBlock("Project updates since your last turn", notices), messages.join("\n\n")]
+    const named = await namedState(
+      answering.map((m) => m.content).join("\n\n"),
+      { tasks: this.store.listTasks({ projectId: this.project.id }) },
+      { store: this.store, prs: this.prs() },
+      NAMED_TASKS_HEADING,
+    )
+    const prompt = [updatesBlock("Project updates since your last turn", notices), named, messages.join("\n\n")]
       .filter(Boolean)
       .join("\n\n")
-    const result = await this.runPrompt(prompt, false, images)
+    const sources = new Set(answering.map(captainSourceOf))
+    const ask = { trigger: TRIGGER_RANK.find((s) => sources.has(s)) ?? null, requestedAt: Math.min(...answering.map((m) => m.createdAt)), images }
+    const result = await this.runPrompt(prompt, false, ask)
     this.handled(entries, result.ok)
     this.replyUpward(answering, result)
     const fromAgents = answering.filter((m) => captainSourceOf(m) === "agent")
@@ -804,6 +829,7 @@ class Captain {
         ),
       ].join("\n\n"),
       true,
+      { trigger: "updates", requestedAt: Math.min(...entries.map((n) => n.createdAt)) },
     )
     this.handled(entries, result.ok)
     if (!result.ok) this.report(`Captain for ${this.project.name} hit an error: ${result.error.slice(0, 500)}`)
@@ -856,7 +882,7 @@ class Captain {
     return { text: lines.join("\n"), hash }
   }
 
-  private async runPrompt(body: string, auto = false, images: string[] = []): Promise<{ ok: boolean; error: string; text: string }> {
+  private async runPrompt(body: string, auto = false, ask: RunAsk = {}): Promise<{ ok: boolean; error: string; text: string }> {
     let now = this.projectNow()
     const recapFile = this.store.getKv(recapKey(this.project.id))
     const compacted = recapFile ? this.recap(recapFile) : null
@@ -865,7 +891,7 @@ class Captain {
     const switched = s.started && (this.store.getKv(sessionCliKey(this.project.id)) ?? "claude") !== this.cli()
     let result: RunResult = switched
       ? { ok: false, error: "session not found: it belongs to the other CLI", text: "", raw: "", sessionId: null }
-      : await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started, "turn", images)
+      : await this.run([compacted, now.text, body].filter(Boolean).join("\n\n"), s.id, s.started, "turn", ask)
     if (!result.ok && s.started && MISSING_SESSION.test(result.error)) {
       const fresh = randomUUID()
       this.store.setKv(sessionKey(this.project.id), fresh)
@@ -879,7 +905,7 @@ class Captain {
         .join("\n")
       const last = lastCompaction(this.compactionsDir)
       const saved = compacted ?? (last ? this.recap(last.file, "Your session was reset. This is the last summary you wrote") : null)
-      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false, "turn", images)
+      result = await this.run(`${saved ? `${saved}\n\n` : ""}Earlier Captain conversation (your session was reset):\n${recap}\n\n---\n\n${now.text}\n\n${body}`, fresh, false, "turn", ask)
     }
     if (result.ok) this.store.setKv(notesSeenKey(this.project.id), now.notesHash)
     if (result.ok && recapFile) this.store.setKv(recapKey(this.project.id), null)
@@ -1074,12 +1100,14 @@ class Captain {
     return { cli: "claude", bin: bin!, args: [...pre, ...this.claudeArgs(kind, sessionId, resume)], env, translate: null, after() {} }
   }
 
-  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", images: string[] = []): Promise<RunResult> {
+  private run(prompt: string, sessionId: string, resume: boolean, kind: RunKind = "turn", ask: RunAsk = {}): Promise<RunResult> {
     return new Promise((resolve) => {
       // Codex compacts on its own and has no /context: doCompact starts a fresh session from the summary instead.
       if (this.cli() === "codex" && (kind === "compact" || kind === "context")) return resolve({ ok: true, error: "", text: "", raw: "", sessionId: null })
-      const launch = this.launch(kind, sessionId, resume, images)
+      const launch = this.launch(kind, sessionId, resume, ask.images ?? [])
       const cliName = launch.cli === "codex" ? `codex (${this.c.codexBin})` : `claude (${this.c.claudeBin})`
+      const effort = this.settings.get().captainEffort
+      const clock = new TurnClock()
 
       let child: ChildProcess
       try {
@@ -1104,6 +1132,8 @@ class Captain {
       const startedAt = Date.now()
       const quiet = kind !== "turn"
       const timer = setTimeout(() => child.kill("SIGTERM"), TURN_TIMEOUT_MS)
+      /** The turn's last reply, where the chat's timing chip goes. */
+      let reply: CaptainMessage | null = null
 
       const onLine = (line: string) => {
         if (launch.translate) {
@@ -1122,6 +1152,7 @@ class Captain {
         // stop() closed the database; the run's last lines have nowhere to go.
         if (this.stopped) return
         if (typeof msg.session_id === "string") seenSession = msg.session_id
+        clock.line(msg)
         if (msg.type === "system" && msg.subtype === "init") {
           if (kind === "turn") {
             // Codex names its own thread: that's the session the next turn resumes.
@@ -1150,6 +1181,7 @@ class Captain {
             const meta = { ...(parsed.nextSteps.length ? { [NEXT_STEPS_META_KEY]: parsed.nextSteps } : {}), ...sessionLineMeta(msg, sessionId) }
             const m = this.store.addCaptainMessage(this.project.id, "assistant", text, Object.keys(meta).length ? meta : null)
             this.hub.broadcast({ type: "captain.message", message: m })
+            reply = m
           }
           for (const b of msg.message.content) {
             if (b.type !== "tool_use") continue
@@ -1208,6 +1240,7 @@ class Captain {
             resumed: resume,
           })
         }
+        if (kind !== "context") this.recordTiming(clock, { kind, sessionId: seenSession ?? sessionId, model: resultModel, effort, resume, ask, ok: !err && code === 0 && !resultError, reply })
         const base = { text: said, raw, sessionId: seenSession }
         if (err) return resolve({ ...base, ok: false, error: `Couldn't run ${cliName}: ${err.message}` })
         if (code === 0 && !resultError && (sawResult || launch.cli === "claude")) return resolve({ ...base, ok: true, error: "" })
@@ -1218,5 +1251,36 @@ class Captain {
       child.stdin!.on("error", () => {})
       child.stdin!.end(prompt)
     })
+  }
+
+  /** The run's timings into turn_timings, and their id on the turn's reply (see Orchestrator.recordTiming). */
+  private recordTiming(
+    clock: TurnClock,
+    r: { kind: RunKind; sessionId: string; model: string | null; effort: string; resume: boolean; ask: RunAsk; ok: boolean; reply: CaptainMessage | null },
+  ) {
+    try {
+      const reading = clock.finish(r.ok)
+      const id = `tim_${randomUUID().slice(0, 12)}`
+      const timing = turnTiming(reading, {
+        id,
+        role: "captain",
+        kind: r.kind,
+        projectId: this.project.id,
+        sessionId: r.sessionId,
+        model: r.model ?? this.settings.get().captainModel,
+        effort: r.effort,
+        trigger: r.kind === "turn" ? (r.ask.trigger ?? null) : "compaction",
+        resumed: r.resume,
+        requestedAt: r.ask.requestedAt ?? null,
+        handshake: this.handshakes?.since(`captain:${this.project.id}`, reading.startedAt, clock.ready ?? reading.endedAt) ?? null,
+      })
+      this.store.recordTurnTiming(timing)
+      if (r.kind === "turn" && r.reply) {
+        const updated = this.store.setCaptainMessageTiming(r.reply.id, id, timing.totalMs)
+        if (updated) this.hub.broadcast({ type: "captain.message", message: updated })
+      }
+    } catch (err) {
+      console.error(`[captain ${this.project.id}] couldn't record the turn's timings:`, err)
+    }
   }
 }

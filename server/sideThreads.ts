@@ -32,7 +32,7 @@ import { codexChatLaunch, type ChatLaunch } from "./chatAgent.js"
 import type { AgentCli } from "../shared/agentCli.js"
 import { withOwner } from "../shared/owner.js"
 import { parseNextSteps } from "../shared/nextSteps.js"
-import type { ChatMessage, Effort, SideThread, SideThreadMessage } from "../shared/types.js"
+import type { ChatMessage, Effort, SideThread, SideThreadKind, SideThreadMessage } from "../shared/types.js"
 
 const TURN_TIMEOUT_MS = 10 * 60_000
 /** The most of a highlight or question a thread keeps. */
@@ -65,7 +65,9 @@ export const THREAD_TOOLS: ReadonlySet<string> = new Set([
   "list_hooks",
   "list_hook_runs",
   "pool_status",
+  "machine_stats",
   "box_history",
+  "turn_timings",
   "get_settings",
 ])
 
@@ -179,6 +181,27 @@ export function threadPrompt(o: { quote: string; question: string; anchorText: s
     .join("\n\n")
 }
 
+/**
+ * A reply thread's first prompt: the message Cody replied to, in full (the thread's context starts there), and the
+ * reply. Like an ask's, with the whole message instead of a highlight.
+ */
+export function replyPrompt(o: { original: string; reply: string; context: string | null; ownerName?: string }): string {
+  const own = (t: string) => withOwner(t, o.ownerName)
+  return [
+    own(
+      "[Box Yard side thread] Cody replied to one of the messages in this chat, in a thread under it. The thread is separate from the main conversation: the main chat never sees it, and it starts at that message, so nothing said after it is part of it.",
+    ),
+    o.context ? `[Your session for this thread was started fresh, from your notes.]\n\n${o.context}` : null,
+    `${own("The message Cody is replying to:")}\n${quoteBlock(o.original)}`,
+    own(
+      "Answer the reply in light of that message, briefly and directly. This thread is read-only: you may look things up (get_task, list_tasks, search_history, read_artifact and the other list_, get_ and read_ tools), but nothing that changes Box Yard works here (no create_task, send_to_task, schedules, settings or other changes). If Cody wants something done, say what you would do; Cody can ask for it in the main chat. No next-step block in this thread.",
+    ),
+    `${own("Cody")}'s reply:\n${o.reply}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+}
+
 interface RunState {
   child: ChildProcess | null
   running: boolean
@@ -236,31 +259,66 @@ export class SideThreads {
     return this.store.listSideThreadMessages(id)
   }
 
-  /** Open a thread on a highlighted passage and ask the first question. */
-  create(input: { projectId: string | null; anchorId: string; quote: string; question: string; id?: string; messageId?: string }): { thread: SideThread; message: SideThreadMessage } {
+  /**
+   * Open a thread on a chat message with Cody's first message: a question about a highlighted passage (kind "ask"),
+   * or a reply to the whole message (kind "reply", no quote needed). A message has one reply thread: replying to it
+   * again adds to that thread.
+   */
+  create(input: { projectId: string | null; anchorId: string; quote?: string; question: string; kind?: SideThreadKind; id?: string; messageId?: string }): {
+    thread: SideThread
+    message: SideThreadMessage
+  } {
     this.checkChat(input.projectId)
-    const quote = input.quote.trim()
+    const kind = input.kind ?? "ask"
     const question = input.question.trim()
-    if (!quote) throw new BadRequestError("quote: highlight some text to ask about")
-    if (!question) throw new BadRequestError("question: ask something")
-    if (!this.store.chatUpTo(input.projectId, input.anchorId, 1)) throw new BadRequestError(`anchorId: no message ${input.anchorId} in this chat`)
+    if (!question) throw new BadRequestError(kind === "reply" ? "question: write a reply" : "question: ask something")
+    const anchor = this.store.chatUpTo(input.projectId, input.anchorId, 1)?.[0]
+    if (!anchor) throw new BadRequestError(`anchorId: no message ${input.anchorId} in this chat`)
+    if (kind === "reply") {
+      const existing = this.store.replyThreadOn(input.projectId, input.anchorId)
+      if (existing) {
+        const message = this.send(existing.id, question, input.messageId)
+        return { thread: this.get(existing.id), message }
+      }
+    }
+    const quote = (kind === "reply" ? anchor.content : (input.quote ?? "")).trim()
+    if (!quote) throw new BadRequestError(kind === "reply" ? "anchorId: that message has no text to reply to" : "quote: highlight some text to ask about")
     if (input.id && this.store.getSideThread(input.id)) throw new BadRequestError(`A side thread ${input.id} already exists`)
-    const thread = this.store.createSideThread({ id: input.id, projectId: input.projectId, anchorId: input.anchorId, quote: quote.slice(0, MAX_QUOTE_CHARS), sessionId: randomUUID() })
+    const thread = this.store.createSideThread({ id: input.id, projectId: input.projectId, anchorId: input.anchorId, kind, quote: quote.slice(0, MAX_QUOTE_CHARS), sessionId: randomUUID() })
     this.hub.broadcast({ type: "thread", thread: this.decorate(thread) })
     const message = this.send(thread.id, question, input.messageId)
     return { thread: this.get(thread.id), message }
   }
 
-  /** Cody's next message in a thread; answered right away, or after the turn that's running. */
+  /** Cody's next message in a thread; answered right away, or after the turn that's running. It reopens a resolved thread. */
   send(id: string, content: string, messageId?: string): SideThreadMessage {
     const thread = this.get(id)
     const text = content.trim().slice(0, MAX_QUESTION_CHARS)
     if (!text) throw new BadRequestError("content: message is empty")
     const message = this.store.addSideThreadMessage(thread.id, "user", text, null, messageId)
+    if (thread.resolvedAt !== null) this.store.resolveSideThread(thread.id, false)
+    this.store.seeSideThread(thread.id, message.createdAt)
     this.hub.broadcast({ type: "thread.message", message })
     this.state(thread.id).pending = true
     void this.drain(thread.id)
     return message
+  }
+
+  /** Resolve a thread (it folds away under its message, still reachable there), or reopen it. */
+  resolve(id: string, resolved: boolean): SideThread {
+    this.get(id)
+    this.store.resolveSideThread(id, resolved)
+    this.publish(id)
+    return this.get(id)
+  }
+
+  /** Cody has the thread open: its answers so far are read. */
+  seen(id: string): SideThread {
+    const before = this.get(id)
+    this.store.seeSideThread(id)
+    const after = this.get(id)
+    if (before.unread !== after.unread) this.publish(id)
+    return after
   }
 
   stop(id: string) {
@@ -364,8 +422,13 @@ export class SideThreads {
     // Codex can't fork a session at a message: a thread on a Codex chat always starts from the summary.
     const fork = main.started && host.cli() === "claude" ? forkPoint(upTo, main.id, compactions.at(-1)?.at ?? null) : null
     const anchor = upTo.at(-1)
+    // A reply thread quotes the whole message it replies to; an ask, the highlight (and the message, unless the fork ends on it).
+    const first = (context: string | null, withAnchor: boolean) =>
+      thread.kind === "reply"
+        ? replyPrompt({ original: anchor?.content || thread.quote, reply: question, context, ownerName: owner })
+        : threadPrompt({ quote: thread.quote, question, anchorText: withAnchor ? (anchor?.content ?? null) : null, context, ownerName: owner })
     if (fork) {
-      const prompt = threadPrompt({ quote: thread.quote, question, anchorText: fork.atAnchor ? null : (anchor?.content ?? null), context: null, ownerName: owner })
+      const prompt = first(null, !fork.atAnchor)
       const args = ["--resume", main.id, "--resume-session-at", fork.uuid, "--fork-session", "--session-id", session.sessionId]
       const result = await this.run(id, r, host, prompt, args, session.sessionId, true, "fork")
       // A fork the CLI couldn't make (the session file is gone, say): start over from the summary.
@@ -373,7 +436,7 @@ export class SideThreads {
     }
     const summary = this.summaryBefore(compactions, anchor?.createdAt ?? Date.now())
     const context = summaryContext(upTo, summary, owner)
-    const prompt = threadPrompt({ quote: thread.quote, question, anchorText: null, context: context || null, ownerName: owner })
+    const prompt = first(context || null, false)
     const fresh = randomUUID()
     const result = await this.run(id, r, host, prompt, ["--session-id", fresh], fresh, false, "summary")
     this.finish(id, result)
@@ -383,6 +446,7 @@ export class SideThreads {
     if (result.ok || this.stopped || !this.store.getSideThread(id)) return
     const message = this.store.addSideThreadMessage(id, "error", `The side thread hit an error: ${result.error.slice(0, 1500)}`)
     this.hub.broadcast({ type: "thread.message", message })
+    this.publish(id)
   }
 
   /** A chat's compactions, oldest first: when, and the summary file. */
@@ -545,6 +609,8 @@ export class SideThreads {
           if (text) {
             const m = this.store.addSideThreadMessage(id, "assistant", text)
             this.hub.broadcast({ type: "thread.message", message: m })
+            // Its reply count and unread mark.
+            this.publish(id)
           }
           for (const b of msg.message.content) {
             if (b.type !== "tool_use") continue

@@ -9,7 +9,7 @@ import type { Artifact, BoxInfo, Project, Schedule, Task, TaskStatus } from "../
 type Entity = { id: string }
 const sources = [
   { key: keys.tasks, url: "/api/tasks", sig: (t: Entity) => `${t.id}\t${(t as Task).title}` },
-  { key: keys.projects, url: "/api/projects", sig: (p: Entity) => `${p.id}\t${(p as Project).name}` },
+  { key: keys.projects, url: "/api/projects", sig: (p: Entity) => `${p.id}\t${(p as Project).name}\t${(p as Project).repo ?? ""}` },
   { key: keys.schedules, url: "/api/schedules", sig: (s: Entity) => `${s.id}\t${(s as Schedule).name}` },
   { key: keys.artifacts, url: "/api/artifacts", sig: (a: Entity) => `${a.id}\t${(a as Artifact).url}` },
   { key: keys.boxes, url: "/api/boxes", sig: (b: Entity) => b.id },

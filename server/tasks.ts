@@ -54,6 +54,7 @@ import { atRisk, deleteCheckScript, deleteVerdict, parseDeleteCheck, refusalLine
 import { GITHUB_HELPER, GIT_MARK, KEEP_STAGE_MARK, MIRROR_MARK, keepPackStages, cloneTaskScript, gitWithHelper, hydrateMirrorScript, keepPackScript, pruneMirrorsScript, relinkTaskScript, setHelperScript, syncMirrorScript, withMirrorLock, type MirrorSpec } from "./gitShare.js"
 import type { HookTrigger } from "../shared/hooks.js"
 import { LOCAL_BOX_ID, RUNNER_PHRASE, isLocalRunnerBox, type Runner } from "../shared/runner.js"
+import type { TaskIconName } from "../shared/taskIcons.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu, type RunPodProvider } from "./providers/runpod.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
@@ -66,6 +67,8 @@ import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { BOX_GIT_CREDENTIAL_SCRIPT } from "./providers/upstash.js"
 import { BoxHistory, type BoxEventInput } from "./boxHistory.js"
 import { TurnMeter, type MeasuredTurn } from "./turnPeaks.js"
+import { turnTiming } from "./turnTimings.js"
+import type { TurnClockReading } from "../shared/turnTimings.js"
 import { pickAutoSize, type ProjectAutoSize, type TurnPeak } from "../shared/autoSize.js"
 import type { BoxActor, BoxEvent } from "../shared/boxHistory.js"
 import type { BoxPick } from "../shared/placement.js"
@@ -306,6 +309,8 @@ export interface NewTask {
   runsOn?: Runner | null
   /** The CLI it runs on for good (Task.agentCli); omitted: what its model names, else its project's Agent, else Settings. */
   agentCli?: AgentCli | null
+  /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
+  icon?: TaskIconName | null
 }
 
 /**
@@ -534,6 +539,8 @@ export class TaskManager {
   private meter = new TurnMeter()
   /** Auto-sizing: each project's measured turns (table turn_peaks), read once and dropped when another lands. */
   private turnPeakCache = new Map<string, TurnPeak[]>()
+  /** Running turns' server side, for their timings (turn_timings): when they were asked for and launched, by turn id. */
+  private turnLaunches = new Map<string, { requestedAt: number | null; launchedAt: number; trigger: string | null; model: string | null; effort: string | null; resumed: boolean }>()
   /** Bytes new workspaces being set up on a box are about to use: box -> task -> bytes. */
   private reserved = new Map<string, Map<string, number>>()
   /** The box's slot limit when each running turn claimed its slot, by turn id (see limitLoweredFrom). */
@@ -837,7 +844,7 @@ export class TaskManager {
    * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
    * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
    * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
-   * per call.
+   * per call. Two or more share a batch id (Task.batchId), which the Coordinator's cards view shows as one card.
    */
   createTasks(inputs: NewTask[]): Task[] {
     const projects = inputs.map((input) => {
@@ -848,12 +855,14 @@ export class TaskManager {
       if (input.runsOn) this.requireIdentityRunner(project.id, input.runsOn)
       return project
     })
+    const batchId = inputs.length > 1 ? `batch_${randomUUID().replace(/-/g, "").slice(0, 12)}` : null
     const ids = this.store.db.transaction(() =>
       inputs.map((input, i) => {
         const route = this.initialRoute(input)
         const task = this.store.createTask({
           ...input,
           agentCli: this.agentCliFor(input, projects[i]!),
+          batchId,
           startedBy: input.scheduleId ? "schedule" : (input.source ?? "cody"),
           model: route.model,
           effort: route.effort,
@@ -4720,6 +4729,17 @@ export class TaskManager {
       if (start.exitCode !== 0) throw new Error(`runner did not start: ${(start.stdout + start.stderr).slice(-800)}`)
       keyWaiting = false
       codexWaiting = false
+      // A turn that never reported its end (lost with its box) is forgotten after a day.
+      for (const [id, l] of this.turnLaunches) if (l.launchedAt < Date.now() - 86_400_000) this.turnLaunches.delete(id)
+      this.turnLaunches.set(turnId, {
+        // The oldest message it answers, else (a first turn) the task's creation; a retry or "Continue." has none.
+        requestedAt: queued.length ? Math.min(...queued.map((i) => i.createdAt)) : firstTurn ? row.created_at : null,
+        launchedAt,
+        trigger: compact ? "compaction" : (trigger ?? null),
+        model: agent.model ?? null,
+        effort: agent.effort ?? null,
+        resumed: !firstTurn && !recapped,
+      })
       if (superseded()) {
         await this.provider.exec(boxId, turnKillScript(dir)).catch(() => {})
         this.store.finishTaskTurn(turnId, { status: "stopped", error: "Its start timed out." })
@@ -5702,6 +5722,7 @@ export class TaskManager {
     this.store.releaseInputs(handoffClaim(row.current_turn_id))
     // Auto-sizing: what the turn used on its box, and whether it ran out of memory there.
     const measured = this.recordTurnPeak(row.current_turn_id, ev, !ev.ok && !ev.stopped && !this.stopRequested.has(row.id))
+    const timing = this.recordTurnTiming(row, ev)
     if (row.compacting) return this.finishCompact(row, ev)
     const flags = this.store.turnFlags(row)
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
@@ -5755,7 +5776,7 @@ export class TaskManager {
     if (row.box_id) this.store.touchBox(row.box_id)
 
     const cost = turnCost !== null ? ` · $${turnCost.toFixed(3)}` : ""
-    this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`)
+    this.addEvent(row.id, `Turn ${row.turn_count} ${stopped ? "stopped" : status === "failed" ? "failed" : "finished"}${cost}.`, timing)
     // What the agent said at the end of the turn, for the orchestrator.
     const said = (flags.done && flags.done.length > 40 ? flags.done : result || flags.done || "").replace(/\s+/g, " ").trim()
     const gist = preview(said, 600, "full reply: call wait_for_tasks or get_task")
@@ -5780,6 +5801,47 @@ export class TaskManager {
     this.publishDirectory()
     void this.archive(row.id).finally(() => this.schedule())
     this.schedule()
+  }
+
+  /**
+   * A finished turn's timings into turn_timings (shared/turnTimings.ts): the runner's reading of the CLI run (box clock)
+   * plus the server's side, from the request through the launch to this poll seeing turn_end. Its id, or null when the
+   * runner sent none (an older runner, a crash). Instrumentation only: it never fails the turn.
+   */
+  private recordTurnTiming(row: TaskRow, ev: WorkerEvent): { timingId: string; timingMs: number } | null {
+    const turnId = row.current_turn_id!
+    const launch = this.turnLaunches.get(turnId) ?? null
+    this.turnLaunches.delete(turnId)
+    const t = ev.timing as (TurnClockReading & { preSpawnMs?: number; processMs?: number | null; mcpMs?: number | null }) | null | undefined
+    if (!t || typeof t.startedAt !== "number" || typeof t.endedAt !== "number" || !Array.isArray(t.steps)) return null
+    try {
+      const { preSpawnMs: _pre, runnerStartedAt: _runner, processMs, mcpMs, ...reading } = t as typeof t & { runnerStartedAt?: number }
+      const id = `tim_${turnId.replace(/^[a-z]+_/, "")}`
+      const timing = turnTiming(reading, {
+        id,
+        role: "task",
+        kind: row.compacting ? "compact" : "turn",
+        projectId: row.project_id,
+        taskId: row.id,
+        sessionId: typeof ev.sessionId === "string" ? ev.sessionId : row.session_id,
+        model: launch?.model ?? row.model ?? null,
+        effort: launch?.effort ?? null,
+        trigger: launch?.trigger ?? null,
+        resumed: typeof ev.resumed === "boolean" ? ev.resumed : (launch?.resumed ?? false),
+        requestedAt: launch?.requestedAt ?? null,
+        launchedAt: launch?.launchedAt ?? null,
+        // Server clock → box clock: on an Upstash box both keep NTP time.
+        setupMs: launch ? Math.max(0, reading.startedAt - launch.launchedAt) : null,
+        processMs: processMs ?? null,
+        mcpMs: mcpMs ?? null,
+        seenAt: Date.now(),
+      })
+      this.store.recordTurnTiming(timing)
+      return { timingId: id, timingMs: timing.totalMs }
+    } catch (err) {
+      console.error(`[box-yard] couldn't record the timings of ${turnId}:`, err)
+      return null
+    }
   }
 
   /**
@@ -6564,7 +6626,7 @@ export class TaskManager {
     if (spend.state === "reached") {
       if (seen.reached === limit) return
       seen.reached = seen.warned = limit
-      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Coordinator, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
+      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Boxes page, a waiting task, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
       this.notice(`⚠️ **Cloud spend** hit the limit: ${spend.blockedReason}. New boxes wait ${raise}; running agents keep going, and free slots on the boxes there are still used.`, { kind: "cloud_limit" }, { coordinator: true })
     } else {
       if (seen.warned === limit) return

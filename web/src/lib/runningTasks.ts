@@ -1,5 +1,6 @@
-// The Zen header's running-tasks badge and its dropdown: which tasks count as running, how many, in what order,
-// and how long each has run. Pure, so it is unit tested.
+// Which tasks count as running, how many, in what order, and how long each has run ("12m", the task header's
+// Elapsed). Pure, so it is unit tested. (The Zen header's running-tasks badge that used the rest gave way to the
+// Coordinator chat's project bar.)
 import type { Task, TaskStatus } from "../../../shared/types"
 
 /**

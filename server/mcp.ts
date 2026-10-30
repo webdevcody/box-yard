@@ -32,6 +32,7 @@ import { usd } from "./cloudLimit.js"
 import { cleanupSummary, diskLine, rootDiskLine, rootLow } from "../shared/disk.js"
 import { compareSizes, resizeSummary, resizeTitle, sizeSpecLine } from "../shared/boxSizes.js"
 import { loadLine, memLine } from "../shared/memory.js"
+import type { MachineStats } from "./machineStats.js"
 import { BOX_EVENT_TYPES, boxActorLabel, type BoxEventType } from "../shared/boxHistory.js"
 import { snapshotJobLine } from "../shared/snapshots.js"
 import { RUNNERS, type Runner } from "../shared/runner.js"
@@ -43,8 +44,15 @@ import type { Identities } from "./identity/identities.js"
 import { IdentityDetector } from "./identity/detect.js"
 import { applyRefs, assignChecked, createWithRefs, detectFor, importDetected, testRepos, type IdentityRefs } from "./identity/setup.js"
 import { redact } from "./credentials.js"
+import { redactValues } from "./redact.js"
+import { scopeLine, type Connectors } from "./connectors/connectors.js"
+import type { Connector } from "../shared/connectors.js"
 import { COORDINATOR_SEES, DEFAULT_IDENTITY_ID, IDENTITY_COLORS, type CoordinatorSees, type Identity, type IdentityColor } from "../shared/identities.js"
+import { PROJECT_COLORS, type ProjectColor } from "../shared/projectColors.js"
+import { TASK_ICONS, type TaskIconName } from "../shared/taskIcons.js"
 import { READ_ONLY_REFUSAL, THREAD_TOOLS } from "./sideThreads.js"
+import { timingReport, type McpHandshakes } from "./turnTimings.js"
+import { formatMs, TURN_ROLES, TURN_STAGES, type Quantiles, type TurnRole } from "../shared/turnTimings.js"
 import { chatAround, DEFAULT_HISTORY_SOURCES, HISTORY_SOURCES, parseTerms, searchHistory, TRANSCRIPT_SCAN_ROWS, type HistoryHit, type HistorySource } from "./history.js"
 
 export interface McpDeps {
@@ -74,6 +82,10 @@ export interface McpDeps {
   identityDetector?: IdentityDetector
   /** Side threads' read-only tokens (server/sideThreads.ts). */
   threads?: { callerForToken(token: string): McpCaller | null }
+  /** This computer's memory, swap and load (machine_stats). Without it, the tool isn't offered. */
+  machine?: MachineStats
+  /** Settings › Connectors (docs/connectors.md). Without it, list_connectors isn't offered. */
+  connectors?: Connectors
 }
 
 /**
@@ -144,7 +156,8 @@ const effortSchema = z
       "low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); " +
       "medium = small, well-specified edits or config changes; " +
       "high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); " +
-      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions.",
+      "xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. " +
+      "Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.",
   )
 
 const modelSchema = z
@@ -154,7 +167,10 @@ const modelSchema = z
   .max(100)
   .regex(/^[A-Za-z0-9._:\[\]/-]+$/, "Model names have no spaces")
   .optional()
-  .describe("Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them.")
+  .describe(
+    "Claude model for this task or subsequent turn, from a matching routing rule or Cody's request. Omit to use the project route, Settings or routing defaults; a value here overrides them. " +
+      "Any id `claude --model` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6.",
+  )
 const routingRuleSchema = z.string().trim().min(1).max(120).optional().describe("Routing rule name/id that selected this model and effort.")
 const routingReasonSchema = z.string().trim().min(1).max(500).optional().describe("Short reason this request matches the rule.")
 const routeParams = { model: modelSchema, effort: effortSchema, routing_rule: routingRuleSchema, routing_reason: routingReasonSchema }
@@ -177,6 +193,10 @@ const agentSchema = z
   .describe(
     'The agent CLI it runs on, for good: "claude" (Claude Code) or "codex" (OpenAI Codex). Omit it to follow the project\'s Agent (else Settings › Box agents); a gpt-* or o* model picks "codex" on its own. Pass "codex" when Cody asks for Codex, GPT or OpenAI.',
   )
+const iconSchema = z
+  .enum(TASK_ICONS)
+  .optional()
+  .describe("The task's icon in the Coordinator chat, drawn in its project's colour. Omit it to pick one from the title.")
 
 /**
  * The tools the Coordinator and project Captains use to run Box Yard.
@@ -753,7 +773,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     {
       description: scopeId
         ? "Change your project's box settings, and on RunPod GPU its $/hr cap (gpu_max_hourly_usd) and the machine its new pods get (gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus). Each one left out stays as it is; null clears it, so the global one in Settings › Boxes & limits (or Settings › RunPod GPU) applies again. list_projects shows them (boxSettings, gpu). Running tasks are never stopped by a lower limit; it applies to the next ones."
-        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget.",
+        : "Change a project's name, description, repo, base branch, env vars, box settings (box_size, agents_per_box = tasks running at once, whole_machine, tasks_per_box = task folders kept per box, max_boxes, and on RunPod GPU gpu_max_hourly_usd, gpu_types, gpu_cloud, gpu_min_ram_gb, gpu_min_vcpus: null clears one so the global setting applies) or its own notes budget, or its colour in the chat and sidebar (color).",
       inputSchema: scopeId
         ? { project: z.string().optional().describe("Your project (the default)"), ...boxSettingsInput }
         : {
@@ -786,6 +806,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
               .nullable()
               .optional()
               .describe("This project's notes token budget; null goes back to the one in Settings."),
+            color: z
+              .enum(PROJECT_COLORS)
+              .nullable()
+              .optional()
+              .describe("Its colour in the Coordinator chat (task icons, the project bar, cards) and the sidebar. null goes back to the one picked from its name."),
           },
     },
     safe(
@@ -801,6 +826,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           agent?: AgentCli | null
           notes_max?: number | null
           notes_max_tokens?: number | null
+          color?: ProjectColor | null
         } & BoxSettingsArgs,
       ) => {
         if (!a.project && !scopeId) return fail("Name the project to update.")
@@ -821,6 +847,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
                 ...box,
                 notesMaxCount: a.notes_max,
                 notesMaxTokens: a.notes_max_tokens,
+                color: a.color,
               },
         )
         hub.broadcast({ type: "project", project: p })
@@ -844,6 +871,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         for (const s of store.listSchedules({ projectId: p.id })) await scheduler.remove(s.id)
         for (const t of store.listTasks({ projectId: p.id })) await tasks.deleteTask(t.id)
         await tasks.projectDeleted(p.id)
+        deps.connectors?.projectDeleted(p.id)
         store.deleteProject(p.id)
         hub.broadcast({ type: "project.deleted", projectId: p.id })
         return ok(`Deleted project ${p.name}.`)
@@ -1106,10 +1134,11 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         attachments: attachmentsSchema,
         runs_on: runsOnSchema,
         agent: agentSchema,
+        icon: iconSchema,
         ...routeParams,
       },
     },
-    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; agent?: AgentCli; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
+    safe(async (a: { project: string; title: string; prompt: string; env?: Record<string, string>; related_tasks?: string[]; attachments?: string[]; runs_on?: Runner; agent?: AgentCli; icon?: TaskIconName; model?: string; effort?: Effort; routing_rule?: string; routing_reason?: string }) => {
       const projectId = project(a.project).id
       const prompt = a.related_tasks?.length ? `${a.prompt}\n\n${relatedWork(a.related_tasks, projectId)}` : a.prompt
       await tasks.requireRunner(a.runs_on, projectId, a.env, { agentCli: a.agent, model: a.model })
@@ -1126,6 +1155,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
         source: inputSource,
         runsOn: a.runs_on ?? null,
         agentCli: a.agent ?? null,
+        icon: a.icon ?? null,
       })
       return ok({ ...brief(t), next: "The agent starts as soon as a box slot is free. Use wait_for_tasks to wait for its result if the work is quick." })
     }),
@@ -1139,6 +1169,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     env: envSchema,
     runs_on: runsOnSchema.describe('Where this task runs: "local" (this computer), "box" (an Upstash box), "gpu" (the project\'s RunPod GPU pod) or "docker" (the project\'s Docker container on this computer), over the shared runs_on and the project\'s "Runs on"'),
     agent: agentSchema.describe('"claude" or "codex" for this task, over the shared agent and the project\'s Agent'),
+    icon: iconSchema,
     ...routeParams,
   })
   type BatchItem = z.infer<typeof batchItem>
@@ -1255,6 +1286,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
             source: inputSource,
             runsOn: item.runs_on ?? a.runs_on ?? null,
             agentCli: item.agent ?? a.agent ?? null,
+            icon: item.icon ?? null,
           }
         })
         const created = tasks.createTasks(inputs)
@@ -1925,7 +1957,7 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
     "pool_status",
     {
       description:
-        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
+        "Show worker boxes (which projects live on each; running = tasks running/tasks running at once on that box) and queued tasks. pool.agentsPerBox (tasks running at once per box) and pool.tasksPerBox (task folders kept per box) give the limit for each box size; pool.overridden says when Settings or an env var replaces the size defaults for every box, and pool.projects lists projects with their own box settings (agentsPerBox caps only that project's own tasks running at once on a box; wholeMachine keeps other projects' tasks off its box while it runs). gpu_projects lists RunPod GPU projects' pods, spend and $/hr caps; a queued task says when a cap holds it. docker_projects lists Docker projects' containers (one per project, on this computer), images and limits. The computer running Box Yard itself isn't here: machine_stats shows its memory and load. Box Yard places tasks itself: a project's tasks share its box, a new project gets its own box while the pool has room.",
     },
     safe(async () => {
       // Drop boxes deleted outside Box Yard first (throttled), without waiting long on a slow provider.
@@ -1982,6 +2014,25 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
       })
     }),
   )
+
+  const machine = deps.machine
+  if (machine)
+    server.registerTool(
+      "machine_stats",
+      {
+        description:
+          "This computer's resources (the one running Box Yard, where \"Runs on: This computer\" tasks and the Docker containers run; pool_status covers the Upstash boxes): memory used and free with the OS's memory pressure, swap and whether it's growing, the 1/5/15-minute load and CPU count, the heaviest processes by kind (claude, chrome, docker, node, other), local tasks running against the localAgents limit with what each one uses, and the last 15 minutes of samples (one a minute). " +
+          "It reads the computer directly, so never start a task to measure it. " +
+          "recommendation says whether there's room to raise localAgents (tasks running at once on this computer), when to hold, and when to lower it, with the value to set: a starting point that raises by at most 2 a step. " +
+          (scopeId
+            ? "Only the Coordinator changes localAgents; tell Cody when your project's local tasks are held back by it."
+            : "To keep local concurrency in line with the machine on a schedule, make a Coordinator schedule (create_schedule without a project, e.g. every 10 minutes) whose prompt calls machine_stats, then update_settings { localAgents } within the min and max Cody gave, and says nothing when nothing changes."),
+      },
+      safe(async () => {
+        const limits = tasks.poolLimits()
+        return ok(await machine.report({ running: limits.localAgentsRunning, limit: limits.localAgents }))
+      }),
+    )
 
   coordinatorOnly(
     server.registerTool(
@@ -2052,6 +2103,58 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
           return ok({ changed: changes, next: "Applies from the next turn on; the pool already uses new limits." })
         }),
       ),
+    )
+  }
+
+  // ---------------------------------------------------------------- connectors (docs/connectors.md)
+  // External MCP servers some sessions get. Read-only here: only Settings adds, signs in, scopes or removes one, so no
+  // model can widen a connector's reach. The view has no value in it (a remote server shows its host only: some put a
+  // key in the path), and the whole result is also run through the connectors' own secret values.
+  const connectorStore = deps.connectors
+  if (connectorStore) {
+    const projectName = (id: string) => store.getProject(id)?.name ?? id
+    const connectorView = (c: Connector) => {
+      const yours = scopeId ? { captain: connectorStore.reaches(c, { kind: "captain", projectId: scopeId }), agents: RUNNERS.filter((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })) } : undefined
+      return {
+        name: c.name,
+        label: c.label,
+        tools: `mcp__${c.name}__*`,
+        kind: c.kind,
+        server: c.kind === "stdio" ? `command: ${(c.command ?? "").split("/").pop()}` : (() => {
+          try {
+            return new URL(c.url!).host
+          } catch {
+            return "?"
+          }
+        })(),
+        auth: c.auth,
+        enabled: c.enabled,
+        status: c.status,
+        ...(c.statusDetail ? { detail: c.statusDetail } : {}),
+        ...(c.oauth ? { signedIn: c.oauth.signedInAt !== null && c.status !== "needs_auth", renewsItself: c.oauth.refreshable, signInHost: c.oauth.signInHost } : {}),
+        secrets: c.secrets.map((x) => ({ name: x.name, fingerprint: x.fingerprint, ...(x.readable ? {} : { unreadable: true }) })),
+        lastTest: c.lastTest && { at: new Date(c.lastTest.at).toISOString(), ok: c.lastTest.ok, tools: c.lastTest.tools.slice(0, 60).map((t) => t.name), ...(c.lastTest.error ? { error: c.lastTest.error } : {}) },
+        ...(scopeId
+          ? { yours, otherProjects: c.scope.projects ? c.scope.projects.filter((id) => id !== scopeId).length : "every project" }
+          : { reaches: scopeLine(c.scope, projectName), ...(c.sealedSkipped.length ? { leftOut: `${c.sealedSkipped.map(projectName).join(", ")} (status only, and the Coordinator uses it)` } : {}) }),
+      }
+    }
+    server.registerTool(
+      "list_connectors",
+      {
+        description:
+          "External MCP connectors Cody set up in Settings › Connectors (Gmail, Notion, Linear, …): each one's name (its tools are mcp__<name>__*), server host or command, how it signs in, status (connected; needs_auth: Cody signs in again in Settings › Connectors; error, with the detail; untested), its last test's tools, and " +
+          (scopeId ? "whether you and your project's agents get it (yours). Only connectors that reach your project are listed. " : "who gets it. ") +
+          "Never a token or key: secrets show as fingerprints. You can't add, change or sign in a connector: tell Cody what to do in Settings › Connectors.",
+        inputSchema: {},
+      },
+      safe(async () => {
+        const list = connectorStore
+          .list()
+          .filter((c) => !scopeId || connectorStore.reaches(c, { kind: "captain", projectId: scopeId }) || RUNNERS.some((runner) => connectorStore.reaches(c, { kind: "agent", projectId: scopeId, runner })))
+        const text = JSON.stringify({ connectors: list.map(connectorView) })
+        return { content: [{ type: "text", text: redactValues(text, connectorStore.secretValues()) }] }
+      }),
     )
   }
 
@@ -2612,6 +2715,68 @@ export function buildMcpServer(deps: McpDeps, caller: McpCaller = { kind: "coord
   )
 
   server.registerTool(
+    "turn_timings",
+    {
+      description:
+        "Where the time of Coordinator, Captain and task turns goes: p50/p95/max per role and per stage (queue wait, task setup, CLI start-up with process start and MCP connect, " +
+        "time to first token, model steps, tool calls, the tail after the result, CLI wall and total), the share of prompt tokens read from cache, the slowest tools, and the newest turns with their stages and tokens. " +
+        "Turns are kept 30 days. Use it before and after a speed change, or to answer \"why was that reply slow\"." +
+        (scopeId ? " As a Captain you see your own turns and your project's tasks." : " A status-only project's turns count in the percentiles but stay out of the tool list and the recent turns."),
+      inputSchema: {
+        role: z.enum(TURN_ROLES as [TurnRole, ...TurnRole[]]).optional().describe("Only coordinator, captain or task turns"),
+        project: z.string().optional().describe("Project name or id"),
+        task: z.string().optional().describe("Task id or title: only that task's turns"),
+        days: z.number().min(0.05).max(30).optional().describe("How far back (default 7)"),
+        recent: z.number().int().min(0).max(50).optional().describe("How many of the newest turns to list (default 10)"),
+        kind: z.string().optional().describe("turn (default), compact, summary or context: compaction passes are runs of their own"),
+      },
+    },
+    safe(async (a: { role?: TurnRole; project?: string; task?: string; days?: number; recent?: number; kind?: string }) => {
+      const t = a.task ? task(a.task) : null
+      // A Captain sees its own turns and its tasks', never the Coordinator's.
+      if (scopeId && a.role === "coordinator") throw outOfScope("the Coordinator's turns")
+      const projectId = t?.projectId ?? projectFilter(a.project)
+      const report = timingReport((f) => store.listTurnTimings(f), { role: a.role, projectId, taskId: t?.id, kind: a.kind?.trim() || undefined, days: a.days, recent: a.recent, hidden: (r) => statusOnly(r.projectId) })
+      const projectName = (id: string | null) => (id ? (store.getProject(id)?.name ?? id) : undefined)
+      const q = (x: Quantiles | null | undefined) => (x ? `p50 ${formatMs(x.p50)} · p95 ${formatMs(x.p95)} · max ${formatMs(x.max)} (n ${x.n})` : undefined)
+      const ms = (n: number | null) => (n === null ? undefined : formatMs(n))
+      return ok({
+        days: report.days,
+        turns: report.summary.turns,
+        by_role: Object.fromEntries(
+          Object.entries(report.summary.byRole).map(([role, r]) => [
+            role,
+            {
+              turns: r.turns,
+              cache_read_share: r.cacheReadShare ?? undefined,
+              model_step: q(r.modelStepMs),
+              ...Object.fromEntries(TURN_STAGES.filter((s) => r.stages[s.key]).map((s) => [s.label, q(r.stages[s.key])])),
+            },
+          ]),
+        ),
+        slowest_tools: report.summary.tools.map((x) => `${x.name}: ${formatMs(x.totalMs)} in ${x.n} calls, ${q(x)}`),
+        recent: report.recent.map((r) => ({
+          id: r.id,
+          ended: ago(r.endedAt),
+          role: r.role,
+          project: projectName(r.projectId),
+          task: r.taskId ?? undefined,
+          trigger: r.trigger ?? undefined,
+          effort: r.effort ?? undefined,
+          ok: r.ok,
+          total: formatMs(r.totalMs),
+          stages: Object.fromEntries(
+            (["queueMs", "setupMs", "startupMs", "mcpMs", "firstTokenMs", "modelMs", "toolMs", "tailMs"] as const).filter((k) => r[k] !== null).map((k) => [k.replace(/Ms$/, ""), ms(r[k])]),
+          ),
+          calls: `${r.modelCalls} model, ${r.toolCalls} tool${r.slowestTool ? ` (slowest ${r.slowestTool.name} ${formatMs(r.slowestTool.ms)})` : ""}`,
+          tokens: r.tokens,
+        })),
+        ...(report.hiddenTurns ? { status_only_turns: report.hiddenTurns } : {}),
+      })
+    }),
+  )
+
+  server.registerTool(
     "box_history",
     {
       description:
@@ -2863,9 +3028,13 @@ function callerFor(deps: McpDeps, token: string, auth: string | undefined): McpC
   return projectId ? { kind: "captain", projectId } : null
 }
 
-/** Stateless Streamable HTTP endpoint: a fresh server per request. */
-export function mcpHandler(deps: McpDeps, token: string) {
+/**
+ * Stateless Streamable HTTP endpoint: a fresh server per request. `handshakes` hears each Coordinator and Captain
+ * request's JSON-RPC methods and times, for their turns' start-up timings.
+ */
+export function mcpHandler(deps: McpDeps, token: string, handshakes?: McpHandshakes) {
   return async (req: Request, res: Response) => {
+    const at = Date.now()
     const caller = callerFor(deps, token, req.headers.authorization)
     if (!caller) {
       res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized" }, id: null })
@@ -2874,6 +3043,13 @@ export function mcpHandler(deps: McpDeps, token: string) {
     if (req.method !== "POST") {
       res.status(405).set("Allow", "POST").end()
       return
+    }
+    // Side threads (readOnly callers) run beside the chat's turns: their handshakes aren't the turn's.
+    const key = caller.readOnly ? null : caller.kind === "coordinator" ? "coordinator" : `captain:${caller.projectId}`
+    if (handshakes && key) {
+      const body = req.body as unknown
+      const methods = (Array.isArray(body) ? body : [body]).map((m) => (m && typeof m === "object" ? String((m as { method?: unknown }).method ?? "") : ""))
+      if (methods.some((m) => m === "initialize" || m === "server/discover" || m === "tools/list")) res.on("finish", () => handshakes.saw(key, methods, at, Date.now()))
     }
     const server = buildMcpServer(deps, caller)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })

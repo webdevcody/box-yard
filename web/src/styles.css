@@ -87,7 +87,7 @@ body {
   @apply text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400;
 }
 /* A link to another site (NewTabLink sets data-external) is sky with a trailing ↗, like the app's other outside links,
-   so it never reads as one of the yellow in-app links. PR links wear their state's colors instead (PrTextLink). */
+   so it never reads as one of the yellow in-app links. PR links wear their state's colors instead (GithubTextLink in ui.tsx). */
 .prose-chat a[data-external] {
   @apply text-sky-400 decoration-sky-400/40 hover:decoration-sky-400;
 }
@@ -185,6 +185,19 @@ body.resizing iframe {
   .agent-working {
     animation: agent-fade 2.4s ease-in-out infinite;
   }
+}
+
+/* A Coordinator card that "↓ N new" or "Back to its card" just went to (components/CoordinatorCards.tsx). */
+@keyframes card-flash {
+  0% {
+    box-shadow: 0 0 0 2px rgb(251 191 36 / 0.6);
+  }
+  100% {
+    box-shadow: 0 0 0 2px rgb(251 191 36 / 0);
+  }
+}
+.card-flash {
+  animation: card-flash 1.4s ease-out;
 }
 
 /* Passages that have a side thread (lib/threadHighlight.ts), tinted in place; the open thread's is stronger. */

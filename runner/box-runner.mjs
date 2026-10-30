@@ -281,6 +281,8 @@ async function runTurn() {
   }
   const runAgent = codex ? runCodex : runClaude
   let sessionId = turn.sessionId
+  // Runner start → the CLI's spawn (signing, MCP config, dependency restore): the box side of a task's setup.
+  const preSpawnMs = Date.now() - clocks.wall
   let attempt = await runAgent({ turn, sessionId, resume: turn.resume, prompt, mcpConfigFile })
 
   // The session file can go missing (fresh box, lost archive). Start a new
@@ -322,6 +324,8 @@ async function runTurn() {
     resultUsage: attempt.result?.usage ?? null,
     error: ok ? null : clip(attempt.errorText || attempt.result?.result || `${codex ? "codex" : "claude"} exited with code ${attempt.exitCode}`, 2000),
     sleptMs: Math.max(0, Math.round(Date.now() - clocks.wall - (performance.now() - clocks.mono))),
+    // Where the turn's time went (shared/turnTimings.ts), on the box's clock: the server adds its side.
+    timing: attempt.timing ? { ...attempt.timing, preSpawnMs, runnerStartedAt: clocks.wall } : null,
   })
   // turn.pid and run.json stay behind on purpose: the orchestrator checks the
   // process with them, and a fast turn must not finish before it sees it started.
@@ -561,9 +565,29 @@ function contextReport(sessionId, model) {
   })
 }
 
+/**
+ * The CLI run's timings (shared/turnTimings.ts TurnClockReading) for turn_end, with the stdio MCP server's handshake
+ * (mcp-handshake.json, from this run's MCP process) as processMs and mcpMs. Never throws: timings are optional.
+ */
+function turnTimingOf(clock, ok) {
+  try {
+    const reading = clock.finish(ok)
+    const h = readJson(path.join(taskDir, "mcp-handshake.json"), null)
+    const mine = h && typeof h.initializeAt === "number" && h.initializeAt >= reading.startedAt && h.initializeAt <= (clock.ready ?? reading.endedAt)
+    return {
+      ...reading,
+      processMs: mine ? h.initializeAt - reading.startedAt : null,
+      mcpMs: mine && typeof h.readyAt === "number" ? h.readyAt - h.initializeAt : null,
+    }
+  } catch {
+    return null
+  }
+}
+
 function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
   return new Promise((resolve) => {
     const startedAt = Date.now()
+    const clock = new TurnClock(startedAt)
     const args = [
       "-p",
       "--output-format",
@@ -620,6 +644,7 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
           continue
         }
         if (msg.type === "result") result = msg
+        clock.line(msg)
         const tokens = msg.type === "assistant" && msg.message?.model !== "<synthetic>" ? contextTokensOf(msg.message?.usage) : null
         if (tokens && tokens !== usage?.tokens) {
           usage = { tokens, window: usage?.window ?? null }
@@ -639,6 +664,7 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
         try {
           const msg = JSON.parse(buf)
           if (msg.type === "result") result = msg
+          clock.line(msg)
           for (const ev of translate(msg)) queue(() => emit(ev))
         } catch {}
         buf = ""
@@ -649,7 +675,8 @@ function runClaude({ turn, sessionId, resume, prompt, mcpConfigFile }) {
         // Killed by a signal: 128 + its number, as a shell says it (137 for SIGKILL, what a box's out-of-memory killer sends).
         const killed = code === null && signal ? `claude was killed (${signal})` : ""
         const exitCode = code ?? (signal ? 128 + (os.constants.signals[signal] ?? 0) : 1)
-        resolve({ exitCode, startedAt, result, usage, errorText: [stderr.trim(), result?.is_error ? result.result : "", killed].filter(Boolean).join("\n") })
+        const timing = turnTimingOf(clock, exitCode === 0 && !result?.is_error)
+        resolve({ exitCode, startedAt, result, usage, timing, errorText: [stderr.trim(), result?.is_error ? result.result : "", killed].filter(Boolean).join("\n") })
       })
     })
 
@@ -977,6 +1004,155 @@ function runCodex({ turn, sessionId, resume, prompt }) {
     child.stdin.end(prompt)
   })
 }
+
+// TurnClock: a copy of server/turnTimings.ts's TurnClock (the box never calls the server, so the turn is timed here).
+// test/turn-timings.test.ts runs both on the same streams; change them together.
+
+const TURN_TIMING_MAX_STEPS = 300
+
+class TurnClock {
+  constructor(startedAt = Date.now()) {
+    this.startedAt = startedAt
+    this.readyAt = null
+    this.mcpStatus = null
+    this.firstTokenAt = null
+    this.resultAt = null
+    this.stepStart = null
+    this.stepLast = null
+    this.lastToolEnd = null
+    this.open = new Map()
+    this.ids = new Set()
+    this.steps = []
+    this.dropped = 0
+    this.toolSpans = []
+    this.result = null
+    this.contextTokens = null
+  }
+
+  get ready() {
+    return this.readyAt
+  }
+
+  line(msg, at = Date.now()) {
+    if (!msg || typeof msg !== "object" || msg.parent_tool_use_id) return
+    if (msg.type === "system" && msg.subtype === "init") {
+      if (this.readyAt !== null) return
+      this.readyAt = at
+      if (Array.isArray(msg.mcp_servers) && msg.mcp_servers.length) {
+        this.mcpStatus = msg.mcp_servers.map((s) => `${s?.name ?? "?"}: ${s?.status ?? "?"}`).join(", ")
+      }
+      return
+    }
+    if (msg.type === "stream_event") {
+      if (this.firstTokenAt === null && msg.event?.type === "content_block_delta") this.firstTokenAt = at
+      return
+    }
+    if (msg.type === "assistant" && Array.isArray(msg.message?.content)) {
+      if (msg.message.model === "<synthetic>") return
+      if (this.firstTokenAt === null) this.firstTokenAt = at
+      if (typeof msg.message.id === "string") this.ids.add(msg.message.id)
+      const u = msg.message.usage
+      if (u) {
+        const n = (clockNum(u.input_tokens) ?? 0) + (clockNum(u.cache_creation_input_tokens) ?? 0) + (clockNum(u.cache_read_input_tokens) ?? 0) + (clockNum(u.output_tokens) ?? 0)
+        if (n > 0) this.contextTokens = n
+      }
+      if (this.stepStart === null) this.stepStart = this.lastToolEnd ?? this.readyAt ?? this.startedAt
+      this.stepLast = at
+      for (const b of msg.message.content) {
+        if (b?.type === "tool_use" && typeof b.id === "string") this.open.set(b.id, { name: clockToolName(b.name), at })
+      }
+      return
+    }
+    if (msg.type === "user" && Array.isArray(msg.message?.content)) {
+      for (const b of msg.message.content) {
+        if (b?.type !== "tool_result") continue
+        const call = this.open.get(b.tool_use_id)
+        if (!call) continue
+        this.closeModel()
+        this.open.delete(b.tool_use_id)
+        this.push({ k: "tool", name: call.name, at: call.at - this.startedAt, ms: Math.max(0, at - call.at) })
+        this.toolSpans.push([call.at, at])
+        this.lastToolEnd = at
+      }
+      return
+    }
+    if (msg.type === "result") {
+      this.resultAt = at
+      this.result = msg
+      this.closeModel()
+    }
+  }
+
+  push(step) {
+    if (this.steps.length < TURN_TIMING_MAX_STEPS) this.steps.push(step)
+    else this.dropped++
+  }
+
+  closeModel() {
+    if (this.stepStart === null || this.stepLast === null) return
+    this.push({ k: "model", at: this.stepStart - this.startedAt, ms: Math.max(0, this.stepLast - this.stepStart) })
+    this.stepStart = null
+    this.stepLast = null
+  }
+
+  finish(ok, at = Date.now()) {
+    this.closeModel()
+    for (const call of this.open.values()) {
+      this.push({ k: "tool", name: call.name, at: call.at - this.startedAt, ms: Math.max(0, at - call.at) })
+      this.toolSpans.push([call.at, at])
+    }
+    this.open.clear()
+    const r = this.result
+    const u = r?.usage ?? {}
+    const steps = this.steps
+    return {
+      startedAt: this.startedAt,
+      endedAt: at,
+      startupMs: this.readyAt === null ? null : this.readyAt - this.startedAt,
+      mcpStatus: this.mcpStatus,
+      firstTokenMs: this.firstTokenAt === null ? null : this.firstTokenAt - (this.readyAt ?? this.startedAt),
+      modelMs: steps.reduce((n, s) => (s.k === "model" ? n + s.ms : n), 0),
+      toolMs: clockUnionMs(this.toolSpans),
+      modelCalls: this.ids.size || steps.filter((s) => s.k === "model").length,
+      toolCalls: this.toolSpans.length,
+      tailMs: this.resultAt === null ? null : Math.max(0, at - this.resultAt),
+      wallMs: Math.max(0, at - this.startedAt),
+      cliMs: clockNum(r?.duration_ms),
+      apiMs: clockNum(r?.duration_api_ms),
+      numTurns: clockNum(r?.num_turns),
+      inputTokens: clockNum(u.input_tokens) ?? 0,
+      outputTokens: clockNum(u.output_tokens) ?? 0,
+      cacheReadTokens: clockNum(u.cache_read_input_tokens) ?? 0,
+      cacheWriteTokens: clockNum(u.cache_creation_input_tokens) ?? 0,
+      contextTokens: this.contextTokens,
+      ok,
+      steps,
+      stepsDropped: this.dropped,
+    }
+  }
+}
+
+function clockNum(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null
+}
+
+function clockToolName(name) {
+  return String(name ?? "?").replace(/^mcp__boxyard__/, "")
+}
+
+function clockUnionMs(spans) {
+  const s = [...spans].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let end = -Infinity
+  for (const [a, b] of s) {
+    if (b <= end) continue
+    total += b - Math.max(a, end)
+    end = b
+  }
+  return total
+}
+
+// end TurnClock
 
 // ---------------------------------------------------------------------------
 // MCP mode: newline-delimited JSON-RPC over stdio.
@@ -1492,9 +1668,18 @@ function serveMcp() {
   })
   process.stdin.on("end", () => process.exit(0))
 
+  // When this MCP process was spawned and its handshake ran, for the turn's timings (turnTimingOf).
+  const handshake = { pid: process.pid, spawnedAt: Math.round(performance.timeOrigin), initializeAt: null, readyAt: null }
+  const noteHandshake = () => {
+    try {
+      fs.writeFileSync(path.join(taskDir, "mcp-handshake.json"), JSON.stringify(handshake))
+    } catch {}
+  }
+
   async function handle(req) {
     switch (req.method) {
       case "initialize":
+        handshake.initializeAt ??= Date.now()
         return {
           protocolVersion: req.params?.protocolVersion ?? "2025-06-18",
           capabilities: { tools: {} },
@@ -1503,6 +1688,10 @@ function serveMcp() {
       case "ping":
         return {}
       case "tools/list":
+        if (handshake.readyAt === null) {
+          handshake.readyAt = Date.now()
+          noteHandshake()
+        }
         return { tools: namedTools(TOOLS) }
       case "tools/call":
         return callTool(req.params?.name, req.params?.arguments ?? {})

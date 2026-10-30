@@ -5,24 +5,32 @@ import { newClientId, useChat, useChatBusy, useChatControl, useChatStream, useCo
 import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
-import { AgentIcon, Button, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { AgentIcon, Button, InRepo, META_CHIP, Markdown, cx, warmMarkdown } from "./ui"
+import { MENTIONS } from "../lib/linkify"
 import { useEntityIndex } from "../lib/entities"
 import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
 import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import { VoiceControl } from "./VoiceControl"
-import { CloudMeter } from "./CloudMeter"
-import { RunningTasksBadge } from "./RunningTasks"
+import { CloudMeter, useShowCloudMeter } from "./CloudMeter"
 import { ChatLine } from "./ChatLine"
 import { ChatRows, useCoordinatorRows } from "./UpdateChips"
 import { rowsFrom } from "../lib/chatUpdates"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider } from "./SideThread"
+import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
+import { chatProvenance, filterByProject, filterByTasks, recentProjects, type Provenance } from "../lib/chatProvenance"
+import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
+import { CardsView, NewCardsPill, TimelineCardBanner, ViewToggle, useCards } from "./CoordinatorCards"
+import { setCoordinatorView, showInTimeline, useCoordinatorView, useTimelineCard } from "../lib/coordinatorView"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
+import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { SetupCard, SetupReminder, setSetupSkipped, useSetupNeeded, useSetupSkipped } from "./Setup"
 import { TryFirst, markTryFirstDone, useTryFirstDone } from "./TryFirst"
 import type { Attachment, ChatMessage, OrchestratorState } from "../../../shared/types"
@@ -35,10 +43,23 @@ const SUGGESTIONS = [
 
 const NO_MESSAGES: ChatMessage[] = []
 
+/** How far back a quiet project still gets a chip in the bar: the chat talked about it within this long. */
+const RECENT_MS = 24 * 60 * 60_000
+
+/** The projects the chat talked about lately; the same set until that changes, so the bar doesn't re-render. */
+function useRecentProjects(all: ChatMessage[], prov: Provenance): ReadonlySet<string> {
+  const prev = useRef<ReadonlySet<string>>(new Set())
+  return useMemo(() => {
+    const next = recentProjects(all, prov, Date.now() - RECENT_MS)
+    if (next.size === prev.current.size && [...next].every((p) => prev.current.has(p))) return prev.current
+    return (prev.current = next)
+  }, [all, prov])
+}
+
 /**
  * `onClose` adds a close button to the header; App passes it only while the panel is a drawer. `zen` lays the same
  * chat out as the whole window: every row shares one centered column (`.zen-column` in styles.css), and the
- * context meter moves into the header (ZenContext).
+ * context meter moves into the header (CoordinatorContext). With auto-compact on there's no meter or Compact at all.
  */
 export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onClose?: () => void; zen?: boolean }) {
   const chat = useChat()
@@ -49,19 +70,25 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const compact = useCompactOrchestrator()
   const openSettings = useOpenSettings()
   const compactNow = useCallback(() => compact.mutate(), [compact.mutate])
+  const autoCompact = useAutoCompact("coordinator")
+  // Settings › Usage: off by default, since not everyone uses boxes (the Boxes page always shows the meter).
+  const showCloud = useShowCloudMeter()
+  const meterRow = spotClass(autoCompact, "header")
   const projects = useProjects()
   const tasks = useTasks()
   const [location] = useLocation()
   const box = useRef<HTMLTextAreaElement>(null)
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
-  const list = useRef<StickyScrollHandle>(null)
+  const scroller = useRef<StickyScrollHandle>(null)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
   const skipped = useSetupSkipped()
   const showSetup = zen && setup.needed && !skipped
   const finishSetup = useCallback(() => (zen ? setSetupSkipped(false) : openSettings("credentials")), [zen, openSettings])
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(COORDINATOR_CHAT, box)
   // Then an empty Zen chat shows example requests, until one message is sent or they're dismissed.
   const tryFirstDone = useTryFirstDone()
   const fill = useCallback((text: string, select?: string) => composer.current?.fill(text, select), [])
@@ -74,7 +101,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       if (!content && !attachments.length) return
       const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
-      list.current?.scrollToEnd()
+      scroller.current?.scrollToEnd()
       markTryFirstDone()
       return sending
     },
@@ -90,12 +117,33 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   )
 
   const messages = chat.data ?? NO_MESSAGES
-  const tail = useTail(messages, "chat")
-  // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
-  const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
+  const index = useEntityIndex()
   // Updates fold into chips over the whole thread, so the rendered tail's rows don't change as it grows or trims.
   const all = useMemo(() => splitQueued(messages).settled, [messages])
-  const rows = useCoordinatorRows(all)
+  const allRows = useCoordinatorRows(all)
+  // The project bar: which projects each message is about, and the one the chat shows only (lib/chatProvenance.ts).
+  const projectFilter = useChatProjectFilter()
+  const prov = useMemo(() => chatProvenance(all, index, allRows), [all, index, allRows])
+  const recent = useRecentProjects(all, prov)
+  // Cards, one per task, or the Timeline: every message, or one card's ("Show in timeline").
+  const view = useCoordinatorView()
+  const cardsOn = view === "cards"
+  const only = useTimelineCard()
+  const onlyTasks = cardsOn ? null : (only?.taskIds ?? null)
+  const filtered = Boolean(projectFilter || onlyTasks)
+  const list = useMemo(() => {
+    let l: readonly ChatMessage[] = messages
+    if (projectFilter) l = filterByProject(l, prov, projectFilter)
+    if (onlyTasks) l = filterByTasks(l, prov, onlyTasks)
+    return l as ChatMessage[]
+  }, [messages, prov, projectFilter, onlyTasks])
+  const filteredAll = useMemo(() => (filtered ? splitQueued(list).settled : NO_MESSAGES), [filtered, list])
+  const filteredRows = useCoordinatorRows(filteredAll)
+  const rows = filtered ? filteredRows : allRows
+  const tail = useTail(list, filtered ? `chat:${projectFilter ?? ""}:${onlyTasks ? only!.key : ""}` : "chat")
+  const cards = useCards(allRows, prov, cardsOn && messages.length > 0, projectFilter)
+  // Messages sent mid-turn wait under the streaming reply until the turn that reads them starts.
+  const { settled, queued } = useMemo(() => splitQueued(tail.visible), [tail.visible])
   const shown = useMemo(() => rowsFrom(rows, settled[0]?.id), [rows, settled])
   const currentProject = useMemo(() => {
     const projectId = location.match(/^\/projects\/([^/?#]+)/)?.[1]
@@ -108,17 +156,32 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 
   // Older messages aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
-  const index = useEntityIndex()
   useEffect(() => {
-    if (hidden) warmMarkdown(messages.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index)
-  }, [messages, hidden, index])
+    if (hidden) warmMarkdown(list.slice(0, hidden).flatMap((m) => (m.role === "assistant" ? [m.content] : [])), index, MENTIONS)
+  }, [list, hidden, index])
 
   // Links to a chat message (e.g. a schedule run) may point above the rendered part of the thread.
   const reveal = tail.reveal
   useEffect(() => {
+    const again = (id: string) => requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(REVEAL_CHAT_EVENT, { detail: id }))))
     const onReveal = (e: Event) => {
       const id = (e as CustomEvent<string>).detail
-      if (!reveal(id)) return
+      if (cardsOn) {
+        // On a card (a reply's "from:" line): go to it there. Anything else is the Timeline's.
+        const there = panel.current?.querySelector(`[data-testid="chat-cards"] [data-chat-id="${CSS.escape(id)}"], [data-testid="chat-cards"] [id="chat-${CSS.escape(id)}"]`)
+        if (there) return void requestAnimationFrame(() => there.scrollIntoView({ block: "center", behavior: "smooth" }))
+        setCoordinatorView("timeline")
+        return void again(id)
+      }
+      if (!reveal(id)) {
+        // A message the project filter or one card's timeline hides: show the whole chat, then go to it.
+        if ((projectFilter || onlyTasks) && messages.some((m) => m.id === id)) {
+          setChatProjectFilter(null)
+          showInTimeline(null)
+          again(id)
+        }
+        return
+      }
       // Two frames: let the list settle (and stop following the bottom) before scrolling to the message.
       requestAnimationFrame(() =>
         requestAnimationFrame(() =>
@@ -128,7 +191,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     }
     window.addEventListener(REVEAL_CHAT_EVENT, onReveal)
     return () => window.removeEventListener(REVEAL_CHAT_EVENT, onReveal)
-  }, [reveal])
+  }, [reveal, projectFilter, onlyTasks, cardsOn, messages])
 
   return (
     <ThreadChatProvider value={COORDINATOR_CHAT}>
@@ -136,9 +199,11 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           for it), over it when not. */}
       <section ref={panel} data-testid="chat-panel" className="@container/coord relative flex h-full min-w-0 bg-zinc-950">
         <div className="relative flex min-w-0 flex-1 flex-col">
+          {/* The `head` container: the header and the docked meter row under it switch to their narrow layout together. */}
+          <div className={HEAD_CONTAINER}>
           <header
             className={cx(
-              // A container, so the cloud meter and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
+              // A container, so the cloud meter (if shown) and the voice chip shrink in a narrow header (see CloudMeter, VoiceControl).
               // A column: the controls' row, then (in a narrow header) the cloud meter's strip.
               "@container flex flex-col justify-center",
               // overflow-hidden (for the column's scrollbar gutter) only from sm: phones have no gutter, and the ⋯ menu drops out of the header.
@@ -150,16 +215,22 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           >
             <div className="flex min-w-0 items-center gap-2">
               <AgentIcon busy={Boolean(busy.data)} />
-              {zen && <RunningTasksBadge />}
               {/* The title takes what's left (flex-1 from 0), so it gives way before the cloud meter's text does. */}
-              <div className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">
-                {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
-                {zen && <span className="max-sm:hidden">Box Yard </span>}
-                Coordinator
+              {/* The title opens the chat switcher: the Coordinator, then every project's Captain. Too narrow for the word
+                  beside the view toggle (a 320px phone), the icon says it alone and the switcher keeps its chevron. */}
+              <div className="flex min-w-0 flex-1">
+                <ChatSwitcher current={COORDINATOR_CHAT} onLeave={onClose}>
+                  <span className="@max-[23rem]:sr-only">
+                    {/* Zen names the app too; a phone keeps the short title so it isn't cut beside the controls. */}
+                    {zen && <span className="max-sm:hidden">Box Yard </span>}
+                    Coordinator
+                  </span>
+                </ChatSwitcher>
               </div>
-              <CloudMeter variant="inline" />
+              <ViewToggle />
+              {showCloud && <CloudMeter variant="inline" />}
               <div className="ml-auto flex shrink-0 items-center gap-1">
-                {zen && <ZenContext state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
+                {!autoCompact && <CoordinatorContext zen={zen} state={orch.data} queued={compact.isPending} onCompact={compactNow} />}
                 <VoiceControl />
                 {!zen && (
                   <Button size="sm" variant="ghost" title={`Zen mode: just this chat, full screen (${ZEN_SHORTCUT_LABEL})`} aria-label="Zen mode" onClick={enterZen}>
@@ -192,11 +263,11 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 )}
               </div>
             </div>
-            <CloudMeter variant="strip" />
+            {showCloud && <CloudMeter variant="strip" />}
           </header>
-          {!zen && (
+          {!zen && meterRow !== null && (
             <ContextMeter
-              className="border-b border-zinc-900 px-4 py-2"
+              className={cx("border-b border-zinc-900 px-4 py-2", meterRow)}
               tokens={orch.data?.usage.tokens ?? null}
               window={orch.data?.usage.window ?? null}
               compacting={orch.data?.compacting ?? false}
@@ -204,13 +275,26 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               onCompact={() => compact.mutate()}
             />
           )}
+          </div>
+          {!showSetup && <ProjectBar recent={recent} className={zen ? "zen-column" : "px-4"} />}
 
           {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
           {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
 
           <div className={showSetup ? "hidden" : "contents"}>
             <SelectionToTask source={selectionSource} onPrompt={submit}>
-              <StickyScroll handle={list} count={messages.length} restoreKey="chat" hidden={tail.hidden} onLoadEarlier={tail.loadEarlier} onTrim={tail.trim} className={zen ? "zen-column py-6" : "px-4 py-4"} contentClassName="space-y-3">
+              <StickyScroll
+                handle={scroller}
+                count={cards ? cards.live.length + cards.done.length + cards.coordinator.length : list.length}
+                resetKey={view}
+                restoreKey={cardsOn ? "chat:cards" : "chat"}
+                hidden={cards ? 0 : tail.hidden}
+                onLoadEarlier={cards ? undefined : tail.loadEarlier}
+                onTrim={cards ? undefined : tail.trim}
+                overlay={cards && <NewCardsPill cards={cards.live} />}
+                className={zen ? "zen-column py-6" : "px-4 py-4"}
+                contentClassName="space-y-3"
+              >
                 {messages.length === 0 && !chat.isLoading && zen && !tryFirstDone && (
                   <TryFirst
                     ready={!setup.needed}
@@ -236,9 +320,23 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                <ChatRows rows={shown} onFollowUp={followUp} />
-                <StreamingReply busy={Boolean(busy.data)} />
-                {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={cards ? !cards.live.length && !cards.done.length && !cards.coordinator.length : !settled.length} />}
+                {onlyTasks && <TimelineCardBanner card={only!} empty={!settled.length} />}
+                {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
+                <InRepo mentions>
+                  {cards ? (
+                    <CardsView layout={cards} onFollowUp={followUp} active={Boolean(busy.data) || queued.length > 0}>
+                      <StreamingReply busy={Boolean(busy.data)} />
+                      {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                    </CardsView>
+                  ) : (
+                    <>
+                      <ChatRows rows={shown} onFollowUp={followUp} />
+                      <StreamingReply busy={Boolean(busy.data)} />
+                      {queued.length > 0 && <ChatLines messages={queued} onFollowUp={followUp} />}
+                    </>
+                  )}
+                </InRepo>
               </StickyScroll>
             </SelectionToTask>
 
@@ -254,7 +352,9 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
           </div>
         </div>
         {/* Its header as tall as the chat's: 3.5rem in Zen and the drawer, the docked header's 47px (py-3, a 22px row, the border). */}
-        <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+        <InRepo mentions>
+          <SideThreadPane chat={COORDINATOR_CHAT} headerClassName={zen || onClose ? "min-h-14" : "min-h-[47px]"} />
+        </InRepo>
       </section>
     </ThreadChatProvider>
   )
@@ -263,12 +363,13 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
 const ZEN_CONTEXT_HINT = "How much of the Coordinator's context window is used. Compact when it gets high."
 
 /**
- * Zen's context reading, in the header left of the voice button: the mini bar and "58%" (full reading in its
- * tooltip), then Compact, quiet until CONTEXT_WARN_PCT and amber from there. Compact keeps one width in every
- * state (the icon turns into a spinner), so nothing in the header moves. On phones the chip alone opens a menu
- * with the full reading and Compact.
+ * The Coordinator's context reading in its header, left of the voice button, while auto-compact is off. A wide Zen
+ * header: the mini bar and "58%" (full reading in its tooltip), then Compact, quiet until CONTEXT_WARN_PCT and amber
+ * from there. Compact keeps one width in every state (the icon turns into a spinner), so nothing in the header moves.
+ * The docked panel has its meter row under the header instead. A narrow header (a phone, a slim panel) has neither:
+ * one ⋯ button, amber from CONTEXT_WARN_PCT, opens a menu with the full reading and Compact.
  */
-function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
+function CoordinatorContext({ zen, state, queued, onCompact }: { zen: boolean; state: OrchestratorState | undefined; queued: boolean; onCompact: () => void }) {
   const { open, setOpen, root, trigger } = usePopover()
   const tokens = state?.usage.tokens ?? null
   const window = state?.usage.window ?? null
@@ -280,39 +381,47 @@ function ZenContext({ state, queued, onCompact }: { state: OrchestratorState | u
   const title = status ?? "Compact: summarise the conversation to free up context. If a turn is running, it compacts right after."
   const icon = waiting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Minimize2 className="h-3 w-3" />
   const bar = pct === null ? <span className="text-xs text-zinc-500">Context</span> : <ContextMiniBar tokens={tokens} window={window} hint={ZEN_CONTEXT_HINT} />
+  const reading = `Context ${contextLabel(tokens, window)}`
+  const menu = spotClass(false, "menu")
   return (
-    <div ref={root} data-testid="zen-context" className="relative mr-1 flex items-center gap-1.5">
-      <span className="max-sm:hidden">{bar}</span>
-      <button
-        type="button"
-        onClick={() => onCompact()}
-        disabled={waiting}
-        title={title}
-        aria-label={status ?? "Compact"}
-        className={cx(
-          META_CHIP,
-          "max-sm:hidden disabled:cursor-default",
-          warn ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
-        )}
-      >
-        {icon}
-        Compact
-      </button>
-      <button
+    <div ref={root} className="relative flex items-center">
+      {zen && (
+        <div data-testid="zen-context" className={cx("mr-1 flex items-center gap-1.5", spotClass(false, "header"))}>
+          {bar}
+          <button
+            type="button"
+            onClick={() => onCompact()}
+            disabled={waiting}
+            title={title}
+            aria-label={status ?? "Compact"}
+            className={cx(
+              META_CHIP,
+              "disabled:cursor-default",
+              warn ? "border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20" : "border-zinc-800 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100",
+            )}
+          >
+            {icon}
+            Compact
+          </button>
+        </div>
+      )}
+      <Button
         ref={trigger}
-        type="button"
+        size="sm"
+        variant="ghost"
         onClick={() => setOpen(!open)}
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Context ${contextLabel(tokens, window)}: more`}
-        className={cx(META_CHIP, "sm:hidden", warn ? "border-amber-500/40 bg-amber-500/10" : "border-zinc-800")}
+        aria-label={`${reading}: more`}
+        title={reading}
+        data-testid="context-menu-button"
+        className={cx(menu, warn && "text-amber-300! hover:text-amber-200!")}
       >
-        {bar}
-        <MoreHorizontal className="h-3.5 w-3.5 text-zinc-500" />
-      </button>
+        {waiting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MoreHorizontal className="h-3.5 w-3.5" />}
+      </Button>
       {open && (
-        <div role="menu" className="absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl sm:hidden">
-          <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">Context {contextLabel(tokens, window)}</div>
+        <div role="menu" className={cx("absolute top-full right-0 z-30 mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl", menu)}>
+          <div className="px-2 py-1.5 text-xs text-zinc-400 tabular-nums">{reading}</div>
           <button
             type="button"
             role="menuitem"

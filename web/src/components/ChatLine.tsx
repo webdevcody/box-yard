@@ -3,17 +3,19 @@
 import { memo, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import { AlarmClock, AlertTriangle, Bot, ChevronDown, ChevronRight, Loader2, Webhook, Wrench } from "lucide-react"
-import { AppLink, LineIcon, Markdown, cx } from "./ui"
+import { AppLink, InRepo, LineIcon, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
 import { routes, toolMentions } from "../lib/linkify"
 import { CAPTAIN_TOOLS, captainToolView, isLongMessage, splitNotice, type NoticeKind } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
 import { AttachmentList } from "./Attachments"
 import { QueuedChatMessage } from "./QueuedMessages"
+import { ProjectDot, TaskTile } from "./TaskIcon"
 import { RecommendedNextSteps, nextStepsFromMeta } from "./RecommendedNextSteps"
 import { MESSAGE_BLOCK, MessageActions } from "./MessageActions"
 import { ThreadMarkers } from "./SideThread"
 import { ReplySources } from "./ReplySources"
+import { TurnTimingChip, timingOf } from "./TurnTimingChip"
 import type { UpdateSource } from "../lib/chatUpdates"
 import type { ChatMessage } from "../../../shared/types"
 
@@ -43,6 +45,14 @@ export function CollapsibleMarkdown({ children, className }: { children: string;
 }
 
 /**
+ * A collapsed tool line's parts, in the order they give way on a narrow row: the preview first (flex-1 from a zero
+ * basis, so it only ever takes the room that's left), then the target; the tool name never shrinks.
+ */
+const TOOL_NAME = "max-w-full shrink-0 truncate font-mono"
+const TOOL_TARGET = "min-w-0 truncate"
+const TOOL_PREVIEW = "min-w-0 flex-1 truncate"
+
+/**
  * A send_to_captain / ask_captain / wait_for_captain call: links that project's Captain tab and
  * expands on click to the message the Coordinator sent and, for ask/wait, what the Captain replied.
  */
@@ -70,16 +80,24 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
         className="-mx-1 flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1 py-0.5 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
       >
         <Wrench className="h-3 w-3 shrink-0" />
-        <span className="min-w-0 truncate font-mono">{m.content}</span>
+        <span data-testid="tool-name" className={TOOL_NAME}>
+          {m.content}
+        </span>
         <span className="shrink-0 text-zinc-600">·</span>
         {v.href ? (
-          <AppLink href={v.href} className="shrink-0 text-zinc-400 hover:text-zinc-200 hover:underline">
+          <AppLink href={v.href} className={cx(TOOL_TARGET, "text-zinc-400 hover:text-zinc-200 hover:underline")}>
             {v.project!.label} Captain
           </AppLink>
         ) : (
-          <span className="shrink-0">{projectRef ?? "project"} Captain</span>
+          <span data-testid="tool-target" className={TOOL_TARGET}>
+            {projectRef ?? "project"} Captain
+          </span>
         )}
-        {!open && v.message && <span className="min-w-0 truncate text-zinc-600">· {v.message.replace(/\s+/g, " ")}</span>}
+        {!open && v.message && (
+          <span data-testid="tool-preview" className={cx(TOOL_PREVIEW, "text-zinc-600")}>
+            · {v.message.replace(/\s+/g, " ")}
+          </span>
+        )}
         {pending && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-600" aria-label="Waiting for the Captain" />}
         <ChevronRight className={cx("ml-auto h-3.5 w-3.5 shrink-0 transition-transform", open && "rotate-90")} />
       </div>
@@ -88,7 +106,9 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
           {v.message && (
             <div>
               <div className="mb-0.5 text-[11px] font-semibold tracking-wide text-sky-400/90 uppercase">Sent to the Captain</div>
-              <CollapsibleMarkdown className="text-sm text-zinc-300">{v.message}</CollapsibleMarkdown>
+              <InRepo projectId={v.project?.id}>
+                <CollapsibleMarkdown className="text-sm text-zinc-300">{v.message}</CollapsibleMarkdown>
+              </InRepo>
             </div>
           )}
           {v.waits && (
@@ -97,7 +117,9 @@ const CaptainToolLine = memo(function CaptainToolLine({ m }: { m: ChatMessage })
                 Captain replied{v.finished === false ? " (still working)" : ""}
               </div>
               {v.reply ? (
-                <CollapsibleMarkdown className="text-sm text-zinc-300">{v.reply}</CollapsibleMarkdown>
+                <InRepo projectId={v.project?.id}>
+                  <CollapsibleMarkdown className="text-sm text-zinc-300">{v.reply}</CollapsibleMarkdown>
+                </InRepo>
               ) : (
                 <div className="text-zinc-500">{pending ? "Waiting for the Captain…" : "No reply yet. The Captain reports back when it's done."}</div>
               )}
@@ -124,15 +146,19 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5 pl-1 text-xs text-zinc-500">
       <Wrench className="h-3 w-3 shrink-0" />
-      <span className="min-w-0 truncate font-mono">{m.content}</span>
+      <span data-testid="tool-name" className={TOOL_NAME}>
+        {m.content}
+      </span>
       {mentions.length > 0 && (
-        <span className="truncate text-zinc-600">
+        <span data-testid="tool-target" className={cx(TOOL_TARGET, "text-zinc-600")}>
           ·{" "}
           {mentions.map((t, i) => (
             <span key={i}>
               {i > 0 && ", "}
               {t.ref ? (
                 <AppLink href={t.ref.href} className="text-zinc-400 hover:text-zinc-200 hover:underline">
+                  {t.ref.kind === "task" && <TaskTile id={t.ref.id} bare className="mr-0.5 align-[-2px]" />}
+                  {t.ref.kind === "project" && <ProjectDot projectId={t.ref.id} className="mr-1 align-[1px]" />}
                   {t.text.slice(0, 60)}
                 </AppLink>
               ) : (
@@ -142,7 +168,11 @@ const PlainToolLine = memo(function PlainToolLine({ m }: { m: ChatMessage }) {
           ))}
         </span>
       )}
-      {detail && <span className="truncate text-zinc-600">· {String(detail).slice(0, 60)}</span>}
+      {detail && (
+        <span data-testid="tool-target" className={cx(TOOL_TARGET, "text-zinc-600")}>
+          · {String(detail).slice(0, 60)}
+        </span>
+      )}
     </div>
   )
 })
@@ -329,13 +359,15 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
   const accent = NOTICE_ACCENT[n.kind]
   return (
     <div id={`chat-${m.id}`} data-testid="notice-card" data-attention={accent ? n.kind : undefined} className={MESSAGE_BLOCK}>
-      {taskId ? (
-        <NoticeCard taskId={taskId} className={accent}>
-          {body}
-        </NoticeCard>
-      ) : (
-        <div className={cx(NOTICE_CLASS, accent)}>{body}</div>
-      )}
+      <InRepo taskId={taskId} projectId={projectId}>
+        {taskId ? (
+          <NoticeCard taskId={taskId} className={accent}>
+            {body}
+          </NoticeCard>
+        ) : (
+          <div className={cx(NOTICE_CLASS, accent)}>{body}</div>
+        )}
+      </InRepo>
       <MessageActions text={m.content} anchorId={m.id} />
     </div>
   )
@@ -345,17 +377,30 @@ const NoticeLine = memo(function NoticeLine({ m }: { m: ChatMessage }) {
  * A chat message. Its root names the message (`data-chat-id`): a selection in it can start a side thread on it, and
  * the threads it has show as markers under it (SideThread.tsx; nothing outside a chat with threads).
  * `sources`: on a Coordinator reply, the updates it read (lib/chatUpdates.ts), named in a "from:" line under it.
+ * `next`: whether its suggested next steps show (the Coordinator chat shows only the newest reply's).
  */
-export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
+export const ChatLine = memo(function ChatLine({ m, onFollowUp, sources, next = true }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next?: boolean }) {
   return (
     <div data-chat-id={m.id}>
-      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} />
+      <ChatLineBody m={m} onFollowUp={onFollowUp} sources={sources} next={next} />
       {m.role !== "tool" && <ThreadMarkers m={m} />}
     </div>
   )
 })
 
-function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null }) {
+/** Under a reply: the updates it read ("from: …") and its turn's time. */
+function ReplyFooter({ m, sources }: { m: ChatMessage; sources?: UpdateSource[] | null }) {
+  const timing = timingOf(m.meta)
+  if (!timing) return sources ? <ReplySources sources={sources} /> : null
+  return (
+    <div className="mt-1 flex min-w-0 items-center gap-3">
+      {sources && <ReplySources sources={sources} />}
+      <TurnTimingChip id={timing.id} ms={timing.ms} className={sources ? "mt-1" : undefined} />
+    </div>
+  )
+}
+
+function ChatLineBody({ m, onFollowUp, sources, next }: { m: ChatMessage; onFollowUp: (message: string) => void; sources?: UpdateSource[] | null; next: boolean }) {
   if (m.role === "user" && m.meta?.scheduleId) {
     // A prompt injected by a Coordinator schedule, not typed by Cody.
     return (
@@ -427,9 +472,9 @@ function ChatLineBody({ m, onFollowUp, sources }: { m: ChatMessage; onFollowUp: 
   return (
     <div id={`chat-${m.id}`} data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
-      {sources && <ReplySources sources={sources} />}
-      <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />
-      <MessageActions text={m.content} anchorId={m.id} />
+      <ReplyFooter m={m} sources={sources} />
+      {next && <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />}
+      <MessageActions text={m.content} anchorId={m.id} reply />
     </div>
   )
 }

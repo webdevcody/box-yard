@@ -23,6 +23,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
       "orchestratorCodexModel",
       "orchestratorEffort",
       "orchestratorAutoCompact",
+      "orchestratorRelay",
       "captainCli",
       "captainModel",
       "captainCodexModel",
@@ -108,8 +109,8 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
   {
     key: "costs",
     label: "Usage",
-    description: "What boxes may cost per day and per month, and the Upstash Box rates their cost is worked out with.",
-    fields: ["costRates", "budget"],
+    description: "What boxes may cost per day and per month, whether the Coordinator's header shows that spend, and the Upstash Box rates their cost is worked out with.",
+    fields: ["showCloudMeter", "costRates", "budget"],
   },
   {
     key: "notifications",
@@ -131,7 +132,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { identity: "identities", accounts: "identities", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", container: "docker", containers: "docker" }
+const ALIASES: Record<string, SettingsSection> = { identity: "identities", accounts: "identities", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", spend: "costs", meter: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", container: "docker", containers: "docker" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

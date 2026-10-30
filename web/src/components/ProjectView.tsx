@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useLocation, useSearchParams } from "wouter"
 import { AlarmClock, Bot, FileText, FolderGit2, ListTodo, NotebookPen, Settings, ShieldAlert, Trash2, Webhook, X } from "lucide-react"
 import {
@@ -55,6 +55,8 @@ import { confirmDialog } from "../lib/confirm"
 import { PAGE_BLEED_BOTTOM } from "../lib/layout"
 import { rememberProjectTab } from "../lib/breadcrumb"
 import { isQuietRun } from "../../../shared/quiet"
+import { PROJECT_COLORS, projectColors, type ProjectColor } from "../../../shared/projectColors"
+import { projectColorStyle } from "./TaskIcon"
 
 const TABS = [
   { key: "tasks", label: "Tasks", icon: ListTodo },
@@ -748,6 +750,48 @@ function ProjectDockerSettings({ draft, setDraft }: { draft: DockerDraft; setDra
   )
 }
 
+/**
+ * The project's colour (shared/projectColors.ts): its tasks' tiles and its chip in the Coordinator chat, its folder in
+ * the sidebar. Auto is the one picked from its name, shown as it would be.
+ */
+export function ProjectColorPicker({ project, value, onChange }: { project: Project; value: ProjectColor | null; onChange: (c: ProjectColor | null) => void }) {
+  const projects = useProjects().data
+  const auto = useMemo(() => projectColors((projects ?? [project]).map((p) => (p.id === project.id ? { ...p, color: null } : p))).get(project.id), [projects, project])
+  const swatch = (c: ProjectColor | undefined, on: boolean, label: string, pick: () => void, auto = false) => (
+    <button
+      key={label}
+      type="button"
+      role="radio"
+      aria-checked={on}
+      aria-label={label}
+      title={label}
+      onClick={pick}
+      data-color={c}
+      style={projectColorStyle(c)}
+      className={cx(
+        "flex h-7 items-center justify-center gap-1.5 rounded-lg pointer-coarse:h-11",
+        auto ? "px-2 text-xs text-zinc-400 pointer-coarse:px-3" : "w-7 pointer-coarse:w-11",
+        on ? "bg-zinc-800 text-zinc-100 ring-1 ring-zinc-600" : "hover:bg-zinc-800",
+      )}
+    >
+      <span className="h-3 w-3 rounded-full bg-(--pc)" />
+      {auto && "Auto"}
+    </button>
+  )
+  return (
+    <div className="space-y-1.5">
+      <span id="project-color-label" className="block text-xs font-medium tracking-wide whitespace-nowrap text-zinc-400 uppercase">
+        Colour
+      </span>
+      <div role="radiogroup" aria-labelledby="project-color-label" data-testid="project-color" className="flex flex-wrap gap-1">
+        {swatch(auto, value === null, `Auto (${auto ?? "from its name"})`, () => onChange(null), true)}
+        {PROJECT_COLORS.map((c) => swatch(c, value === c, c, () => onChange(c)))}
+      </div>
+      <span className="block text-xs text-zinc-500">Its tasks' icons and its chip in the Coordinator chat, and its folder in the sidebar.</span>
+    </div>
+  )
+}
+
 function ProjectSettings({ project, onDone }: { project: Project; onDone: () => void }) {
   const update = useUpdateProject()
   const remove = useDeleteProject()
@@ -775,6 +819,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
   const [identityId, setIdentityId] = useState(project.identityId)
+  const [color, setColor] = useState<ProjectColor | null>(project.color ?? null)
   const identities = useIdentities().data
   const identity = identities?.find((i) => i.id === identityId)
   // Who it acts as can't change mid-turn: the server refuses, so the form says so first.
@@ -792,7 +837,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const defaults = settings.data?.settings
   const defaultAgentCli: AgentCli = defaults?.agentCli ?? DEFAULT_AGENT_CLI
   // Save lights up once anything differs from what the form opened with, and goes dark again when it's changed back.
-  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, agentCli, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId])
+  const snapshot = JSON.stringify([name, description, repo, baseBranch, env, removeKeys, runner, agentCli, boxSize, partialClone, pushAtTurnEnd, depCache, agentsPerBox, wholeMachine, tasksPerBox, maxBoxes, gpuMaxHourlyUsd, machine, docker, notesMax, notesTokens, identityId, color])
   const [opened] = useState(snapshot)
   const dirty = snapshot !== opened
   const cancel = async () => {
@@ -840,6 +885,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           notesMaxTokens: optionalInt(notesTokens),
           ...(identityId !== project.identityId ? { identityId } : {}),
           ...(agentCli !== (project.agentCli ?? "") ? { agentCli: agentCli || null } : {}),
+          ...(color !== (project.color ?? null) ? { color } : {}),
         })
         onDone()
       }}
@@ -862,6 +908,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
       <Field label="Description">
         <textarea className={inputClass} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
       </Field>
+      <ProjectColorPicker project={project} value={color} onChange={setColor} />
       <div className="space-y-2">
         <Field
           label="Runs on"

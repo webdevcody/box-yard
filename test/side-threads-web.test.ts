@@ -19,9 +19,13 @@ const thread = (over: Partial<SideThread> = {}): SideThread => ({
   id: "thr_abc123",
   projectId: null,
   anchorId: REPLY.id,
+  kind: "ask",
   quote: "never backs off",
   context: "fork",
   busy: false,
+  replies: 2,
+  unread: false,
+  resolvedAt: null,
   createdAt: 2,
   updatedAt: 2,
   ...over,
@@ -175,6 +179,104 @@ describe("side thread markers", () => {
     await flush()
     expect(qc.getQueryData(threadKeys.stream("thr_abc123"))).toBe("")
     expect(document.querySelector("[data-testid=side-thread-reply]")!.textContent).toContain("Because it retries forever.")
+  })
+})
+
+/** Type into a textarea and press Enter, as React sees it. */
+function typeAndSend(box: HTMLTextAreaElement, text: string) {
+  act(() => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, text)
+    box.dispatchEvent(new Event("input", { bubbles: true }))
+  })
+  act(() => void box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })))
+}
+
+const replyThread = (over: Partial<SideThread> = {}) => thread({ id: "thr_reply01", kind: "reply", quote: REPLY.content, ...over })
+const posts = (path: string) => fetchMock.mock.calls.filter(([u, init]) => u === path && (init as RequestInit | undefined)?.method !== "GET" && (init as RequestInit | undefined)?.body !== undefined)
+
+describe("threaded replies", () => {
+  it("Reply opens an empty thread on the message; the first reply starts it, out of the main chat", async () => {
+    render()
+    const reply = host.querySelector<HTMLButtonElement>("[data-testid=message-reply]")!
+    expect(reply).not.toBeNull()
+    click(reply)
+    const pane = document.querySelector("[data-testid=side-thread]")!
+    // The original on top, titled by its first line, and nothing sent yet.
+    expect(pane.querySelector("[data-testid=side-thread-title]")!.textContent).toBe("The retry loop in server/sync.ts never backs off,")
+    expect(pane.querySelector("[data-testid=side-thread-original]")!.textContent).toContain("so a dead remote spins the CPU.")
+    expect(pane.textContent).toContain("No replies yet")
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/api/threads"))).toEqual([])
+    const box = pane.querySelector<HTMLTextAreaElement>("textarea")!
+    expect(document.activeElement).toBe(box)
+
+    typeAndSend(box, "Can it back off?")
+    await flush()
+    const [[, init]] = posts("/api/threads")
+    const body = JSON.parse((init as RequestInit).body as string)
+    expect(body).toMatchObject({ kind: "reply", anchorId: REPLY.id, question: "Can it back off?", projectId: null })
+    expect(body.quote).toBeUndefined()
+    expect(openThreadId(COORDINATOR_CHAT)).toBe(body.id)
+    // Nothing went to the Coordinator's own chat.
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith("/api/chat"))).toBe(false)
+    // The chat shows the count under the message, not the reply; the panel says Claude is working.
+    expect(host.querySelector("[data-testid=thread-replies]")!.textContent).toContain("1 reply")
+    expect(host.querySelector("[data-chat-id]")!.textContent).not.toContain("Can it back off?")
+    expect(document.querySelector("[data-testid=side-thread-working]")!.textContent).toContain("Claude is working")
+  })
+
+  it("Reply on a message that has replies opens its thread; questions on highlights stay chips", () => {
+    render([replyThread(), thread()])
+    expect(host.querySelectorAll("[data-testid=thread-replies]")).toHaveLength(1)
+    expect(host.querySelectorAll("[data-testid=thread-marker]")).toHaveLength(1)
+    click(host.querySelector("[data-testid=message-reply]")!)
+    expect(openThreadId(COORDINATOR_CHAT)).toBe("thr_reply01")
+  })
+
+  it("↰ N replies counts live, shows answering and unread, and opening marks it read", async () => {
+    render([replyThread({ busy: true })])
+    const button = () => host.querySelector<HTMLButtonElement>("[data-testid=thread-replies]")!
+    expect(button().textContent).toBe("2 replies")
+    expect(button().getAttribute("aria-label")).toBe("2 replies, answering")
+    act(() => void applyThreadEvent(qc, { type: "thread", thread: replyThread({ busy: false, replies: 3, unread: true }) }))
+    await flush()
+    expect(button().textContent).toBe("3 replies")
+    expect(button().dataset.unread).toBe("true")
+
+    click(button())
+    await flush()
+    expect(openThreadId(COORDINATOR_CHAT)).toBe("thr_reply01")
+    expect(posts("/api/threads/thr_reply01/seen")).toHaveLength(1)
+    expect(button().dataset.unread).toBeUndefined()
+    expect(button().getAttribute("aria-pressed")).toBe("true")
+  })
+
+  it("resolve folds the thread away under its message; it reopens from there", async () => {
+    render([replyThread()])
+    act(() => openThread(COORDINATOR_CHAT, "thr_reply01"))
+    click(document.querySelector("[data-testid=side-thread-resolve]")!)
+    await flush()
+    expect(posts("/api/threads/thr_reply01/resolve")).toHaveLength(1)
+    expect(JSON.parse((posts("/api/threads/thr_reply01/resolve")[0]![1] as RequestInit).body as string)).toEqual({ resolved: true })
+    // It slides away, and the count says resolved.
+    expect(document.querySelector<HTMLElement>("[data-testid=side-thread]")!.dataset.open).toBeUndefined()
+    const marker = host.querySelector<HTMLButtonElement>("[data-testid=thread-replies]")!
+    expect(marker.dataset.resolved).toBe("true")
+    expect(marker.getAttribute("aria-label")).toBe("2 replies, resolved")
+    act(() => forgetThread(COORDINATOR_CHAT, "thr_reply01"))
+    click(marker)
+    expect(openThreadId(COORDINATOR_CHAT)).toBe("thr_reply01")
+    expect(document.querySelector("[data-testid=side-thread-resolve]")!.getAttribute("aria-label")).toBe("Reopen thread")
+  })
+
+  it("expands over the chat and back", () => {
+    render([replyThread()])
+    act(() => openThread(COORDINATOR_CHAT, "thr_reply01"))
+    const pane = () => document.querySelector<HTMLElement>("[data-testid=side-thread]")!
+    expect(pane().dataset.expanded).toBeUndefined()
+    click(document.querySelector("[data-testid=side-thread-expand]")!)
+    expect(pane().dataset.expanded).toBe("true")
+    click(document.querySelector("[data-testid=side-thread-expand]")!)
+    expect(pane().dataset.expanded).toBeUndefined()
   })
 })
 

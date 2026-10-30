@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useState, useSyncExterna
 import { CHAT_MAX, CHAT_MIN, PAGE_PADDING, coordinatorDock, threadDockWidth } from "./lib/layout"
 import { COORDINATOR_CHAT, useThreadShown } from "./lib/threads"
 import type { CSSProperties } from "react"
-import { Route, Switch } from "wouter"
+import { Route, Router, Switch } from "wouter"
 import { navigate } from "wouter/use-browser-location"
 import { SETTINGS_PARAM, parseSection } from "./lib/settingsNav"
 import { Menu, MessageSquare } from "lucide-react"
@@ -23,12 +23,16 @@ import { NotificationEffects } from "./components/NotificationEffects"
 import { SettingsHost } from "./components/SettingsDialog"
 import { ConfirmHost } from "./components/ConfirmDialog"
 import { FilePreviewHost } from "./components/FilePreview"
+import { LightboxHost } from "./components/Lightbox"
 import { HealthBanner, InboxView, Login } from "./components/Views"
 import { YardView } from "./components/YardView"
 import { cx } from "./components/ui"
 import { ResizeHandle, useResizable } from "./lib/resize"
 import { BrandLogo } from "./components/BrandLogo"
 import { useZen, useZenHotkeys, useZenLanding } from "./lib/zen"
+import { closeZenPanel, zenAroundNav } from "./lib/zenPanel"
+import { ZenPanel } from "./components/ZenPanel"
+import { OPEN_COORDINATOR_EVENT } from "./lib/chatSwitch"
 
 export function App() {
   const me = useMe()
@@ -52,12 +56,22 @@ export function App() {
   useZenHotkeys(zen)
   const agentSettings = useAgentSettings({ enabled: authed })
   const landed = useZenLanding(agentSettings.data?.settings.startInZen ?? (agentSettings.isError ? false : undefined))
-  // Drawers close behind Zen, so leaving it (Esc, back or a link) shows the page, not a drawer over it.
+  // Drawers close behind Zen, so leaving it (Esc, back or a link) shows the page, not a drawer over it. Zen's side
+  // panel closes when Zen does, so coming back starts with the chat alone.
   useEffect(() => {
-    if (!zen) return
+    if (!zen) {
+      closeZenPanel()
+      return
+    }
     setNavOpen(false)
     setChatOpen(false)
   }, [zen])
+
+  // A chat switcher picked the Coordinator: the drawer opens (docked or in Zen, it's already on screen).
+  useEffect(() => {
+    window.addEventListener(OPEN_COORDINATOR_EVENT, openChat)
+    return () => window.removeEventListener(OPEN_COORDINATOR_EVENT, openChat)
+  }, [openChat])
 
   useEffect(() => {
     const onUnauthorized = () => void qc.invalidateQueries({ queryKey: keys.me })
@@ -109,13 +123,14 @@ export function App() {
       )}
 
       {/* The global orchestrator chat: docked beside the page when there's room for both, else a drawer;
-          the whole window in Zen */}
+          the whole window in Zen, with the side panel (ZenPanel) on its right. The `zen` container lays the panel out
+          by the window's width. */}
       <div
         data-zen={zen || undefined}
         data-docked={(!zen && dock.docked) || undefined}
         className={cx(
           zen
-            ? "relative min-w-0 flex-1"
+            ? "@container/zen relative grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(0,1fr)]"
             : dock.docked
               ? // Eased only when a side thread opens or closes, not while its edge is dragged.
                 cx("relative shrink-0 border-l border-zinc-900", !chatSize.handle.dragging && "transition-[width] duration-300 ease-out motion-reduce:transition-none")
@@ -129,13 +144,18 @@ export function App() {
         style={!zen && dock.docked ? { width: dockWidth } : undefined}
       >
         {!zen && dock.docked && <ResizeHandle {...chatSize.handle} className="block!" />}
-        <ChatPanel onClose={dock.docked ? undefined : closeChat} zen={zen} />
+        {/* In Zen, the chat's task, Captain and project links open the side panel instead of leaving (lib/zenPanel.ts). */}
+        <Router aroundNav={zenAroundNav}>
+          <ChatPanel onClose={dock.docked ? undefined : closeChat} zen={zen} />
+        </Router>
+        {zen && <ZenPanel />}
       </div>
       {zen && <Toasts quiet />}
       <CommandPalette />
       <SettingsHost />
       <ConfirmHost />
       <FilePreviewHost />
+      <LightboxHost />
       <NotificationEffects />
     </div>
   )

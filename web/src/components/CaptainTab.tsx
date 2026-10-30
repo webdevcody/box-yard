@@ -26,9 +26,10 @@ import {
 import { useTail } from "../lib/tail"
 import { splitQueued } from "../lib/queued"
 import { useEntityIndex } from "../lib/entities"
+import { HEAD_CONTAINER, spotClass, useAutoCompact } from "../lib/contextVisibility"
 import { captainRows, groupLabel, parseNotice, plainText, stripFrontMatter, type CaptainNoticeItem, type CaptainRow } from "../lib/captainTranscript"
 import { NOTICE_ICON } from "./noticeIcons"
-import { AgentIcon, AppLink, Button, LineIcon, Markdown, TimeAgo, cx, warmMarkdown } from "./ui"
+import { AgentIcon, AppLink, Button, InRepo, LineIcon, Markdown, TimeAgo, cx, useRepoScope, warmMarkdown } from "./ui"
 import { ChatLine, CollapsibleMarkdown, FullReplyLink } from "./ChatLine"
 import { stripTruncation } from "../lib/truncated"
 import { QueuedChatMessage } from "./QueuedMessages"
@@ -45,17 +46,30 @@ import { Modal } from "./Modal"
 import { PREVIEW_GROUP } from "./FileLink"
 import { PublishedRow, SLIM_TITLE_LINK } from "./PublishedNotices"
 import { menuItem, usePopover } from "./TaskHeader"
+import { ChatSwitcher } from "./ChatSwitcher"
+import { useComposerFocus } from "../lib/chatSwitch"
 import type { Attachment, CaptainCompaction, CaptainMessage, CaptainSource, CaptainState, Project } from "../../../shared/types"
 
 const NO_MESSAGES: CaptainMessage[] = []
 
+/** A project's Captain chat. Everything in it is about the project, so "#12" and "PR #12" link to its repo. */
 export function CaptainTab({ project }: { project: Project }) {
+  return (
+    <InRepo projectId={project.id}>
+      <CaptainChat project={project} />
+    </InRepo>
+  )
+}
+
+function CaptainChat({ project }: { project: Project }) {
   const state = useCaptainState(project.id)
   const messages = useCaptainMessages(project.id)
   const send = useSendCaptainMessage(project.id)
   const panel = useRef<HTMLElement>(null)
   const box = useRef<HTMLTextAreaElement>(null)
   const thread = useRef<StickyScrollHandle>(null)
+  // Picked in a chat switcher: the composer takes focus.
+  useComposerFocus(project.id, box)
   const [openGroups, setOpenGroups] = useState<ReadonlySet<string>>(() => new Set())
   useEffect(() => setOpenGroups(new Set()), [project.id])
 
@@ -98,9 +112,10 @@ export function CaptainTab({ project }: { project: Project }) {
   // Older replies aren't rendered yet: parse their markdown in idle time so loading them is quick.
   const hidden = tail.hidden
   const index = useEntityIndex()
+  const repo = useRepoScope()
   useEffect(() => {
-    if (hidden) warmMarkdown(rows.slice(0, hidden).flatMap((r) => (r.type === "message" && r.message.role === "assistant" ? [r.message.content] : [])), index)
-  }, [rows, hidden, index])
+    if (hidden) warmMarkdown(rows.slice(0, hidden).flatMap((r) => (r.type === "message" && r.message.role === "assistant" ? [r.message.content] : [])), index, repo)
+  }, [rows, hidden, index, repo])
 
   const busy = Boolean(state.data?.busy)
   // Selected Captain output becomes a task request to this Captain.
@@ -435,8 +450,11 @@ function StatusPill({ state }: { state: CaptainState | undefined }) {
 function CaptainHeader({ projectId, state, lastActive }: { projectId: string; state: CaptainState | undefined; lastActive: number | null }) {
   const compact = useCompactCaptain(projectId)
   const settings = useAgentSettings().data?.settings
-  const model = settings ? `${settings.orchestratorModel} · ${settings.orchestratorEffort} effort` : null
-  const meter: MeterProps = {
+  const model = settings ? `${settings.captainModel} · ${settings.captainEffort} effort` : null
+  // Captains compact on the Coordinator's auto-compact setting; with it on they show no meter or Compact.
+  const autoCompact = useAutoCompact("coordinator")
+  const headerMeter = spotClass(autoCompact, "header")
+  const meter: MeterProps | null = autoCompact ? null : {
     tokens: state?.usage.tokens ?? null,
     window: state?.usage.window ?? null,
     compacting: state?.compacting ?? false,
@@ -445,13 +463,16 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
     onCompact: () => compact.mutate(),
   }
   return (
-    // Like the task header: name, status and a small context reading; model, last active and the full meter are in ⋯.
-    <header className="flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4">
+    // Like the task header: name, status and a small context reading (when wide); model, last active and the full meter are in ⋯.
+    <header className={cx(HEAD_CONTAINER, "flex items-center gap-2 border-b border-zinc-900 px-3 py-2 sm:px-4")}>
       <AgentIcon busy={Boolean(state?.busy)} />
-      <span className="text-sm font-semibold text-zinc-100">Captain</span>
+      {/* Opens the chat switcher: the Coordinator, then every project's Captain. */}
+      <ChatSwitcher current={projectId}>Captain</ChatSwitcher>
       <StatusPill state={state} />
       <div className="ml-auto flex items-center gap-1">
-        <ContextMiniBar tokens={meter.tokens} window={meter.window} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className="mr-1" />
+        {meter && headerMeter !== null && (
+          <ContextMiniBar tokens={meter.tokens} window={meter.window} hint="How much of the Captain's context window is used. Compact from the ⋯ menu when it gets high." className={cx("mr-1", headerMeter)} />
+        )}
         <CaptainMenu projectId={projectId} meter={meter} model={model} lastActive={lastActive} />
       </div>
     </header>
@@ -460,7 +481,7 @@ function CaptainHeader({ projectId, state, lastActive }: { projectId: string; st
 
 type MeterProps = Omit<ComponentProps<typeof ContextMeter>, "className">
 
-function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: string; meter: MeterProps; model: string | null; lastActive: number | null }) {
+function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: string; meter: MeterProps | null; model: string | null; lastActive: number | null }) {
   const { open, setOpen, root, trigger } = usePopover()
   const [history, setHistory] = useState(false)
   const compactions = useCaptainCompactions(projectId)
@@ -488,7 +509,7 @@ function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: strin
         >
           <div className="space-y-1 border-b border-zinc-800/80 px-2 pt-1.5 pb-2.5 text-xs text-zinc-500">
             {model && (
-              <p className="truncate" title="The Captain runs on the Coordinator's model and effort (Settings → Coordinator)">
+              <p className="truncate" title="Captains' model and effort (Settings → Coordinator → Project Captains)">
                 <span className="text-zinc-300">{model}</span>
               </p>
             )}
@@ -497,7 +518,7 @@ function CaptainMenu({ projectId, meter, model, lastActive }: { projectId: strin
                 Active <TimeAgo ts={lastActive} />
               </p>
             )}
-            <ContextMeter className="pt-1.5" {...meter} />
+            {meter && <ContextMeter className="pt-1.5" {...meter} />}
           </div>
           <button
             type="button"

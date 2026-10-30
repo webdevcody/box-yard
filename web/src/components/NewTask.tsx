@@ -8,10 +8,11 @@ import { AlertTriangle, FileText, Laptop, Loader2, Paperclip, Plus, ShieldAlert,
 import { newClientId, useAgentSettings, useCreateTask, useProjects, useSettings } from "../lib/queries"
 import { draftScope, loadDraft, saveDraft } from "../lib/newTask"
 import { primeSendSound } from "../lib/sendSound"
-import { EFFORT_LABEL, MODELS } from "../lib/models"
+import { EFFORT_LABEL } from "../../../shared/models"
+import { EffortPicker, ModelPicker } from "./ModelPicker"
 import { uploadFile } from "../lib/api"
 import { titleFromPrompt } from "../../../shared/taskTitle"
-import { EFFORTS, type Attachment, type Effort, type Project } from "../../../shared/types"
+import { type Attachment, type Effort, type Project } from "../../../shared/types"
 import { LOCAL_UNSANDBOXED, type Runner } from "../../../shared/runner"
 import { AGENT_CLIS, AGENT_CLI_LABEL, CODEX_MODEL_SUGGESTIONS, DEFAULT_AGENT_CLI, type AgentCli } from "../../../shared/agentCli"
 import { Modal, focusables } from "./Modal"
@@ -538,37 +539,28 @@ export function NewTaskDialog({
           </Select>
         </Field>
         <Field label="Model">
-          <Select className="w-full" value={model} onChange={(e) => setModel(e.target.value)} data-testid="new-task-model">
-            {agentCli === "codex" ? (
-              <>
-                <option value="">Default ({settings?.agentCodexModel || "Codex's default"})</option>
-                {CODEX_MODEL_SUGGESTIONS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </>
-            ) : (
-              <>
-                <option value="">Default{settings?.agentModel ? ` (${settings.agentModel})` : ""}</option>
-                {MODELS.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </>
-            )}
-          </Select>
+          {agentCli === "codex" ? (
+            <Select className="w-full" value={model} onChange={(e) => setModel(e.target.value)} data-testid="new-task-model">
+              <option value="">Default ({settings?.agentCodexModel || "Codex's default"})</option>
+              {CODEX_MODEL_SUGGESTIONS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </Select>
+          ) : (
+            <ModelPicker value={model} onChange={setModel} defaultLabel={`Default${settings?.agentModel ? ` (${settings.agentModel})` : ""}`} testId="new-task-model" />
+          )}
         </Field>
         <Field label="Effort">
-          <Select className="w-full" value={effort} onChange={(e) => setEffort(e.target.value as Effort | "")} data-testid="new-task-effort">
-            <option value="">Default{settings?.agentEffort ? ` (${EFFORT_LABEL[settings.agentEffort] ?? "same as Coordinator"})` : ""}</option>
-            {EFFORTS.map((x) => (
-              <option key={x} value={x}>
-                {EFFORT_LABEL[x]}
-              </option>
-            ))}
-          </Select>
+          <EffortPicker
+            value={effort}
+            onChange={(v) => setEffort(v as Effort | "")}
+            model={model || settings?.agentModel || ""}
+            effective={effort || (settings?.agentEffort !== "orchestrator" ? settings?.agentEffort : "") || ""}
+            lead={<option value="">Default{settings?.agentEffort ? ` (${settings.agentEffort === "orchestrator" ? "Coordinator decides" : EFFORT_LABEL[settings.agentEffort]})` : ""}</option>}
+            testId="new-task-effort"
+          />
         </Field>
       </div>
       <RunHereToggle on={runsOn === "local"} projectLocal={projectRunner === "local"} onChange={(on) => setRunner(on ? "local" : projectRunner === "local" ? "box" : projectRunner)} />

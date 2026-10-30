@@ -8,6 +8,8 @@ import { isQuietRun, parseOutcome, type TaskOutcome } from "../shared/quiet.js"
 import { normalizeRunner, parseRunsOn, type Runner } from "../shared/runner.js"
 import { DEFAULT_IDENTITY_ID } from "../shared/identities.js"
 import { DEFAULT_AGENT_CLI, isAgentCli, type AgentCli } from "../shared/agentCli.js"
+import { isProjectColor, type ProjectColor } from "../shared/projectColors.js"
+import { isTaskIcon, type TaskIconName } from "../shared/taskIcons.js"
 import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } from "../shared/placement.js"
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
@@ -16,6 +18,7 @@ import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
 import { AUTO_SIZE_WINDOW_MS, type TurnPeak } from "../shared/autoSize.js"
+import { TURN_TIMINGS_WINDOW_MS, type TurnRole, type TurnTiming } from "../shared/turnTimings.js"
 import type {
   AppNotification,
   Artifact,
@@ -47,6 +50,7 @@ import type {
   ScheduleRunStatus,
   ScheduleTarget,
   SideThread,
+  SideThreadKind,
   SideThreadMessage,
   SideThreadRole,
   Task,
@@ -69,11 +73,22 @@ interface SideThreadRow {
   id: string
   project_id: string | null
   anchor_id: string
+  kind: string
   quote: string
   created_at: number
   updated_at: number
   context: string | null
+  resolved_at: number | null
+  seen_at: number | null
+  replies: number
+  last_answer_at: number | null
 }
+
+/** A thread row with its reply count and newest answer, for sideThreadFrom. */
+const SIDE_THREAD_SELECT = `SELECT t.*,
+  (SELECT COUNT(*) FROM side_thread_messages m WHERE m.thread_id = t.id AND m.role IN ('user', 'assistant')) AS replies,
+  (SELECT MAX(m.created_at) FROM side_thread_messages m WHERE m.thread_id = t.id AND m.role IN ('assistant', 'error')) AS last_answer_at
+  FROM side_threads t`
 
 /** busy is the runner's to say (SideThreads.decorate); a row alone is never busy. */
 function sideThreadFrom(r: SideThreadRow): SideThread {
@@ -81,9 +96,13 @@ function sideThreadFrom(r: SideThreadRow): SideThread {
     id: r.id,
     projectId: r.project_id,
     anchorId: r.anchor_id,
+    kind: r.kind === "reply" ? "reply" : "ask",
     quote: r.quote,
     context: r.context === "fork" || r.context === "summary" ? r.context : null,
     busy: false,
+    replies: r.replies ?? 0,
+    unread: r.last_answer_at !== null && r.last_answer_at > (r.seen_at ?? 0),
+    resolvedAt: r.resolved_at,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   }
@@ -183,6 +202,10 @@ export interface TaskRow {
   pr_labels_json: string | null
   merge_request_json: string | null
   push_state_json: string | null
+  /** Its icon (shared/taskIcons.ts); null picks one from its title. */
+  icon?: string | null
+  /** Shared by the tasks one create_tasks call started; null when started on its own. */
+  batch_id?: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -279,6 +302,7 @@ export interface CaptainNoticeEntry {
   content: string
   loopKey: string
   meta: Record<string, unknown> | null
+  createdAt: number
 }
 
 /** A project's own box settings; null uses the global one (shared/types.ts Project). */
@@ -311,6 +335,8 @@ const AGENTS_PER_BOX = "COALESCE(agents_per_box, CASE WHEN heavy_tasks IN ('one-
 interface ProjectRow {
   id: string
   name: string
+  /** Its colour (shared/projectColors.ts); null picks one from its name. */
+  color?: string | null
   description: string
   repo: string | null
   base_branch: string
@@ -685,6 +711,8 @@ export interface PendingInput {
   source: string
   content: string
   attachments: string[]
+  /** When it was sent: a task turn's timings measure its queue wait from the oldest. */
+  createdAt: number
 }
 
 /** A queued input as stored, for the queue list and its edits. `content` is the editable text (no prefix). */
@@ -717,7 +745,7 @@ export interface QueuedChatRow {
 export type QueuedChatChange = { ok: true; row: QueuedChatRow } | { ok: false; reason: "delivered" | "deleted" | "missing" }
 
 const inputAttachments = (r: InputRow) => (r.attachments ? (JSON.parse(r.attachments) as string[]) : [])
-const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r) })
+const pendingInput = (r: InputRow): PendingInput => ({ id: r.id, source: r.source, content: r.prefix + (r.content || "(no text)"), attachments: inputAttachments(r), createdAt: r.created_at })
 const queuedInputRow = (r: InputRow): QueuedInputRow => ({
   id: r.id,
   taskId: r.task_id,
@@ -797,6 +825,7 @@ export class Store {
       gpuMachine: gpuMachineOf(row),
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       identityId: row.identity_id || DEFAULT_IDENTITY_ID,
+      color: isProjectColor(row.color) ? row.color : null,
       snapshot: row.snapshot_id
         ? {
             id: row.snapshot_id,
@@ -894,6 +923,7 @@ export class Store {
     agentCli?: AgentCli | null
     notesMaxCount?: number | null
     notesMaxTokens?: number | null
+    color?: ProjectColor | null
   }): Project {
     const now = Date.now()
     const id = input.id ?? newId("prj")
@@ -921,6 +951,7 @@ export class Store {
     this.setProjectNotesBudget(id, input)
     if (input.identityId) this.setProjectIdentity(id, input.identityId)
     if (input.agentCli) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
+    if (input.color) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(input.color, id)
     return this.getProject(id)!
   }
 
@@ -971,6 +1002,8 @@ export class Store {
       identityId?: string
       /** The CLI its new tasks run on; null clears it (Settings › Box agents applies). Its existing tasks keep theirs. */
       agentCli?: AgentCli | null
+      /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
+      color?: ProjectColor | null
     },
   ): Project {
     const current = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(id) as ProjectRow | undefined
@@ -1000,6 +1033,7 @@ export class Store {
     this.setProjectNotesBudget(id, patch)
     if (patch.identityId) this.setProjectIdentity(id, patch.identityId)
     if (patch.agentCli !== undefined) this.db.prepare("UPDATE projects SET agent_cli = ? WHERE id = ?").run(patch.agentCli, id)
+    if (patch.color !== undefined) this.db.prepare("UPDATE projects SET color = ? WHERE id = ?").run(patch.color, id)
     return this.getProject(id)!
   }
 
@@ -1231,6 +1265,8 @@ export class Store {
       placement: this.taskPlacement(row),
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
+      icon: isTaskIcon(row.icon) ? row.icon : null,
+      batchId: row.batch_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -1344,6 +1380,10 @@ export class Store {
     runsOn?: Runner | null
     /** The CLI its agent runs on for good (TaskRow.agent_cli); omitted: Claude Code. */
     agentCli?: AgentCli | null
+    /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
+    icon?: TaskIconName | null
+    /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
+    batchId?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1373,7 +1413,14 @@ export class Store {
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
     if (input.agentCli) this.db.prepare("UPDATE tasks SET agent_cli = ? WHERE id = ?").run(input.agentCli, id)
+    if (input.icon) this.setTaskIcon(id, input.icon)
+    if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     return this.getTask(id)!
+  }
+
+  /** A task's icon (shared/taskIcons.ts); null goes back to the one from its title. */
+  setTaskIcon(id: string, icon: TaskIconName | null) {
+    this.db.prepare("UPDATE tasks SET icon = ? WHERE id = ?").run(icon, id)
   }
 
   startTaskTurn(input: {
@@ -2092,6 +2139,15 @@ export class Store {
     return r ? { id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
   }
 
+  /** Add meta.timingId (turn_timings) to a Coordinator chat message: its turn's timing chip. */
+  setChatTiming(id: string, timingId: string, timingMs: number): ChatMessage | null {
+    this.db.prepare("UPDATE chat_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
+    const r = this.db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(id) as
+      | { id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
+      | undefined
+    return r ? { id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
+  }
+
   listChat(limit = 300): ChatMessage[] {
     const rows = this.db
       .prepare(
@@ -2118,6 +2174,12 @@ export class Store {
       meta: json(r.meta_json, null),
       createdAt: r.created_at,
     }))
+  }
+
+  /** When the oldest notice the orchestrator hasn't been told about was written, or null when there is none. */
+  oldestUnseenNoticeAt(): number | null {
+    const r = this.db.prepare("SELECT MIN(created_at) AS at FROM chat_messages WHERE seen_by_orchestrator = 0").get() as { at: number | null }
+    return r.at
   }
 
   /** Notices the orchestrator has not been told about yet; marks them seen. */
@@ -2176,18 +2238,38 @@ export class Store {
     return rows.map((r) => ({ id: r.id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at }))
   }
 
-  createSideThread(input: { id?: string; projectId: string | null; anchorId: string; quote: string; sessionId: string }): SideThread {
+  createSideThread(input: { id?: string; projectId: string | null; anchorId: string; quote: string; sessionId: string; kind?: SideThreadKind }): SideThread {
     const now = Date.now()
     const id = input.id ?? newId("thr")
     this.db
-      .prepare("INSERT INTO side_threads (id, project_id, anchor_id, quote, session_id, started, context, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)")
-      .run(id, input.projectId, input.anchorId, input.quote, input.sessionId, now, now)
+      .prepare("INSERT INTO side_threads (id, project_id, anchor_id, kind, quote, session_id, started, context, created_at, updated_at, seen_at) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)")
+      .run(id, input.projectId, input.anchorId, input.kind ?? "ask", input.quote, input.sessionId, now, now, now)
     return this.getSideThread(id)!
   }
 
   getSideThread(id: string): SideThread | null {
-    const r = this.db.prepare("SELECT * FROM side_threads WHERE id = ?").get(id) as SideThreadRow | undefined
+    const r = this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.id = ?`).get(id) as SideThreadRow | undefined
     return r ? sideThreadFrom(r) : null
+  }
+
+  /** The reply thread on a chat message, if it has one. */
+  replyThreadOn(projectId: string | null, anchorId: string): SideThread | null {
+    const r = (
+      projectId
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id = ? ORDER BY t.created_at ASC LIMIT 1`).get(anchorId, projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.anchor_id = ? AND t.kind = 'reply' AND t.project_id IS NULL ORDER BY t.created_at ASC LIMIT 1`).get(anchorId)
+    ) as SideThreadRow | undefined
+    return r ? sideThreadFrom(r) : null
+  }
+
+  /** Resolve a thread (folded away under its message), or reopen it. */
+  resolveSideThread(id: string, resolved: boolean) {
+    this.db.prepare("UPDATE side_threads SET resolved_at = ? WHERE id = ?").run(resolved ? Date.now() : null, id)
+  }
+
+  /** Cody has seen the thread up to now: its answers so far aren't unread. */
+  seeSideThread(id: string, at = Date.now()) {
+    this.db.prepare("UPDATE side_threads SET seen_at = MAX(COALESCE(seen_at, 0), ?) WHERE id = ?").run(at, id)
   }
 
   /** The thread's Claude session, and whether a run has created it yet. */
@@ -2200,8 +2282,8 @@ export class Store {
   listSideThreads(projectId: string | null): SideThread[] {
     const rows = (
       projectId
-        ? this.db.prepare("SELECT * FROM side_threads WHERE project_id = ? ORDER BY created_at ASC, rowid ASC").all(projectId)
-        : this.db.prepare("SELECT * FROM side_threads WHERE project_id IS NULL ORDER BY created_at ASC, rowid ASC").all()
+        ? this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.project_id = ? ORDER BY t.created_at ASC, t.rowid ASC`).all(projectId)
+        : this.db.prepare(`${SIDE_THREAD_SELECT} WHERE t.project_id IS NULL ORDER BY t.created_at ASC, t.rowid ASC`).all()
     ) as SideThreadRow[]
     return rows.map(sideThreadFrom)
   }
@@ -2251,6 +2333,15 @@ export class Store {
     return msg
   }
 
+  /** Add meta.timingId (turn_timings) to a Captain chat message: its turn's timing chip. */
+  setCaptainMessageTiming(id: string, timingId: string, timingMs: number): CaptainMessage | null {
+    this.db.prepare("UPDATE captain_messages SET meta_json = json_set(COALESCE(meta_json, '{}'), '$.timingId', ?, '$.timingMs', ?) WHERE id = ?").run(timingId, timingMs, id)
+    const r = this.db.prepare("SELECT * FROM captain_messages WHERE id = ?").get(id) as
+      | { id: string; project_id: string; role: ChatRole; content: string; meta_json: string | null; created_at: number }
+      | undefined
+    return r ? { id: r.id, projectId: r.project_id, role: r.role, content: r.content, meta: json(r.meta_json, null), createdAt: r.created_at } : null
+  }
+
   listCaptainMessages(projectId: string, limit = 300): CaptainMessage[] {
     const rows = this.db
       .prepare(
@@ -2290,12 +2381,12 @@ export class Store {
 
   peekUnseenCaptainNoticeEntries(projectId: string): CaptainNoticeEntry[] {
     const rows = this.db
-      .prepare("SELECT content, meta_json FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
-      .all(projectId) as { content: string; meta_json: string | null }[]
+      .prepare("SELECT content, meta_json, created_at FROM captain_messages WHERE project_id = ? AND seen_by_captain = 0 ORDER BY created_at ASC, rowid ASC")
+      .all(projectId) as { content: string; meta_json: string | null; created_at: number }[]
     return rows.map((r) => {
       const meta = json<Record<string, unknown> | null>(r.meta_json, null)
       const loopKey = typeof meta?.loopKey === "string" && meta.loopKey ? meta.loopKey : r.content
-      return { content: r.content, loopKey, meta }
+      return { content: r.content, loopKey, meta, createdAt: r.created_at }
     })
   }
 
@@ -2907,6 +2998,45 @@ export class Store {
     }))
   }
 
+  // ---------- turn timings ----------
+
+  private timingsPrunedAt = 0
+
+  /** One run's timings (shared/turnTimings.ts). Drops rows past the 30-day window, at most every 10 minutes. */
+  recordTurnTiming(t: TurnTiming) {
+    const { id, role, kind, projectId, taskId, sessionId, model, effort, trigger, resumed, ok, requestedAt, startedAt, endedAt, totalMs, steps, ...stages } = t
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO turn_timings (id, role, kind, project_id, task_id, session_id, model, effort, trigger, resumed, ok, requested_at, started_at, ended_at, total_ms, stages_json, steps_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, role, kind, projectId, taskId, sessionId, model, effort, trigger, resumed ? 1 : 0, ok ? 1 : 0, requestedAt, startedAt, endedAt, Math.round(totalMs), JSON.stringify(stages), JSON.stringify(steps))
+    const now = Date.now()
+    if (now - this.timingsPrunedAt > 10 * 60_000) {
+      this.timingsPrunedAt = now
+      this.db.prepare("DELETE FROM turn_timings WHERE ended_at < ?").run(now - TURN_TIMINGS_WINDOW_MS)
+    }
+  }
+
+  getTurnTiming(id: string): TurnTiming | null {
+    const r = this.db.prepare("SELECT * FROM turn_timings WHERE id = ?").get(id) as TurnTimingRow | undefined
+    return r ? timingFromRow(r) : null
+  }
+
+  /** Runs that ended since `since`, newest first. */
+  listTurnTimings(filter: { since: number; role?: TurnRole; projectId?: string; taskId?: string; kind?: string; limit?: number }): TurnTiming[] {
+    const where = ["ended_at >= ?"]
+    const args: (string | number)[] = [filter.since]
+    if (filter.role) where.push("role = ?"), args.push(filter.role)
+    if (filter.projectId) where.push("project_id = ?"), args.push(filter.projectId)
+    if (filter.taskId) where.push("task_id = ?"), args.push(filter.taskId)
+    if (filter.kind) where.push("kind = ?"), args.push(filter.kind)
+    const rows = this.db
+      .prepare(`SELECT * FROM turn_timings WHERE ${where.join(" AND ")} ORDER BY ended_at DESC LIMIT ?`)
+      .all(...args, filter.limit ?? 5000) as TurnTimingRow[]
+    return rows.map(timingFromRow)
+  }
+
   // ---------- schedules ----------
 
   private scheduleFromRow(r: ScheduleRow): Schedule {
@@ -3381,4 +3511,53 @@ export function githubSlug(repo: string | null): string | null {
   if (/^[\w.-]+\/[\w.-]+$/.test(repo)) return repo
   const m = repo.match(/github\.com[/:]([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i)
   return m ? `${m[1]}/${m[2]}` : null
+}
+
+interface TurnTimingRow {
+  id: string
+  role: string
+  kind: string
+  project_id: string | null
+  task_id: string | null
+  session_id: string | null
+  model: string | null
+  effort: string | null
+  trigger: string | null
+  resumed: number
+  ok: number
+  requested_at: number | null
+  started_at: number
+  ended_at: number
+  total_ms: number
+  stages_json: string
+  steps_json: string
+}
+
+function timingFromRow(r: TurnTimingRow): TurnTiming {
+  const parse = <T>(text: string, fallback: T): T => {
+    try {
+      return JSON.parse(text) as T
+    } catch {
+      return fallback
+    }
+  }
+  return {
+    ...parse<Partial<TurnTiming>>(r.stages_json, {}),
+    id: r.id,
+    role: r.role as TurnRole,
+    kind: r.kind,
+    projectId: r.project_id,
+    taskId: r.task_id,
+    sessionId: r.session_id,
+    model: r.model,
+    effort: r.effort,
+    trigger: r.trigger,
+    resumed: Boolean(r.resumed),
+    ok: Boolean(r.ok),
+    requestedAt: r.requested_at,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    totalMs: r.total_ms,
+    steps: parse(r.steps_json, []),
+  } as TurnTiming
 }

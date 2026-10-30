@@ -5,7 +5,7 @@ import type { PreviewLink, Task } from "../../../shared/types"
 import { badgeStatus } from "../lib/prState"
 import { cardSummary } from "../lib/taskSummary"
 import { compactTokens, money } from "../lib/usage"
-import { AgentCliChip, NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
+import { AgentCliChip, InRepo, LinkedText, NewTabLink, PrChip, QuietPill, StatusBadge, TimeAgo, cx, WaitIcon } from "./ui"
 import { isQuietRun } from "../../../shared/quiet"
 import { MergePrCardButton } from "./MergePr"
 import { mergeButtonState } from "../lib/mergePr"
@@ -60,7 +60,9 @@ export const TaskCard = memo(function TaskCard({
         {task.status === "needs_input" && task.question ? (
           <div className="flex gap-2 rounded-lg bg-amber-500/10 px-2.5 py-2 text-amber-200">
             <MessageCircleQuestion className="mt-0.5 h-4 w-4 shrink-0" />
-            <span className="line-clamp-2 break-words">{task.question}</span>
+            <span className="line-clamp-2 break-words">
+              <CardText task={task} text={task.question} />
+            </span>
           </div>
         ) : task.status === "queued" && task.waitReason ? (
           <p className="line-clamp-2 break-words text-amber-200/80" data-testid="wait-reason">
@@ -68,14 +70,18 @@ export const TaskCard = memo(function TaskCard({
             <WaitReason task={task} inLink />
           </p>
         ) : task.status === "failed" && task.error ? (
-          <p className="line-clamp-2 break-words text-red-300/80">{task.error}</p>
+          <p className="line-clamp-2 break-words text-red-300/80">
+            <CardText task={task} text={task.error} />
+          </p>
         ) : summary.kind === "activity" ? (
           <p className="line-clamp-2 break-words text-zinc-400" title="Latest agent activity">
             <Activity className="mr-1.5 inline h-3.5 w-3.5 -translate-y-px text-zinc-500" />
-            {summary.text}
+            <CardText task={task} text={summary.text} />
           </p>
         ) : (
-          <p className="line-clamp-2 break-words text-zinc-400">{summary.text}</p>
+          <p className="line-clamp-2 break-words text-zinc-400">
+            <CardText task={task} text={summary.text} />
+          </p>
         )}
       </div>
 
@@ -136,6 +142,18 @@ export const TaskCard = memo(function TaskCard({
     </Link>
   )
 })
+
+/**
+ * A card's text with "PR #406", "#12" and "head 8269e827" linked to the task's repo. The card is a link, so they're
+ * buttons that open GitHub in a new tab, not the card (LinkedText's inLink).
+ */
+function CardText({ task, text }: { task: Task; text: string }) {
+  return (
+    <InRepo taskId={task.id} projectId={task.projectId}>
+      <LinkedText text={text} inLink />
+    </InRepo>
+  )
+}
 
 /** A compact one-line preview chip ("Preview :4030"); the agent's full label and the URL are in the tooltip. */
 function PreviewChip({ preview }: { preview: PreviewLink }) {

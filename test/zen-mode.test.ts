@@ -8,6 +8,7 @@ import { openPalette } from "../web/src/components/CommandPalette.js"
 import { keys } from "../web/src/lib/queries.js"
 import { currentToasts, dismiss, isCritical, toast, type Toast } from "../web/src/lib/toast.js"
 import { ZEN_PATH, isZenShortcut } from "../web/src/lib/zen.js"
+import { HEAD_CONTAINER, NARROW_HEAD_ONLY, WIDE_HEAD_ONLY } from "../web/src/lib/contextVisibility.js"
 import type { ChatMessage, Project, Task } from "../shared/types"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -70,12 +71,13 @@ let root: Root
 let host: HTMLElement
 
 /** `/` renders as a reload of this tab (already landed), so only the tests that ask for it start in Zen. */
-function render(path = "/", tokens = 84_000) {
+function render(path = "/", tokens = 84_000, autoCompact = false) {
   history.replaceState(null, "", path)
   sessionStorage.setItem("box-yard:landed", "1")
   const qc = new QueryClient({ defaultOptions: { queries: { staleTime: Infinity, retry: false } } })
   qc.setQueryData(keys.me, { authed: true, authRequired: false })
-  qc.setQueryData(keys.agentSettings, { settings: { startInZen: true, ownerName: "Cody" }, sources: {}, defaults: {} })
+  const orchestratorAutoCompact = { enabled: autoCompact, unit: "tokens", value: 250_000 }
+  qc.setQueryData(keys.agentSettings, { settings: { startInZen: true, ownerName: "Cody", orchestratorAutoCompact }, sources: {}, defaults: {} })
   qc.setQueryData(keys.health, { ok: true, provider: "mock", mock: true, bus: "file", claude: { available: true, version: "x" }, problems: [], pool: {}, orchestratorBusy: false, scheduler: "local" })
   qc.setQueryData(keys.orchestrator, { busy: false, usage: { tokens, window: 1_000_000, updatedAt: now }, compacting: false, compactQueued: false, lastCompaction: null, compactionsDir: "", error: null })
   qc.setQueryData(keys.chat, CHAT)
@@ -128,8 +130,10 @@ describe("Zen mode", () => {
     expect(chat()!.querySelector("[aria-label='Leave Zen mode']")).not.toBeNull()
     expect(chat()!.querySelector("[aria-label='Zen mode']")).toBeNull()
     expect(chat()!.querySelector("header")!.textContent).toContain("Box Yard Coordinator")
-    // Every row pads in to the one centered column.
-    expect(chat()!.querySelectorAll(".zen-column").length).toBe(3)
+    // Every row pads in to the one centered column: the header, the project bar (a task is running), the thread
+    // and the composer.
+    expect(chat()!.querySelectorAll(".zen-column").length).toBe(4)
+    expect(chat()!.querySelector('[data-testid="project-bar"]')!.classList.contains("zen-column")).toBe(true)
   })
 
   it("puts the context reading and Compact in the header, left of the other controls, and nowhere else", async () => {
@@ -151,25 +155,44 @@ describe("Zen mode", () => {
     expect((fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls.some(([url, init]) => url.includes("compact") && init?.method === "POST")).toBe(true)
   })
 
-  it("emphasises Compact from 75% and offers it from the phone chip's menu", () => {
+  it("emphasises Compact from 75% and, in a narrow header, offers it only from the ⋯ menu", () => {
     render(ZEN_PATH, 800_000)
-    const ctx = chat()!.querySelector<HTMLElement>("[data-testid=zen-context]")!
+    const header = chat()!.querySelector("header")!
+    const ctx = header.querySelector<HTMLElement>("[data-testid=zen-context]")!
     expect(ctx.querySelector("button[aria-label=Compact]")!.className).toContain("amber")
-    const chip = ctx.querySelector<HTMLButtonElement>("button[aria-haspopup=menu]")!
+    // Container queries on the header, not the viewport: the reading is wide-only, the ⋯ button narrow-only.
+    expect(ctx.className).toContain(WIDE_HEAD_ONLY)
+    const chip = header.querySelector<HTMLButtonElement>("[data-testid=context-menu-button]")!
+    expect(chip.className).toContain(NARROW_HEAD_ONLY)
+    expect(chip.className).toContain("amber")
+    expect(chip.querySelector("[data-testid=context-mini]")).toBeNull()
     expect(chip.getAttribute("aria-label")).toContain("800k / 1m · 80%")
     act(() => chip.click())
-    const menu = ctx.querySelector("[role=menu]")!
+    const menu = header.querySelector("[role=menu]")!
     expect(menu.textContent).toContain("Context 800k / 1m · 80%")
     act(() => menu.querySelector<HTMLButtonElement>("[role=menuitem]")!.click())
-    expect(ctx.querySelector("[role=menu]")).toBeNull()
+    expect(header.querySelector("[role=menu]")).toBeNull()
   })
 
-  it("the side panel keeps its own context meter row and its short title", () => {
+  it("the side panel keeps its own context meter row (wide only, ⋯ when narrow) and its short title", () => {
     render("/")
     expect(chat()!.querySelector("header")!.textContent).toContain("Coordinator")
     expect(chat()!.querySelector("header")!.textContent).not.toContain("Box Yard Coordinator")
-    expect(chat()!.querySelector("[data-testid=context-meter]")).not.toBeNull()
+    const row = chat()!.querySelector<HTMLElement>("[data-testid=context-meter]")!
+    expect(row.className).toContain(WIDE_HEAD_ONLY)
+    expect(row.closest(`[class~="${HEAD_CONTAINER}"]`)).toBe(chat()!.querySelector("header")!.parentElement)
     expect(chat()!.querySelector("[data-testid=zen-context]")).toBeNull()
+    expect(chat()!.querySelector("[data-testid=context-menu-button]")!.className).toContain(NARROW_HEAD_ONLY)
+  })
+
+  it("with auto-compact on, shows no context reading and no Compact, in Zen or the side panel", () => {
+    for (const path of [ZEN_PATH, "/"]) {
+      render(path, 900_000, true)
+      expect(chat()!.querySelector("[data-testid=zen-context], [data-testid=context-meter], [data-testid=context-mini], [data-testid=context-menu-button]")).toBeNull()
+      expect([...chat()!.querySelectorAll("button")].some((b) => /compact/i.test(`${b.textContent} ${b.getAttribute("aria-label")}`))).toBe(false)
+      // The rest of the header stays.
+      expect(chat()!.querySelector("[aria-label=Settings]")).not.toBeNull()
+    }
   })
 
   it("a reload of / stays on the Yard, and the panel offers the way in", () => {
@@ -279,19 +302,23 @@ describe("Zen mode", () => {
     expect(inZen()).toBe(true)
   })
 
-  it("an in-app link in the transcript leaves Zen; a Cmd-click is left to the browser", () => {
+  it("a task link in the transcript opens the side panel and stays in Zen; a Cmd-click is left to the browser", () => {
     render(ZEN_PATH)
     const link = [...chat()!.querySelectorAll("a")].find((a) => a.getAttribute("href") === "/tasks/task_zen001")!
     expect(link).toBeTruthy()
     const cmd = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true })
     act(() => void link.dispatchEvent(cmd))
     expect(cmd.defaultPrevented).toBe(false)
+    // happy-dom follows the link itself; a new tab would leave this one on /zen.
+    history.replaceState(history.state, "", ZEN_PATH)
     expect(inZen()).toBe(true)
+    expect(document.querySelector("[data-testid=zen-panel]")).toBeNull()
     const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })
     act(() => void link.dispatchEvent(plain))
     expect(plain.defaultPrevented).toBe(true)
-    expect(location.pathname).toBe("/tasks/task_zen001")
-    expect(inZen()).toBe(false)
+    expect(location.pathname).toBe(ZEN_PATH)
+    expect(inZen()).toBe(true)
+    expect(document.querySelector("[data-testid=zen-panel-title]")!.textContent).toBe("Write the zen docs")
   })
 
   it("shows only critical toasts, at the top, clear of the composer", () => {
