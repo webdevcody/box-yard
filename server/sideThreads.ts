@@ -71,6 +71,7 @@ export const THREAD_TOOLS: ReadonlySet<string> = new Set([
   "list_hook_runs",
   "pool_status",
   "machine_stats",
+  "list_machines",
   "box_history",
   "turn_timings",
   "get_settings",
