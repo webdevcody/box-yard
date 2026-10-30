@@ -457,15 +457,19 @@ export function createBoxYard(
     const ids = notices.flatMap((n) => retroSuggestionIds(n.meta))
     if (ids.length) retro.settle(projectId, ids, ok)
   }
-  // A Captain's automatic report, or its reply to a send_to_captain: a notice that wakes the Coordinator, like a task's.
+  // A Captain's automatic report, or its reply to a send_to_captain: a notice on the Coordinator chat. It wakes the
+  // Coordinator like a task's, unless it's only for Cody's information (captainWake.ts): then the Coordinator reads it
+  // with its next turn's updates.
+  captains.coordinatorTurn = () => orchestrator.turnKey
   captains.onReport = (projectId, content, report) => {
     const project = store.getProject(projectId)
     const who = `Captain${project ? ` for ${project.name}` : ""}`
+    const fyi = report.fyi ? { fyi: true } : {}
     const msg = report.replyTo
-      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo })
-      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true })
+      ? store.addChat("notice", `${who} replied: ${content}`, { projectId, captain: true, replyTo: report.replyTo, ...fyi })
+      : store.addChat("notice", `${who}: ${content}`, { projectId, captain: true, ...fyi })
     hub.broadcast({ type: "chat.message", message: msg })
-    orchestrator.nudge()
+    if (!report.fyi) orchestrator.nudge()
   }
   store.onNotification = (notification) => hub.broadcast({ type: "notification", notification })
   const auth = new Auth(c.password, store)
