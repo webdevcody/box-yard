@@ -1,7 +1,7 @@
 // OpenAI's Codex CLI as a Box Yard agent (docs/codex.md): the `codex exec` arguments, its login, its context usage,
 // and a translation of its `--json` events into the Claude Code stream-json messages the Coordinator, Captains and
 // side threads already read. Task agents run Codex through runner/box-runner.mjs, which has its own copy of the
-// translation (it runs on boxes with plain Node); test/codex.test.ts keeps the two in step.
+// translation (it runs on boxes with plain Node); test/codex-task.e2e.test.ts keeps the two in step.
 import fs from "node:fs"
 import path from "node:path"
 import type { Effort } from "../shared/types.js"

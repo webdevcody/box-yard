@@ -89,8 +89,9 @@ const login = (() => {
   return null
 })()
 
+const thread = resume ?? randomUUID()
 if (process.env.FAKE_CODEX_LOG) {
-  fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args: argv, home: process.env.CODEX_HOME ?? null, login: login?.kind ?? null, account: login?.account ?? null, model, resume, sandbox, images, config }) + "\n")
+  fs.appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ args: argv, home: process.env.CODEX_HOME ?? null, login: login?.kind ?? null, account: login?.account ?? null, thread, model, resume, sandbox, images, config }) + "\n")
 }
 
 process.stdout.on("error", () => {})
@@ -119,7 +120,6 @@ if (process.env.FAKE_CODEX_REFRESH === "1" && login?.kind === "chatgpt") {
 // ---------------------------------------------------------------- run fake-claude
 
 const fakeClaude = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-claude.mjs")
-const thread = resume ?? randomUUID()
 const claudeArgs = ["-p", "--output-format", "stream-json", "--verbose", ...(resume ? ["--resume", resume] : ["--session-id", thread])]
 if (typeof config.developer_instructions === "string") claudeArgs.push("--append-system-prompt", config.developer_instructions)
 if (model) claudeArgs.push("--model", model)

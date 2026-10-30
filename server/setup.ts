@@ -15,7 +15,8 @@ import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
-import { DOCKER_NEEDS_CLAUDE_KEY } from "../shared/docker.js"
+import { DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY } from "../shared/docker.js"
+import type { AgentCli } from "../shared/agentCli.js"
 
 export const CHECK_TIMEOUT_MS = 15_000
 /** A real `claude` call takes a few seconds to start. */
@@ -117,7 +118,7 @@ export class Setup {
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
    * whether Settings › Credentials has one.
    */
-  async runnerProblem(runner: Runner, claudeKey?: boolean): Promise<string | null> {
+  async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude"): Promise<string | null> {
     const { c, credentials } = this.d
     // Docker first: mock mode's containers are folders and always "run", but a stand-in Docker may not.
     const docker = runner !== "docker" ? null : this.d.dockerProblem ? await this.d.dockerProblem() : "Docker containers aren't available on this Box Yard"
@@ -128,6 +129,16 @@ export class Setup {
     }
     if (runner === "box") {
       return c.boxProvider === "local" || creds.upstashBoxApiKey.state === "set" ? null : "Upstash boxes aren't set up: add an Upstash Box API key in Settings › Credentials"
+    }
+    if (cli === "codex") {
+      const codexKey = claudeKey ?? (creds.codexAuthJson.state === "set" || creds.codexApiKey.state === "set")
+      if (runner === "docker") return codexKey ? null : DOCKER_NEEDS_CODEX_KEY
+      await this.refreshLocal()
+      const local = this.local?.result.check
+      if (!local) return "Box Yard couldn't check this computer's tools (codex --version didn't answer)"
+      if (!local.tools.find((t) => t.key === "codex")?.found) return `Codex isn't installed on this computer (\`${c.codexBin} --version\` failed). Install it (npm i -g @openai/codex), then try again`
+      if (local.codexLogin === false && !codexKey) return "Codex on this computer isn't signed in: run `codex login`, or add a Codex login in Settings › Credentials"
+      return null
     }
     const keySet = claudeKey ?? (creds.claudeOauthToken.state === "set" || creds.anthropicApiKey.state === "set")
     if (runner === "docker") return keySet ? null : DOCKER_NEEDS_CLAUDE_KEY
