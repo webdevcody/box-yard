@@ -1,7 +1,6 @@
 // Side threads: a question about a highlighted passage in the Coordinator chat or a Captain's chat, answered in a
-// panel on the right (server/sideThreads.ts), or a task card's questions to the Coordinator, answered in the card. This
-// keeps their queries, the live events that update them, and which thread each chat has open.
-import { useEffect, useSyncExternalStore } from "react"
+// panel on the right (server/sideThreads.ts). This keeps their queries, the live events that update them, and which thread each chat has open.
+import { useSyncExternalStore } from "react"
 import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
 import { api } from "./api"
 import { newClientId, upsert } from "./queries"
@@ -128,76 +127,6 @@ export function useSendThreadMessage(chat: ThreadChat, id: string) {
 }
 
 export const newThreadIds = () => ({ id: newClientId("thr"), messageId: newClientId("thm") })
-
-const NO_THREAD_MESSAGES: SideThreadMessage[] = []
-
-/** A task card's thread in the Coordinator chat (kind "task", anchored on the card's key), or null before its first question. */
-export function useCardThread(key: string): SideThread | null {
-  const q = useQuery({
-    queryKey: threadKeys.list(COORDINATOR_CHAT),
-    queryFn: () => api<SideThread[]>("/api/threads"),
-    staleTime: Infinity,
-    select: (list: SideThread[]) => list.find((t) => t.kind === "task" && t.anchorId === key) ?? null,
-  })
-  return q.data ?? null
-}
-
-/**
- * An open card's thread and its messages. Shown, its answers are read (now, and as they arrive).
- */
-export function useCardThreadLog(key: string): { thread: SideThread | null; messages: SideThreadMessage[] } {
-  const thread = useCardThread(key)
-  const messages = useThreadMessages(thread?.id ?? "", Boolean(thread)).data ?? NO_THREAD_MESSAGES
-  const qc = useQueryClient()
-  const unread = Boolean(thread?.unread)
-  const id = thread?.id
-  useEffect(() => {
-    if (!unread || !id) return
-    patch(qc, COORDINATOR_CHAT, id, () => ({ unread: false }))
-    void api(`/api/threads/${id}/seen`, { body: {} }).catch(() => {})
-  }, [unread, id, qc])
-  return { thread, messages }
-}
-
-/**
- * Ask the Coordinator from a task's card (`anchorId`: its key): the card's thread, started by the first question and
- * added to by the next. It shows in the card, never in the thread panel, and the main chat doesn't see it.
- */
-export function useAskCard() {
-  const qc = useQueryClient()
-  const chat = COORDINATOR_CHAT
-  return useMutation({
-    mutationFn: (input: { id: string; messageId: string; anchorId: string; title: string; question: string }) =>
-      api<{ thread: SideThread; message: SideThreadMessage }>("/api/threads", {
-        body: { id: input.id, messageId: input.messageId, anchorId: input.anchorId, question: input.question, kind: "task", projectId: null },
-      }),
-    onMutate: (input) => {
-      const existing = qc.getQueryData<SideThread[]>(threadKeys.list(chat))?.find((t) => t.kind === "task" && t.anchorId === input.anchorId)
-      const id = existing?.id ?? input.id
-      if (existing) patch(qc, chat, id, (t) => ({ busy: true, resolvedAt: null, replies: t.replies + 1 }))
-      else {
-        const now = Date.now()
-        const thread: SideThread = { id, projectId: null, anchorId: input.anchorId, kind: "task", quote: input.title, context: null, busy: true, replies: 1, unread: false, resolvedAt: null, createdAt: now, updatedAt: now }
-        qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => upsert(list ?? [], thread))
-      }
-      qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(id), (list) => upsert(list ?? [], pendingMessage(id, input.messageId, input.question.trim())))
-      return { id, fresh: !existing }
-    },
-    onError: (err: Error, input, ctx) => {
-      if (ctx?.fresh) dropThread(qc, chat, ctx.id)
-      else if (ctx) qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(ctx.id), (list) => list?.filter((m) => m.id !== input.messageId))
-      toast.error("Couldn't ask the Coordinator", err.message)
-    },
-    onSuccess: ({ thread, message }, _input, ctx) => {
-      if (ctx && thread.id !== ctx.id) {
-        // The card had a thread this browser hadn't heard of: the question went there.
-        dropThread(qc, chat, ctx.id)
-        void qc.invalidateQueries({ queryKey: threadKeys.messages(thread.id) })
-      } else qc.setQueryData<SideThreadMessage[]>(threadKeys.messages(thread.id), (list) => upsert(list ?? [], message))
-      qc.setQueryData<SideThread[]>(threadKeys.list(chat), (list) => upsert(list ?? [], thread))
-    },
-  })
-}
 
 export function useThreadControl(chat: ThreadChat) {
   const qc = useQueryClient()

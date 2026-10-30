@@ -75,7 +75,7 @@ export function Composer({
   historyKey?: string
   /** false: text only (a side thread): no attach button, and pasted or dropped files are left alone. */
   files?: boolean
-  /** More controls in the button row, after the mic: where a card's message goes (CardComposer). */
+  /** More controls in the button row, after the mic: who the message goes to (CardComposer, ChatPanel). */
   tools?: ReactNode
 }) {
   const [value, setValue] = useState("")

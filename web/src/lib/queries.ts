@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
-import { api, clientId } from "./api"
+import { ApiError, api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
 import { withCleanup } from "./diskCleanup"
@@ -906,7 +906,11 @@ export function useCreateTask() {
   })
 }
 
-export function useSendTaskMessage(taskId: string) {
+/** The server refused it (not "can't reach the server"): a card's reply then goes to the Coordinator (CardComposer). */
+export const refused = (err: unknown) => err instanceof ApiError && err.status >= 400
+
+/** `quiet`: errors it says nothing about, because the caller handles them (a card's reroute). */
+export function useSendTaskMessage(taskId: string, { quiet }: { quiet?: (err: Error) => boolean } = {}) {
   const qc = useQueryClient()
   return useMutation({
     /** `inChat`: sent from the task's card in the Coordinator chat, which then shows it (TaskManager.sentFromChat). */
@@ -928,6 +932,7 @@ export function useSendTaskMessage(taskId: string) {
     },
     onError: (err, _v, ctx) => {
       ctx?.undo()
+      if (quiet?.(err)) return
       playSendSound("failed")
       fail("Couldn't send the message")(err)
     },

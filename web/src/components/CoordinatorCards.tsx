@@ -1,9 +1,10 @@
 // The Coordinator chat as cards: one per task, in the order the chat first named them, so new activity never moves
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
 // its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
-// latest line. Open, it shows where it came from, its newest entries with its side thread's questions and answers among
-// them (CardThread.tsx), a box to reply in (CardComposer.tsx), and the way to its timeline and its task page. ⤢ opens
-// it in the side panel reply threads use (SideThread.tsx) instead, with its whole history.
+// latest line. Open, it shows where it came from, its newest entries, a box that replies to its task (CardComposer.tsx),
+// and the way to its timeline and its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
+// instead, with its whole history. With a project picked in the bar, that project's Captain card (BottomCard.tsx)
+// takes the Coordinator card's place.
 // A create_tasks batch is one card whose tasks open in place. Finished cards fold into "N done today" at the top,
 // and a card with news says "N new" until opened; the ↓ pill steps through them. What goes in which card is
 // lib/chatCards.ts; Cards ⇄ Timeline is the chat header's ViewToggle (lib/coordinatorView.ts).
@@ -45,12 +46,12 @@ import { clearFocusCard, revealInTimeline, setCoordinatorView, showCard, showInT
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
-import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown, useCardThread, useCardThreadLog, useThreadControl, useThreadMessages } from "../lib/threads"
+import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
 import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
-import { BatchComposer, CardComposer, WorkingLine } from "./CardComposer"
-import { CardThreadLine, CardThreadLive } from "./CardThread"
+import { CardComposer, WorkingLine } from "./CardComposer"
+import { BottomCardHead, bottomCardFolded } from "./BottomCard"
 import { MESSAGE_BLOCK, MessageActions, MessageMenu, type MenuItem } from "./MessageActions"
 import { COMPOSER_FOOTER } from "./Composer"
 import { PANEL_ICON, PANEL_WIDE, PanelHeader, type CardPanelProps } from "./SideThread"
@@ -59,7 +60,7 @@ import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
 import { AppLink, Elapsed, InRepo, LineIcon, MERGED_BADGE, Markdown, PrChip, PriorityPill, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
-import type { ChatMessage, SideThread, SideThreadMessage, Task } from "../../../shared/types"
+import type { ChatMessage, Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
 const CARD_SHOW = 4
@@ -153,8 +154,9 @@ function scrollToCard(key: string, open = true) {
 }
 
 /**
- * The cards, then the Coordinator card. `children` go at the end of the Coordinator card: the reply streaming in and
- * the messages queued behind it.
+ * The cards, then the Coordinator card, but only with "All" in the project bar: a project's Captain card takes its
+ * place (ChatPanel). `children` go at the end of the Coordinator card: the reply streaming in and the messages queued
+ * behind it.
  */
 export const CardsView = memo(function CardsView({
   layout,
@@ -206,9 +208,11 @@ export const CardsView = memo(function CardsView({
       {live.map((c) => (
         <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />
       ))}
-      <CoordinatorCard entries={coordinator} next={newest} onFollowUp={onFollowUp} active={active}>
-        {children}
-      </CoordinatorCard>
+      {!project && (
+        <CoordinatorCard entries={coordinator} next={newest} onFollowUp={onFollowUp} active={active}>
+          {children}
+        </CoordinatorCard>
+      )}
     </div>
   )
 })
@@ -312,10 +316,8 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const { first, tasks, batch, title, statuses } = head
   const asks = statuses.includes("needs_input")
   const finished = statuses.length > 0 && statuses.every((s) => FINISHED.has(s))
-  const thread = useCardThread(card.key)
-  // An answer in its side thread Cody hasn't seen is news too.
-  const unread = newSince(card.entries, useSeenAt(card.key)) + (thread?.unread ? 1 : 0)
-  // Open, its news is in front of Cody (the thread's answers are marked read by CardSession).
+  const unread = newSince(card.entries, useSeenAt(card.key))
+  // Open, its news is in front of Cody.
   useEffect(() => {
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
@@ -368,7 +370,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
           <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
         <CardMeta card={card} head={head} />
-        {!open && <LatestLine card={card} batch={batch} thread={thread} />}
+        {!open && <LatestLine card={card} batch={batch} />}
         {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
       </div>
       {open && <CardBody card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />}
@@ -377,7 +379,6 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
 })
 
 const NO_TASKS: Task[] = []
-const NO_THREAD: readonly SideThreadMessage[] = []
 
 /** Its agent is on a turn now (not just queued for one). */
 const isWorking = (t: Task) => t.status === "working" || t.status === "starting"
@@ -448,30 +449,11 @@ function entryLine(e: CardEntry): Line {
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
-/** A line of a card's side thread, as its latest line. */
-function threadLine(m: SideThreadMessage): Line {
-  if (m.role === "user") return { icon: Send, className: "text-yard-400", who: "You asked the Coordinator", text: m.content }
-  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: m.content }
-  return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, "")) }
-}
-
-/** The newest question, answer or error of a thread (not a lookup). */
-function lastSaid(messages: readonly SideThreadMessage[] | undefined): SideThreadMessage | null {
-  for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) if (messages![i]!.role !== "tool") return messages![i]!
-  return null
-}
-
-/**
- * A closed card's newest entry, two lines at most: its side thread's newest line when that came later. In a batch,
- * the task it's about leads.
- */
-function LatestLine({ card, batch, thread }: { card: ChatCard; batch: string | null; thread: SideThread | null }) {
+/** A closed card's newest entry, two lines at most. In a batch, the task it's about leads. */
+function LatestLine({ card, batch }: { card: ChatCard; batch: string | null }) {
   const e = card.entries[card.entries.length - 1]
-  const fromThread = thread !== null && thread.updatedAt > card.last
-  const said = lastSaid(useThreadMessages(thread?.id ?? "", fromThread).data)
-  const shown = fromThread ? said : null
-  const line = useMemo(() => (shown ? threadLine(shown) : e ? entryLine(e) : null), [shown, e])
-  const kid = !shown && card.batchId && e?.tasks.length === 1 ? e.tasks[0]! : null
+  const line = useMemo(() => (e ? entryLine(e) : null), [e])
+  const kid = card.batchId && e?.tasks.length === 1 ? e.tasks[0]! : null
   const kidTile = useTaskTile(kid)
   const who = line && kid && kidTile ? `${batchTaskName(kidTile.title, batch)}${line.who ? ` ${line.who.toLowerCase()}` : ""}` : line?.who
   return (
@@ -519,10 +501,8 @@ function CardSession({
 }) {
   // A batch's tasks keep their own entries under their rows; the card has what's about several, and replies.
   const own = useMemo(() => (card.batchId ? card.entries.filter((e) => e.type === "message" || e.tasks.length !== 1) : card.entries), [card])
-  const log = useCardThreadLog(card.key)
   const updates = own.filter((e) => e.type === "update").length
-  // Only its side thread so far: the divider has no count over it.
-  const label = own.length ? countLabel(updates, own.length - updates) : log.messages.length ? null : "No updates yet"
+  const label = own.length ? countLabel(updates, own.length - updates) : "No updates yet"
   return (
     <>
       {card.origin && (
@@ -546,20 +526,19 @@ function CardSession({
         </div>
       )}
       {/* A batch's history is under its rows: its own divider only when it has some of its own. */}
-      {inPanel && (own.length > 0 || log.messages.length > 0 || !card.batchId) && (
+      {inPanel && (own.length > 0 || !card.batchId) && (
         <div data-testid="card-panel-divider" className="flex items-center gap-2 pt-1 text-[11px] text-zinc-500">
-          {label && <span className="shrink-0">{label}</span>}
+          <span className="shrink-0">{label}</span>
           <span className="h-px flex-1 bg-zinc-800" />
         </div>
       )}
-      <CardEntries entries={own} thread={log.messages} show={inPanel ? PANEL_SHOW : CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
-      {log.thread && <CardThreadLive thread={log.thread} />}
+      <CardEntries entries={own} show={inPanel ? PANEL_SHOW : CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
       {!card.batchId && tasks[0] && isWorking(tasks[0]) && <WorkingLine who={tasks[0].title} />}
     </>
   )
 }
 
-/** An open card: its session, the box to reply in, and the way to its timeline, the side panel and its page. */
+/** An open card: its session, the box to reply in (a batch's are in its tasks' rows), and the way to its timeline, the side panel and its page. */
 function CardBody({
   card,
   batch,
@@ -579,7 +558,7 @@ function CardBody({
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
       <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />
-      {card.batchId ? <BatchComposer cardKey={card.key} title={title} /> : tasks[0] && <CardComposer task={tasks[0]} />}
+      {!card.batchId && tasks[0] && <CardComposer task={tasks[0]} />}
       <div className="flex flex-wrap items-center gap-1 pt-0.5">
         <button type="button" onClick={showInTimelineCard} className={FOOT} data-testid="chat-card-timeline">
           <List className="h-3 w-3" aria-hidden />
@@ -638,10 +617,6 @@ function CardPanelView({
   const [menu, setMenu] = useState(false)
   const markDone = useMarkDoneFromInbox()
   const stop = useStopTask()
-  const control = useThreadControl(COORDINATOR_CHAT)
-  // Its side thread (CardSession reads it and marks it seen): its lines and its working line scroll the panel too.
-  const thread = useCardThread(card.key)
-  const lines = useThreadMessages(thread?.id ?? "", Boolean(thread)).data?.length ?? 0
   const closing = usePendingCloses()
   const [, navigate] = useLocation()
   const unread = newSince(card.entries, useSeenAt(card.key))
@@ -668,19 +643,8 @@ function CardPanelView({
   const items: MenuItem[] = [
     { icon: List, label: "Show in timeline", run: () => showInTimeline({ key: card.key, taskIds: card.taskIds }) },
     ...(page ? [{ icon: Link2, label: "Open the task page", run: () => void (openInZenPanel(page) || navigate(page)) }] : []),
-    // Its agent's turn, or the Coordinator's answer in its side thread.
-    ...((task && isRunning(task)) || thread?.busy
-      ? [
-          {
-            icon: Square,
-            label: "Stop answering",
-            run: () => {
-              if (task && isRunning(task)) stop.mutate(task.id)
-              if (thread?.busy) control.stop(thread.id)
-            },
-          },
-        ]
-      : []),
+    // Its agent's turn.
+    ...(task && isRunning(task) ? [{ icon: Square, label: "Stop answering", run: () => stop.mutate(task.id) }] : []),
     { icon: LayoutGrid, label: "Show its card", run: showItsCard },
   ]
   // Over the whole chat, it reads in a column.
@@ -729,7 +693,7 @@ function CardPanelView({
           {open.expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
         </button>
       </PanelHeader>
-      <StickyScroll count={card.entries.length + lines + (thread?.busy ? 1 : 0)} resetKey={card.key} className={cx("px-3 py-3", wide)} contentClassName="space-y-2.5">
+      <StickyScroll count={card.entries.length} resetKey={card.key} className={cx("px-3 py-3", wide)} contentClassName="space-y-2.5">
         <div data-testid="card-panel-head" style={projectColorStyle(first?.color)} className="rounded-[10px] border border-l-[3px] border-zinc-800/80 border-l-(--pc) bg-zinc-900/40 py-2 pr-2.5 pl-3">
           <div className="flex items-start gap-2">
             <CardIcon card={card} size="lg" />
@@ -739,11 +703,7 @@ function CardPanelView({
         </div>
         <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} inPanel />
       </StickyScroll>
-      {card.batchId ? (
-        <BatchComposer cardKey={card.key} title={title} className={cx(PANEL_BOX, wide)} />
-      ) : (
-        task && <CardComposer task={task} className={cx(PANEL_BOX, wide)} />
-      )}
+      {task && <CardComposer task={task} className={cx(PANEL_BOX, wide)} />}
     </div>
   )
 }
@@ -793,7 +753,7 @@ const BatchTask = memo(function BatchTask({
   )
 })
 
-/** An open batch task: its entries and its side thread's lines, who's answering, and its box. */
+/** An open batch task: its entries, who's working, and its box. */
 function BatchTaskBody({
   id,
   task,
@@ -809,15 +769,9 @@ function BatchTaskBody({
   next: string | null
   onFollowUp: (text: string) => void
 }) {
-  const log = useCardThreadLog(id)
   return (
     <div className="space-y-1.5 px-2 pt-1 pb-2">
-      {entries.length || log.messages.length ? (
-        <CardEntries entries={entries} thread={log.messages} show={CARD_SHOW} own next={next} onFollowUp={onFollowUp} />
-      ) : (
-        <div className="text-xs text-zinc-500">No updates yet.</div>
-      )}
-      {log.thread && <CardThreadLive thread={log.thread} />}
+      {entries.length ? <CardEntries entries={entries} show={CARD_SHOW} own next={next} onFollowUp={onFollowUp} /> : <div className="text-xs text-zinc-500">No updates yet.</div>}
       {task && isWorking(task) && <WorkingLine who={name} />}
       {task && <CardComposer task={task} />}
       <AppLink href={`/tasks/${id}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
@@ -827,40 +781,27 @@ function BatchTaskBody({
   )
 }
 
-/** A card's entries and its side thread's lines, in the order they came. */
-type Row = { at: number; entry: CardEntry; line?: undefined } | { at: number; line: SideThreadMessage; entry?: undefined }
-
-function rowsOf(entries: readonly CardEntry[], thread: readonly SideThreadMessage[]): Row[] {
-  const rows: Row[] = entries.map((entry) => ({ at: entry.at, entry }))
-  if (!thread.length) return rows
-  // Stable: an entry and a line at the same time keep entries first.
-  return [...rows, ...thread.map((line) => ({ at: line.createdAt, line }))].sort((a, b) => a.at - b.at)
-}
-
 /**
- * The newest `show` entries, with "N earlier" for more, and the card's side thread's lines among them. `own`: a task's
+ * The newest `show` entries, with "N earlier" for more. `own`: a task's
  * card, whose chips needn't name it. The update that ends the turn Cody's message started shows as the agent's reply,
  * not a chip: it answers Cody.
  */
 function CardEntries({
   entries,
-  thread = NO_THREAD,
   show,
   own,
   next,
   onFollowUp,
 }: {
   entries: readonly CardEntry[]
-  thread?: readonly SideThreadMessage[]
   show: number
   own: boolean
   next: string | null
   onFollowUp: (text: string) => void
 }) {
   const [limit, setLimit] = useState(show)
-  const rows = useMemo(() => rowsOf(entries, thread), [entries, thread])
-  const shown = rows.length > limit ? rows.slice(-limit) : rows
-  const hidden = rows.length - shown.length
+  const shown = entries.length > limit ? entries.slice(-limit) : entries
+  const hidden = entries.length - shown.length
   const answers = useMemo(() => answersOf(entries), [entries])
   return (
     <>
@@ -870,10 +811,8 @@ function CardEntries({
           {hidden} earlier
         </button>
       )}
-      {shown.map(({ entry: e, line }) =>
-        line ? (
-          <CardThreadLine key={line.id} m={line} />
-        ) : e.type === "message" ? (
+      {shown.map((e) =>
+        e.type === "message" ? (
           <ChatLine key={e.id} m={e.message} sources={e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
         ) : answers.has(e.id) && e.item.type === "notice" ? (
           <AgentReply key={e.id} m={e.item.message} />
@@ -934,22 +873,30 @@ const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
   )
 })
 
-/** Cody's own thread, pinned under the cards: Cody's messages and the answers that aren't about one task. */
+/** Cody's own thread, pinned under the cards: Cody's messages and the answers that aren't about one task. Folds to its header (BottomCard.tsx). */
 function CoordinatorCard({ entries, next, onFollowUp, active, children }: { entries: readonly CardEntry[]; next: string | null; onFollowUp: (text: string) => void; active: boolean; children?: ReactNode }) {
+  const folded = bottomCardFolded.use()
+  const last = entries[entries.length - 1]
+  const latest = useMemo(() => {
+    if (!last) return null
+    const line = entryLine(last)
+    return `${line.who}: ${line.text}`
+  }, [last])
   return (
     <section id="card-coordinator" data-testid="coordinator-card" aria-label="Coordinator" className={cx(CARD, "border-l-yard-500 bg-zinc-900/25")}>
-      <div className="flex items-start gap-2 py-2 pr-2 pl-3">
-        <span aria-hidden className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-md bg-yard-400/15 text-yard-400">
-          <Bot className="h-[13px] w-[13px]" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-[13.5px] leading-[22px] font-semibold text-zinc-100">
-            Coordinator <span className="text-xs font-normal text-zinc-500">· your main chat</span>
-          </div>
-          <div className="text-[11.5px] text-zinc-500">What you type below lands here. Each task it starts gets a card above.</div>
-        </div>
-      </div>
-      {(entries.length > 0 || active) && (
+      <BottomCardHead
+        icon={
+          <span aria-hidden className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-md bg-yard-400/15 text-yard-400">
+            <Bot className="h-[13px] w-[13px]" />
+          </span>
+        }
+        title="Coordinator"
+        tag="your main chat"
+        hint="What you type below lands here. Each task it starts gets a card above."
+        latest={latest}
+        working={active}
+      />
+      {!folded && (entries.length > 0 || active) && (
         <div className="space-y-3 border-t border-zinc-800/70 px-3 py-2.5">
           <CardEntries entries={entries} show={COORDINATOR_SHOW} own={false} next={next} onFollowUp={onFollowUp} />
           {children}

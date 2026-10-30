@@ -4,8 +4,8 @@
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
 // - A reply the Coordinator wrote on its own after reading updates (the "from:" line, lib/chatUpdates.ts) goes to the
 //   cards of the tasks those updates are about. A reply to Cody stays with his message, in the Coordinator card.
-// - What Cody sends to a task from its card stays in it (a sent notice). Cody's questions to the Coordinator from a card
-//   aren't in the chat at all: they're the card's side thread (CardThread.tsx).
+// - What Cody sends to a task from its card stays in it (a sent notice). One its task refused goes to the Coordinator
+//   as Cody's message (lib/reroute.ts), so it's in the Coordinator card.
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
 //   Tool calls show only in the timeline.
 // - A card's place is where the chat first named its task, so new activity never moves it.
