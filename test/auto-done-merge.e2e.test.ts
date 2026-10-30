@@ -118,7 +118,7 @@ describe("Done when its PR merges", () => {
     const before = r.yard.store.getTask(idle.id)!.updatedAt
     await call(r, "PUT", "/api/agent-settings", { autoDoneOnMerge: true })
     expect([ready, idle, asking, failed].map(status)).toEqual(["done", "done", "needs_input", "failed"])
-    expect(events(r, idle.id).at(-1)).toMatch(/^Moved to done: its pull request #\d+ is merged \(Settings › Done when its PR merges\)\.$/)
+    expect(events(r, idle.id).at(-1)).toMatch(/^Moved to done: its pull request #\d+ is merged \(Settings › Done when its PR merges\)\.( Its workspace is archived and its box slot freed\.)?$/)
     // Not new activity: it keeps its place in "recent" lists.
     expect(r.yard.store.getTask(idle.id)!.updatedAt).toBe(before)
   }, 90_000)
