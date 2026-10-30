@@ -854,11 +854,19 @@ export class TaskManager {
    * sign-in, or there are no Upstash boxes. Nothing falls back to the other runner. No runner asked for: no check.
    * With the task's project (and its own env), a Claude key its turns would get counts (a Docker container needs one).
    */
-  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}): Promise<void> {
+  async requireRunner(runner: Runner | null | undefined, projectId?: string, taskEnv: Record<string, string> = {}, machineLabel: string | null = null): Promise<void> {
     if (!runner || !this.runnerProblem) return
     const claudeKey = projectId && this.store.getProject(projectId) ? this.turnCredentials(projectId, taskEnv).claudeFrom !== null : undefined
     const problem = await this.runnerProblem(runner, claudeKey)
     if (problem) throw new BadRequestError(`Can't run it on ${RUNNER_PHRASE[runner]}: ${problem}.`)
+    // A label no machine has is a typo, not a wait: busy, offline or switched-off machines with it are waited for.
+    const machines = this.machines?.list() ?? []
+    if (runner === "ssh" && machineLabel && this.machines && !machines.some((m) => machineMatches(m, machineLabel))) {
+      const labels = [...new Set(machines.flatMap((m) => m.labels))].sort()
+      throw new BadRequestError(
+        `Can't run it on ${labelPhrase(normalizeLabel(machineLabel))}: no SSH machine has that label or name (${labels.length ? `labels: ${labels.join(", ")}` : "none has a label yet"}). Label one in Settings › Machines, or with update_machine.`,
+      )
+    }
   }
 
   /** Throws a clear 400 when the project's identity doesn't allow `runner` (Identity.runners). */

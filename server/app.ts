@@ -60,7 +60,8 @@ import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
 import { DockerService } from "./docker/service.js"
 import { MachineService, type MachineServiceDeps } from "./machines/service.js"
-import { isMachineBox, machineOfBox } from "../shared/machines.js"
+import { MachineActions } from "./machines/actions.js"
+import { isMachineBox, MACHINE_LIMITS, machineOfBox, normalizeLabel, type MachineKeyRef } from "../shared/machines.js"
 import { ClaudeModels } from "./claudeModels.js"
 import { serverClaudeEnv } from "./turnCredentials.js"
 import { projectDockerPatch } from "./docker/settings.js"
@@ -106,7 +107,30 @@ const hookFilters = z.object({
   includeAgentWakes: z.boolean().optional(),
 })
 
+/** An SSH machine label (shared/machines.ts normalizeLabel); empty is none, left out leaves it as it is. */
+const machineLabelSchema = z
+  .string()
+  .max(80)
+  .nullish()
+  .transform((v) => (v === undefined ? undefined : normalizeLabel(v)))
+
+/** Settings › Machines › Add (and Edit, where every field is optional). */
+const machineFields = {
+  name: z.string().trim().min(1).max(40),
+  host: z.string().trim().min(1).max(253),
+  user: z.string().trim().min(1).max(32),
+  port: z.number().int().min(MACHINE_LIMITS.port.min).max(MACHINE_LIMITS.port.max).optional(),
+  keyRef: z.string().trim().min(1).max(600),
+  maxTasks: z.number().int().min(MACHINE_LIMITS.maxTasks.min).max(MACHINE_LIMITS.maxTasks.max).optional(),
+  labels: z.array(z.string().max(80)).max(MACHINE_LIMITS.labels).optional(),
+  dir: z.string().trim().max(300).optional(),
+  enabled: z.boolean().optional(),
+}
+
 const schemas = {
+  machine: z.object({ ...machineFields, test: z.boolean().optional() }).strict(),
+  machinePatch: z.object(machineFields).partial().strict(),
+  machineSettings: z.object({ localLabel: z.string().max(80).nullable() }).strict(),
   tts: z
     .object({
       text: z.string().max(MAX_TTS_CHARS * 2),
@@ -132,6 +156,8 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
+    /** Runs on: SSH machine: the machines' label or name (null: any machine). Ignored on another runner. */
+    machineLabel: machineLabelSchema,
     identityId: z.string().min(1).max(64).optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
@@ -151,6 +177,8 @@ const schemas = {
     pushAtTurnEnd: z.boolean().nullable().optional(),
     depCache: z.boolean().nullable().optional(),
     runner: z.enum(RUNNERS).optional(),
+    /** Runs on: SSH machine: the machines' label or name (null: any machine). Ignored on another runner. */
+    machineLabel: machineLabelSchema,
     identityId: z.string().min(1).max(64).optional(),
     /** Its colour (shared/projectColors.ts); null goes back to the one from its name. */
     color: z.enum(PROJECT_COLORS).nullable().optional(),
@@ -169,11 +197,14 @@ const schemas = {
     attachments: attachmentIds,
     /** Run on this computer ("local") or a box over the project's "Runs on", for every turn (Task.runsOn). */
     runsOn: z.enum(RUNNERS).nullish(),
+    /** With runsOn "ssh": the machines' label or name (Task.machineLabel). */
+    machineLabel: machineLabelSchema,
   }),
   message: z.object({
     content: z.string().trim().max(50_000),
     attachments: attachmentIds,
     runsOn: z.enum(RUNNERS).optional(),
+    machineLabel: machineLabelSchema,
     /** Sent from the task's card in the Coordinator chat: the chat gets a line saying so (TaskManager.sentFromChat). */
     inChat: z.boolean().optional(),
   }),
@@ -295,6 +326,8 @@ export interface BoxYard {
   docker: DockerService
   /** Settings › Machines: Cody's SSH machines behind "Runs on: SSH machine" (docs/machines.md). */
   machines: MachineService
+  /** What the machine routes and MCP tools do (add, change, test, remove with the tasks on it). */
+  machineActions: MachineActions
   /** Settings › Identities: the GitHub account, author and Claude login each project's agents use (docs/identities.md). */
   identities: Identities
   /** Settings › Connectors: external MCP servers some sessions get (docs/connectors.md). */
@@ -453,15 +486,18 @@ export function createBoxYard(
   dockerService.onEvent = (e) => tasks.dockerEvent(e)
   dockerService.onProgress = (boxId, message) => tasks.startProgress(boxId, message)
   dockerService.images.onChange(() => hub.broadcast({ type: "docker.build", build: dockerService.images.status() }))
-  /** Settings › Machines and the Boxes page: every machine with its state and the tasks on it. */
-  const machinesStatus = () =>
-    machines.status((boxId) => {
+  // Settings › Machines, the Boxes page and the machine MCP tools: every machine with its state and the tasks on it.
+  const machineActions = new MachineActions({
+    service: machines,
+    tasks,
+    usage: (boxId) => {
       const rows = store.listTaskRows({ boxId })
       return { running: rows.filter((r) => r.current_turn_id).length, tasks: rows.length }
-    })
+    },
+  })
   // A machine added, changed, tested or removed: the pages hear it, and waiting tasks look again.
   machines.onChange(() => {
-    hub.broadcast({ type: "machines", status: machinesStatus() })
+    hub.broadcast({ type: "machines", status: machineActions.status() })
     tasks.schedule()
   })
   // Waiting tasks look again: a new token, Claude login or runner list can change where (and whether) they run.
@@ -742,7 +778,7 @@ export function createBoxYard(
     // A smaller notes budget for this project can put it over: its Captain hears about it.
     notes.checkBudget(project.id)
     // Its waiting tasks look for a slot where it runs now (Local agents, or the box pool), or under its new box limits.
-    if (body.runner || [body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
+    if (body.runner || [body.machineLabel, body.boxSize, body.agentsPerBox, body.wholeMachine, body.tasksPerBox, body.maxBoxes, body.gpuMaxHourlyUsd, body.gpuMachine, body.docker, body.identityId].some((v) => v !== undefined)) tasks.schedule()
     if (body.identityId !== undefined && body.identityId !== before?.identityId) hub.broadcast({ type: "identities", identities: identities.list() })
     res.json(project)
   })
@@ -992,7 +1028,7 @@ export function createBoxYard(
   api.post("/tasks", async (req, res) => {
     const { attachments, model, ...body } = parse(schemas.task, req.body)
     // A runner that can't run fails here with the reason; it never falls back to the other one.
-    await tasks.requireRunner(body.runsOn, body.projectId, body.env)
+    await tasks.requireRunner(body.runsOn, body.projectId, body.env, body.machineLabel)
     res.status(201).json(tasks.createTask({ ...body, model: model || null, attachments: uploads.resolveAll(attachments) }))
   })
   api.get("/tasks/:id", (req, res) => {
@@ -1006,9 +1042,9 @@ export function createBoxYard(
   api.post("/tasks/:id/messages", async (req, res) => {
     const body = parse(schemas.message, req.body)
     const row = store.getTaskRow(req.params.id!)
-    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {})
+    await tasks.requireRunner(body.runsOn, row?.project_id, row ? store.taskEnv(row.id) : {}, body.machineLabel)
     const files = withAttachments(body.content, body.attachments)
-    if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn)
+    if (body.runsOn) tasks.setRunsOn(req.params.id!, body.runsOn, body.machineLabel)
     const task = tasks.sendInput(req.params.id!, body.content, "cody", files)
     if (body.inChat) tasks.sentFromChat(task.id, body.content, files)
     res.json(task)
@@ -1197,6 +1233,41 @@ export function createBoxYard(
   api.post("/docker/containers/:boxId/stop", async (req, res) => {
     await tasks.stopDockerContainer(String(req.params.boxId), { actor: { kind: "owner" }, reason: "Stopped from Settings › Docker." })
     res.json(await dockerStatus())
+  })
+
+  // ---- Cody's SSH machines (Settings › Machines, the Boxes page; docs/machines.md). Keys are references only.
+  api.get("/machines", (_req, res) => {
+    res.json(machineActions.status())
+  })
+  /** Add a machine and test it (test: false skips the test). */
+  api.post("/machines", async (req, res) => {
+    const { test, keyRef, ...body } = parse(schemas.machine, req.body)
+    const machine = await machineActions.add({ ...body, keyRef: keyRef as MachineKeyRef }, { kind: "owner" }, { test })
+    res.status(201).json({ machine, status: machineActions.status() })
+  })
+  api.put("/machines/settings", (req, res) => {
+    machineActions.saveSettings(parse(schemas.machineSettings, req.body))
+    res.json(machineActions.status())
+  })
+  /** Change a machine; a new address, key or work folder tests it again. */
+  api.patch("/machines/:id", async (req, res) => {
+    const { keyRef, ...body } = parse(schemas.machinePatch, req.body)
+    const machine = await machineActions.update(String(req.params.id), { ...body, ...(keyRef !== undefined ? { keyRef: keyRef as MachineKeyRef } : {}) })
+    res.json({ machine, status: machineActions.status() })
+  })
+  /** ?force=1 removes it even when an offline machine's task folders can't be archived first; 409 without it. */
+  api.delete("/machines/:id", async (req, res) => {
+    const released = await machineActions.remove(String(req.params.id), { kind: "owner" }, { force: req.query.force === "1" })
+    res.json({ ...released, status: machineActions.status() })
+  })
+  api.post("/machines/:id/test", async (req, res) => {
+    const machine = await machineActions.test(String(req.params.id))
+    res.json({ machine, status: machineActions.status() })
+  })
+  /** The machine was reinstalled (new host key): forget the old one and test it again. */
+  api.post("/machines/:id/forget-host-key", async (req, res) => {
+    const machine = await machineActions.forgetHostKey(String(req.params.id))
+    res.json({ machine, status: machineActions.status() })
   })
 
   // ---- text-to-speech (Settings › Voice): settings, the provider proxy and voice lists
@@ -1608,6 +1679,7 @@ export function createBoxYard(
     retro,
     docker: dockerService,
     machines,
+    machineActions,
     identities,
     connectors,
     async start() {

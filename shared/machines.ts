@@ -3,6 +3,8 @@
 // Each machine has labels ("laptops", "gpu"); a task or project picks machines by label, and the scheduler takes a
 // free one of those (docs/machines.md).
 
+import { parseRunsOn, RUNNERS, type Runner } from "./runner.js"
+
 /**
  * A machine's virtual box: `ssh-<machineId>`. Like this computer it's shared by every project that runs there, and
  * like the GPU pods and Docker containers it's never a `boxes` row, so the pool (Max boxes, Max tasks running at
@@ -142,6 +144,38 @@ export function labelFromRunsOn(v: unknown): string | null {
   if (typeof v !== "string") return null
   const m = /^(?:label|ssh):(.+)$/i.exec(v.trim())
   return m ? normalizeLabel(m[1]) : null
+}
+
+/** runs_on's alias for this computer that Settings › Machines › "Local means" never changes. */
+export const THIS_COMPUTER = "this_computer"
+
+/**
+ * Where the MCP tools' runs_on and machine_label send a task (docs/machines.md › Labels):
+ * - "label:gpu" (or "ssh:gpu"), or "ssh" with machine_label "gpu", or machine_label alone: SSH machines labelled gpu;
+ * - "ssh" alone: any of Cody's SSH machines;
+ * - "local": this computer, unless Settings › Machines › "Local means" names a label (`localLabel`), and then the
+ *   SSH machines with that label;
+ * - "this_computer": always this computer.
+ * `runner` null: follow the project. Throws on a combination that makes no sense.
+ */
+export function resolveRunsOn(runsOn: string | null | undefined, machineLabel: string | null | undefined, localLabel: string | null): { runner: Runner | null; machineLabel: string | null; viaLocal: boolean } {
+  const wanted = machineLabel == null ? null : normalizeLabel(machineLabel)
+  if (machineLabel != null && machineLabel.trim() && !wanted) throw new Error(`machine_label "${machineLabel}" has no letters or digits.`)
+  const v = runsOn?.trim()
+  if (!v) return { runner: wanted ? "ssh" : null, machineLabel: wanted, viaLocal: false }
+  const short = /^(?:label|ssh):/i.test(v)
+  if (short) {
+    const label = labelFromRunsOn(v)
+    if (!label) throw new Error(`runs_on "${v}" names no label: use "label:<label>", like "label:gpu".`)
+    if (wanted && wanted !== label) throw new Error(`runs_on "${v}" and machine_label "${wanted}" name different labels: pass one.`)
+    return { runner: "ssh", machineLabel: label, viaLocal: false }
+  }
+  if (v === "ssh") return { runner: "ssh", machineLabel: wanted, viaLocal: false }
+  if (v === "local" && localLabel && !wanted) return { runner: "ssh", machineLabel: localLabel, viaLocal: true }
+  const runner = v === THIS_COMPUTER ? "local" : parseRunsOn(v)
+  if (!runner) throw new Error(`runs_on "${v}" isn't a runner: ${[...RUNNERS, THIS_COMPUTER].join(", ")} or "label:<label>".`)
+  if (wanted) throw new Error(`machine_label goes with SSH machines (runs_on "ssh", or leave runs_on out), not with runs_on "${v}".`)
+  return { runner, machineLabel: null, viaLocal: false }
 }
 
 /** "laptops", or "any SSH machine" when there's no label: for wait reasons and placement lines. */
