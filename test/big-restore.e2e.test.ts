@@ -255,7 +255,7 @@ describe("restores never send one file over the box's upload limit", () => {
     expect(events(r, t.id)).toContain(
       `Couldn't restore the workspace archive on box ${back.boxId} (${reason}), so the task restarts from a recap on a fresh checkout of branch ${t.branch}, with the uncommitted work its last turn pushed. The archive is kept on the server as ${kept} (removed after 7 days).`,
     )
-    expect(events(r, t.id)).toContain(`Resumed from a recap: its workspace archive couldn't be restored, so a new Claude session started on a fresh checkout of branch ${t.branch} with the task's summary, PR and recent messages.`)
+    expect(events(r, t.id)).toContain(`Resumed from a recap: its workspace archive couldn't be restored, so a new Claude Code session started on a fresh checkout of branch ${t.branch} with the task's summary, PR and recent messages.`)
     const notice = r.yard.store.listChat().find((m) => m.role === "notice" && m.content.includes("restarts from a recap"))
     expect(notice?.content).toMatch(new RegExp(`^⚠️ \\*\\*wipe lobby items\\*\\* restarts from a recap: its workspace archive couldn't be restored on box ${back.boxId} \\(${escape(reason)}\\)`))
   })
