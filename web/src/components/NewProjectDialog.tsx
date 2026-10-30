@@ -19,7 +19,8 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [picked, setPicked] = useState<Runner | null>(null)
   const runner = picked ?? setup.data?.runner.default ?? null
   const noUpstash = setup.data?.upstash.available === false
-  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset"
+  // A GPU project runs on RunPod or Vast.ai: either key lets it be picked (Project › Settings › Boxes picks the cloud).
+  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset" && setup.data?.credentials.vastApiKey?.state !== "set"
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -75,7 +76,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
               {RUNNERS.map((r) => (
                 <option key={r} value={r} disabled={(r === "box" && noUpstash) || (r === "gpu" && noRunPod)}>
                   {RUNNER_LABEL[r]}
-                  {r === "local" ? " (not sandboxed)" : r === "gpu" ? (noRunPod ? " (add a RunPod key in Settings first)" : "") : r === "docker" ? " (isolated, on this computer)" : noUpstash ? " (add an Upstash key in Settings first)" : ""}
+                  {r === "local" ? " (not sandboxed)" : r === "gpu" ? (noRunPod ? " (add a RunPod or Vast.ai key in Settings first)" : "") : r === "docker" ? " (isolated, on this computer)" : noUpstash ? " (add an Upstash key in Settings first)" : ""}
                 </option>
               ))}
             </Select>

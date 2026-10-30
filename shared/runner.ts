@@ -11,10 +11,10 @@ export const normalizeRunner = (v: unknown): Runner => (v === "local" || v === "
 /** A task's own runner (Task.runsOn), which wins over its project's in both directions; null follows the project. */
 export const parseRunsOn = (v: unknown): Runner | null => (v === "local" || v === "box" || v === "gpu" || v === "docker" ? v : null)
 
-export const RUNNER_LABEL: Record<Runner, string> = { box: "Upstash box", local: "This computer", gpu: "RunPod GPU", docker: "Docker container" }
+export const RUNNER_LABEL: Record<Runner, string> = { box: "Upstash box", local: "This computer", gpu: "GPU (RunPod or Vast.ai)", docker: "Docker container" }
 
-/** "an Upstash box", "this computer", "a RunPod GPU pod", "a Docker container": for sentences. */
-export const RUNNER_PHRASE: Record<Runner, string> = { box: "an Upstash box", local: "this computer", gpu: "a RunPod GPU pod", docker: "a Docker container on this computer" }
+/** "an Upstash box", "this computer", "a GPU pod", "a Docker container": for sentences. */
+export const RUNNER_PHRASE: Record<Runner, string> = { box: "an Upstash box", local: "this computer", gpu: "a GPU pod (RunPod or Vast.ai)", docker: "a Docker container on this computer" }
 
 /** The runners the onboarding choice (the default for new projects) offers. RunPod GPU is picked per project. */
 export const SETUP_RUNNERS = ["box", "local", "docker"] as const

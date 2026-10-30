@@ -31,6 +31,7 @@ import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextPct } from "./Co
 import type { Artifact, PreviewLink, Project, Schedule, Task } from "../../../shared/types"
 import { RUNNER_LABEL, isLocalRunnerBox } from "../../../shared/runner"
 import { gpuBoxIndex, isGpuBox } from "../../../shared/runpod"
+import { GPU_PROVIDER_LABEL, gpuBoxProvider } from "../../../shared/gpu"
 import { isDockerBox } from "../../../shared/docker"
 import { confirmDialog } from "../lib/confirm"
 import { copyIdOnClick, lastProjectTab, projectCrumbHref } from "../lib/breadcrumb"
@@ -340,7 +341,7 @@ function TaskMenu({
                 {isLocalRunnerBox(task.boxId) ? (
                   <span className="min-w-0 truncate text-amber-200">This computer (unsandboxed)</span>
                 ) : isGpuBox(task.boxId) ? (
-                  <span className="min-w-0 truncate text-zinc-300">Its project's RunPod GPU pod #{gpuBoxIndex(task.boxId)}</span>
+                  <span className="min-w-0 truncate text-zinc-300">Its project's {GPU_PROVIDER_LABEL[gpuBoxProvider(task.boxId) ?? "runpod"]} GPU pod #{gpuBoxIndex(task.boxId)}</span>
                 ) : isDockerBox(task.boxId) ? (
                   <span className="min-w-0 truncate text-zinc-300">Its project's Docker container</span>
                 ) : task.boxId ? (

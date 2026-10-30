@@ -12,6 +12,7 @@ import {
   useProjectAutoSize,
   useProjects,
   useRunPod,
+  useVast,
   useRunningTask,
   useSchedules,
   useSettings,
@@ -46,6 +47,8 @@ import { BOX_SIZE_SPECS, sizeSpecLine } from "../../../shared/boxSizes"
 import { AUTO_SIZE_MIN_RUNS } from "../../../shared/autoSize"
 import { RUNPOD_CLOUDS, RUNPOD_MACHINE_LIMITS, shortGpu, type ProjectGpuMachine, type RunPodCloud } from "../../../shared/runpod"
 import { GpuTypePicker } from "./GpuTypePicker"
+import { VastGpuPicker } from "./VastSettings"
+import { GPU_PROVIDERS, GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, type GpuProvider } from "../../../shared/gpu"
 import { CLOUD_HELP, CLOUD_OPTION } from "./RunPodSettings"
 import { DEFAULT_NOTE_BUDGET, NOTE_BUDGET_LIMITS } from "../../../shared/notes"
 import { LOCAL_UNSANDBOXED, RUNNERS, RUNNER_LABEL, RUNNER_PHRASE, type Runner } from "../../../shared/runner"
@@ -164,9 +167,15 @@ export function ProjectView({ id }: { id: string }) {
   )
 }
 
-/** A GPU project's own machine as the form edits it: "" for a field that uses Settings › RunPod GPU's. */
-type MachineDraft = { gpuTypes: string[] | null; cloud: RunPodCloud | ""; minRamGb: string; minVcpus: string }
-const machineDraft = (m: ProjectGpuMachine): MachineDraft => ({ gpuTypes: m.gpuTypes, cloud: m.cloud ?? "", minRamGb: m.minRamGb?.toString() ?? "", minVcpus: m.minVcpus?.toString() ?? "" })
+/** A GPU project's own cloud and machine as the form edits them: "" for a field that uses the global one. */
+type MachineDraft = { provider: GpuProvider | ""; gpuTypes: string[] | null; cloud: RunPodCloud | ""; minRamGb: string; minVcpus: string }
+const machineDraft = (m: ProjectGpuMachine, provider: GpuProvider | null): MachineDraft => ({
+  provider: provider ?? "",
+  gpuTypes: m.gpuTypes,
+  cloud: m.cloud ?? "",
+  minRamGb: m.minRamGb?.toString() ?? "",
+  minVcpus: m.minVcpus?.toString() ?? "",
+})
 
 /** A number field's value, or null when it's blank (use the default). */
 function optionalInt(text: string): number | null {
@@ -418,10 +427,17 @@ function ProjectBoxSettings(p: {
 }) {
   const openSettings = useOpenSettings()
   const runpod = useRunPod({ enabled: p.gpu })
-  const gpuCap = runpod.data ? `$${runpod.data.settings.maxHourlyUsd}/hr (Settings › RunPod GPU › Max per project)` : "Settings › RunPod GPU › Max per project"
-  const rp = runpod.data?.settings
+  const vast = useVast({ enabled: p.gpu })
   const m = p.machine
   const setM = (patch: Partial<MachineDraft>) => p.setMachine({ ...m, ...patch })
+  // The cloud its new pods come from: its own pick, else Settings › Vast.ai GPU › Use for GPU projects.
+  const vastDefault = Boolean(vast.data?.settings.defaultForGpu)
+  const provider = effectiveGpuProvider(m.provider || null, vastDefault)
+  const onVast = provider === "vast"
+  const where = GPU_SETTINGS_PATH[provider]
+  const rp = runpod.data?.settings
+  const g = onVast ? vast.data?.settings : rp
+  const gpuCap = g ? `$${g.maxHourlyUsd}/hr (${where} › Max per project)` : `${where} › Max per project`
   const cloud = m.cloud || rp?.cloud || "SECURE"
   const s = p.info?.settings
   const followsSize = (k: "slotsPerBox" | "maxResidentPerBox") => !p.info || p.info.sources[k] === "default"
@@ -451,7 +467,7 @@ function ProjectBoxSettings(p: {
         Leave one blank to use the global setting. Where projects share a box, the strictest Task folders kept per box wins.
         {p.local && " This project runs on this computer: Tasks running at once also limits its tasks here, within Settings › Tasks running at once on this computer, and the rest apply when it runs on boxes."}
         {p.gpu &&
-          " This project runs on RunPod GPU pods: Tasks running at once sets its tasks per pod (blank: Settings › RunPod GPU), Max boxes its most pods at once, and GPU cap what they may cost together. Task folders kept per box and Box size apply when it runs on boxes."}
+          ` This project runs on ${GPU_PROVIDER_LABEL[provider]} GPU ${onVast ? "instances" : "pods"}: Tasks running at once sets its tasks per ${onVast ? "instance" : "pod"} (blank: ${where}), Max boxes its most ${onVast ? "instances" : "pods"} at once, and GPU cap what they may cost together. Task folders kept per box and Box size apply when it runs on boxes.`}
         {p.docker &&
           " This project runs in a Docker container of its own: Tasks running at once sets its tasks in the container at once (blank: Settings › Docker › Tasks running at once per container), within the container's CPU and memory (Settings › Docker). Task folders kept per box and Box size apply when it runs on boxes."}
       </p>
@@ -517,12 +533,38 @@ function ProjectBoxSettings(p: {
       </label>
       {p.gpu && (
         <OverrideField
+          id="project-gpu-provider"
+          label="GPU cloud"
+          global={`${GPU_PROVIDER_LABEL[vastDefault ? "vast" : "runpod"]} (Settings › Vast.ai GPU › Use for GPU projects)`}
+          set={Boolean(m.provider)}
+          onClear={() => setM({ provider: "", gpuTypes: null })}
+          hint="Where its GPU pods come from. RunPod: pods with a network volume that keeps caches between runs. Vast.ai: a marketplace with more GPU types and stock, often cheaper, but no volume and hosts of varying reliability. Its tasks move once their workspace is archived."
+        >
+          <Select
+            id="project-gpu-provider"
+            className="w-full min-w-0 sm:w-80"
+            value={m.provider}
+            // Its own GPU types are one cloud's names: switching clouds goes back to the new cloud's list.
+            onChange={(e) => setM({ provider: e.target.value as GpuProvider | "", gpuTypes: null })}
+            data-testid="project-gpu-provider"
+          >
+            <option value="">Global: {GPU_PROVIDER_LABEL[vastDefault ? "vast" : "runpod"]}</option>
+            {GPU_PROVIDERS.map((c) => (
+              <option key={c} value={c}>
+                {GPU_PROVIDER_LABEL[c]}
+              </option>
+            ))}
+          </Select>
+        </OverrideField>
+      )}
+      {p.gpu && (
+        <OverrideField
           id="project-gpu-cap"
           label="GPU cap ($/hr)"
           global={gpuCap}
           set={p.gpuMaxHourlyUsd.trim() !== ""}
           onClear={() => p.setGpuMaxHourlyUsd("")}
-          hint="Most this project's RunPod pods may cost together. A task that needs another pod over it waits and says so. 0: no cap of its own; Settings › RunPod GPU › Max for all pods still applies."
+          hint={`Most this project's ${GPU_PROVIDER_LABEL[provider]} ${onVast ? "instances" : "pods"} may cost together. A task that needs another over it waits and says so. 0: no cap of its own; ${where} › Max for all ${onVast ? "instances" : "pods"} still applies.`}
         >
           <LimitInput
             id="project-gpu-cap"
@@ -530,7 +572,7 @@ function ProjectBoxSettings(p: {
             step={0.05}
             value={p.gpuMaxHourlyUsd}
             onChange={p.setGpuMaxHourlyUsd}
-            placeholder={runpod.data ? `Global: $${runpod.data.settings.maxHourlyUsd}` : "Global"}
+            placeholder={g ? `Global: $${g.maxHourlyUsd}` : "Global"}
           />
         </OverrideField>
       )}
@@ -539,20 +581,28 @@ function ProjectBoxSettings(p: {
           <OverrideField
             id="project-gpu-types"
             label="GPU types"
-            global={rp ? `${rp.gpuTypes.map(shortGpu).join(", ")} (Settings › RunPod GPU)` : "Settings › RunPod GPU › GPU types"}
+            global={g ? `${g.gpuTypes.map(shortGpu).join(", ")} (${where})` : `${where} › GPU types`}
             set={m.gpuTypes !== null}
             onClear={() => setM({ gpuTypes: null })}
-            hint="Its new pods try these in order; the first in stock within the caps wins. For browser and WebGL game testing an RTX A4000, RTX 4000 Ada or (Community) RTX 3070 is plenty."
+            hint={
+              onVast
+                ? "Its new instances rent the cheapest offer of the first of these that has one within the caps. For browser and WebGL game testing an RTX 3070 or A4000 is plenty."
+                : "Its new pods try these in order; the first in stock within the caps wins. For browser and WebGL game testing an RTX A4000, RTX 4000 Ada or (Community) RTX 3070 is plenty."
+            }
           >
             {m.gpuTypes ? (
-              <GpuTypePicker id="project-gpu-types" value={m.gpuTypes} onChange={(gpuTypes) => setM({ gpuTypes })} cloud={cloud} enabled={Boolean(runpod.data?.apiKey)} />
+              onVast ? (
+                <VastGpuPicker id="project-gpu-types" value={m.gpuTypes} onChange={(gpuTypes) => setM({ gpuTypes })} enabled={Boolean(vast.data?.apiKey)} />
+              ) : (
+                <GpuTypePicker id="project-gpu-types" value={m.gpuTypes} onChange={(gpuTypes) => setM({ gpuTypes })} cloud={cloud} enabled={Boolean(runpod.data?.apiKey)} />
+              )
             ) : (
-              <Button type="button" size="sm" variant="ghost" onClick={() => setM({ gpuTypes: [...(rp?.gpuTypes ?? [])] })} data-testid="project-gpu-types-own" disabled={!rp}>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setM({ gpuTypes: [...(g?.gpuTypes ?? [])] })} data-testid="project-gpu-types-own" disabled={!g}>
                 Pick this project's own
               </Button>
             )}
           </OverrideField>
-          <OverrideField id="project-gpu-cloud" label="Cloud" global={rp ? CLOUD_OPTION[rp.cloud].split(":")[0]! : "Settings › RunPod GPU › Cloud"} set={Boolean(m.cloud)} onClear={() => setM({ cloud: "" })} hint={CLOUD_HELP}>
+          {!onVast && <OverrideField id="project-gpu-cloud" label="Cloud" global={rp ? CLOUD_OPTION[rp.cloud].split(":")[0]! : "Settings › RunPod GPU › Cloud"} set={Boolean(m.cloud)} onClear={() => setM({ cloud: "" })} hint={CLOUD_HELP}>
             <Select id="project-gpu-cloud" className="w-full min-w-0 sm:w-80" value={m.cloud} onChange={(e) => setM({ cloud: e.target.value as RunPodCloud | "" })} data-testid="project-gpu-cloud">
               <option value="">Global: {rp ? CLOUD_OPTION[rp.cloud].split(":")[0] : "Settings › RunPod GPU"}</option>
               {RUNPOD_CLOUDS.map((c) => (
@@ -561,27 +611,27 @@ function ProjectBoxSettings(p: {
                 </option>
               ))}
             </Select>
-          </OverrideField>
+          </OverrideField>}
           <div className="grid gap-3 @4xl:grid-cols-2">
             <OverrideField
               id="project-gpu-min-ram"
               label="Min RAM (GB)"
-              global={rp ? `${rp.minRamGb} GB (Settings › RunPod GPU)` : "Settings › RunPod GPU › Min RAM"}
+              global={g ? `${g.minRamGb} GB (${where})` : `${where} › Min RAM`}
               set={m.minRamGb.trim() !== ""}
               onClear={() => setM({ minRamGb: "" })}
               hint="Its new pods only go to hosts with at least this much RAM. A game's browser needs about 12 GB; cheap Community hosts can have less."
             >
-              <LimitInput id="project-gpu-min-ram" range={RUNPOD_MACHINE_LIMITS.minRamGb} value={m.minRamGb} onChange={(minRamGb) => setM({ minRamGb })} placeholder={rp ? `Global: ${rp.minRamGb}` : "Global"} />
+              <LimitInput id="project-gpu-min-ram" range={RUNPOD_MACHINE_LIMITS.minRamGb} value={m.minRamGb} onChange={(minRamGb) => setM({ minRamGb })} placeholder={g ? `Global: ${g.minRamGb}` : "Global"} />
             </OverrideField>
             <OverrideField
               id="project-gpu-min-vcpus"
               label="Min vCPUs"
-              global={rp ? `${rp.minVcpus} (Settings › RunPod GPU)` : "Settings › RunPod GPU › Min vCPUs"}
+              global={g ? `${g.minVcpus} (${where})` : `${where} › Min vCPUs`}
               set={m.minVcpus.trim() !== ""}
               onClear={() => setM({ minVcpus: "" })}
               hint="…and at least this many vCPUs. Running pods keep what they have; these apply to new ones."
             >
-              <LimitInput id="project-gpu-min-vcpus" range={RUNPOD_MACHINE_LIMITS.minVcpus} value={m.minVcpus} onChange={(minVcpus) => setM({ minVcpus })} placeholder={rp ? `Global: ${rp.minVcpus}` : "Global"} />
+              <LimitInput id="project-gpu-min-vcpus" range={RUNPOD_MACHINE_LIMITS.minVcpus} value={m.minVcpus} onChange={(minVcpus) => setM({ minVcpus })} placeholder={g ? `Global: ${g.minVcpus}` : "Global"} />
             </OverrideField>
           </div>
         </div>
@@ -811,7 +861,7 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
   const [tasksPerBox, setTasksPerBox] = useState(project.tasksPerBox?.toString() ?? "")
   const [maxBoxes, setMaxBoxes] = useState(project.maxBoxes?.toString() ?? "")
   const [gpuMaxHourlyUsd, setGpuMaxHourlyUsd] = useState(project.gpuMaxHourlyUsd?.toString() ?? "")
-  const [machine, setMachine] = useState<MachineDraft>(() => machineDraft(project.gpuMachine))
+  const [machine, setMachine] = useState<MachineDraft>(() => machineDraft(project.gpuMachine, project.gpuProvider))
   const [docker, setDocker] = useState<DockerDraft>(() => dockerDraft(project.docker))
   const [notesMax, setNotesMax] = useState(project.notesMaxCount?.toString() ?? "")
   const [notesTokens, setNotesTokens] = useState(project.notesMaxTokens?.toString() ?? "")
@@ -875,7 +925,9 @@ function ProjectSettings({ project, onDone }: { project: Project; onDone: () => 
           tasksPerBox: optionalInt(tasksPerBox),
           maxBoxes: optionalInt(maxBoxes),
           ...(runner === "gpu" || project.gpuMaxHourlyUsd !== null ? { gpuMaxHourlyUsd: optionalNumber(gpuMaxHourlyUsd) } : {}),
-          ...(runner === "gpu" ? { gpuMachine: { gpuTypes: machine.gpuTypes, cloud: machine.cloud || null, minRamGb: optionalInt(machine.minRamGb), minVcpus: optionalInt(machine.minVcpus) } } : {}),
+          ...(runner === "gpu"
+            ? { gpuMachine: { gpuTypes: machine.gpuTypes, cloud: machine.cloud || null, minRamGb: optionalInt(machine.minRamGb), minVcpus: optionalInt(machine.minVcpus) }, gpuProvider: machine.provider || null }
+            : {}),
           ...(runner === "docker" ? { docker: dockerOf(docker) } : {}),
           notesMaxCount: optionalInt(notesMax),
           notesMaxTokens: optionalInt(notesTokens),
