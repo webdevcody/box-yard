@@ -87,7 +87,7 @@ body {
   @apply text-yard-400 underline decoration-yard-400/40 underline-offset-2 hover:decoration-yard-400;
 }
 /* A link to another site (NewTabLink sets data-external) is sky with a trailing ↗, like the app's other outside links,
-   so it never reads as one of the yellow in-app links. PR links wear their state's colors instead (PrTextLink). */
+   so it never reads as one of the yellow in-app links. PR links wear their state's colors instead (GithubTextLink in ui.tsx). */
 .prose-chat a[data-external] {
   @apply text-sky-400 decoration-sky-400/40 hover:decoration-sky-400;
 }

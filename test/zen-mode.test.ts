@@ -300,19 +300,23 @@ describe("Zen mode", () => {
     expect(inZen()).toBe(true)
   })
 
-  it("an in-app link in the transcript leaves Zen; a Cmd-click is left to the browser", () => {
+  it("a task link in the transcript opens the side panel and stays in Zen; a Cmd-click is left to the browser", () => {
     render(ZEN_PATH)
     const link = [...chat()!.querySelectorAll("a")].find((a) => a.getAttribute("href") === "/tasks/task_zen001")!
     expect(link).toBeTruthy()
     const cmd = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true })
     act(() => void link.dispatchEvent(cmd))
     expect(cmd.defaultPrevented).toBe(false)
+    // happy-dom follows the link itself; a new tab would leave this one on /zen.
+    history.replaceState(history.state, "", ZEN_PATH)
     expect(inZen()).toBe(true)
+    expect(document.querySelector("[data-testid=zen-panel]")).toBeNull()
     const plain = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })
     act(() => void link.dispatchEvent(plain))
     expect(plain.defaultPrevented).toBe(true)
-    expect(location.pathname).toBe("/tasks/task_zen001")
-    expect(inZen()).toBe(false)
+    expect(location.pathname).toBe(ZEN_PATH)
+    expect(inZen()).toBe(true)
+    expect(document.querySelector("[data-testid=zen-panel-title]")!.textContent).toBe("Write the zen docs")
   })
 
   it("shows only critical toasts, at the top, clear of the composer", () => {

@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
 import type { ProjectSnapshot, SnapshotJob } from "./snapshots.js"
 import type { Identity } from "./identities.js"
@@ -392,17 +393,27 @@ export interface SideThread {
   id: string
   /** null: the Coordinator chat; else that project's Captain chat. */
   projectId: string | null
-  /** The chat message the highlight is in. */
+  /** The chat message the highlight is in (an ask), or the message replied to (a reply thread). */
   anchorId: string
-  /** The highlighted text, as selected. */
+  /** "ask": a question about a highlighted passage. "reply": replies to the whole message, one thread per message, shown as "N replies" under it. */
+  kind: SideThreadKind
+  /** The highlighted text, as selected; for a reply thread, the whole message replied to. */
   quote: string
   /** How the thread got the chat's context: a fork of its session at the message, or (after a compaction) its summary. null until the first answer. */
   context: "fork" | "summary" | null
   /** A turn is running. */
   busy: boolean
+  /** Cody's messages and the answers (not tool lines or errors). */
+  replies: number
+  /** An answer (or error) came after Cody last had the thread open. */
+  unread: boolean
+  /** When Cody resolved it, or null. A new message reopens it. */
+  resolvedAt: number | null
   createdAt: number
   updatedAt: number
 }
+
+export type SideThreadKind = "ask" | "reply"
 
 export type SideThreadRole = "user" | "assistant" | "tool" | "error"
 
@@ -605,6 +616,8 @@ export type UiEvent =
   | { type: "docker.build"; build: DockerImageBuild }
   /** Settings › Identities changed: an identity, its secrets' fingerprints, or which projects use it. */
   | { type: "identities"; identities: Identity[] }
+  /** Settings › Connectors changed: a connector, its status, or its secrets' fingerprints (never a value). */
+  | { type: "connectors"; connectors: Connector[] }
   | { type: "artifact"; artifact: Artifact }
   | { type: "boxes"; boxes: BoxInfo[] }
   | { type: "box.cleanup"; cleanup: BoxCleanup }

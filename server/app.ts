@@ -21,6 +21,7 @@ import { TtsError, TtsService, type TtsOptions } from "./tts.js"
 import { mcpHandler } from "./mcp.js"
 import { McpHandshakes, timingReport } from "./turnTimings.js"
 import { TURN_ROLES, type TurnRole } from "../shared/turnTimings.js"
+import { MachineStats, type MachineReaders } from "./machineStats.js"
 import { ProjectNotes, MAX_NOTE_CHARS } from "./notes.js"
 import { NotesRetro, retroSuggestionIds } from "./retro.js"
 import { Auth } from "./auth.js"
@@ -50,6 +51,9 @@ import { Identities } from "./identity/identities.js"
 import { IdentityDetector, type DetectOptions } from "./identity/detect.js"
 import { assignChecked, detectFor, importDetected, importInput, runningTask, testRepos } from "./identity/setup.js"
 import { SecretBox } from "./identity/secretBox.js"
+import { ConnectorService } from "./connectors/service.js"
+import { ConnectorSignIns } from "./connectors/oauth.js"
+import { OAUTH_CALLBACK_PATH } from "../shared/connectors.js"
 import { isGpuBox, shortGpu } from "../shared/runpod.js"
 import { isDockerBox } from "../shared/docker.js"
 import { gpuMachinePatch } from "./runpod/settings.js"
@@ -166,11 +170,14 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    quote: z.string().trim().min(1).max(MAX_QUOTE_CHARS),
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. */
+    kind: z.enum(["ask", "reply"]).optional(),
+    quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),
     messageId: idSchema,
   }),
   sideThreadMessage: z.object({ id: idSchema, content: z.string().trim().min(1).max(MAX_QUESTION_CHARS) }),
+  sideThreadResolve: z.object({ resolved: z.boolean().default(true) }),
   login: z.object({ password: z.string() }),
   schedule: z.object({
     id: idSchema,
@@ -273,6 +280,8 @@ export interface BoxYard {
   docker: DockerService
   /** Settings › Identities: the GitHub account, author and Claude login each project's agents use (docs/identities.md). */
   identities: Identities
+  /** Settings › Connectors: external MCP servers some sessions get (docs/connectors.md). */
+  connectors: ConnectorService
   start(): Promise<void>
   stop(): void
 }
@@ -300,6 +309,10 @@ export function createBoxYard(
     setup?: Pick<SetupDeps, "listBoxes" | "fetch" | "anthropicBaseUrl" | "timeoutMs" | "localCheck">
     /** A made-up home folder and PATH for identity detection to read instead of this computer's (tests, mock screenshots). */
     detect?: Pick<DetectOptions, "home" | "env">
+    /** Stands in for fetch in connectors' OAuth requests (tests). */
+    connectorFetch?: typeof globalThis.fetch
+    /** A made-up computer for machine_stats to read instead of this one (tests). */
+    machine?: MachineReaders
   } = {},
 ): BoxYard {
   const db = openDb(c.dataDir)
@@ -309,19 +322,36 @@ export function createBoxYard(
   const artifacts = new Artifacts(store, path.join(c.dataDir, "artifacts"))
   const redis = redisEnabled(c) ? new Redis(c.redisUrl, c.redisToken) : null
   const settings = new SettingsStore(store, c)
-  // Project identities (docs/identities.md): their secrets are encrypted with a key that is never in the database.
+  // Project identities (docs/identities.md) and connectors (docs/connectors.md): their secrets are encrypted with a key
+  // that is never in the database.
+  const secretBox = new SecretBox({ dataDir: c.dataDir, envKey: c.secretKey })
   const identities = new Identities({
     db,
-    secrets: new SecretBox({ dataDir: c.dataDir, envKey: c.secretKey }),
+    secrets: secretBox,
     credentials: settings.credentials,
     github: opts.github?.fetch,
     mock: c.mock,
   })
   /** Reads this computer's gh, git and ssh for detect_identities and the gh:/file:/agent: references (server-side only). */
   const identityDetector = new IdentityDetector({ ...opts.detect, github: opts.github?.fetch })
+  /** This computer's memory, swap and load for machine_stats, sampled once a minute from start(). */
+  const machine = new MachineStats(opts.machine)
   /** Every credential value in effect: no transcript keeps one, and no error shows one. */
-  const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues()]
+  const secretValues = () => [...settings.credentials.secrets(), ...identities.secretValues(), ...connectors.store.secretValues()]
   store.transcriptSecrets = secretValues
+  // External MCP connectors (docs/connectors.md). Their secrets go in through Settings only, and out only into a session's
+  // connection; a Coordinator connector never reaches a status-only project (Connectors.reaches).
+  const connectors = new ConnectorService({
+    db,
+    secrets: secretBox,
+    statusOnly: (projectId) => identities.statusOnly(projectId),
+    projectExists: (projectId) => Boolean(store.getProject(projectId)),
+    projectName: (projectId) => store.getProject(projectId)?.name ?? null,
+    port: c.port,
+    publicUrl: c.publicUrl || undefined,
+    redact: (text) => redact(text, secretValues()),
+    fetch: opts.connectorFetch,
+  })
   /** A project's identity has to allow where it runs (Identity.runners). */
   const requireIdentityRunner = (identityId: string, runner: Runner) => {
     const problem = identities.runnerProblem(identities.require(identityId).id, runner)
@@ -399,6 +429,7 @@ export function createBoxYard(
     hub.broadcast({ type: "identities", identities: identities.list() })
     tasks.schedule()
   })
+  connectors.store.onChange(() => hub.broadcast({ type: "connectors", connectors: connectors.store.list() }))
   const qstash = opts.qstash !== undefined ? opts.qstash : qstashEnabled(c) ? new QStash(c.qstashToken, c.qstashUrl) : null
   const mcpToken = randomBytes(24).toString("hex")
   // Claude sessions on this computer reach /mcp on the address we listen on (127.0.0.1 unless HOST is one IP).
@@ -537,7 +568,7 @@ export function createBoxYard(
   app.all(
     "/mcp",
     mcpHandler(
-      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads },
+      { store, tasks, hub, artifacts, publicUrl, scheduler, uploads, settings, settingsTools, captains, hooks, notes, coordinatorCompactionsDir: orchestrator.compactionsDir, defaultRunner: () => setup.defaultRunner(), identities, identityDetector, threads, machine, connectors: connectors.store },
       mcpToken,
       handshakes,
     ),
@@ -560,6 +591,26 @@ export function createBoxYard(
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true, pid: process.pid })
+  })
+
+  // A connector's OAuth provider sends the browser back here (docs/connectors.md › Where the redirect lands). No login:
+  // on an iPhone the provider's page opens in Safari, which a home-screen Box Yard doesn't share cookies with. The state
+  // is the gate: made by a logged-in Sign in, single use, ten minutes, and useless without the verifier held here.
+  app.get(OAUTH_CALLBACK_PATH, async (req, res) => {
+    res.set({
+      "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "X-Content-Type-Options": "nosniff",
+    })
+    const params = new URLSearchParams(Object.entries(req.query).flatMap(([k, v]) => (typeof v === "string" ? [[k, v]] : [])))
+    try {
+      const done = await connectors.finishSignIn(params)
+      res.type("html").send(callbackPage(true, `${done.label} is connected.`, "You can close this tab: Settings › Connectors shows it."))
+    } catch (err) {
+      const message = err instanceof BadRequestError ? err.message : "Something went wrong finishing the sign-in."
+      res.status(400).type("html").send(callbackPage(false, "The sign-in didn't finish.", redact(message, secretValues())))
+    }
   })
 
   // ---- auth
@@ -720,12 +771,72 @@ export function createBoxYard(
     const i = identities.require(req.params.id!)
     res.json(await identities.test(i.id, testRepos(store, i), { save: true }))
   })
+
+  // ---- connectors (shared/connectors.ts, docs/connectors.md): values go in, only fingerprints come out
+  api.get("/connectors", (_req, res) => {
+    res.json(connectors.store.list())
+  })
+  api.post("/connectors", (req, res) => {
+    res.status(201).json(connectors.store.create(req.body))
+  })
+  api.patch("/connectors/:id", (req, res) => {
+    res.json(connectors.store.update(req.params.id!, req.body))
+  })
+  api.delete("/connectors/:id", (req, res) => {
+    connectors.store.delete(req.params.id!)
+    res.json({ ok: true })
+  })
+  const secretBody = z.object({ value: z.string() }).strict()
+  api.put("/connectors/:id/token", (req, res) => {
+    res.json(connectors.saveSecret(req.params.id!, "token", parse(secretBody, req.body).value))
+  })
+  api.delete("/connectors/:id/token", (req, res) => {
+    connectors.store.removeSecret(req.params.id!, "token")
+    res.json(connectors.store.require(req.params.id!))
+  })
+  api.put("/connectors/:id/client-secret", (req, res) => {
+    res.json(connectors.saveSecret(req.params.id!, "client_secret", parse(secretBody, req.body).value))
+  })
+  api.delete("/connectors/:id/client-secret", (req, res) => {
+    connectors.store.removeSecret(req.params.id!, "client_secret")
+    res.json(connectors.store.require(req.params.id!))
+  })
+  api.put("/connectors/:id/env/:name", (req, res) => {
+    res.json(connectors.saveSecret(req.params.id!, { env: req.params.name! }, parse(secretBody, req.body).value))
+  })
+  api.delete("/connectors/:id/env/:name", (req, res) => {
+    connectors.store.removeSecret(req.params.id!, `env:${req.params.name!}`)
+    res.json(connectors.store.require(req.params.id!))
+  })
+  /**
+   * Start an OAuth sign-in: the provider's page to open, and whether it comes back by itself or Cody pastes the address
+   * it lands on. It returns only to an address this request came in on (or BOXYARD_PUBLIC_URL).
+   */
+  api.post("/connectors/:id/oauth/start", async (req, res) => {
+    const body = parse(z.object({ origin: z.string().max(500).optional() }).strict(), req.body ?? {})
+    const here = [req.get("origin"), `${req.protocol}://${req.get("host")}`].filter((x): x is string => !!x)
+    res.json(await connectors.signIns.start(req.params.id!, body.origin ?? here[0]!, here))
+  })
+  /** Paste-back: the address the provider's page ended up on (a loopback one that didn't load on this device). */
+  api.post("/connectors/oauth/complete", async (req, res) => {
+    const { url } = parse(z.object({ url: z.string().min(1).max(8000) }).strict(), req.body)
+    res.json(await connectors.finishSignIn(ConnectorSignIns.pasted(url)))
+  })
+  api.post("/connectors/:id/sign-out", (req, res) => {
+    connectors.store.signOut(req.params.id!)
+    res.json(connectors.store.require(req.params.id!))
+  })
+  /** Connect the way a session would and list its tools; sets its status. */
+  api.post("/connectors/:id/test", async (req, res) => {
+    res.json(await connectors.test(req.params.id!))
+  })
   api.delete("/projects/:id", async (req, res) => {
     const id = req.params.id!
     for (const s of store.listSchedules({ projectId: id })) await scheduler.remove(s.id)
     for (const t of store.listTasks({ projectId: id })) await tasks.deleteTask(t.id)
     await tasks.projectDeleted(id)
     store.deleteProject(id)
+    connectors.store.projectDeleted(id)
     hub.broadcast({ type: "project.deleted", projectId: id })
     res.json({ ok: true })
   })
@@ -1192,6 +1303,13 @@ export function createBoxYard(
     const body = parse(schemas.sideThreadMessage, req.body)
     res.status(201).json(threads.send(req.params.id!, body.content, body.id))
   })
+  api.post("/threads/:id/resolve", (req, res) => {
+    const body = parse(schemas.sideThreadResolve, req.body ?? {})
+    res.json(threads.resolve(req.params.id!, body.resolved))
+  })
+  api.post("/threads/:id/seen", (req, res) => {
+    res.json(threads.seen(req.params.id!))
+  })
   api.post("/threads/:id/stop", (req, res) => {
     threads.get(req.params.id!)
     threads.stop(req.params.id!)
@@ -1436,10 +1554,12 @@ export function createBoxYard(
     retro,
     docker: dockerService,
     identities,
+    connectors,
     async start() {
       // A "This computer" setup's gh login can stand in for the GitHub token: look for it before PRs are followed.
       if (setup.onThisComputer()) await setup.refreshLocal()
       await tasks.start()
+      machine.start()
       scheduler.start()
       orchestrator.resumeScheduled()
       stopSnapshots = startSelfSnapshots(c, db)
@@ -1460,6 +1580,7 @@ export function createBoxYard(
       retro.stop()
       hooks.stop()
       scheduler.stop()
+      machine.stop()
       tasks.stop()
       captains.stop()
       orchestrator.stop()
@@ -1470,4 +1591,13 @@ export function createBoxYard(
       db.close()
     },
   }
+}
+
+const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!)
+
+/** The page a connector's OAuth callback shows: no script, nothing from the request but the escaped message. */
+function callbackPage(ok: boolean, title: string, detail: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Box Yard: ${escapeHtml(title)}</title>
+<style>body{font:16px/1.5 system-ui,-apple-system,sans-serif;background:#0b0d10;color:#e6e8eb;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box}main{max-width:28rem}h1{font-size:1.25rem;color:${ok ? "#4ade80" : "#f87171"}}p{color:#a3a9b1}</style></head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(detail)}</p></main></body></html>`
 }
