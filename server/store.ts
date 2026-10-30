@@ -201,6 +201,8 @@ export interface TaskRow {
   push_state_json: string | null
   /** Its icon (shared/taskIcons.ts); null picks one from its title. */
   icon?: string | null
+  /** Shared by the tasks one create_tasks call started; null when started on its own. */
+  batch_id?: string | null
 }
 
 /** A pending merge request as stored: the public fields plus the queued input that carries the message. */
@@ -1250,6 +1252,7 @@ export class Store {
       mergeRequest: publicMergeRequest(this.mergeRequestOf(row)),
       pushState: json<PushState | null>(row.push_state_json, null),
       icon: isTaskIcon(row.icon) ? row.icon : null,
+      batchId: row.batch_id ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }
@@ -1363,6 +1366,8 @@ export class Store {
     runsOn?: Runner | null
     /** Its icon (shared/taskIcons.ts); omitted picks one from its title. */
     icon?: TaskIconName | null
+    /** The create_tasks call it came from (TaskRow.batch_id), when that started more than one. */
+    batchId?: string | null
   }): Task {
     const now = Date.now()
     const id = input.id ?? newId("task")
@@ -1392,6 +1397,7 @@ export class Store {
     if (input.startedBy) this.db.prepare("UPDATE tasks SET source = ? WHERE id = ?").run(input.startedBy, id)
     if (input.runsOn) this.db.prepare("UPDATE tasks SET runs_on = ? WHERE id = ?").run(input.runsOn, id)
     if (input.icon) this.setTaskIcon(id, input.icon)
+    if (input.batchId) this.db.prepare("UPDATE tasks SET batch_id = ? WHERE id = ?").run(input.batchId, id)
     return this.getTask(id)!
   }
 

@@ -907,6 +907,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN color TEXT;
   ALTER TABLE tasks ADD COLUMN icon TEXT;
   `,
+  `
+  -- The tasks one create_tasks call started share a batch id (TaskManager.createTasks), so the Coordinator's cards
+  -- view can show a fan-out as one card. NULL: started on its own.
+  ALTER TABLE tasks ADD COLUMN batch_id TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {
