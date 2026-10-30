@@ -7,6 +7,7 @@ import type { BoxEvent } from "./boxHistory.js"
 import type { TtsInfo } from "./tts.js"
 import type { SetupStatus } from "./setup.js"
 import type { Runner } from "./runner.js"
+import type { GpuProvider } from "./gpu.js"
 import type { AgentCli } from "./agentCli.js"
 import type { Connector } from "./connectors.js"
 import type { TaskPlacement } from "./placement.js"
@@ -92,6 +93,8 @@ export interface Project {
   gpuMaxHourlyUsd: number | null
   /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
   gpuMachine: ProjectGpuMachine
+  /** When it runs on a GPU: the cloud its boxes come from (shared/gpu.ts); null follows Settings › Vast.ai GPU › Use for GPU projects. */
+  gpuProvider: GpuProvider | null
   /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
   docker: ProjectDocker
   /** Who acts for it (shared/identities.ts): its GitHub account, git author, signing key and Claude login. */
@@ -1012,6 +1015,8 @@ export interface CloudStatus {
   list: CloudBox[]
   /** RunPod GPU pods: their $/hour now against the cap for all pods; null when RunPod isn't set up. */
   gpu: { pods: number; hourlyUsd: number; capUsd: number } | null
+  /** Vast.ai GPU instances, the same way; null (or absent) when Vast.ai isn't set up. */
+  vast?: { pods: number; hourlyUsd: number; capUsd: number } | null
   /** New boxes past the ones Box Yard makes in an hour without asking. */
   fanout: BoxFanout
 }

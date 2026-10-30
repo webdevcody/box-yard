@@ -5,7 +5,8 @@ import { RUNPOD_STOCK_IMAGE, cloudLabel, shortGpu, gpuBoxIndex, gpuBoxProject, i
 import type { RunPodSettings } from "../../shared/runpod.js"
 import { RunPodError, rankDataCenters, type CatalogGpu, type RunPodApi, type RunPodPod, type RunPodVolume } from "../runpod/api.js"
 import type { SshPool, SshTarget } from "../runpod/ssh.js"
-import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe, type ExecResult } from "./types.js"
+import { q, type BoxHealth, type BoxProvider, type BoxUsageProbe } from "./types.js"
+import { SshBoxProvider } from "./sshBox.js"
 
 const ROOT = "/box"
 /** Box Yard gives each task the ports PORT_BASE + 10·n (TaskManager.assign); a pod exposes the first of each. */
@@ -68,7 +69,7 @@ export function catalogPrice(g: CatalogGpu, cloud: RunPodCloud): number | null {
  * uploads go over SSH to the pod's public TCP port. Nothing here ever starts a pod except `wake`, so polling a
  * stopped box costs nothing.
  */
-export class RunPodProvider implements BoxProvider {
+export class RunPodProvider extends SshBoxProvider implements BoxProvider {
   readonly name = "runpod"
   readonly nodeBin = "node"
   readonly claudeBin = "claude"
@@ -79,7 +80,9 @@ export class RunPodProvider implements BoxProvider {
   /** Pod creates one at a time, so two pods starting together can't both fit under a cap only one fits under. */
   private creating: Promise<unknown> = Promise.resolve()
 
-  constructor(private readonly d: RunPodProviderDeps) {}
+  constructor(private readonly d: RunPodProviderDeps) {
+    super(d.ssh)
+  }
 
   root() {
     return ROOT
@@ -132,7 +135,7 @@ export class RunPodProvider implements BoxProvider {
     return found ?? null
   }
 
-  private async target(boxId: string): Promise<SshTarget> {
+  protected async target(boxId: string): Promise<SshTarget> {
     const st = await this.state(boxId)
     if (!st?.target || st.pod.status !== "RUNNING") throw new Error(`The GPU pod for ${boxId} isn't running`)
     return st.target
@@ -437,49 +440,6 @@ export class RunPodProvider implements BoxProvider {
       { direct: true, timeoutMs: 120_000 },
     )
     if (init.exitCode !== 0) throw new Error(`Preparing pod ${st.pod.id} failed: ${(init.stdout.toString() + init.stderr).slice(-800)}`)
-  }
-
-  /** Every command touches the heartbeat the pod's watchdog reads. */
-  private wrap(command: string) {
-    return `touch /box/.heartbeat 2>/dev/null; ${command}`
-  }
-
-  async exec(boxId: string, command: string): Promise<ExecResult> {
-    const r = await this.d.ssh.run(await this.target(boxId), this.wrap(command), { timeoutMs: 30 * 60_000 })
-    return { exitCode: r.exitCode, stdout: r.stdout.toString("utf8"), stderr: r.stderr }
-  }
-
-  async execStream(boxId: string, command: string, onOutput: (chunk: string) => void): Promise<{ exitCode: number }> {
-    const r = await this.d.ssh.run(await this.target(boxId), this.wrap(command), { onOutput })
-    if (r.exitCode === 255) throw new Error(`SSH to ${boxId} failed`)
-    return { exitCode: r.exitCode }
-  }
-
-  async hold(boxId: string, command: string, signal: AbortSignal): Promise<void> {
-    try {
-      await this.d.ssh.run(await this.target(boxId), this.wrap(command), { signal })
-    } catch {}
-  }
-
-  async writeFile(boxId: string, filePath: string, content: string | Buffer): Promise<void> {
-    const tmp = `${filePath}.by-tmp`
-    const r = await this.d.ssh.run(await this.target(boxId), `mkdir -p ${q(path.posix.dirname(filePath))} && cat > ${q(tmp)} && mv ${q(tmp)} ${q(filePath)}`, { input: content, timeoutMs: 10 * 60_000 })
-    if (r.exitCode !== 0) throw new Error(`Writing ${filePath} on ${boxId} failed: ${r.stderr.slice(-300)}`)
-  }
-
-  async readFile(boxId: string, filePath: string): Promise<Buffer> {
-    const r = await this.d.ssh.run(await this.target(boxId), `cat ${q(filePath)}`, { timeoutMs: 10 * 60_000 })
-    if (r.exitCode !== 0) throw Object.assign(new Error(`Reading ${filePath} on ${boxId} failed: ${r.stderr.slice(-300)}`), { code: r.exitCode === 1 ? "ENOENT" : undefined })
-    return r.stdout
-  }
-
-  async uploadFile(boxId: string, localPath: string, destination: string): Promise<void> {
-    const tmp = `${destination}.by-tmp`
-    const r = await this.d.ssh.run(await this.target(boxId), `mkdir -p ${q(path.posix.dirname(destination))} && cat > ${q(tmp)} && mv ${q(tmp)} ${q(destination)}`, {
-      input: fs.createReadStream(localPath),
-      timeoutMs: 60 * 60_000,
-    })
-    if (r.exitCode !== 0) throw new Error(`Uploading to ${destination} on ${boxId} failed: ${r.stderr.slice(-300)}`)
   }
 
   /** RunPod's HTTP proxy: public, no auth, about 100 s per request, websockets work. Only POD_HTTP_PORTS are exposed. */

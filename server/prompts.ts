@@ -3,6 +3,7 @@ import { AGENT_CLI_LABEL, type AgentCli } from "../shared/agentCli.js"
 import type { Project, ProjectNote, Task, TaskMessage } from "../shared/types.js"
 import { BOX_SIZE_ORDER, BOX_SIZE_SPECS } from "../shared/boxSizes.js"
 import { formatBytes } from "../shared/disk.js"
+import type { GpuProvider } from "../shared/gpu.js"
 import { DEFAULT_NOTE_BUDGET, noteLine, shortTokens, type NoteBudget } from "../shared/notes.js"
 import type { LivePr } from "./prs.js"
 
@@ -32,10 +33,13 @@ export function workerSystemPrompt(input: {
   const cli = AGENT_CLI_LABEL[input.agent ?? "claude"]
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
+  const vast = input.box?.gpu?.cloud === "vast"
   const docker = Boolean(input.box?.docker)
   const header = [
     local
       ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
+      : vast
+      ? `You are a Box Yard agent: a headless ${cli} worker running on a Vast.ai GPU instance of your project's own (Linux, as root).`
       : gpu
       ? `You are a Box Yard agent: a headless ${cli} worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : docker
@@ -55,6 +59,8 @@ export function workerSystemPrompt(input: {
     `  Only suggest environment or box gotchas, Cody's decisions and preferences, and project facts that aren't in the code. Run logs, merge reports and code tours go in the PR description instead.`,
     local
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
+      : vast
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the instance, published straight from the host as plain HTTP that anyone with the link can open, so keep secrets out of it; ${port + 1}-${port + 9} work inside the instance only.`
       : gpu
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
       : docker
@@ -104,8 +110,8 @@ export interface BoxPromptInfo {
   alone?: boolean
   /** The local runner: the turn runs on the computer running Box Yard, unsandboxed (shared/runner.ts). */
   local?: boolean
-  /** A RunPod GPU pod of the project's own (shared/runpod.ts): its GPU, e.g. "RTX A5000". */
-  gpu?: { name: string }
+  /** A GPU pod of the project's own (shared/runpod.ts, shared/gpu.ts): its GPU, e.g. "RTX A5000", and its cloud (RunPod when unset). */
+  gpu?: { name: string; cloud?: GpuProvider }
   /** A Docker container of the project's own on the computer running Box Yard (shared/docker.ts): its CPU limit. */
   docker?: { cpus: number | null }
 }
@@ -114,6 +120,13 @@ export interface BoxPromptInfo {
 function boxLines(b: BoxPromptInfo): string[] {
   if (b.gpu) {
     const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    if (b.gpu.cloud === "vast") {
+      return [
+        `Your instance has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
+        `The instance is destroyed when your project has been idle a while, and a new one (on another host) is rented for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the instance's disk goes. There's no network volume, so large downloads come down again on a new instance.`,
+        `Run heavy jobs one at a time and stop servers you no longer need.`,
+      ]
+    }
     return [
       `Your pod has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
       `The pod is stopped when your project has been idle a while and started again (a new pod) for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the pod's disk goes. /workspace/data is the project's network volume: put large downloads, datasets and model weights there to keep them across pods.`,

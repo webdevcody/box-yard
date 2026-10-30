@@ -922,6 +922,11 @@ export const MIGRATIONS: string[] = [
   ALTER TABLE projects ADD COLUMN agent_cli TEXT;
   ALTER TABLE tasks ADD COLUMN agent_cli TEXT;
   `,
+  `
+  -- Which GPU cloud a "Runs on: GPU" project's boxes come from (shared/gpu.ts): 'runpod' or 'vast'. NULL follows
+  -- Settings › Vast.ai GPU › Use for GPU projects (RunPod unless that's on).
+  ALTER TABLE projects ADD COLUMN gpu_provider TEXT;
+  `,
 ]
 
 export function openDb(dataDir: string, file = "box-yard.sqlite"): DB {

@@ -9,6 +9,7 @@ import { DEFAULT_SETTINGS } from "../server/settings.js"
 import type { SettingChange, SettingView } from "../server/settingsTools.js"
 import { Uploads, uploadsDir } from "../server/uploads.js"
 import { DEFAULT_RUNPOD_SETTINGS } from "../shared/runpod.js"
+import { DEFAULT_VAST_SETTINGS } from "../shared/vast.js"
 import type { HubEvent, Project, SettingsInfo } from "../shared/types.js"
 import { freePort, testConfig, tmpDir } from "./helpers.js"
 
@@ -115,6 +116,17 @@ describe("get_settings", () => {
 
     // A group filter returns only that group.
     expect(Object.values(await rows(call, "runpod")).every((s) => s.group === "runpod")).toBe(true)
+  })
+
+  it("lists Settings › Vast.ai GPU as vast.*, and saves them through its own store", async () => {
+    const r = await start()
+    const { call } = await mcpAs(r)
+    const all = await rows(call)
+    for (const k of Object.keys(DEFAULT_VAST_SETTINGS)) expect(all[`vast.${k}`], k).toBeDefined()
+    expect(all["vast.defaultForGpu"]).toMatchObject({ group: "vast", value: false, writable: true })
+    expect(all["credentials.vastApiKey"]).toMatchObject({ value: "not set", secret: true, envVar: "VAST_API_KEY" })
+    expect(changed(await update(call, { "vast.totalMaxHourlyUsd": 2 }))).toEqual([{ key: "vast.totalMaxHourlyUsd", before: 3, after: 2 }])
+    expect(r.yard.settingsTools.list("vast").find((s) => s.key === "vast.totalMaxHourlyUsd")?.value).toBe(2)
   })
 
   it("shows API keys and tokens only as set / not set", async () => {

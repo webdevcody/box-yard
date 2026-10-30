@@ -15,6 +15,7 @@ import { isBoxPick, placeKindOf, type BoxPick, type Place, type TaskPlacement } 
 import { limitBlock, type BoxAgent } from "./agentLimits.js"
 import type { ProjectSnapshot } from "../shared/snapshots.js"
 import type { ProjectGpuMachine } from "../shared/runpod.js"
+import { isGpuProvider, type GpuProvider } from "../shared/gpu.js"
 import type { ProjectDocker } from "../shared/docker.js"
 import { buildUsagePeriod, type PeriodBoxInterval, type PeriodClaudeRow } from "./usagePeriod.js"
 import type { TurnTrigger } from "./turnTrigger.js"
@@ -359,6 +360,7 @@ interface ProjectRow {
   gpu_cloud?: string | null
   gpu_min_ram_gb?: number | null
   gpu_min_vcpus?: number | null
+  gpu_provider?: string | null
   docker_image?: string | null
   docker_dockerfile?: string | null
   identity_id?: string | null
@@ -828,6 +830,7 @@ export class Store {
       maxBoxes: row.max_boxes ?? null,
       gpuMaxHourlyUsd: row.gpu_max_hourly_usd ?? null,
       gpuMachine: gpuMachineOf(row),
+      gpuProvider: isGpuProvider(row.gpu_provider) ? row.gpu_provider : null,
       docker: { image: row.docker_image || null, dockerfile: row.docker_dockerfile || null },
       identityId: row.identity_id || DEFAULT_IDENTITY_ID,
       color: isProjectColor(row.color) ? row.color : null,
@@ -882,6 +885,12 @@ export class Store {
     return gpuMachineOf(row ?? {})
   }
 
+  /** A GPU project's own cloud (Project.gpuProvider), or null to follow the global one, without loading the rest. */
+  projectGpuProvider(id: string): GpuProvider | null {
+    const row = this.db.prepare("SELECT gpu_provider FROM projects WHERE id = ?").get(id) as { gpu_provider: string | null } | undefined
+    return isGpuProvider(row?.gpu_provider) ? row.gpu_provider : null
+  }
+
   /** Where the project's agents run, without loading the rest (placement asks for every queued task). */
   /** Where a task's turns run: its own runs_on when set, else its project's "Runs on". */
   taskRunner(row: Pick<TaskRow, "project_id" | "runs_on">): Runner {
@@ -922,6 +931,7 @@ export class Store {
     maxBoxes?: number | null
     gpuMaxHourlyUsd?: number | null
     gpuMachine?: Partial<ProjectGpuMachine>
+    gpuProvider?: GpuProvider | null
     docker?: Partial<ProjectDocker>
     identityId?: string
     /** The CLI its new tasks run on; null/omitted uses Settings › Box agents. */
@@ -997,6 +1007,8 @@ export class Store {
       gpuMaxHourlyUsd?: number | null
       /** Each field: undefined leaves it, null clears it (Settings › RunPod GPU's applies). */
       gpuMachine?: Partial<ProjectGpuMachine>
+      /** null clears it (Settings › Vast.ai GPU › Use for GPU projects decides). */
+      gpuProvider?: GpuProvider | null
       /** Each field: undefined leaves it, null clears it (Settings › Docker's image applies). */
       docker?: Partial<ProjectDocker>
       /** null clears it (Settings › Max notes applies). */
@@ -1064,7 +1076,10 @@ export class Store {
    * A project's own box limits; undefined leaves a value as it is, null clears it. Saving Agents per box also
    * clears the old heavy_tasks it replaced, so a cleared value really goes back to the global one.
    */
-  private setProjectBoxLimits(id: string, b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine>; docker?: Partial<ProjectDocker> }) {
+  private setProjectBoxLimits(
+    id: string,
+    b: Partial<ProjectBoxLimits> & { gpuMaxHourlyUsd?: number | null; gpuMachine?: Partial<ProjectGpuMachine>; gpuProvider?: GpuProvider | null; docker?: Partial<ProjectDocker> },
+  ) {
     if (b.agentsPerBox !== undefined) this.db.prepare("UPDATE projects SET agents_per_box = ?, heavy_tasks = NULL WHERE id = ?").run(b.agentsPerBox, id)
     if (b.wholeMachine !== undefined) this.db.prepare("UPDATE projects SET whole_machine = ? WHERE id = ?").run(b.wholeMachine ? 1 : 0, id)
     if (b.tasksPerBox !== undefined) this.db.prepare("UPDATE projects SET tasks_per_box = ? WHERE id = ?").run(b.tasksPerBox, id)
@@ -1075,6 +1090,7 @@ export class Store {
     if (m.cloud !== undefined) this.db.prepare("UPDATE projects SET gpu_cloud = ? WHERE id = ?").run(m.cloud, id)
     if (m.minRamGb !== undefined) this.db.prepare("UPDATE projects SET gpu_min_ram_gb = ? WHERE id = ?").run(m.minRamGb, id)
     if (m.minVcpus !== undefined) this.db.prepare("UPDATE projects SET gpu_min_vcpus = ? WHERE id = ?").run(m.minVcpus, id)
+    if (b.gpuProvider !== undefined) this.db.prepare("UPDATE projects SET gpu_provider = ? WHERE id = ?").run(b.gpuProvider, id)
     const d = b.docker ?? {}
     if (d.image !== undefined) this.db.prepare("UPDATE projects SET docker_image = ? WHERE id = ?").run(d.image?.trim() || null, id)
     if (d.dockerfile !== undefined) this.db.prepare("UPDATE projects SET docker_dockerfile = ? WHERE id = ?").run(d.dockerfile?.trim() ? d.dockerfile : null, id)
@@ -1557,10 +1573,10 @@ export class Store {
     return rows.map((r) => r.box_id)
   }
 
-  /** GPU pods' boxes (`runpod-…`) with a turn on them: pods that are up or starting. */
+  /** GPU boxes (`runpod-…`, `vastai-…`) with a turn on them: pods and instances that are up or starting. */
   gpuBoxesInUse(): string[] {
     const rows = this.db
-      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE box_id LIKE 'runpod-%' AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
+      .prepare(`SELECT DISTINCT box_id FROM tasks WHERE (box_id LIKE 'runpod-%' OR box_id LIKE 'vastai-%') AND (current_turn_id IS NOT NULL OR status IN ('starting', 'working'))`)
       .all() as { box_id: string }[]
     return rows.map((r) => r.box_id)
   }

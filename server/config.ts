@@ -152,6 +152,8 @@ export const config = {
   githubToken: env.GITHUB_TOKEN ?? "",
   /** RunPod GPU pods (Settings › RunPod GPU, docs/runpod.md). Optional. */
   runpodApiKey: env.RUNPOD_API_KEY ?? "",
+  /** Vast.ai GPU instances (Settings › Vast.ai GPU, docs/vast.md). Optional. */
+  vastApiKey: env.VAST_API_KEY ?? "",
   /** The docker CLI for Docker projects (docs/docker.md); empty: found on PATH or where Docker Desktop puts it. */
   dockerBin: env.DOCKER_BIN?.trim() ?? "",
   /**
