@@ -9,11 +9,25 @@ try {
   localStorage.removeItem("boxyard:coordinator-timeline")
 } catch {}
 
-// The Cards view's "Tasks only": the task cards without the Coordinator card under them. This browser remembers it.
+// The Cards view's "Tasks only": the task cards without the card under them, the Coordinator's under "All" and a
+// project's Captain's with a project picked. This browser remembers two choices: one for "All", one shared by every
+// project (hiding one Captain hides them all, so the bar's pills don't each carry a state of their own).
 const tasksOnly = localFlag("boxyard:cards-tasks-only")
-export const useTasksOnly = tasksOnly.use
-/** Hide (or show again) the Coordinator card. Sending to the Coordinator shows it, so its answer is in view. */
-export const setTasksOnly = tasksOnly.set
+const captainTasksOnly = localFlag("boxyard:cards-tasks-only-project")
+/** "Tasks only" under "All" (`project` false) or with a project picked. */
+export function useTasksOnly(project = false) {
+  const all = tasksOnly.use()
+  const picked = captainTasksOnly.use()
+  return project ? picked : all
+}
+/**
+ * Hide (or show again) the Coordinator card, or with `project` the Captain's. Sending to either shows its card, so its
+ * answer is in view.
+ */
+export function setTasksOnly(on: boolean, project = false) {
+  if (project) captainTasksOnly.set(on)
+  else tasksOnly.set(on)
+}
 
 let focus: string | null = null
 let message: string | null = null
