@@ -40,7 +40,11 @@ describe("chat.turn event (voice summaries)", () => {
     expect(turn.replyId).toBe(replies.at(-1)!.id)
     expect(turn.startedAt).toBeGreaterThanOrEqual(before)
     // The final reply comes after the tool line, and the turn event after both.
-    const order = events.filter((e) => e.type === "chat.message" || e.type === "chat.turn").map((e) => (e.type === "chat.turn" ? "turn" : e.message.role))
+    // A message broadcast again (the reply, once its turn's timing is on it) is an update, not a new line.
+    const seen = new Set<string>()
+    const order = events
+      .filter((e) => e.type === "chat.turn" || (e.type === "chat.message" && !seen.has(e.message.id) && seen.add(e.message.id)))
+      .map((e) => (e.type === "chat.turn" ? "turn" : e.type === "chat.message" ? e.message.role : ""))
     expect(order.slice(-3)).toEqual(["tool", "assistant", "turn"])
   })
 })
