@@ -3703,9 +3703,10 @@ export class TaskManager {
   /**
    * Which SSH machine a task's next turn takes (`pickMachine`, shared/machines.ts), or null with the reason: one with
    * the label it runs on (its own machine_label, else its project's; none: any machine), that works (enabled, tested,
-   * answered lately), has a Claude login to use (a Claude key Box Yard forwards, else the machine's own login) and a
-   * free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole machine (`limitBlock`).
-   * Its workspace's machine first; it moves to another only when nothing would be lost (`moveBlock`, no upload limit).
+   * answered lately), has the task's agent installed (Box Yard never installs one there) with a login to use
+   * (`machineAgent`) and a free slot: its Tasks running at once, and the projects' Agents at once and Needs the whole
+   * machine (`limitBlock`). Its workspace's machine first; it moves to another only when nothing would be lost
+   * (`moveBlock`, no upload limit).
    */
   private async machineTarget(row: TaskRow): Promise<string | null> {
     if (!this.machines) {
@@ -3715,6 +3716,8 @@ export class TaskManager {
     const current = isMachineBox(row.box_id) ? machineOfBox(row.box_id) : null
     // A turn-end archive being written right now: it can move in a moment, so it doesn't count as stuck there.
     const canMove = !current || !row.session_started || (!this.archiving.has(row.id) && this.moveBlock(row, Infinity) === null)
+    const cli = taskAgentCli(row)
+    const agent = this.machineAgent(row)
     const machines = this.machines.list().map((m): MachineCandidate => {
       const boxId = machineBoxId(m.id)
       const limit = this.limitBlock(row, boxId)
@@ -3739,6 +3742,32 @@ export class TaskManager {
     return machineBoxId(pick.machineId)
   }
 
+  /**
+   * Whether a task's agent can run on a machine, from its last test. Claude Code: installed, and a Claude key Box Yard
+   * forwards or the machine's own login. Codex: installed, and an OpenAI API key Box Yard forwards, Box Yard's ChatGPT
+   * login where the machine keeps it in memory (a tmpfs for secrets, `codexHandOver`), or the machine's own login.
+   */
+  private machineAgent(row: TaskRow): (m: Machine) => Pick<MachineCandidate, "agentFound" | "agentLogin"> {
+    const env = this.store.taskEnv(row.id)
+    if (taskAgentCli(row) === "codex") {
+      const kind = this.codexCredentials(row.project_id, env).kind
+      return (m) => ({
+        agentFound: this.c.mock || m.lastTest?.tools.codex.found === true,
+        agentLogin: this.c.mock || kind === "api_key" || (kind === "chatgpt" && this.codexHandOver(machineBoxId(m.id))) || m.lastTest?.codexLogin === true,
+      })
+    }
+    const claudeKey = this.c.mock || this.turnCredentials(row.project_id, env).claudeFrom !== null
+    return (m) => ({ agentFound: this.c.mock || m.lastTest?.tools.claude.found === true, agentLogin: claudeKey || m.lastTest?.claudeLogin === true })
+  }
+
+  /**
+   * Box Yard's ChatGPT login for Codex goes to an SSH machine only when the machine keeps it in memory (its tmpfs for
+   * secrets, Linux's /dev/shm): it's a long-lived login that Codex refreshes, so it never lands on the machine's disk.
+   */
+  private codexHandOver(boxId: string): boolean {
+    return Boolean(providerOf(this.provider, boxId).secretsDir)
+  }
+
   /** Put a task on the machine `machineTarget` picked. One moving off another machine restores there from its archive. */
   private machineAssign(row: TaskRow, target: string): string {
     this.machineWaitNoticed.delete(row.id)
@@ -3754,7 +3783,8 @@ export class TaskManager {
 
   /**
    * A task waits for an SSH machine: the reason on the task, and its Captain hears it once per kind of wait when no
-   * machine can take it (none has the label, none works, no Claude login). A busy one is only a queue: no notice.
+   * machine can take it (none has the label, none works, none has its agent or a login for it). A busy one is only a
+   * queue: no notice.
    */
   private machineWait(row: TaskRow, pick: Extract<MachinePick, { wait: string }>) {
     this.setWaitReason(row.id, pick.wait)

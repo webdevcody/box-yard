@@ -22,7 +22,8 @@ const m = (id: string, over: Partial<MachineCandidate> = {}): MachineCandidate =
   labels: [],
   enabled: true,
   problem: null,
-  claudeLogin: true,
+  agentFound: true,
+  agentLogin: true,
   maxTasks: 2,
   running: 0,
   blocked: null,
@@ -30,7 +31,7 @@ const m = (id: string, over: Partial<MachineCandidate> = {}): MachineCandidate =
 })
 
 const pick = (machines: MachineCandidate[], over: Partial<Parameters<typeof pickMachine>[0]> = {}) =>
-  pickMachine({ machines, label: null, current: null, canMove: true, claudeKey: false, ...over })
+  pickMachine({ machines, label: null, current: null, canMove: true, cli: "claude", ...over })
 
 describe("machine labels", () => {
   it("normalizes labels and lists", () => {
@@ -124,11 +125,30 @@ describe("pickMachine", () => {
     expect(pick([m("a", { problem: "offline" })])).toMatchObject({ kind: "unusable", wait: expect.stringContaining("a: offline") })
   })
 
-  it("needs a Claude login: the machine's own, or a key Box Yard forwards", () => {
-    const machines = [m("a", { claudeLogin: false }), m("b", { claudeLogin: null, running: 1 }), m("c", { claudeLogin: true, running: 1 })]
+  it("needs the task's agent installed with a login to use (the machine's own, or one Box Yard hands it)", () => {
+    const machines = [m("a", { agentLogin: false }), m("b", { agentFound: false, running: 1 }), m("c", { running: 1 })]
     expect(pick(machines)).toEqual({ machineId: "c", moved: false })
-    expect(pick(machines, { claudeKey: true })).toEqual({ machineId: "a", moved: false })
-    expect(pick([m("a", { claudeLogin: false })])).toMatchObject({ kind: "claude" })
+    expect(pick([m("a", { agentLogin: false })])).toEqual({
+      kind: "login",
+      wait: "Waiting for a Claude Code login for your SSH machines: log in to claude on a and test it again, or add a Claude key in Settings › Credentials",
+    })
+    expect(pick([m("a", { agentFound: false }), m("b", { agentFound: false })], { cli: "codex" })).toEqual({
+      kind: "agent",
+      wait: "Waiting: none of your SSH machines has Codex installed: install it on one of them (npm install -g @openai/codex) and test it again",
+    })
+    // Installed somewhere, logged in nowhere: the login is what it waits for, named for Codex.
+    expect(pick([m("a", { agentFound: false, labels: ["gpu"] }), m("b", { agentLogin: false, labels: ["gpu"] })], { cli: "codex", label: "gpu" })).toEqual({
+      kind: "login",
+      wait: expect.stringMatching(/^Waiting for a Codex login for SSH machines labelled "gpu": run codex login on b and test it again, or add an OpenAI API key for Codex/),
+    })
+  })
+
+  it("waits on its own machine for its agent when its workspace can't move", () => {
+    expect(pick([m("a", { agentFound: false }), m("b")], { current: "a", canMove: false, cli: "codex" })).toEqual({
+      kind: "agent",
+      wait: "Waiting for Codex on a, where its workspace is: install it there (npm install -g @openai/codex) and test it again",
+    })
+    expect(pick([m("a", { agentLogin: false }), m("b")], { current: "a", canMove: false })).toMatchObject({ kind: "login", wait: expect.stringContaining("Claude Code login on a, where its workspace is") })
   })
 
   it("stays on its machine while it has room, and moves when it's busy and nothing would be lost", () => {
