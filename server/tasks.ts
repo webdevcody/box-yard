@@ -1417,7 +1417,7 @@ export class TaskManager {
     if (row.current_turn_id) await this.stopTask(taskId)
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
-    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder stays on this computer; once its work is pushed, its build output is freed and, past Settings › Task folders kept on this computer, the folder is archived and removed." : "Closed. Its workspace was archived and its box slot freed.")
+    this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder stays on this computer until the task is deleted or this computer's cleanup archives it (Settings › Boxes & limits › This computer and SSH machines)." : "Closed. Its workspace was archived and its box slot freed.")
     this.emitTask(row.id)
     void this.evictWhenSettled(row.id)
     this.publishDirectory()
@@ -7565,7 +7565,7 @@ export class TaskManager {
     }
     await this.sweepRootDisks(now)
     await this.routineUpkeep(now)
-    await this.ownComputersUpkeep(now)
+    this.ownComputersUpkeep(now)
     await this.sweepGpuPods(now)
     await this.sweepDocker(now)
     this.schedule()
@@ -7621,7 +7621,7 @@ export class TaskManager {
    * finished task's build output, Task folders kept and the low-disk floor. Only computers that hold task folders, and
    * only SSH machines that work right now.
    */
-  private async ownComputersUpkeep(now: number) {
+  private ownComputersUpkeep(now: number) {
     if (now - this.lastOwnUpkeepAt < OWN_UPKEEP_MS) return
     this.lastOwnUpkeepAt = now
     const held = new Set(this.store.listTaskRows().flatMap((r) => (r.box_id && (isLocalRunnerBox(r.box_id) || isMachineBox(r.box_id)) ? [r.box_id] : [])))
@@ -7630,7 +7630,9 @@ export class TaskManager {
       const m = this.machineOf(id)
       return Boolean(m?.enabled && !this.machines!.problem(m))
     })
-    await Promise.all(boxIds.map((id) => this.ownCleanup.upkeep(id, now)))
+    // Not awaited: archiving a backlog of old folders mustn't hold up maintain() (stalled turns, lost boxes). A pass
+    // still running on a computer makes the next one there skip it.
+    for (const id of boxIds) void this.ownCleanup.upkeep(id, now)
   }
 
   /**

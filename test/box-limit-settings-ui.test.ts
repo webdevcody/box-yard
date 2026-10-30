@@ -146,3 +146,34 @@ describe("box limit fields", () => {
     expect(requests).toEqual([])
   })
 })
+
+describe("this computer's cleanup fields", () => {
+  const input = (id: string) => document.querySelector<HTMLInputElement>(`[data-testid=${id}]`)!
+
+  it("show the laptop defaults under their own heading", () => {
+    render(info())
+    expect(document.querySelector("[data-testid=limits-own-computers]")!.textContent).toContain("This computer and SSH machines")
+    expect(input("local-folders-kept").value).toBe("10")
+    expect(input("local-build-cleanup").checked).toBe(true)
+    expect(input("local-build-cleanup-hours").value).toBe("6")
+    expect(input("local-disk-min-free").value).toBe("30")
+    expect(document.body.textContent).toContain("Most task folders in /Volumes/fast/agents")
+  })
+
+  it("are drafts until Save, which sends only what changed", async () => {
+    render(info())
+    type(input("local-folders-kept"), "4")
+    type(input("local-disk-min-free"), "50")
+    act(() => input("local-build-cleanup").click())
+    await settle()
+    expect(requests).toEqual([])
+    // Off, the idle hours don't apply.
+    expect(input("local-build-cleanup-hours").disabled).toBe(true)
+    replies["PUT /api/agent-settings"] = info({ localFoldersKept: 4, localDiskMinFreeGb: 50, localBuildCleanup: false }, { localFoldersKept: "ui", localDiskMinFreeGb: "ui", localBuildCleanup: "ui" })
+    act(() => saveButton().click())
+    await settle()
+    const put = requests.find((r) => r.method === "PUT")!
+    expect(put.body).toMatchObject({ localFoldersKept: 4, localDiskMinFreeGb: 50, localBuildCleanup: false })
+    expect(put.body).not.toHaveProperty("localBuildCleanupIdleHours")
+  })
+})
