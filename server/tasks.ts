@@ -6466,7 +6466,7 @@ export class TaskManager {
     if (spend.state === "reached") {
       if (seen.reached === limit) return
       seen.reached = seen.warned = limit
-      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Coordinator, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
+      const raise = spend.dailyLimitUsd > 0 && spend.blockedReason?.startsWith("today") ? "until midnight, or until you raise today's limit (the cloud meter on the Boxes page, a waiting task, or Settings › Usage)" : "until you raise the monthly limit in Settings › Usage"
       this.notice(`⚠️ **Cloud spend** hit the limit: ${spend.blockedReason}. New boxes wait ${raise}; running agents keep going, and free slots on the boxes there are still used.`, { kind: "cloud_limit" }, { coordinator: true })
     } else {
       if (seen.warned === limit) return
