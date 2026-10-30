@@ -542,3 +542,44 @@ describe("StickyScroll", () => {
     })
   })
 })
+
+describe("overlay", () => {
+  // happy-dom has no stacking, so this checks the structure that keeps the overlay on top: the list is its own
+  // stacking context (relative z-0), so a card's sticky z-20 header inside it can't paint over the overlay (z-10)
+  // that comes after it.
+  function renderWithOverlay(pill: boolean) {
+    act(() =>
+      root.render(
+        createElement(StickyScroll, {
+          count: 1,
+          overlay: pill ? createElement("button", { "data-testid": "pill" }, "↓ 3 new") : null,
+          children: createElement("div", { "data-h": 100 }, createElement("header", { className: "sticky top-0 z-20" }, "Coordinator")),
+        }),
+      ),
+    )
+  }
+
+  it("floats above the list's sticky headers", () => {
+    renderWithOverlay(true)
+    const pill = host.querySelector("[data-testid=pill]")!
+    const header = host.querySelector("header")!
+    const list = host.querySelector<HTMLElement>(".overflow-y-auto")!
+    const overlay = pill.closest<HTMLElement>("[data-overlay]")!
+    expect(list.contains(header)).toBe(true)
+    expect(list.classList).toContain("relative")
+    expect(list.classList).toContain("z-0")
+    expect(overlay.classList).toContain("absolute")
+    expect(overlay.classList).toContain("z-10")
+    expect(list.compareDocumentPosition(overlay) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // Only the pill takes clicks; the strip around it lets them through to the list.
+    expect(overlay.classList).toContain("pointer-events-none")
+  })
+
+  it("leaves room under the last row for it, outside the measured rows", () => {
+    renderWithOverlay(true)
+    const room = host.querySelector<HTMLElement>("[data-testid=overlay-room]")!
+    expect(room.parentElement).toBe(host.querySelector(".overflow-y-auto"))
+    expect(room.className).toContain("group-has-[[data-overlay]>*]/sticky:block")
+    expect(room.closest(".group\\/sticky")).not.toBeNull()
+  })
+})
