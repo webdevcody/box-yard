@@ -552,8 +552,10 @@ function ChatLineBody({
   return (
     <div id={`chat-${m.id}`} data-testid="chat-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <Markdown>{m.content}</Markdown>
+      {/* In a card, its next steps are the answer buttons, right under it. */}
+      {next && inCard && <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} actions />}
       <ReplyFooter m={m} sources={sources} />
-      {next && <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />}
+      {next && !inCard && <RecommendedNextSteps steps={nextStepsFromMeta(m.meta)} onPick={onFollowUp} />}
       <MessageActions text={m.content} anchorId={m.id} reply />
     </div>
   )

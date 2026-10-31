@@ -942,6 +942,14 @@ describe("A card's event digest", () => {
     expect(body.textContent).toContain("Shall I restart Box Yard?")
     // The Coordinator's reply in a task card has no "from:" line.
     expect(body.querySelector('[data-testid="reply-sources"]')).toBeNull()
+    // Its next steps are the card's answer buttons, the first the primary one, right under the reply.
+    const answers = body.querySelector('[data-testid="chat-reply"] [data-testid="answer-buttons"]')!
+    expect(answers.getAttribute("aria-label")).toBe("Next steps")
+    expect([...answers.querySelectorAll("button")].map((b) => [b.textContent, b.hasAttribute("data-primary")])).toEqual([
+      ["Restart Box Yard now", true],
+      ["Not yet", false],
+    ])
+    expect(answers.previousElementSibling!.textContent).toContain("Shall I restart Box Yard?")
     const line = digest.querySelector("button")!
     expect(line.getAttribute("aria-expanded")).toBe("false")
     click(line)
@@ -962,6 +970,20 @@ describe("A card's event digest", () => {
     expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')!.getAttribute("data-open")).toBe("true")
     expect(card(CARDS.id).querySelector(`[data-chat-id="${done.id}"]`)).not.toBeNull()
     vi.restoreAllMocks()
+  })
+
+  it("an answer button sends its step to the Coordinator", async () => {
+    const posts: { url: string; body: Record<string, unknown> }[] = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    click(head(CARDS.id))
+    click(card(CARDS.id).querySelector('[data-testid="answer-buttons"] button')!)
+    await frames()
+    expect(posts).toEqual([{ url: "/api/chat", body: expect.objectContaining({ content: "Restart Box Yard now" }) }])
   })
 
   it("leaves a lone event a quiet chip, and the Coordinator card has no digest", async () => {
