@@ -431,7 +431,7 @@ function SentFrom({ taskId, inCard }: { taskId: string; inCard: boolean }) {
       <button
         type="button"
         onClick={() => showCard(taskId)}
-        className="shrink-0 rounded-sm font-medium text-yard-400 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
+        className="shrink-0 rounded-sm font-medium text-yard-400 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
       >
         Open card ›
       </button>

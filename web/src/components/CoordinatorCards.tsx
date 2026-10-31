@@ -91,8 +91,8 @@ const CARD_BODY = "space-y-2 border-t border-zinc-800/70 py-2 pr-2.5 pl-3"
 /** The lines under a card's title, lined up with it past the tile (a narrow card has no tile). */
 const UNDER_TITLE = "ml-[30px] @max-[30rem]:ml-0"
 const FOOT =
-  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
-const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
+  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
+const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-11"
 
 export interface CardsLayout {
   /** Every card, unfiltered and unfolded: the side panel finds its card here. */
@@ -822,7 +822,7 @@ function CardSession({
           onClick={() => revealChatMessage(card.origin!.id)}
           title="Show it in the Coordinator card"
           data-testid="chat-card-origin"
-          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-9"
+          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-11"
         >
           <LineIcon icon={CornerDownRight} className="h-3 w-3" />
           <span className="shrink-0">From your message {clock(card.origin.createdAt)}:</span>
@@ -1373,7 +1373,7 @@ function PillTarget({ card, where }: { card: ChatCard; where: string }) {
 }
 
 const TOGGLE_BUTTON =
-  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
+  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-2.5"
 
 /**
  * "Tasks only", in the chat's header: hides the card under the task cards, the Coordinator's under "All" or the picked

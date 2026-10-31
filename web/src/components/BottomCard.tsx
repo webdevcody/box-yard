@@ -45,9 +45,9 @@ export function HiddenCard({ label, onShow, testId }: { label: string; onShow: (
 }
 
 const CARD = "scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px]"
-const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
+const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-11"
 const FOOT =
-  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-yard-400 hover:bg-zinc-800 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
+  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-yard-400 hover:bg-zinc-800 hover:text-yard-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
 
 /**
  * The bottom card's header: its icon, who it is ("Coordinator · your main chat"), and under it what the box below
@@ -122,7 +122,7 @@ export function BottomCardHead({
         aria-expanded={!folded}
         aria-label={folded ? "Unfold" : "Fold"}
         title={folded ? "Show the conversation" : "Fold it to this line"}
-        className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
+        className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2.5 pointer-coarse:h-11 pointer-coarse:w-11"
       >
         <ChevronRight className={cx("h-3.5 w-3.5 transition-transform", !folded && "rotate-90")} aria-hidden />
       </button>
@@ -202,7 +202,7 @@ function CaptainCardBody({ projectId }: { projectId: string }) {
         latest={latestLine(talk.at(-1))}
         working={busy}
       >
-        <AppLink href={captainHref(projectId)} title="The Captain's whole chat" className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9">
+        <AppLink href={captainHref(projectId)} title="The Captain's whole chat" className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 pointer-coarse:-my-2.5 pointer-coarse:h-11 pointer-coarse:w-11">
           <Maximize2 className="h-[13px] w-[13px]" aria-label="Open the Captain's chat" />
         </AppLink>
       </BottomCardHead>
