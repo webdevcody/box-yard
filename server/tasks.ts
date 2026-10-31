@@ -60,7 +60,7 @@ import type { TaskIconName } from "../shared/taskIcons.js"
 import { parsePriority, queueOrder, type QueueEntry, type TaskPriority } from "../shared/priority.js"
 import { MAX_GPU_PODS, gpuBoxId, gpuBoxIndex, gpuBoxProject, gpuPodLabel, isGpuBox, type RunPodSettings } from "../shared/runpod.js"
 import { POD_HTTP_PORTS, shortGpu } from "./providers/runpod.js"
-import { GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, gpuBoxIdOn, gpuBoxProvider, type GpuProvider } from "../shared/gpu.js"
+import { GPU_POD_NOUNS, GPU_PROVIDER_LABEL, GPU_SETTINGS_PATH, effectiveGpuProvider, globalGpuProviderSource, gpuBoxIdOn, gpuBoxProvider, type GpuProvider } from "../shared/gpu.js"
 import { DOCKER_MAX_TASKS, DOCKER_NEEDS_CLAUDE_KEY, DOCKER_NEEDS_CODEX_KEY, dockerBoxId, dockerBoxProject, dockerLabel, isDockerBox, type DockerSettings } from "../shared/docker.js"
 import { CODEX_ON_MACHINES, isMachineBox, labelPhrase, machineBoxId, machineLabel, machineMatches, machineOfBox, normalizeLabel, pickMachine, type Machine, type MachineCandidate, type MachinePick } from "../shared/machines.js"
 import type { DockerContainerState } from "./providers/docker.js"
@@ -176,6 +176,12 @@ const FANOUT_WINDOW_MS = 60 * 60_000
 const FANOUT_NOTICE_MS = 30 * 60_000
 const gpuSlotWait = (kind: GpuProvider) => `Waiting for a free slot on its project's GPU pod (its Tasks running at once, or ${GPU_SETTINGS_PATH[kind]} › Tasks running at once per pod)`
 /** Where a GPU project's $/hr cap is raised, for the wait reason. */
+/** Why a GPU task waits when its cloud has no key. */
+const GPU_NOT_SET_UP: Record<GpuProvider, string> = {
+  runpod: "Waiting: RunPod GPU isn't set up (add a RunPod API key in Settings › RunPod GPU)",
+  vast: "Waiting: Vast.ai GPU isn't set up (add a Vast.ai API key in Settings › Credentials)",
+  daytona: "Waiting: Daytona isn't set up (add a Daytona API key in Settings › Daytona)",
+}
 const gpuCapHow = (kind: GpuProvider) => `raise it in Project › Settings › Boxes or with update_project gpu_max_hourly_usd; ${GPU_SETTINGS_PATH[kind]} › Max per project is the default`
 /** How often Box Yard touches an idle GPU pod's heartbeat, so its own watchdog only fires when Box Yard is gone. */
 const GPU_HEARTBEAT_MS = 5 * 60_000
@@ -261,6 +267,8 @@ export interface TaskManagerDeps {
   gpu?: GpuRunner | null
   /** Vast.ai GPU instances (Runs on: GPU, for projects on Vast.ai), when this install has the runner. */
   vast?: GpuRunner | null
+  /** Daytona sandboxes (Runs on: GPU, for projects on Daytona), when this install has the runner. */
+  daytona?: GpuRunner | null
   /** Docker containers on this computer (Runs on: Docker container), when this install has the runner. */
   docker?: DockerRunner | null
   /** Cody's SSH machines (Runs on: SSH machine), when this install has the runner. */
@@ -296,7 +304,7 @@ export interface DockerRunner {
   problem(): Promise<string | null>
 }
 
-/** A GPU cloud's pod as TaskManager reads it, in RunPod's words (Vast.ai's instances are mapped to them). */
+/** A GPU cloud's pod as TaskManager reads it, in RunPod's words (Vast.ai's instances and Daytona's sandboxes are mapped to them). */
 export interface GpuPod {
   id: string
   status: string
@@ -307,7 +315,7 @@ export interface GpuPod {
   startedAt?: string | null
 }
 
-/** What TaskManager uses of a GPU cloud's provider: RunPodProvider, VastProvider, or a stand-in in tests. */
+/** What TaskManager uses of a GPU cloud's provider: RunPodProvider, VastProvider, DaytonaProvider, or a stand-in in tests. */
 export type GpuPodProvider = BoxProvider & {
   /** This install's pods, cached for a few seconds unless `fresh`. */
   listPods(fresh?: boolean): Promise<{ boxId: string; pod: GpuPod }[]>
@@ -320,15 +328,15 @@ export type GpuPodProvider = BoxProvider & {
 }
 type GpuPods = { boxId: string; pod: GpuPod }[]
 
-/** What TaskManager reads of a GPU cloud's settings (Settings › RunPod GPU, Settings › Vast.ai GPU). */
+/** What TaskManager reads of a GPU cloud's settings (Settings › RunPod GPU, Settings › Vast.ai GPU, Settings › Daytona). */
 export type GpuRunnerSettings = Pick<RunPodSettings, "agentsPerPod" | "idleMinutes" | "maxHourlyUsd" | "totalMaxHourlyUsd" | "gpuTypes" | "minRamGb" | "minVcpus"> & {
   /** RunPod only: Secure or Community Cloud. */
   cloud?: RunPodSettings["cloud"]
-  /** Vast.ai only: GPU projects without a cloud of their own run there. */
+  /** Vast.ai and Daytona only: GPU projects without a cloud of their own run there (Daytona's wins when both are on). */
   defaultForGpu?: boolean
 }
 
-/** What TaskManager needs of a GPU runner: RunPod's (server/runpod/service.ts) or Vast.ai's (server/vast/service.ts). */
+/** What TaskManager needs of a GPU runner: RunPod's (server/runpod/service.ts), Vast.ai's (server/vast/service.ts) or Daytona's (server/daytona/service.ts). */
 export interface GpuRunner {
   /** Which cloud; unset is RunPod (test stand-ins). */
   kind?: GpuProvider
@@ -338,6 +346,11 @@ export interface GpuRunner {
   enabled(): boolean
   /** The owner asked to keep this box's pod up until then, even idle (ms since epoch), or null. */
   keepWarmUntil(boxId: string): number | null
+  /**
+   * Its pods count toward Settings › Usage › Daily cloud limit (recorded as box usage at their $/hr each minute), and
+   * no new one starts while a cloud limit is reached. Daytona's; RunPod and Vast.ai have only their $/hr caps.
+   */
+  metered?: boolean
 }
 
 /** How prepareWorkspace set a task's folder up. `fallback`: its archive couldn't be restored, so it was cloned fresh. */
@@ -685,6 +698,8 @@ export class TaskManager {
   private readonly gpu: GpuRunner | null
   /** Vast.ai GPU instances, or null when this install doesn't have that runner. */
   private readonly vast: GpuRunner | null
+  /** Daytona sandboxes, or null when this install doesn't have that runner. */
+  private readonly daytona: GpuRunner | null
   /** When each GPU pod's heartbeat was last touched by the idle sweep, and when the sweep last ran. */
   private gpuTouchedAt = new Map<string, number>()
   /** Pods stopGpuPod is terminating, with the provider's own line about it once it came (one history row, not two). */
@@ -712,6 +727,7 @@ export class TaskManager {
   constructor(deps: TaskManagerDeps) {
     this.gpu = deps.gpu ?? null
     this.vast = deps.vast ?? null
+    this.daytona = deps.daytona ?? null
     this.docker = deps.docker ?? null
     this.machines = deps.machines ?? null
     this.identities = deps.identities
@@ -1656,9 +1672,14 @@ export class TaskManager {
     return { maxBoxes, slotsPerBox, maxAgents, maxResidentPerBox, boxIdleDeleteMinutes }
   }
 
-  /** The GPU runners this install has: RunPod's, then Vast.ai's. */
+  /** The GPU runners this install has: RunPod's, then Vast.ai's, then Daytona's. */
   private gpuRunners(): GpuRunner[] {
-    return [this.gpu, this.vast].filter((g): g is GpuRunner => Boolean(g))
+    return [this.gpu, this.vast, this.daytona].filter((g): g is GpuRunner => Boolean(g))
+  }
+
+  /** The runner of one cloud, or null when this install lacks it. */
+  private gpuRunnerOf(kind: GpuProvider): GpuRunner | null {
+    return kind === "vast" ? this.vast : kind === "daytona" ? this.daytona : this.gpu
   }
 
   private gpuKind(g: GpuRunner): GpuProvider {
@@ -1668,12 +1689,12 @@ export class TaskManager {
   /** The runner a GPU box belongs to, by its id's prefix, or null (not a GPU box, or this install lacks that cloud). */
   private gpuFor(boxId: string | null | undefined): GpuRunner | null {
     const kind = gpuBoxProvider(boxId)
-    return kind === "vast" ? this.vast : kind === "runpod" ? this.gpu : null
+    return kind ? this.gpuRunnerOf(kind) : null
   }
 
-  /** The cloud a GPU project's new pods come from: its own pick, else Settings › Vast.ai GPU › Use for GPU projects. */
+  /** The cloud a GPU project's new pods come from: its own pick, else Settings › Daytona or Settings › Vast.ai GPU › Use for GPU projects. */
   gpuCloudOf(projectId: string): GpuProvider {
-    return effectiveGpuProvider(this.store.projectGpuProvider(projectId), Boolean(this.vast?.settings().defaultForGpu))
+    return effectiveGpuProvider(this.store.projectGpuProvider(projectId), Boolean(this.vast?.settings().defaultForGpu), Boolean(this.daytona?.settings().defaultForGpu))
   }
 
   /** Every cloud's pods as last listed. */
@@ -1810,7 +1831,7 @@ export class TaskManager {
    */
   async projectGpuSettings(p: Pick<Project, "id" | "gpuMaxHourlyUsd" | "maxBoxes" | "gpuMachine"> & { gpuProvider?: GpuProvider | null }, fresh = false) {
     const kind = this.gpuCloudOf(p.id)
-    const gpu = kind === "vast" ? this.vast : this.gpu
+    const gpu = this.gpuRunnerOf(kind)
     if (!gpu) return null
     if (fresh) for (const g of this.gpuRunners()) if (g.enabled()) await this.gpuPods(g)
     const s = gpu.settings()
@@ -1823,7 +1844,7 @@ export class TaskManager {
     const ownCloud = p.gpuProvider !== undefined ? p.gpuProvider : this.store.projectGpuProvider(p.id)
     const other = pods.filter((x) => gpuBoxProvider(x.boxId) !== kind)
     return {
-      provider: `${GPU_PROVIDER_LABEL[kind]} (${ownCloud ? "this project" : "global: Settings › Vast.ai GPU › Use for GPU projects"})`,
+      provider: `${GPU_PROVIDER_LABEL[kind]} (${ownCloud ? "this project" : `global: ${globalGpuProviderSource(kind)}`})`,
       gpuTypes: `${(m.gpuTypes ?? s.gpuTypes).map(shortGpu).join(", ")} (${from(m.gpuTypes, "GPU types")})`,
       ...(kind === "runpod" ? { cloud: `${m.cloud ?? s.cloud} (${from(m.cloud, "Cloud")})` } : {}),
       minRamGb: `${m.minRamGb ?? s.minRamGb} (${from(m.minRamGb, "Min RAM")})`,
@@ -2695,6 +2716,7 @@ export class TaskManager {
     if (project.runner === "ssh" || isMachineBox(boxId)) throw new BadRequestError(`${project.name} runs on SSH machines: they're your own computers, so they're never snapshotted.`)
     if (project.runner === "gpu" || isGpuBox(boxId)) {
       if (this.gpuCloudOf(projectId) === "vast") throw new BadRequestError(`${project.name} runs on Vast.ai GPU instances, which start fresh each time, so it has no box snapshot.`)
+      if (this.gpuCloudOf(projectId) === "daytona") throw new BadRequestError(`${project.name} runs on Daytona sandboxes, which start fresh each time, so it has no box snapshot.`)
       throw new BadRequestError(`${project.name} runs on RunPod GPU pods: pod #1's network volume keeps caches between its runs, so it has no box snapshot.`)
     }
     if (project.runner === "docker" || isDockerBox(boxId)) throw new BadRequestError(`${project.name} runs in a Docker container: its volume keeps caches between runs, so it has no box snapshot.`)
@@ -3832,26 +3854,26 @@ export class TaskManager {
 
   /**
    * Which of its project's pods a GPU task's next turn takes, or null with the reason, on the cloud its project's new
-   * pods come from (`gpuCloudOf`: RunPod or Vast.ai):
+   * pods come from (`gpuCloudOf`: RunPod, Vast.ai or Daytona):
    * 1. its own pod while that's up: its workspace is there (it moves only when nothing would be lost, `canMove`),
    * 2. another of the project's pods that is up (or starting) and has a free slot,
    * 3. a new pod, while the project has fewer than its Max boxes (MAX_GPU_PODS when unset) and one more fits under
    *    the per-project and total $/hr caps (`gpuCapBlock`). Pods are `runpod-<projectId>` (#1), then `-2`, `-3`, …
-   *    (`vastai-…` on Vast.ai).
+   *    (`vastai-…` on Vast.ai, `daytona-…` on Daytona).
    * Slots per pod are its project's Agents per box, else its cloud's Agents per pod (`slotsFor`). A task whose pod is
    * on the other cloud (its project's cloud changed) moves when nothing would be lost, else keeps running there.
    */
   private async gpuTarget(row: TaskRow): Promise<string | null> {
     const projectId = row.project_id
     const kind = this.gpuCloudOf(projectId)
-    const gpu = kind === "vast" ? this.vast : this.gpu
+    const gpu = this.gpuRunnerOf(kind)
     const cloud = GPU_PROVIDER_LABEL[kind]
     if (!gpu) {
       this.setWaitReason(row.id, `Waiting: ${cloud} GPU isn't available on this Box Yard`)
       return null
     }
     if (!gpu.enabled()) {
-      this.setWaitReason(row.id, kind === "vast" ? "Waiting: Vast.ai GPU isn't set up (add a Vast.ai API key in Settings › Credentials)" : "Waiting: RunPod GPU isn't set up (add a RunPod API key in Settings › RunPod GPU)")
+      this.setWaitReason(row.id, GPU_NOT_SET_UP[kind])
       return null
     }
     const own = isGpuBox(row.box_id) && gpuBoxProject(row.box_id) === projectId ? row.box_id : null
@@ -3889,7 +3911,7 @@ export class TaskManager {
     }
     const block = await this.gpuCapBlock(gpu, projectId, pods, up)
     if (block) {
-      this.gpuWait(row, block.kind, block.reason)
+      this.gpuWait(row, block.kind, block.reason, block.fix)
       return null
     }
     // A new pod: the task's old one when it's in range (its number stays), else the first unused number.
@@ -3940,7 +3962,7 @@ export class TaskManager {
       this.gpuSeenBy.set(kind, pods)
       return pods
     } catch (err) {
-      if (taskId) this.setWaitReason(taskId, `Waiting: couldn't list the ${kind === "vast" ? "Vast.ai instances" : "RunPod pods"} (${errorMessage(err)})`)
+      if (taskId) this.setWaitReason(taskId, `Waiting: couldn't list the ${GPU_PROVIDER_LABEL[kind]} ${GPU_POD_NOUNS[kind]} (${errorMessage(err)})`)
       return null
     }
   }
@@ -3963,9 +3985,13 @@ export class TaskManager {
    * cloud's price, one still starting at the next pod's price. Null when it fits, or when the prices can't be read
    * (the pod start checks the caps again).
    */
-  private async gpuCapBlock(gpu: GpuRunner, projectId: string, pods: GpuPods, up: string[]): Promise<{ kind: string; reason: string } | null> {
+  private async gpuCapBlock(gpu: GpuRunner, projectId: string, pods: GpuPods, up: string[]): Promise<{ kind: string; reason: string; fix?: WaitFix } | null> {
     const cloudKind = this.gpuKind(gpu)
     const cloud = GPU_PROVIDER_LABEL[cloudKind]
+    if (gpu.metered) {
+      const limit = this.cloudBlock()
+      if (limit) return { kind: "cloud", reason: `${cloud} ${GPU_POD_NOUNS[cloudKind]} count toward the cloud limit, and ${limit.text}`, fix: limit.fix }
+    }
     let next: Awaited<ReturnType<GpuPodProvider["nextPodPrice"]>>
     try {
       next = await gpu.provider.nextPodPrice(projectId)
@@ -3980,7 +4006,9 @@ export class TaskManager {
         reason:
           cloudKind === "vast"
             ? `Vast.ai cap $${cap}/hr is below every offer for the GPU types in Settings › Vast.ai GPU, or none is rentable right now (${gpuCapHow(cloudKind)})`
-            : `RunPod cap $${cap}/hr is below the price of every GPU type in Settings › RunPod GPU (${gpuCapHow(cloudKind)})`,
+            : cloudKind === "daytona"
+              ? `Daytona cap $${cap}/hr is below the price of the sandbox Settings › Daytona asks for (${gpuCapHow(cloudKind)})`
+              : `RunPod cap $${cap}/hr is below the price of every GPU type in Settings › RunPod GPU (${gpuCapHow(cloudKind)})`,
       }
     }
     const cost = (id: string) => pods.find((p) => p.boxId === id)?.pod.cost ?? next.usd
@@ -4003,8 +4031,8 @@ export class TaskManager {
   }
 
   /** A GPU task waits for a pod a cap rules out: the reason on the task, and its Captain hears it once. */
-  private gpuWait(row: TaskRow, kind: string, reason: string) {
-    this.setWaitReason(row.id, `Waiting: ${reason}`)
+  private gpuWait(row: TaskRow, kind: string, reason: string, fix: WaitFix | null = null) {
+    this.setWaitReason(row.id, `Waiting: ${reason}`, null, [], fix)
     if (this.gpuWaitNoticed.get(row.id) === kind) return
     this.gpuWaitNoticed.set(row.id, kind)
     this.notice(`⚠️ **${row.title}** waits: ${reason}.`, { taskId: row.id, projectIds: [row.project_id] })
@@ -4330,7 +4358,7 @@ export class TaskManager {
     }
   }
 
-  /** A GPU pod started or was terminated (by RunPodProvider or VastProvider), for the box history. */
+  /** A GPU pod started or was terminated (by RunPodProvider, VastProvider or DaytonaProvider), for the box history. */
   gpuPodEvent(e: { boxId: string; kind: "started" | "terminated"; detail: string; actor?: BoxActor; reason?: string }) {
     // Box Yard is terminating it (stopGpuPod): that one row, with who and why, takes the provider's detail.
     if (e.kind === "terminated" && !e.actor && this.gpuTerminating.has(e.boxId)) {
@@ -4350,13 +4378,13 @@ export class TaskManager {
 
   /**
    * Terminate a GPU pod now (Terminate pod, delete_box, or the idle sweep); a RunPod pod's network volume stays, a
-   * Vast.ai instance's disk goes with it. Its workspaces must be in their archives: running turns are never stopped,
+   * Vast.ai instance's or Daytona sandbox's disk goes with it. Its workspaces must be in their archives: running turns are never stopped,
    * and a task without a fresh archive is archived first.
    */
   async stopGpuPod(boxId: string, opts: { actor: BoxActor; reason: string; force?: boolean }): Promise<void> {
     const gpu = this.gpuFor(boxId)
-    const vast = gpuBoxProvider(boxId) === "vast"
-    if (!gpu) throw new BadRequestError(`${vast ? "Vast.ai" : "RunPod"} GPU isn't available on this Box Yard`)
+    const kind = gpuBoxProvider(boxId) ?? "runpod"
+    if (!gpu) throw new BadRequestError(`${GPU_PROVIDER_LABEL[kind]} ${kind === "daytona" ? "sandboxes aren't" : "GPU isn't"} available on this Box Yard`)
     const residents = this.store.listTaskRows({ boxId })
     if (!opts.force && residents.some((r) => r.current_turn_id || r.status === "starting")) throw new ConflictError("An agent is running on that pod; stop it first")
     for (const r of residents) if (r.session_started) await this.archiveUnlessHeld(r.id).catch(() => {})
@@ -4371,7 +4399,7 @@ export class TaskManager {
       this.gpuTerminating.delete(boxId)
     }
     this.gpuTouchedAt.delete(boxId)
-    const after = vast ? "Its disk went with it; every workspace is in its archive." : "Its network volume stays."
+    const after = kind === "runpod" ? "Its network volume stays." : "Its disk went with it; every workspace is in its archive."
     this.gpuPodEvent({ boxId, kind: "terminated", detail: `${detail ? `${detail}. ` : ""}${after}`, actor: opts.actor, reason: opts.reason })
   }
 
@@ -4395,10 +4423,11 @@ export class TaskManager {
     try {
       pods = await gpu.provider.listPods(true)
     } catch (err) {
-      console.warn(`[box-yard] ${kind === "vast" ? "Vast.ai instances" : "RunPod pods"}: ${errorMessage(err)}`)
+      console.warn(`[box-yard] ${GPU_PROVIDER_LABEL[kind]} ${GPU_POD_NOUNS[kind]}: ${errorMessage(err)}`)
       return
     }
     this.gpuSeenBy.set(kind, pods)
+    if (gpu.metered) this.meterGpuPods(kind, pods, now)
     const live = new Set(this.gpuSeen.map((p) => p.boxId))
     for (const { boxId, pod } of pods) {
       if (pod.status !== "RUNNING") continue
@@ -4436,6 +4465,33 @@ export class TaskManager {
         this.gpuTouchedAt.set(boxId, now)
         await this.provider.exec(boxId, "true").catch(() => {})
       }
+    }
+  }
+
+  /**
+   * Record what a metered cloud's pods cost since they were last metered (or started) as box usage at their $/hr, so
+   * they count toward Settings › Usage › Daily cloud limit and show in the cloud meter's spend. Runs with the sweep,
+   * once a minute; a pod that's gone keeps what was recorded.
+   */
+  private meterGpuPods(kind: GpuProvider, pods: GpuPods, now: number) {
+    for (const { boxId, pod } of pods) {
+      if ((pod.status !== "RUNNING" && pod.status !== "STARTING") || !pod.cost) continue
+      const started = pod.startedAt ? Date.parse(pod.startedAt) : NaN
+      const from = Math.max(this.store.lastBoxUsageEnd(boxId) ?? 0, Number.isFinite(started) ? started : now - 60_000)
+      if (now - from < 1000) continue
+      this.store.recordBoxUsageInterval({
+        boxId,
+        provider: kind,
+        size: "small",
+        keepAlive: false,
+        startedAt: from,
+        endedAt: now,
+        activeMs: 0,
+        uptimeMs: now - from,
+        diskBytes: null,
+        source: "estimated",
+        computeUsd: (pod.cost * (now - from)) / 3_600_000,
+      })
     }
   }
 
@@ -4716,7 +4772,7 @@ export class TaskManager {
     if (isGpuBox(boxId)) {
       const pod = this.gpuFor(boxId)?.provider.cached(boxId)
       const cloud = gpuBoxProvider(boxId) ?? "runpod"
-      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU", ...(cloud === "vast" ? { cloud } : {}) } }
+      return { memoryBytes: null, slots, alone, gpu: { name: pod?.gpu?.id ? shortGpu(pod.gpu.id) : "GPU", ...(cloud !== "runpod" ? { cloud } : {}) } }
     }
     if (isDockerBox(boxId)) {
       const d = this.docker?.settings()
@@ -7333,7 +7389,7 @@ export class TaskManager {
       const pods = await g.provider.listPods().catch(() => null)
       return pods ? { pods: pods.length, hourlyUsd: pods.reduce((sum, p) => sum + (p.pod.cost ?? 0), 0), capUsd: g.settings().totalMaxHourlyUsd } : null
     }
-    const [gpu, vast] = await Promise.all([gpuSpend(this.gpu), gpuSpend(this.vast)])
+    const [gpu, vast, daytona] = await Promise.all([gpuSpend(this.gpu), gpuSpend(this.vast), gpuSpend(this.daytona)])
     return {
       spend,
       hourlyUsd: (recent * 3_600_000) / CLOUD_RATE_WINDOW_MS,
@@ -7348,6 +7404,7 @@ export class TaskManager {
       list,
       gpu,
       vast,
+      daytona,
       fanout: this.boxFanout(now),
     }
   }

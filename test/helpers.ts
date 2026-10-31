@@ -61,6 +61,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     codexApiKey: "",
     githubToken: "",
     vastApiKey: "",
+    daytonaApiKey: "",
     elevenlabsApiKey: "",
     openaiApiKey: "",
     ttsProvider: "",

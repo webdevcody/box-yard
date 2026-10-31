@@ -22,8 +22,9 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
   const [picked, setPicked] = useState<Runner | null>(null)
   const runner = picked ?? setup.data?.runner.default ?? null
   const noUpstash = setup.data?.upstash.available === false
-  // A GPU project runs on RunPod or Vast.ai: either key lets it be picked (Project › Settings › Boxes picks the cloud).
-  const noRunPod = setup.data?.credentials.runpodApiKey?.state === "unset" && setup.data?.credentials.vastApiKey?.state !== "set"
+  // A GPU project runs on RunPod, Vast.ai or Daytona: any of their keys lets it be picked (Project › Settings › Boxes picks the cloud).
+  const noRunPod =
+    setup.data?.credentials.runpodApiKey?.state === "unset" && setup.data?.credentials.vastApiKey?.state !== "set" && setup.data?.credentials.daytonaApiKey?.state !== "set"
   const noMachines = useMachines().data?.machines.length === 0
   const [machineLabel, setMachineLabel] = useState("")
   // "" follows Settings › Box agents › Agent.
@@ -88,7 +89,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
                     ? " (not sandboxed)"
                     : r === "gpu"
                       ? noRunPod
-                        ? " (add a RunPod or Vast.ai key in Settings first)"
+                        ? " (add a RunPod, Vast.ai or Daytona key in Settings first)"
                         : ""
                       : r === "docker"
                         ? " (isolated, on this computer)"

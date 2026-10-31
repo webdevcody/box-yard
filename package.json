@@ -20,6 +20,7 @@
     "worker-snapshot": "tsx scripts/make-worker-snapshot.ts",
     "smoke:runpod": "tsx scripts/smoke-runpod.ts",
     "smoke:vast": "tsx scripts/smoke-vast.ts",
+    "smoke:daytona": "tsx scripts/smoke-daytona.ts",
     "smoke:models": "tsx scripts/smoke-models.ts",
     "test:docker": "BOXYARD_DOCKER_E2E=1 vitest run test/docker-real.e2e.test.ts",
     "test:detect": "BOXYARD_DETECT_E2E=1 vitest run test/identity-detect-here.e2e.test.ts --silent=false",

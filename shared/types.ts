@@ -100,7 +100,7 @@ export interface Project {
   gpuMaxHourlyUsd: number | null
   /** When it runs on RunPod GPU: the GPU types, cloud and least host RAM/vCPUs for its new pods; null fields use Settings › RunPod GPU's. */
   gpuMachine: ProjectGpuMachine
-  /** When it runs on a GPU: the cloud its boxes come from (shared/gpu.ts); null follows Settings › Vast.ai GPU › Use for GPU projects. */
+  /** When it runs on a GPU: the cloud its boxes come from (shared/gpu.ts); null follows Settings › Daytona / Vast.ai GPU › Use for GPU projects. */
   gpuProvider: GpuProvider | null
   /** When it runs in a Docker container: its own image or Dockerfile; both null use Settings › Docker's (shared/docker.ts). */
   docker: ProjectDocker
@@ -1068,6 +1068,8 @@ export interface CloudStatus {
   gpu: { pods: number; hourlyUsd: number; capUsd: number } | null
   /** Vast.ai GPU instances, the same way; null (or absent) when Vast.ai isn't set up. */
   vast?: { pods: number; hourlyUsd: number; capUsd: number } | null
+  /** Daytona sandboxes, the same way; null (or absent) when Daytona isn't set up. */
+  daytona?: { pods: number; hourlyUsd: number; capUsd: number } | null
   /** New boxes past the ones Box Yard makes in an hour without asking. */
   fanout: BoxFanout
 }

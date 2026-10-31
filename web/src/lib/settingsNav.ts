@@ -1,7 +1,7 @@
 // Pure helpers for the settings dialog: its categories, the `?settings=` deep link, and unsaved-change tracking.
 import type { Settings } from "../../../shared/types"
 
-export type SettingsSection = "orchestrator" | "agents" | "credentials" | "identities" | "runpod" | "vast" | "docker" | "machines" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
+export type SettingsSection = "orchestrator" | "agents" | "credentials" | "identities" | "runpod" | "vast" | "daytona" | "docker" | "machines" | "hooks" | "limits" | "costs" | "notifications" | "voice" | "about"
 
 export interface SectionInfo {
   key: SettingsSection
@@ -68,6 +68,13 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
     label: "Vast.ai GPU",
     description:
       "The other GPU cloud: Vast.ai's marketplace has more GPU types and stock, often cheaper. A GPU project on Vast.ai rents an instance of its own when a task needs it and destroys it when idle. Hosts are other people's machines, so reliability and price vary.",
+    fields: [],
+  },
+  {
+    key: "daytona",
+    label: "Daytona",
+    description:
+      "Managed sandboxes for GPU projects, with or without a GPU: a project on Daytona gets a sandbox of its own when a task needs it, sized here, and it's deleted when idle. Billed per second for the CPU, memory, disk and GPU it has while it runs.",
     fields: [],
   },
   {
@@ -153,7 +160,7 @@ export const SETTINGS_SECTIONS: SectionInfo[] = [
 export const SETTINGS_PARAM = "settings"
 export const DEFAULT_SECTION: SettingsSection = "orchestrator"
 
-const ALIASES: Record<string, SettingsSection> = { identity: "identities", accounts: "identities", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", spend: "costs", meter: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", vastai: "vast", "vast.ai": "vast", container: "docker", containers: "docker" }
+const ALIASES: Record<string, SettingsSection> = { identity: "identities", accounts: "identities", signing: "identities", keys: "credentials", credential: "credentials", setup: "credentials", tokens: "credentials", hook: "hooks", automations: "hooks", boxes: "limits", agent: "agents", workers: "agents", cost: "costs", usage: "costs", budget: "costs", spend: "costs", meter: "costs", speech: "voice", tts: "voice", gpu: "runpod", gpus: "runpod", vastai: "vast", "vast.ai": "vast", sandbox: "daytona", sandboxes: "daytona", container: "docker", containers: "docker" }
 
 /** The section a `?settings=` value points at; unknown or empty values fall back to the first one. */
 export function parseSection(value: string | null | undefined): SettingsSection {

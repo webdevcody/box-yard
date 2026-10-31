@@ -14,6 +14,7 @@ import type { SettingsStore } from "./settings.js"
 import { providerMessage } from "./tts.js"
 import { checkLocal, type LocalCheckResult } from "./localCheck.js"
 import { authorFallbacks } from "./gitAuthor.js"
+import { DAYTONA_API } from "./daytona/api.js"
 import { CREDENTIAL_INFO, type CredentialKey, type CredentialTest, type LocalCheck, type RecentRepos, type SetupStatus } from "../shared/setup.js"
 import { SETUP_RUNNERS, type Runner } from "../shared/runner.js"
 import type { GpuProvider } from "../shared/gpu.js"
@@ -122,7 +123,7 @@ export class Setup {
    * login). Mock mode needs none. Never a reason to run it somewhere else instead. `claudeKey` says whether the task's
    * turns get a Claude key (TaskManager.turnCredentials: its project's, its identity's or Settings'); omitted, it's
    * whether Settings › Credentials has one. "gpu" needs the key of `gpuCloud` (the project's GPU cloud), or of
-   * either cloud when there's no project to ask.
+   * any cloud when there's no project to ask.
    */
   async runnerProblem(runner: Runner, claudeKey?: boolean, cli: AgentCli = "claude", gpuCloud?: GpuProvider): Promise<string | null> {
     const { c, credentials } = this.d
@@ -138,8 +139,10 @@ export class Setup {
     if (runner === "gpu") {
       const runpod = creds.runpodApiKey.state === "set"
       const vast = creds.vastApiKey.state === "set"
+      const daytona = creds.daytonaApiKey.state === "set"
       if (gpuCloud === "vast") return vast ? null : "Vast.ai GPU isn't set up: add a Vast.ai API key in Settings › Credentials"
-      if (gpuCloud === "runpod" || !vast) return runpod ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
+      if (gpuCloud === "daytona") return daytona ? null : "Daytona isn't set up: add a Daytona API key in Settings › Daytona"
+      if (gpuCloud === "runpod" || (!vast && !daytona)) return runpod ? null : "RunPod GPU isn't set up: add a RunPod API key in Settings › RunPod GPU"
       return null
     }
     if (runner === "box") {
@@ -272,6 +275,7 @@ export class Setup {
     if (key === "codexApiKey") return this.checkCodex({ kind: "api_key", key: value })
     if (key === "runpodApiKey") return this.checkRunPod(value)
     if (key === "vastApiKey") return this.checkVast(value)
+    if (key === "daytonaApiKey") return this.checkDaytona(value)
     return this.checkGitHub(value)
   }
 
@@ -321,6 +325,18 @@ export class Setup {
       if (typeof v === "number" && Number.isFinite(v)) credit = v
     } catch {}
     return credit === null ? "Works: Vast.ai accepted the key." : `Works: Vast.ai accepted the key ($${credit.toFixed(2)} credit).`
+  }
+
+  /**
+   * List this key's sandboxes with a label none has: free, sandbox-scoped (the permission Box Yard needs), and it
+   * never makes anything.
+   */
+  private async checkDaytona(apiKey: string): Promise<string> {
+    const labels = encodeURIComponent(JSON.stringify({ "boxyard-check": "1" }))
+    const res = await this.request(this.d.fetch, `${DAYTONA_API}/sandbox?labels=${labels}`, { headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "X-Daytona-Source": "box-yard" } }, "Daytona")
+    const body = await res.text().catch(() => "")
+    if (!res.ok) throw new Error(`Daytona ${res.status === 401 || res.status === 403 ? "rejected the key" : "failed"} (HTTP ${res.status}): ${providerMessage(body) || res.statusText}`)
+    return "Works: Daytona accepted the key."
   }
 
   /** GET /v1/models: free, and it fails the same way a real call would with a bad key. */

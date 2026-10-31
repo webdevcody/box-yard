@@ -1,6 +1,6 @@
 # RunPod GPU pods
 
-A project can run its agents on a RunPod GPU pod instead of an Upstash box or this computer: pick **Runs on: RunPod GPU** on the project's page. Use it for work that needs a real GPU, like WebGL games in headless Chrome, CUDA or ML. A project can run on [Vast.ai](vast.md) instead (its GPU cloud in Project › Settings › Boxes).
+A project can run its agents on a RunPod GPU pod instead of an Upstash box or this computer: pick **Runs on: RunPod GPU** on the project's page. Use it for work that needs a real GPU, like WebGL games in headless Chrome, CUDA or ML. A project can run on [Vast.ai](vast.md) or [Daytona](daytona.md) instead (its GPU cloud in Project › Settings › Boxes).
 
 ## Setup (once per Box Yard install)
 

@@ -10,14 +10,17 @@ import { GPU_BOX_PREFIXES, GPU_PROVIDER_LABEL, anyGpuBoxIndex, anyGpuBoxProject,
  */
 export const GPU_BOX_PREFIX = GPU_BOX_PREFIXES.runpod
 export const gpuBoxId = (projectId: string, n = 1) => gpuBoxIdOn("runpod", projectId, n)
-/** Any GPU cloud's box: RunPod's `runpod-…` or Vast.ai's `vastai-…`. */
+/** Any GPU cloud's box: RunPod's `runpod-…`, Vast.ai's `vastai-…` or Daytona's `daytona-…`. */
 export const isGpuBox = isAnyGpuBox
 export const gpuBoxProject = anyGpuBoxProject
 /** Which of its project's pods a GPU box is: 1 for `runpod-<projectId>`. */
 export const gpuBoxIndex = anyGpuBoxIndex
-/** "GPU pod #2 · survive-the-night" on RunPod, "Vast.ai GPU #2 · survive-the-night" on Vast.ai. */
-export const gpuPodLabel = (id: string, projectName: string | null) =>
-  `${gpuBoxProvider(id) === "vast" ? `${GPU_PROVIDER_LABEL.vast} GPU` : "GPU pod"} #${gpuBoxIndex(id)} · ${projectName ?? gpuBoxProject(id)}`
+/** "GPU pod #2 · survive-the-night" on RunPod, "Vast.ai GPU #2 · survive-the-night" on Vast.ai, "Daytona sandbox #2 · …" on Daytona. */
+export const gpuPodLabel = (id: string, projectName: string | null) => {
+  const cloud = gpuBoxProvider(id)
+  const name = cloud === "vast" ? `${GPU_PROVIDER_LABEL.vast} GPU` : cloud === "daytona" ? `${GPU_PROVIDER_LABEL.daytona} sandbox` : "GPU pod"
+  return `${name} #${gpuBoxIndex(id)} · ${projectName ?? gpuBoxProject(id)}`
+}
 /** The most pods one project may have: its Max boxes when lower, and the bound when it sets none (the $/hr caps apply too). */
 export const MAX_GPU_PODS = 20
 

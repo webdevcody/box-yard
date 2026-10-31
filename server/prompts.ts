@@ -35,6 +35,7 @@ export function workerSystemPrompt(input: {
   const local = Boolean(input.box?.local)
   const gpu = Boolean(input.box?.gpu)
   const vast = input.box?.gpu?.cloud === "vast"
+  const daytona = input.box?.gpu?.cloud === "daytona"
   const docker = Boolean(input.box?.docker)
   const machine = input.box?.machine
   const header = [
@@ -44,6 +45,8 @@ export function workerSystemPrompt(input: {
       ? withOwner(`You are a Box Yard agent: a headless ${cli} worker running directly on Cody's own computer (Box Yard's local runner), not in a sandbox.`, input.ownerName)
       : vast
       ? `You are a Box Yard agent: a headless ${cli} worker running on a Vast.ai GPU instance of your project's own (Linux, as root).`
+      : daytona
+      ? `You are a Box Yard agent: a headless ${cli} worker running in a Daytona sandbox of your project's own (Linux, as root).`
       : gpu
       ? `You are a Box Yard agent: a headless ${cli} worker running on a RunPod GPU pod of your project's own (Linux, as root).`
       : docker
@@ -68,6 +71,8 @@ export function workerSystemPrompt(input: {
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &); Cody opens it on http://localhost:<port>. Your ports are ${port}-${port + 9}; $PORT is ${port}. Other programs on this computer may hold a port: if yours is taken, use the next free one in your range.`
       : vast
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the instance, published straight from the host as plain HTTP that anyone with the link can open, so keep secrets out of it; ${port + 1}-${port + 9} work inside the instance only.`
+      : daytona
+      ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0. Your ports are ${port}-${port + 9}; $PORT is ${port}. Cody opens it through Daytona's HTTPS proxy, websockets included, on a link for that port alone that lapses after a day.`
       : gpu
       ? `- report_preview: after starting a server in the background (nohup ... > server.log 2>&1 &) bound to 0.0.0.0 on $PORT (${port}). Only $PORT is reachable from outside the pod (through RunPod's HTTPS proxy, websockets included); ${port + 1}-${port + 9} work inside the pod only.`
       : docker
@@ -129,6 +134,17 @@ export interface BoxPromptInfo {
 function boxLines(b: BoxPromptInfo): string[] {
   if (b.gpu) {
     const others = b.alone || b.slots <= 1 ? "" : `, shared with up to ${b.slots - 1} other agents of your project that may run at the same time`
+    if (b.gpu.cloud === "daytona") {
+      const after = [
+        `The sandbox is deleted when your project has been idle a while, and a new one is made for the next turn. Box Yard archives your working directory between turns, so your work stays; anything else on the sandbox's disk goes. There's no network volume, so large downloads come down again in a new sandbox.`,
+        `Run heavy jobs one at a time and stop servers you no longer need.`,
+      ]
+      if (b.gpu.name === "CPU only") return [`Your Daytona sandbox has no GPU (CPU only)${others}.`, ...after]
+      return [
+        `Your sandbox has ${/MI355X/.test(b.gpu.name) ? `an AMD ${b.gpu.name}${others}. It runs ROCm, not CUDA: check it with rocm-smi` : `an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi`}. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer names the GPU, not SwiftShader.`,
+        ...after,
+      ]
+    }
     if (b.gpu.cloud === "vast") {
       return [
         `Your instance has an NVIDIA ${b.gpu.name}${others}. Check it with nvidia-smi. For WebGL or WebGPU in headless Chrome, pass --use-gl=angle --use-angle=gl-egl --ignore-gpu-blocklist --enable-gpu (google-chrome is installed), then check chrome://gpu or the page's WebGL renderer says NVIDIA, not SwiftShader.`,
@@ -351,7 +367,7 @@ export const SNAPSHOT_GUIDANCE =
 /** The task tools' shared options, explained once for both chats: the tools' parameters point here ("Task options"). */
 export const TASK_OPTIONS = [
   `Task options: create_task, create_tasks and send_to_task take these (set_task_model and set_task_priority change them later); omit one for its default.`,
-  `- runs_on overrides the project's "Runs on" for the task's later turns too (follow-ups, retries, hooks, Merge PR). "local" = this computer (the one running Box Yard, unsandboxed), when Cody says "locally", "on my machine" or "on this computer", unless Settings › Machines › "Local means" names a machine label: then "local" goes to Cody's SSH machines with that label (list_machines shows local_means) and "this_computer" still means this computer; "box" = an Upstash box; "gpu" = the project's GPU pod on RunPod or Vast.ai (its gpu_provider; billed per hour; needs that cloud's key); "docker" = the project's isolated Docker container on this computer (needs Docker running and a Claude key), for "in a container" or "isolated"; "ssh" = one of Cody's own computers over SSH (any, or those machine_label names); "label:<label>" = a free SSH machine with that label or name, the same as "ssh" with machine_label, for when Cody names a group of their machines ("on a GPU machine", "on the laptops"; list_machines lists the labels). machine_label alone means runs_on "ssh"; busy or offline machines with it are waited for, and in create_tasks an item's runs_on or machine_label replaces the shared pair. A runner that can't run (claude missing or signed out here, Docker stopped, no SSH machine with the label) fails the call with the reason, and nothing is created or sent: report it, never retry on another runner. On send_to_task it moves the task ("continue it locally") from its next turn, once nothing would be lost (its turn-end archive and push hold all the work); otherwise it keeps running where it is and its log says why.`,
+  `- runs_on overrides the project's "Runs on" for the task's later turns too (follow-ups, retries, hooks, Merge PR). "local" = this computer (the one running Box Yard, unsandboxed), when Cody says "locally", "on my machine" or "on this computer", unless Settings › Machines › "Local means" names a machine label: then "local" goes to Cody's SSH machines with that label (list_machines shows local_means) and "this_computer" still means this computer; "box" = an Upstash box; "gpu" = the project's GPU pod on RunPod, Vast.ai or Daytona (its gpu_provider; billed per hour; needs that cloud's key); "docker" = the project's isolated Docker container on this computer (needs Docker running and a Claude key), for "in a container" or "isolated"; "ssh" = one of Cody's own computers over SSH (any, or those machine_label names); "label:<label>" = a free SSH machine with that label or name, the same as "ssh" with machine_label, for when Cody names a group of their machines ("on a GPU machine", "on the laptops"; list_machines lists the labels). machine_label alone means runs_on "ssh"; busy or offline machines with it are waited for, and in create_tasks an item's runs_on or machine_label replaces the shared pair. A runner that can't run (claude missing or signed out here, Docker stopped, no SSH machine with the label) fails the call with the reason, and nothing is created or sent: report it, never retry on another runner. On send_to_task it moves the task ("continue it locally") from its next turn, once nothing would be lost (its turn-end archive and push hold all the work); otherwise it keeps running where it is and its log says why.`,
   `- priority "high" puts the task's turns at the front of the queue: when a slot frees up (on this computer, a box, a GPU pod, a Docker container or an SSH machine), it goes before every normal task waiting, first in, first out among the high ones. Use it when Cody wants something to run before the queued work ("run this next", "high priority"), e.g. while every slot on this computer is taken. It never stops a running agent, and the project's limits (agents_per_box, whole_machine) still hold; a high task they hold back doesn't block others. It stays on the task, follow-ups included, until set_task_priority lowers it.`,
   `- effort, when you pass one (a matching routing rule, an escalation, or Settings leaves effort to you): the lowest that fits. low = one-command chores and lookups (open or close an issue, run one command, read a file, report a status); medium = small, well-specified edits or config changes; high = real coding work (features, bug fixes, refactors, tests, reviews, research that needs care); xhigh/max = large, hard or risky multi-file work, deep debugging or architecture decisions. Opus 4.6 and Sonnet 4.6 have no xhigh (it runs as high); Opus 4.5, Sonnet 4.5, Haiku 4.5 and older take no effort.`,
   `- model: any id \`claude --model\` takes: claude-fable-5-1, claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5, an alias (opus, sonnet, haiku, fable, best, opusplan, opus[1m], sonnet[1m]) or an older id such as claude-opus-4-6. When to pass model, effort and routing_*: "Agent model/effort routing" below.`,

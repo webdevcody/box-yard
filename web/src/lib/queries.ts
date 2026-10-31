@@ -15,6 +15,8 @@ import type { TtsInfo } from "../../../shared/tts"
 import type { CredentialKey, CredentialTest, CredentialsPatch, RecentRepos, SetupStatus } from "../../../shared/setup"
 import type { RunPodGpuOption, RunPodImageBuild, RunPodStatus } from "../../../shared/runpod"
 import type { VastGpuOption, VastStatus } from "../../../shared/vast"
+import type { DaytonaStatus } from "../../../shared/daytona"
+import { GPU_POD_NOUN, gpuBoxProvider } from "../../../shared/gpu"
 import type { DockerImageBuild, DockerStatus, ProjectDocker } from "../../../shared/docker"
 import type { MachineSettings, MachineStatus, MachinesStatus } from "../../../shared/machines"
 import type { Runner } from "../../../shared/runner"
@@ -97,6 +99,7 @@ export const keys = {
   runpodGpus: ["runpod-gpus"] as const,
   vast: ["vast"] as const,
   vastGpus: ["vast-gpus"] as const,
+  daytona: ["daytona"] as const,
   docker: ["docker"] as const,
   /** Cody's SSH machines (Settings › Machines, the Boxes page); the "machines" event keeps it live. */
   machines: ["machines"] as const,
@@ -527,6 +530,21 @@ export function useVastAction<T>(title: string, call: (input: T) => Promise<Vast
   return useMutation({
     mutationFn: call,
     onSuccess: (r) => qc.setQueryData(keys.vast, r),
+    onError: fail(title),
+  })
+}
+
+// ------------------------------------------------------------------ Daytona (Settings › Daytona)
+
+/** Settings and sandboxes. Polled while open: sandboxes change at Daytona, not here. */
+export const useDaytona = (o: { enabled?: boolean; poll?: boolean } = {}) =>
+  useQuery({ queryKey: keys.daytona, queryFn: () => api<DaytonaStatus>("/api/daytona"), enabled: o.enabled, refetchInterval: o.poll ? 15_000 : false, staleTime: 5_000 })
+/** A Daytona action: save settings, keep a sandbox warm. */
+export function useDaytonaAction<T>(title: string, call: (input: T) => Promise<DaytonaStatus>) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: call,
+    onSuccess: (r) => qc.setQueryData(keys.daytona, r),
     onError: fail(title),
   })
 }
@@ -1337,7 +1355,13 @@ export function useDeleteBox() {
     },
     onSuccess: (res, input) => {
       qc.setQueryData<BoxInfo[]>(keys.boxes, (list) => list?.filter((b) => b.id !== input.boxId))
-      if (res.kind === "pod") toast.info(`Terminated ${res.label}`, "Every workspace was archived first and its network volume stays. Its tasks start a new pod on their next message.")
+      if (res.kind === "pod")
+        toast.info(
+          `Terminated ${res.label}`,
+          gpuBoxProvider(input.boxId) === "runpod"
+            ? "Every workspace was archived first and its network volume stays. Its tasks start a new pod on their next message."
+            : `Every workspace was archived first, then its disk went with it. Its tasks start a new ${GPU_POD_NOUN[gpuBoxProvider(input.boxId) ?? "runpod"]} on their next message.`,
+        )
       else if (res.kind === "container") toast.info(`Deleted ${res.label}`, "Every workspace was archived first, then the container and its volume went. Its tasks start a new container on their next message.")
       else toast.info(`Deleted ${input.boxId}`, "Every workspace was archived first. Its tasks move to another box on their next message.")
     },
@@ -1346,6 +1370,7 @@ export function useDeleteBox() {
       void qc.invalidateQueries({ queryKey: keys.tasks })
       void qc.invalidateQueries({ queryKey: keys.runpod })
       void qc.invalidateQueries({ queryKey: keys.vast })
+      void qc.invalidateQueries({ queryKey: keys.daytona })
       void qc.invalidateQueries({ queryKey: keys.docker })
     },
   })

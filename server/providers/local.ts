@@ -276,6 +276,8 @@ export class LocalRunnerRouter implements BoxProvider {
     readonly vast: BoxProvider | null = null,
     /** Cody's SSH machines (`ssh-<machineId>`, shared/machines.ts). */
     readonly machines: BoxProvider | null = null,
+    /** Daytona sandboxes (`daytona-<projectId>[-<n>]`, shared/gpu.ts), when set up. */
+    readonly daytona: BoxProvider | null = null,
   ) {
     if (base.resize) this.resize = (boxId, size) => this.of(boxId).resize!(boxId, size)
     // Snapshots are the box provider's; the local runner's computer is never snapshotted (LocalRunnerProvider).
@@ -291,6 +293,10 @@ export class LocalRunnerRouter implements BoxProvider {
     if (gpuBoxProvider(boxId) === "vast") {
       if (!this.vast) throw new Error("Vast.ai GPU isn't set up: add VAST_API_KEY in Settings › Credentials")
       return this.vast
+    }
+    if (gpuBoxProvider(boxId) === "daytona") {
+      if (!this.daytona) throw new Error("Daytona isn't set up: add DAYTONA_API_KEY in Settings › Credentials")
+      return this.daytona
     }
     if (isGpuBox(boxId)) {
       if (!this.gpu) throw new Error("RunPod GPU isn't set up: add RUNPOD_API_KEY in Settings › Credentials")
