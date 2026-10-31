@@ -6,7 +6,7 @@ import type { ChatMessage } from "../../../shared/types"
 import { groupPublished, type PublishedGroup } from "./publishedNotices"
 import { noticeKind, plainText, segments, splitNotice, type NoticeKind } from "./captainTranscript"
 import { stripTruncation } from "./truncated"
-import { routes } from "./linkify"
+import { routes, shortShas } from "./linkify"
 
 /** Notices that wait on Cody or went wrong: always a full card with an accent, never a chip. */
 export const ATTENTION_KINDS: ReadonlySet<NoticeKind> = new Set(["needs_input", "failed", "merge"])
@@ -83,10 +83,10 @@ export interface ChipView {
   preview: string
 }
 
-/** Plain text with URLs as their short labels ("PR #16", a file name). */
+/** Plain text with URLs as their short labels ("PR #16", a file name) and commit SHAs in their short form. */
 const plainLine = (md: string) =>
   segments(plainText(md))
-    .map((s) => ("href" in s ? s.label : s.text))
+    .map((s) => ("href" in s ? s.label : shortShas(s.text)))
     .join("")
     .trim()
 

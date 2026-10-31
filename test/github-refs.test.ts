@@ -61,6 +61,12 @@ describe("splitGithubRefs", () => {
     ])
   })
 
+  it("reads a whole SHA as its short form, keeping the whole one in the link", () => {
+    const sha = "ff8fc2305ab9c31e61cfc78f89fadf6c2d5d42ee"
+    const [, seg] = splitGithubRefs(`merged as squash commit ${sha}.`, "o/r")
+    expect(seg).toEqual({ text: sha, label: "ff8fc23", url: `https://github.com/o/r/commit/${sha}`, kind: "commit" })
+  })
+
   it("leaves hex that isn't a SHA after one of those words alone", () => {
     // Words and numbers: a SHA has letters and digits.
     expect(refs("head deadbeef, as 1234567, commit facade1x")).toEqual([])
