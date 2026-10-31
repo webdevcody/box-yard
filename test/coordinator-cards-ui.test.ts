@@ -20,6 +20,7 @@ import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { COORDINATOR_CHAT, closeThread, forgetThread, openThread, openThreadId } from "../web/src/lib/threads.js"
 import { contextLabel } from "../web/src/components/ContextMeter.js"
 import { revealChatMessage } from "../web/src/lib/reveal.js"
+import { resetDock } from "../web/src/lib/dockComposer.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project, SettingsInfo, Task, TaskStatus } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -73,6 +74,7 @@ beforeEach(() => {
   sessionStorage.clear()
   resetCardsSeen()
   resetChipState()
+  resetDock()
   vi.stubGlobal("fetch", () => new Promise(() => {}))
   history.replaceState(null, "", "/")
   qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
@@ -246,6 +248,9 @@ describe("Coordinator cards", () => {
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
     const pill = host.querySelector('[data-testid="new-cards-pill"]')!
     expect(pill.textContent).toContain("1 new")
+    // In the line over the box, not floating over the cards.
+    expect(pill.closest('[data-testid="dock-line"]')).not.toBeNull()
+    expect(host.querySelector("[data-overlay]")).toBeNull()
     expect(pill.querySelector('[data-testid="new-cards-target"]')!.textContent).toBe("Coordinator cards")
     // The card got news without moving.
     expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
@@ -992,6 +997,85 @@ describe("A card's event digest", () => {
     expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')).toBeNull()
     expect(card(CARDS.id).querySelectorAll('[data-testid="update-chip"]')).toHaveLength(1)
     expect(coordinator().querySelector('[data-testid="event-digest"]')).toBeNull()
+  })
+})
+
+describe("The docked box (a narrow chat)", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+  })
+  afterEach(() => vi.restoreAllMocks())
+  /** The chat column measures `width` px: a phone's, or a wide panel's. */
+  const narrow = (width = 390) => vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, bottom: 800, right: width, width, height: 800, toJSON: () => ({}) } as DOMRect)
+  const footer = () => host.querySelector('[data-testid="chat-footer"]') as HTMLElement
+  const to = () => footer().querySelector('[data-testid="dock-to-target"]')?.textContent
+  const textarea = () => footer().querySelector("textarea")!
+  const send = async (text: string) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea(), text)
+      textarea().dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void footer().querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+  }
+
+  it("is the only box: it follows the card Cody opens, says so, and sends to its task", async () => {
+    narrow()
+    render()
+    expect(footer().dataset.docked).toBe("true")
+    expect(to()).toBe("Coordinator")
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+    click(head(LOGIN.id))
+    // No box in the card: the one at the bottom is its.
+    expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).toBeNull()
+    expect(to()).toBe("Fix login")
+    expect(textarea().placeholder).toBe("Answer the agent…")
+    await send("The new one")
+    expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
+    // Another card opened: the box goes with it. Closed: back to the Coordinator.
+    click(head(CARDS.id))
+    expect(to()).toBe("Coordinator cards")
+    click(head(CARDS.id))
+    expect(to()).toBe("Coordinator")
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+  })
+
+  it("its To menu sends to the Coordinator or another open card", () => {
+    narrow()
+    render()
+    click(head(LOGIN.id))
+    click(head(CARDS.id))
+    click(footer().querySelector('[data-testid="dock-to"]')!)
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map((i) => i.textContent)).toEqual(["To the Coordinator", "To Fix login", "To Coordinator cards"])
+    click(items[1]!)
+    expect(to()).toBe("Fix login")
+    click(footer().querySelector('[data-testid="dock-to"]')!)
+    click(document.querySelector('[role="menuitem"]')!)
+    expect(to()).toBe("Coordinator")
+  })
+
+  it("names the picked project's Captain as the chat's own", () => {
+    narrow()
+    act(() => setChatProjectFilter(YARD.id))
+    render()
+    expect(to()).toBe("box-yard Captain")
+  })
+
+  it("isn't there in a wide chat: each open card keeps its own box", () => {
+    narrow(800)
+    render()
+    expect(footer().dataset.docked).toBeUndefined()
+    click(head(LOGIN.id))
+    expect(footer().querySelector('[data-testid="dock-to"]')).toBeNull()
+    expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
   })
 })
 

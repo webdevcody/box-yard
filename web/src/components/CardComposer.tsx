@@ -25,17 +25,19 @@ export function cardPlaceholder(task: Task): string {
   return "Reply to this task…"
 }
 
-/** A task's card (or a batch's task row). `className`: the side panel's sticky footer. */
-export const CardComposer = memo(function CardComposer({ task, className = BOX }: { task: Task; className?: string }) {
-  const toTask = useSendTaskMessage(task.id, { quiet: refused })
+/**
+ * Sending a reply to `task` from the chat: straight to it, or to the Coordinator when it refuses (lib/reroute.ts).
+ * `rerouted`: why the last one went to the Coordinator, until the next one goes through. A card's box and the chat's
+ * docked box (DockComposer.tsx) share it.
+ */
+export function useCardSend(task: Task | null) {
+  const toTask = useSendTaskMessage(task?.id ?? "", { quiet: refused })
   const toCoordinator = useSendChat()
-  const panel = useRef<HTMLElement>(null)
-  // Why the last reply went to the Coordinator instead, until the next one goes through.
-  const [rerouted, setRerouted] = useState<string | null>(null)
+  const [rerouted, setRerouted] = useState<{ taskId: string; reason: string } | null>(null)
   const submit = useCallback(
-    async (text: string, attachments: Attachment[]) => {
+    async (text: string, attachments: Attachment[] = []) => {
       const content = text.trim()
-      if (!content) return
+      if (!content || !task) return
       try {
         await toTask.mutateAsync({ content, attachments, inChat: true })
         setRerouted(null)
@@ -44,11 +46,18 @@ export const CardComposer = memo(function CardComposer({ task, className = BOX }
         const reason = (err as Error).message
         // Thrown again when the Coordinator can't take it either: the Composer puts the text back.
         await toCoordinator.mutateAsync({ id: newClientId("chat"), content: reroutedMessage(task, reason, content) })
-        setRerouted(reason)
+        setRerouted({ taskId: task.id, reason })
       }
     },
     [task, toTask.mutateAsync, toCoordinator.mutateAsync],
   )
+  return { submit, rerouted: rerouted && rerouted.taskId === task?.id ? rerouted.reason : null }
+}
+
+/** A task's card (or a batch's task row). `className`: the side panel's sticky footer. */
+export const CardComposer = memo(function CardComposer({ task, className = BOX }: { task: Task; className?: string }) {
+  const panel = useRef<HTMLElement>(null)
+  const { submit, rerouted } = useCardSend(task)
   return (
     <div data-testid="card-composer" className="@container/box">
       <Composer
@@ -71,7 +80,7 @@ export const CardComposer = memo(function CardComposer({ task, className = BOX }
 })
 
 /** Under a card's box: its last reply went to the Coordinator, why, and (behind a project filter) the way to it. */
-function Rerouted({ reason }: { reason: string }) {
+export function Rerouted({ reason }: { reason: string }) {
   const filtered = useChatProjectFilter() !== null
   const show = () => {
     setChatProjectFilter(null)
@@ -85,7 +94,7 @@ function Rerouted({ reason }: { reason: string }) {
         {filtered && (
           <>
             {" "}
-            <button type="button" onClick={show} className={cx("text-yard-400 underline-offset-2 hover:underline pointer-coarse:min-h-9")}>
+            <button type="button" onClick={show} className={cx("text-yard-400 underline-offset-2 hover:underline pointer-coarse:min-h-11")}>
               Show
             </button>
           </>

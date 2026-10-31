@@ -50,10 +50,11 @@ import { confirmDialog } from "../lib/confirm"
 import { chipView, isSent, itemMessages, noticeText, type CoordinatorRow } from "../lib/chatUpdates"
 import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
-import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
+import { isOpen, setOpen, useChipOpen, useOpenAmong } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, clearShownMessage, setTasksOnly, showCard, showMessage, useFocusCard, useShownMessage, useTasksOnly } from "../lib/coordinatorView"
 import { revealChatMessage } from "../lib/reveal"
+import { dockTarget, setDockTarget, useDocked, useDockTarget } from "../lib/dockComposer"
 import { shortShas } from "../lib/linkify"
 import { digestEntries, digestSummary, eventLine, isEvent, type DigestPiece } from "../lib/cardDigest"
 import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../lib/cardJump"
@@ -628,6 +629,14 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   useEffect(() => {
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
+  // The docked box (DockComposer.tsx) follows the card Cody opens, and goes back to the chat's own when it closes.
+  const wasOpen = useRef(open)
+  useEffect(() => {
+    if (open === wasOpen.current) return
+    wasOpen.current = open
+    if (open) setDockTarget(card.key)
+    else if (dockTarget() === card.key) setDockTarget(null)
+  }, [open, card.key])
   const onHead = (e: MouseEvent | KeyboardEvent) => {
     // Its PR link and its buttons keep their click.
     if ((e.target as HTMLElement).closest("a, button")) return
@@ -832,14 +841,40 @@ function CardSession({
   )
 }
 
-/** An open card: its session and the box to reply in. Its header has the way to the side panel, its page and Mark done. */
+/**
+ * An open card: its session and the box to reply in, which a narrow chat docks at its bottom instead
+ * (DockComposer.tsx). Its header has the way to the side panel, its page and Mark done.
+ */
 function CardBody({ card, task, next, onFollowUp }: { card: ChatCard; task: Task | undefined; next: string | null; onFollowUp: (text: string) => void }) {
+  const docked = useDocked()
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
       <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} />
-      {task && <CardComposer task={task} />}
+      {task && !docked && <CardComposer task={task} />}
     </div>
   )
+}
+
+/**
+ * The card the docked box sends to: the one Cody opened last (lib/dockComposer.ts), while it's open and shown (not
+ * folded away or behind another project). Null: the chat's own box.
+ */
+export function useDockCard(layout: CardsLayout | null): ChatCard | null {
+  const key = useDockTarget()
+  const [open] = useChipOpen(cardOpenKey(key ?? ""))
+  if (!key || !open || !layout) return null
+  return layout.live.find((c) => c.key === key) ?? layout.idle.find((c) => c.key === key) ?? layout.done.find((c) => c.key === key) ?? null
+}
+
+/** The open cards the docked box can send to, in the list's order: its "To" menu. */
+export function useOpenCards(layout: CardsLayout | null): ChatCard[] {
+  const cards = useMemo(() => (layout ? [...layout.live, ...layout.idle, ...layout.done] : []), [layout])
+  const keys = useMemo(() => cards.map((c) => cardOpenKey(c.key)), [cards])
+  const open = useOpenAmong(keys)
+  return useMemo(() => {
+    const on = new Set(open.split("\n"))
+    return cards.filter((c) => on.has(cardOpenKey(c.key)))
+  }, [cards, open])
 }
 
 /** The panel's box: the chat's sticky footer. */
@@ -1233,8 +1268,8 @@ function CoordinatorHidden() {
   return <HiddenCard label="Coordinator card" onShow={() => setTasksOnly(false)} testId="coordinator-hidden" />
 }
 
-/** What the pill covers at the bottom of the chat: a card under it is still below. */
-const PILL_INSET = 48
+/** What covers the bottom of the chat: nothing, the pill sits in the line over the box. */
+const PILL_INSET = 0
 
 /**
  * Which way the card `key` is from what's on screen in its scroller (lib/cardJump.ts), kept up to date as the chat
@@ -1306,7 +1341,7 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
       data-direction={dir}
       data-target={target.key}
       title={more ? `Go to this card (${where}); click again for the next of ${fresh.length} cards with news` : `Go to this card (${where})`}
-      className="flex min-w-0 items-center gap-1.5 rounded-full border border-yard-400/50 bg-[#1c1708] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-yard-300 shadow-lg hover:bg-[#2a220b] pointer-coarse:py-2.5"
+      className="flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-yard-400/50 bg-[#1c1708] px-2.5 text-xs font-medium whitespace-nowrap text-yard-300 hover:bg-[#2a220b] focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-3.5"
     >
       <Arrow className="h-3.5 w-3.5 shrink-0" aria-hidden />
       <span className="shrink-0">{total} new</span>
@@ -1323,13 +1358,13 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
   )
 })
 
-/** The card the pill goes to: its icon and title, cut short. A phone has room for the icon only; the title is still read out. */
+/** The card the pill goes to: its icon and title, cut short. A narrow line has room for the icon only; the title is still read out. */
 function PillTarget({ card, where }: { card: ChatCard; where: string }) {
   const tile = useTaskTile(card.taskId)
   return (
     <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(tile?.color)}>
       <TaskTile id={card.taskId} />
-      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 max-[26rem]:sr-only">
+      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 @max-[34rem]/dock:sr-only">
         {tile?.title ?? card.key}
       </span>
       <span className="sr-only">, {where}</span>

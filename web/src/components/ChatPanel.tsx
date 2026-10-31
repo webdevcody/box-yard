@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react"
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type RefObject } from "react"
 import { useLocation } from "wouter"
 import { Expand, Loader2, Minimize2, MoreHorizontal, Settings as SettingsIcon, Shrink, Square, X } from "lucide-react"
 import {
@@ -21,8 +21,10 @@ import { REVEAL_CHAT_EVENT } from "../lib/reveal"
 import { splitQueued } from "../lib/queued"
 import { AgentIcon, Button, InRepo, META_CHIP, Markdown, cx } from "./ui"
 import { useEntityIndex } from "../lib/entities"
-import { StickyScroll, type StickyScrollHandle } from "./StickyScroll"
-import { COMPOSER_FOOTER, Composer, type ComposerHandle } from "./Composer"
+import { StickyScroll, createJumpStore, type StickyScrollHandle } from "./StickyScroll"
+import { type ComposerHandle } from "./Composer"
+import { DockComposer } from "./DockComposer"
+import { DOCK_BELOW_PX, setDocked } from "../lib/dockComposer"
 import { CONTEXT_WARN_PCT, ContextMeter, ContextMiniBar, contextLabel, contextPct } from "./ContextMeter"
 import { menuItem, usePopover } from "./TaskHeader"
 import { useOpenSettings } from "./SettingsDialog"
@@ -37,7 +39,7 @@ import { SideThreadPane, ThreadChatProvider, type CardPanelProps } from "./SideT
 import { ProjectBar, ProjectFilterEmpty } from "./ProjectBar"
 import { chatProvenance, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { pickProject, setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
-import { CardPanel, CardsBarPills, CardsView, NewCardsPill, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
+import { CardPanel, CardsBarPills, CardsView, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
 import { CaptainCard, showBottomCard } from "./BottomCard"
 import { projectColorStyle } from "./TaskIcon"
 import { useTiles } from "../lib/taskTiles"
@@ -106,6 +108,11 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
   const composer = useRef<ComposerHandle>(null)
   const panel = useRef<HTMLElement>(null)
   const scroller = useRef<StickyScrollHandle>(null)
+  // "Jump to latest" goes in the line over the box (DockComposer.tsx), not over the cards.
+  const jumpStore = useMemo(createJumpStore, [])
+  // The chat column's width: narrow, the cards' boxes dock at its bottom (lib/dockComposer.ts).
+  const column = useRef<HTMLDivElement>(null)
+  useDockWhenNarrow(column)
   // Until the required keys are set, Zen shows the setup card instead of a chat that can't answer. The thread and
   // composer stay mounted behind it, so a draft survives.
   const setup = useSetupNeeded()
@@ -180,6 +187,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     : { busy: Boolean(busy.data), state: orch.data, queued: compact.isPending, compact: compactNow, who: "the Coordinator's" }
   // The chat switcher stays in this chat: a project goes on the project bar and the chat shows only it, its Captain
   // in the box below (rather than opening the Captain's own tab or Zen panel); the Coordinator shows it all again.
+  const chatTarget = useMemo(() => (captainId ? { label: `the ${captainName} Captain`, color: captainColor } : { label: "the Coordinator" }), [captainId, captainName, captainColor])
   const pickHere = useCallback((chat: string) => {
     if (chat === COORDINATOR_CHAT) setChatProjectFilter(null)
     else pickProject(chat)
@@ -199,7 +207,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       {/* A `coord` container: an open side thread sits beside the chat when the panel is wide (App widens the dock
           for it), over it when not. */}
       <section ref={panel} data-testid="chat-panel" className="@container/coord relative flex h-full min-w-0 bg-zinc-950">
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div ref={column} className="relative flex min-w-0 flex-1 flex-col">
           {/* The `head` container: the header and the docked meter row under it switch to their narrow layout together. */}
           <div className={HEAD_CONTAINER}>
           <header
@@ -296,7 +304,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                 handle={scroller}
                 count={(cards ? cards.live.length + cards.idle.length + cards.done.length + cards.coordinator.length : 0) + (captainId ? (captainMessages.data?.length ?? 0) + (talking.busy ? 1 : 0) : 0)}
                 restoreKey="chat:cards"
-                overlay={cards && <NewCardsPill cards={cards.live} />}
+                jumpStore={jumpStore}
                 // --chat-pad: its top padding, which a card's sticky header pulls up over (CoordinatorCards).
                 className={zen ? "zen-column py-6 [--chat-pad:1.5rem]" : "px-4 py-4 [--chat-pad:1rem]"}
                 contentClassName="space-y-3"
@@ -343,7 +351,10 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
               </StickyScroll>
             </SelectionToTask>
 
-            <Composer
+            <DockComposer
+              layout={cards}
+              jumpStore={jumpStore}
+              chat={chatTarget}
               onSubmit={submit}
               placeholder={captainId ? (talking.busy ? "Queue another message for the Captain…" : `Message the ${captainName} Captain…`) : busy.data ? "Queue another message…" : "Ask the Coordinator…"}
               textareaRef={box}
@@ -363,7 +374,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                   </span>
                 )
               }
-              className={zen ? cx(COMPOSER_FOOTER, "zen-column overflow-hidden") : undefined}
+              className={zen ? "zen-column overflow-hidden" : undefined}
             />
           </div>
         </div>
@@ -375,6 +386,23 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
     </ThreadChatProvider>
   )
 })
+
+/** Docks the cards' boxes while `column` is narrower than DOCK_BELOW_PX (its own width, not the window's). */
+function useDockWhenNarrow(column: RefObject<HTMLElement | null>) {
+  useLayoutEffect(() => {
+    const el = column.current
+    if (!el) return
+    const measure = () => setDocked(el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().width < DOCK_BELOW_PX)
+    measure()
+    if (typeof ResizeObserver !== "function") return () => setDocked(false)
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      setDocked(false)
+    }
+  }, [column])
+}
 
 const contextHint = (who: string) => `How much of ${who} context window is used. Compact when it gets high.`
 
