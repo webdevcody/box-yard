@@ -165,7 +165,10 @@ describe("Coordinator cards", () => {
     expect(origin.textContent).toContain("Fix login and build the cards")
     // Its question.
     expect(body.textContent).toContain("Which page, the old one or the new one?")
-    expect([...body.querySelectorAll(`a[href="/tasks/${LOGIN.id}"]`)].some((a) => a.textContent === "Task page")).toBe(true)
+    // Its page is a button in its header, not a footer link.
+    expect(card(LOGIN.id).querySelector(`[data-testid="chat-card-meta"] a[href="/tasks/${LOGIN.id}"]`)!.textContent).toBe("Task page")
+    expect(body.textContent).not.toContain("Task page")
+    expect(body.textContent).not.toContain("Open in panel")
     // In its own card a task's update leads with what happened, not the task's name.
     click(head(CARDS.id))
     const chip = card(CARDS.id).querySelector('[data-testid="update-chip"]')!
@@ -230,7 +233,7 @@ describe("Coordinator cards", () => {
     const body = card(HOLLOW.id).querySelector('[data-testid="chat-card-body"]')!
     expect(body.textContent).toContain("the entrance is lit")
     expect(body.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Shoot every Map 3 area")
-    expect(body.querySelector(`a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
+    expect(card(HOLLOW.id).querySelector(`[data-testid="chat-card-meta"] a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
     // The finished one is in "done today", a card like any other.
     click(host.querySelector('[data-testid="cards-done"]')!)
     expect(card(CAMP.id).textContent).toContain("Merged")
@@ -360,9 +363,10 @@ describe("Reply in a card", () => {
     expect(bubble.textContent).toContain("to this task")
     expect(bubble.textContent).toContain("The new one")
     expect(bubble.textContent).not.toContain("got a message")
-    // It answers Cody, so it reads as the agent's reply, not a chip.
+    // It answers Cody, so it reads as the agent's reply, not a chip; the card's header names the task, so it doesn't.
     const reply = body.querySelector('[data-testid="agent-reply"]')!
-    expect(reply.textContent).toContain("Fix login")
+    expect(reply.textContent).toContain("finished its turn")
+    expect(reply.textContent).not.toContain("Fix login")
     expect(reply.textContent).toContain("Switched to the new page.")
     expect(reply.querySelector("strong")?.textContent).toBe("the new page")
     expect([...body.querySelectorAll('[data-testid="update-chip"]')].some((c) => c.textContent?.includes("Switched"))).toBe(false)
@@ -566,10 +570,11 @@ describe("A card in the side panel", () => {
     expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
   })
 
-  it("opens from an open card's footer", () => {
+  it("opens from an open card's ⤢, in its header", () => {
     render()
     click(head(CARDS.id))
-    click(button(card(CARDS.id), "Open in panel"))
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-open-panel"]')).toBeNull()
+    click(expand(CARDS.id))
     expect(panel()!.dataset.card).toBe(CARDS.id)
     expect(panel()!.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Coordinator cards")
     expect(panel()!.textContent).toContain("opened PR #9")
@@ -872,6 +877,50 @@ describe("The bottom panel with a project picked", () => {
   })
 })
 
+describe("A card's header", () => {
+  const meta = (key: string) => card(key).querySelector('[data-testid="chat-card-meta"]') as HTMLElement
+  it("holds the title once, then one row with its status, one PR chip (↗), its age and ✓ ⤢ → and fold", () => {
+    render()
+    const c = card(CARDS.id)
+    expect(c.querySelectorAll('[data-testid="chat-card-title"]')).toHaveLength(1)
+    expect(meta(CARDS.id).textContent).toContain("PR ready")
+    const pr = meta(CARDS.id).querySelectorAll('a[href="https://github.com/o/r/pull/9"]')
+    expect(pr).toHaveLength(1)
+    expect(pr[0]!.getAttribute("target")).toBe("_blank")
+    expect(pr[0]!.querySelector("[data-external-mark]")).not.toBeNull()
+    expect([...meta(CARDS.id).querySelectorAll("button, a")].map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim())).toEqual([
+      expect.stringContaining("PR #9"),
+      "Mark done",
+      "Open in the side panel",
+      "Task page",
+      "Open the card",
+    ])
+    // Open, the body doesn't repeat it: no PR chip, no counts, no footer.
+    click(c.querySelector('[data-testid="chat-card-fold"]')!)
+    expect(c.dataset.open).toBe("true")
+    expect(c.querySelector('[data-testid="chat-card-fold"]')!.getAttribute("aria-label")).toBe("Fold the card")
+    const body = c.querySelector('[data-testid="chat-card-body"]')!
+    expect(body.querySelector('a[href="https://github.com/o/r/pull/9"]')).toBeNull()
+    expect(c.textContent).not.toMatch(/\d+ updates?\b/)
+    click(c.querySelector('[data-testid="chat-card-fold"]')!)
+    expect(c.dataset.open).toBeUndefined()
+  })
+
+  it("says Merged once, in its PR chip", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    expect(meta(CAMP.id).textContent!.match(/Merged/g)).toHaveLength(1)
+    expect(meta(CAMP.id).querySelector('[data-pr-state="merged"]')!.textContent).toContain("Merged #399")
+  })
+
+  it("names its project only under All", () => {
+    render()
+    expect(meta(CARDS.id).querySelector('[data-testid="chat-card-project"]')!.textContent).toBe(YARD.name)
+    act(() => setChatProjectFilter(YARD.id))
+    expect(meta(CARDS.id).querySelector('[data-testid="chat-card-project"]')).toBeNull()
+  })
+})
+
 describe("Mark done in the cards", () => {
   // Resting since a turn 5 hours ago: past the 3 hour "Idle after".
   const OLD = task("task_old00001", MAP.id, "Map 3 PR #401: East Town", "idle")
@@ -946,10 +995,14 @@ describe("Mark done in the cards", () => {
     expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
   })
 
-  it("marks a task waiting on Cody done from the open card's footer; no ✓ on a card that's running or asking", () => {
+  it("marks a task waiting on Cody done from the open card's ✓; no ✓ on a closed card that's running or asking", () => {
     render()
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
     click(head(LOGIN.id))
-    click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
+    const check = card(LOGIN.id).querySelector('[data-testid="chat-card-check"]') as HTMLElement
+    expect(check.title).toContain("Close the task")
+    click(check)
     expect(toastTitles()).toEqual(["Marked done"])
     // Open, it stays where it is (it folds once closed), and says it's done.
     expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])

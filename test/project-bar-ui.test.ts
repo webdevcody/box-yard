@@ -119,7 +119,7 @@ describe("project bar", () => {
   it("leads task links with their tile, in their project's colour", () => {
     render(createElement(ChatPanel))
     // The reply's link, in the Coordinator card.
-    const links = [...host.querySelectorAll(`a[href="/tasks/${LEVEL.id}"]`)]
+    const links = [...host.querySelectorAll(`[data-testid="coordinator-card"] a[href="/tasks/${LEVEL.id}"]`)]
     expect(links).toHaveLength(1)
     for (const link of links) {
       const tile = link.querySelector('[data-testid="task-tile"]')!

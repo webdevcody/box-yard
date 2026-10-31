@@ -1,23 +1,24 @@
 // The Coordinator chat as cards: one per task, in the order the chat first named them, so new activity never moves
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
-// its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
-// latest line. Open, it shows where it came from, its newest entries, a box that replies to its task (CardComposer.tsx),
-// and the way to its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
-// instead, with its whole history. With a project picked in the bar, that project's Captain card (BottomCard.tsx)
-// takes the Coordinator card's place.
+// its title (full width), then one row with its status, its PR chip, its news and age, and its actions as buttons
+// (44px under a finger): ✓ Mark done, ⤢ the side panel, → its task page and fold. Closed, its latest line. Open, it
+// shows where it came from, its newest entries and a box that replies to its task (CardComposer.tsx); nothing in it
+// repeats the header. ⤢ opens it in the side panel reply threads use (SideThread.tsx) instead, with its whole
+// history. With a project picked in the bar, that project's Captain card (BottomCard.tsx) takes the Coordinator card's place.
 // Every task has its own card, one create_tasks call's next to each other. Finished cards fold into "N done today" at the top, and
 // resting ones quiet for Settings' cardsIdleHours into "N idle" next to it; a card with news says "N new" until
-// opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
-// over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
+// opened, and the ↓ pill steps through them. Mark done (a card's ✓, Select, or "Mark all idle as done" in Select's
+// bar) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
 // "Tasks only" is the chat header's TasksOnlyToggle (lib/coordinatorView.ts).
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   Bot,
-  ChevronRight,
+  ChevronDown,
   ChevronUp,
   ChevronsDownUp,
   LocateFixed,
@@ -57,7 +58,7 @@ import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../li
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
-import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
+import { COORDINATOR_CHAT, closeThread, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
 import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
@@ -72,7 +73,7 @@ import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
 import { usePopover } from "./TaskHeader"
 import { BAR_CHIP, CHIP_OFF } from "./ProjectBar"
-import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, TimeAgo, cx } from "./ui"
+import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, StatusDot, TimeAgo, cx } from "./ui"
 import { CARDS_IDLE_HOURS, type ChatMessage, type Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
@@ -80,12 +81,12 @@ const CARD_SHOW = 4
 const COORDINATOR_SHOW = 3
 const EARLIER_STEP = 10
 
-const CARD = "scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px] bg-zinc-900/40"
+const CARD = "@container scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px] bg-zinc-900/40"
 const CARD_HEAD =
   "block w-full cursor-pointer rounded-[9px] py-2 pr-2 pl-3 text-left hover:bg-zinc-900/50 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
 const CARD_BODY = "space-y-2 border-t border-zinc-800/70 py-2 pr-2.5 pl-3"
-/** The line under a card's title, lined up with it past the tile. */
-const UNDER_TITLE = "ml-[30px]"
+/** The lines under a card's title, lined up with it past the tile (a narrow card has no tile). */
+const UNDER_TITLE = "ml-[30px] @max-[30rem]:ml-0"
 const FOOT =
   "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
 const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
@@ -563,33 +564,45 @@ function CardTitle({ title }: { title: string }) {
 }
 
 /**
- * The line under a card's title: its project, status, run time and PR, what it holds, and when. `children` go at its
- * end (a card's new count, ✓ and ⤢), so the title keeps the card's width.
+ * The line under a card's title: its status (unless its PR chip says "Merged" already), run time, PR, news and age;
+ * its project only under "All" in a wide card (the stripe is its colour). `actions` go at its end, so the title keeps
+ * the card's whole width.
  */
-function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; children?: ReactNode }) {
+function CardMeta({ head, last, unread = 0, actions }: { head: CardHead; last: number; unread?: number; actions?: ReactNode }) {
   const { tile, task, status } = head
-  const updates = card.entries.filter((e) => e.type === "update").length
-  const replies = card.entries.length - updates
+  const picked = useChatProjectFilter() !== null
+  const merged = status === "merged" && Boolean(task?.prUrl)
   return (
-    <div className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
-      <span className="flex min-w-0 items-center gap-1.5">
-        <ProjectDot projectId={tile?.projectId} />
-        <span className="truncate text-zinc-400">{tile?.projectName}</span>
-      </span>
+    <div data-testid="chat-card-meta" className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
+      {!picked && tile?.projectName && (
+        <span data-testid="chat-card-project" className="flex min-w-0 items-center gap-1.5 @max-[30rem]:hidden">
+          <ProjectDot projectId={tile.projectId} />
+          <span className="truncate text-zinc-400">{tile.projectName}</span>
+        </span>
+      )}
       {task && status && (
         <>
-          <StatusBadge status={status} />
+          {!merged && <StatusDot status={status} className="text-[11.5px]" />}
           <PriorityPill task={task} />
           <Running task={task} />
-          <PrChip task={task} variant="link" className="text-[11.5px]" />
+          <PrChip task={task} className="text-[11.5px]" />
         </>
       )}
-      {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
-      <TimeAgo ts={card.last} />
-      {children && <span className="ml-auto flex shrink-0 items-center gap-0.5">{children}</span>}
+      {unread > 0 && (
+        <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
+          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
+          {unread} new
+        </span>
+      )}
+      <TimeAgo ts={last} />
+      {actions && <span className="ml-auto flex shrink-0 items-center gap-0.5">{actions}</span>}
     </div>
   )
 }
+
+/** A card header's buttons: 28px with a mouse, 44px under a finger. */
+const HEAD_BUTTON =
+  "grid h-7 w-7 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:w-11"
 
 /** One task's card. */
 const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
@@ -602,8 +615,9 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const atWork = status !== undefined && AT_WORK.has(status)
   const markDone = useCardMarkDone(task)
   const selecting = useSelecting()
-  // The header's ✓: only on a resting card (as Mark all idle), so it never stops a turn or skips a question.
-  const quickDone = task && CLEARABLE.has(task.status) ? markDone : null
+  // The ✓ on a closed card: only a resting one (as Mark all idle), so a glance never stops a turn or skips a question.
+  // Open, any task's (a running one asks first).
+  const check = open ? markDone : task && CLEARABLE.has(task.status) ? markDone : null
   const picked = usePicked(card.key)
   const closing = usePendingCloses()
   const pickable = selecting && Boolean(task && CLEARABLE.has(task.status) && !closing.has(task.id))
@@ -613,7 +627,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
   const onHead = (e: MouseEvent | KeyboardEvent) => {
-    // Its PR link, its ✓ and its ⤢ keep their click.
+    // Its PR link and its buttons keep their click.
     if ((e.target as HTMLElement).closest("a, button")) return
     if ("key" in e && e.key !== "Enter" && e.key !== " ") return
     e.preventDefault()
@@ -622,6 +636,33 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
       if (pickable) togglePicked(card.key)
     } else toggle()
   }
+  const actions = !selecting && (
+    <>
+      {check && (
+        <button type="button" data-testid="chat-card-check" onClick={check.run} aria-label={check.label} title={open ? check.title : check.label} className={cx(HEAD_BUTTON, "hover:bg-emerald-500/10 hover:text-emerald-300")}>
+          <CircleCheck className="h-[15px] w-[15px]" aria-hidden />
+        </button>
+      )}
+      <button
+        type="button"
+        data-testid="chat-card-panel"
+        onClick={() => toggleCard(COORDINATOR_CHAT, card.key)}
+        aria-pressed={inPanel}
+        aria-label="Open in the side panel"
+        title={inPanel ? "Close the side panel" : "Open in the side panel"}
+        className={cx(HEAD_BUTTON, "aria-pressed:text-yard-300")}
+      >
+        <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
+      </button>
+      <AppLink href={`/tasks/${card.taskId}`} title="Open the task page" className={cx(HEAD_BUTTON, "text-yard-400 hover:text-yard-300")}>
+        <ArrowRight className="h-[15px] w-[15px]" aria-hidden />
+        <span className="sr-only">Task page</span>
+      </AppLink>
+      <button type="button" data-testid="chat-card-fold" onClick={toggle} aria-expanded={open} aria-label={open ? "Fold the card" : "Open the card"} title={open ? "Fold" : "Open"} className={HEAD_BUTTON}>
+        <ChevronDown className={cx("h-4 w-4 transition-transform motion-reduce:transition-none", open && "rotate-180")} aria-hidden />
+      </button>
+    </>
+  )
   return (
     <section
       id={`card-${card.key}`}
@@ -663,52 +704,16 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
               {picked && pickable ? <SquareCheck className="h-4 w-4" /> : <Square className="h-4 w-4" />}
             </span>
           )}
-          <TaskTile id={card.taskId} size="lg" />
+          <TaskTile id={card.taskId} size="lg" className="@max-[30rem]:hidden" />
           <CardTitle title={title} />
-          <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
-        <CardMeta card={card} head={head}>
-          {unread > 0 && (
-            <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="mr-1 inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
-              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
-              {unread} new
-            </span>
-          )}
-          {!selecting && quickDone && <CardCheck markDone={quickDone} />}
-          <button
-            type="button"
-            data-testid="chat-card-panel"
-            onClick={() => toggleCard(COORDINATOR_CHAT, card.key)}
-            aria-pressed={inPanel}
-            aria-label="Open in the side panel"
-            title={inPanel ? "Close the side panel" : "Open in the side panel"}
-            className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-pressed:text-yard-300 pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
-          >
-            <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
-          </button>
-        </CardMeta>
+        <CardMeta head={head} last={card.last} unread={unread} actions={actions} />
         {!open && <LatestLine card={card} />}
       </div>
-      {open && <CardBody card={card} task={task} next={next} onFollowUp={onFollowUp} markDone={markDone} />}
+      {open && <CardBody card={card} task={task} next={next} onFollowUp={onFollowUp} />}
     </section>
   )
 })
-
-/** A resting card's ✓ at the end of its meta line: Mark done in one click, with the toast's Undo. */
-function CardCheck({ markDone }: { markDone: NonNullable<ReturnType<typeof useCardMarkDone>> }) {
-  return (
-    <button
-      type="button"
-      data-testid="chat-card-check"
-      onClick={markDone.run}
-      aria-label={markDone.label}
-      title={markDone.label}
-      className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
-    >
-      <CircleCheck className="h-[14px] w-[14px]" aria-hidden />
-    </button>
-  )
-}
 
 const NO_TASKS: Task[] = []
 
@@ -825,39 +830,12 @@ function CardSession({
   )
 }
 
-/** An open card: its session, the box to reply in, and the way to the side panel and its page. */
-function CardBody({
-  card,
-  task,
-  next,
-  onFollowUp,
-  markDone,
-}: {
-  card: ChatCard
-  task: Task | undefined
-  next: string | null
-  onFollowUp: (text: string) => void
-  markDone: ReturnType<typeof useCardMarkDone>
-}) {
+/** An open card: its session and the box to reply in. Its header has the way to the side panel, its page and Mark done. */
+function CardBody({ card, task, next, onFollowUp }: { card: ChatCard; task: Task | undefined; next: string | null; onFollowUp: (text: string) => void }) {
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
       <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} />
       {task && <CardComposer task={task} />}
-      <div className="flex flex-wrap items-center gap-1 pt-0.5">
-        <button type="button" onClick={() => openCard(COORDINATOR_CHAT, card.key)} className={FOOT} data-testid="chat-card-open-panel">
-          <Maximize2 className="h-3 w-3" aria-hidden />
-          Open in panel
-        </button>
-        <AppLink href={`/tasks/${card.taskId}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-          Task page
-        </AppLink>
-        {markDone && (
-          <button type="button" onClick={markDone.run} title={markDone.title} className={cx(FOOT, "ml-auto")} data-testid="chat-card-mark-done">
-            <CircleCheck className="h-3 w-3" aria-hidden />
-            {markDone.label}
-          </button>
-        )}
-      </div>
     </div>
   )
 }
@@ -981,7 +959,7 @@ function CardPanelView({
             <TaskTile id={card.taskId} size="lg" />
             <CardTitle title={title} />
           </div>
-          <CardMeta card={card} head={head} />
+          <CardMeta head={head} last={card.last} />
         </div>
         <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} inPanel />
       </StickyScroll>
@@ -1040,9 +1018,9 @@ function CardEntries({
       )}
       {shown.map((e) =>
         e.type === "message" ? (
-          <ChatLine key={e.id} m={e.message} sources={e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
+          <ChatLine key={e.id} m={e.message} sources={own ? null : e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
         ) : answers.has(e.id) && e.item.type === "notice" ? (
-          <AgentReply key={e.id} m={e.item.message} />
+          <AgentReply key={e.id} m={e.item.message} own={own} />
         ) : (
           <UpdateChip key={e.id} item={e.item} own={own} />
         ),
@@ -1111,8 +1089,11 @@ function answersOf(entries: readonly CardEntry[]): Set<string> {
   return out
 }
 
-/** A task's agent answering Cody in its card: its tile and name, then its words from the turn's notice. */
-const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
+/**
+ * A task's agent answering Cody: its tile and name (not in its own card, whose header says them), then its words from
+ * the turn's notice.
+ */
+const AgentReply = memo(function AgentReply({ m, own }: { m: ChatMessage; own: boolean }) {
   const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
   const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
   const tile = useTaskTile(taskId)
@@ -1122,8 +1103,12 @@ const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
   return (
     <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="agent-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <div className="mb-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] text-zinc-500">
-        <TaskTile id={taskId} />
-        <span className="min-w-0 truncate font-medium text-zinc-300">{tile?.title ?? v.source?.label}</span>
+        {!own && (
+          <>
+            <TaskTile id={taskId} />
+            <span className="min-w-0 truncate font-medium text-zinc-300">{tile?.title ?? v.source?.label}</span>
+          </>
+        )}
         <Icon className={cx("h-3 w-3 shrink-0", className)} aria-label={label} />
         <span className="shrink-0">{v.verb}</span>
         <TimeAgo ts={m.createdAt} />
