@@ -11,8 +11,12 @@
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
 //   Tool calls aren't shown.
 // - An entry about several tasks is on each of their cards.
-// - A card's place is where the chat first named its task, so new activity never moves it. The tasks one create_tasks
-//   call started (Task.batchId) sit together, in the order they were made, where the chat first named any of them.
+// - Every task has a card, the chat named it or not: one a Captain started for Cody (he asked it, not the Coordinator)
+//   is in no Coordinator chat row until its first update, and it's running all the same. arrangeCards shows one the
+//   chat never named while its task is at work or waiting, or for a day after it was made.
+// - A card's place is when its task was made, so new activity never moves it; a task made more than CARD_WINDOW_MS
+//   before the chat first named it (an old one brought back) sits where the chat named it. The tasks one create_tasks
+//   call started (Task.batchId) sit together, in the order they were made, where the first of them sits.
 import type { ChatMessage, TaskStatus } from "../../../shared/types"
 import type { BadgeStatus } from "./prState"
 import type { EntityIndex } from "./linkify"
@@ -42,12 +46,16 @@ export interface ChatCard {
   taskId: string
   /** Oldest first. */
   entries: readonly CardEntry[]
-  /** When the chat first named it: its place in the list (a create_tasks call's tasks: the first of them named). */
+  /** Its place in the list: when its task was made, or when the chat first named it (see the top). */
   first: number
   /** When its newest entry came in (`first` while it has none). */
   last: number
   /** The message that started it (Cody's, or a schedule's or hook's prompt), when the chat first named it in that turn. */
   origin: ChatMessage | null
+  /** False while the chat hasn't named its task: no entries, and arrangeCards shows it only while it's at work or new. */
+  named: boolean
+  /** Who started its task, for a card with nothing else to say ("the nebula Captain", "a hook"); null when unknown. */
+  startedBy: string | null
 }
 
 export interface CardsModel {
@@ -63,6 +71,20 @@ export interface CardTask {
   title: string
   batchId: string | null
   createdAt: number
+  /** Task.startedBy: captain:<project>, orchestrator, cody, hook:<id>, agent:<task>, system. */
+  startedBy?: string | null
+  projectName?: string
+}
+
+/** Who started a task, as a card says it. */
+function starter(t: CardTask): string | null {
+  const s = t.startedBy ?? ""
+  if (s.startsWith("captain:")) return t.projectName ? `the ${t.projectName} Captain` : "its Captain"
+  if (s === "orchestrator") return "the Coordinator"
+  if (s === "cody" || s.startsWith("cody:")) return "you"
+  if (s.startsWith("hook:")) return "a hook"
+  if (s.startsWith("agent:")) return "another task"
+  return null
 }
 
 const NO_TASKS: readonly string[] = []
@@ -142,26 +164,30 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     }
   }
 
-  // One card per task, placed where the chat first named it.
+  // One card per task, placed when it was made (or, brought back long after, where the chat first named it).
   const cards = new Map<string, ChatCard & { entries: CardEntry[] }>()
   const seq = new Map<string, number>()
   const card = (id: string) => {
     let c = cards.get(id)
     if (!c) {
       const n = named.get(id)
+      const t = tasks.get(id)!
       if (n) seq.set(id, n.seq)
-      cards.set(id, (c = { key: id, taskId: id, entries: [], first: n?.at ?? Infinity, last: n?.at ?? Infinity, origin: n?.origin ?? null }))
+      const first = !n || (t.createdAt <= n.at && n.at - t.createdAt <= CARD_WINDOW_MS) ? t.createdAt : n.at
+      const isNamed = Boolean(n) || started.has(id)
+      cards.set(id, (c = { key: id, taskId: id, entries: [], first, last: first, origin: n?.origin ?? null, named: isNamed, startedBy: starter(t) }))
     }
     return c
   }
   for (const id of started) if (tasks.has(id)) card(id)
   for (const e of placed) for (const t of new Set(e.tasks)) card(t).entries.push(e)
+  for (const id of tasks.keys()) card(id)
   const out = [...cards.values()]
   for (const c of out) {
-    if (!Number.isFinite(c.first)) c.first = c.entries[0]?.at ?? 0
+    c.named ||= c.entries.length > 0
     c.last = Math.max(c.first, ...c.entries.map((e) => e.at))
   }
-  // A create_tasks call's tasks stay together, in the order they were made, where the chat first named any of them.
+  // A create_tasks call's tasks stay together, in the order they were made, where the first of them sits.
   type Place = { first: number; seq: number; made: number }
   const own = (c: ChatCard): Place => ({ first: c.first, seq: seq.get(c.key) ?? Infinity, made: 0 })
   const before = (a: Place, b: Place) => a.first - b.first || a.seq - b.seq
@@ -216,7 +242,7 @@ export function stableCards(prev: CardsModel | null, next: CardsModel): CardsMod
   const cards = next.cards.map((c) => {
     const kept = keep(c.entries)
     const p = byKey.get(c.key)
-    if (p && p.first === c.first && p.last === c.last && p.origin === c.origin && p.taskId === c.taskId && sameList(p.entries, kept)) return p
+    if (p && p.first === c.first && p.last === c.last && p.origin === c.origin && p.taskId === c.taskId && p.named === c.named && p.startedBy === c.startedBy && sameList(p.entries, kept)) return p
     return { ...c, entries: kept }
   })
   const coordinator = keep(next.coordinator)
@@ -244,8 +270,8 @@ export interface CardsArrangement {
 }
 
 /**
- * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
- * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top, and with `idleMs` set, resting
+ * Which cards show: those with work going on, waiting on Cody or with a PR open (one the chat never named: only the
+ * first two); the rest while the chat said something about them, or their task was made, in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top, and with `idleMs` set, resting
  * ones (nothing running, queued or waiting) quiet that long into "N idle". `project` keeps one project's. `stay` keeps a
  * card where it is whatever its task does (one open as its task finishes: Cody is reading its reply).
  */
@@ -266,7 +292,8 @@ export function arrangeCards(
     const status = statusOf(c.taskId)
     if (!status) continue
     if (stay(c) || ACTIVE.has(status)) live.push(c)
-    else if (c.last < now - CARD_WINDOW_MS && !OPEN.has(status)) continue
+    // One the chat never named: only while at work or waiting, or for a day after it was made (old ones don't flood in).
+    else if (c.last < now - CARD_WINDOW_MS && (!c.named || !OPEN.has(status))) continue
     else if (FINISHED.has(status)) done.push(c)
     else if (idleMs > 0 && c.last < now - idleMs) idle.push(c)
     else live.push(c)
