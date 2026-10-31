@@ -90,7 +90,8 @@ describe("project bar", () => {
     render(createElement(ChatPanel))
     const ids = () => [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
     const coordinator = () => host.querySelector('[data-testid="coordinator-card"]')
-    expect(ids()).toEqual([LEVEL.id, CARDS.id])
+    // LOGIN, named only in a reply to Cody, still has its card: every task has one.
+    expect(ids()).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
     expect(coordinator()!.textContent).toContain("is asking you something")
     click(chip("Map 3"))
     expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
@@ -100,10 +101,10 @@ describe("project bar", () => {
     expect(text()).not.toContain("hook fired")
     expect(host.querySelector('[data-testid="project-filter-banner"]')?.textContent).toContain("Only Map 3")
     click(chip("box-yard"))
-    expect(ids()).toEqual([CARDS.id])
+    expect(ids()).toEqual([LOGIN.id, CARDS.id])
     expect(text()).toContain("Coordinator cards")
     click(chip("box-yard"))
-    expect(ids()).toEqual([LEVEL.id, CARDS.id])
+    expect(ids()).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
     click(chip("Map 3"))
     const showAll = [...host.querySelectorAll('[data-testid="project-filter-banner"] button')].find((b) => b.textContent?.includes("Show all"))!
     click(showAll)
