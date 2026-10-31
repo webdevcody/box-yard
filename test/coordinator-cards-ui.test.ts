@@ -1239,3 +1239,30 @@ describe("Mark done is instant", () => {
     expect(posts).toEqual([])
   })
 })
+
+describe("a task the Coordinator chat never named", () => {
+  it("gets a card while it runs (a Captain started it for Cody), with the project picked too, and says who started it", async () => {
+    render()
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
+    // Cody asked Map 3's Captain directly: its create_task is in the Captain's chat, and the new task reaches the list
+    // after the page loaded. Nothing in the Coordinator chat names it.
+    const NESTED = task("task_nested01", MAP.id, "Nested list: v1 + v4", "working", { createdAt: Date.now() - 60_000, startedBy: `captain:${MAP.id}` })
+    await act(async () => {
+      qc.setQueryData(keys.tasks, [...TASKS, NESTED])
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id, NESTED.id])
+    expect(card(NESTED.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Started by the Map 3 Captain")
+    act(() => setChatProjectFilter(MAP.id))
+    expect(cards().map((c) => c.dataset.card)).toEqual([HOLLOW.id, DAM.id, NESTED.id])
+    // An old finished task the chat never named doesn't come back as a card.
+    act(() => setChatProjectFilter(null))
+    const OLD = task("task_olddone1", YARD.id, "Old chore", "done", { createdAt: Date.now() - 3 * 24 * 3600_000, startedBy: "cody" })
+    await act(async () => {
+      qc.setQueryData(keys.tasks, [...TASKS, NESTED, OLD])
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(cards().map((c) => c.dataset.card)).not.toContain(OLD.id)
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("2 done today")
+  })
+})
