@@ -34,10 +34,10 @@ import { ChatLine } from "./ChatLine"
 import { useCoordinatorRows } from "./UpdateChips"
 import { SelectionToTask } from "./SelectionToTask"
 import { SideThreadPane, ThreadChatProvider, type CardPanelProps } from "./SideThread"
-import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
+import { ProjectBar, ProjectFilterEmpty } from "./ProjectBar"
 import { chatProvenance, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { pickProject, setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
-import { CardPanel, CardsView, NewCardsPill, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
+import { CardPanel, CardsBarPills, CardsView, NewCardsPill, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
 import { CaptainCard, showBottomCard } from "./BottomCard"
 import { projectColorStyle } from "./TaskIcon"
 import { useTiles } from "../lib/taskTiles"
@@ -285,7 +285,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
             />
           )}
           </div>
-          {!showSetup && <ProjectBar recent={recent} className={zen ? "zen-column" : "px-4"} />}
+          {!showSetup && <ProjectBar recent={recent} className={zen ? "zen-column" : "px-4"} trailing={cards && <CardsBarPills layout={cards} />} />}
 
           {showSetup && <SetupCard status={setup.status!} className="zen-column" />}
           {setup.needed && !showSetup && <SetupReminder status={setup.status!} onFinish={finishSetup} className={zen ? "zen-column" : "px-4"} />}
@@ -326,7 +326,7 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
                     </div>
                   </div>
                 )}
-                {projectFilter && <ProjectFilterBanner projectId={projectFilter} empty={!cards || (!cards.live.length && !cards.idle.length && !cards.done.length && !cards.coordinator.length)} />}
+                {projectFilter && (!cards || (!cards.live.length && !cards.idle.length && !cards.done.length && !cards.coordinator.length)) && <ProjectFilterEmpty projectId={projectFilter} />}
                 {/* The Coordinator's replies span projects: "#12" links only where a paragraph is about one repo. Notices and chips set their task's. */}
                 <InRepo mentions>
                   {cards ? (

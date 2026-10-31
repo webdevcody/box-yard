@@ -959,8 +959,10 @@ describe("Mark done in the cards", () => {
     expect(card(DAM.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
   })
 
-  it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
+  it("Mark all idle as done (in Select's bar) lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
     render()
+    expect(host.querySelector('[data-testid="cards-clear-idle"]')).toBeNull()
+    click(host.querySelector('[data-testid="cards-select"]')!)
     click(host.querySelector('[data-testid="cards-clear-idle"]')!)
     const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
     expect(pop.textContent).toContain("Mark 2 tasks done?")
@@ -971,6 +973,8 @@ describe("Mark done in the cards", () => {
     expect(confirm.textContent).toContain("Mark 1 done")
     click(confirm)
     expect(host.querySelector('[data-testid="cards-clear-idle-popover"]')).toBeNull()
+    // Done with Select too.
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
     expect(live()).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     expect(fold("idle")!.textContent).toContain("1 idle")
     expect(toastTitles()).toEqual(["Marked done"])
@@ -979,6 +983,7 @@ describe("Mark done in the cards", () => {
   it("keeps to the project bar's filter", () => {
     render()
     act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="cards-select"]')!)
     click(host.querySelector('[data-testid="cards-clear-idle"]')!)
     const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
     expect(pop.textContent).toContain("Mark 1 task done?")

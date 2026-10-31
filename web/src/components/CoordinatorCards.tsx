@@ -28,6 +28,7 @@ import {
   Link2,
   Maximize2,
   Minimize2,
+  Moon,
   MoreHorizontal,
   PanelBottomClose,
   Send,
@@ -70,6 +71,7 @@ import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
 import { usePopover } from "./TaskHeader"
+import { BAR_CHIP, CHIP_OFF } from "./ProjectBar"
 import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, TimeAgo, cx } from "./ui"
 import { CARDS_IDLE_HOURS, type ChatMessage, type Task } from "../../../shared/types"
 
@@ -278,23 +280,17 @@ export const CardsView = memo(function CardsView({
   )
 })
 
-const FOLD =
-  "flex min-w-0 flex-1 basis-[13rem] items-center gap-2 rounded-[10px] border border-dashed border-zinc-800 px-2 py-1.5 text-left text-xs text-zinc-500 hover:text-zinc-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-10"
-const BAR_BUTTON =
-  "inline-flex h-full min-h-7 items-center gap-1 rounded-lg border border-zinc-800 px-2 text-xs text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-expanded:bg-zinc-900 aria-expanded:text-zinc-100 pointer-coarse:min-h-10"
+/** A count pill on the filter bar's right: "✓ 24 done today", "☾ 3 idle"; its icon and number alone when narrow. */
+const FOLD_PILL = cx(BAR_CHIP, CHIP_OFF, "pr-2 pointer-coarse:px-3 aria-expanded:border-zinc-600 aria-expanded:bg-zinc-800 aria-expanded:text-zinc-50")
+const BAR_BUTTON = cx(BAR_CHIP, CHIP_OFF, "px-2 text-zinc-400 hover:text-zinc-100 pointer-coarse:w-11 pointer-coarse:justify-center pointer-coarse:px-0")
 
-/** "3 done today" or "4 idle" with their tiles: opens into the cards. */
-function Fold({ cards, open, toggle, label, title, testId }: { cards: readonly ChatCard[]; open: boolean; toggle: () => void; label: string; title: string; testId: string }) {
+/** "✓ 24 done today" or "☾ 4 idle": opens its cards over the list. */
+function Fold({ count, open, toggle, icon: Icon, iconClass, label, title, testId }: { count: number; open: boolean; toggle: () => void; icon: LucideIcon; iconClass: string; label: string; title: string; testId: string }) {
   return (
-    <button type="button" aria-expanded={open} onClick={toggle} data-testid={testId} title={title} className={FOLD}>
-      <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 transition-transform", open && "rotate-90")} aria-hidden />
-      <span className="shrink-0">{label}</span>
-      <span className="flex min-w-0 gap-0.5 overflow-hidden">
-        {cards.map((c) => (
-          <TaskTile key={c.key} id={c.taskId} />
-        ))}
-      </span>
-      <span className="ml-auto shrink-0 @max-[20rem]:hidden">{open ? "hide" : "show"}</span>
+    <button type="button" aria-expanded={open} onClick={toggle} data-testid={testId} title={title} aria-label={`${count} ${label}`} className={FOLD_PILL}>
+      <Icon className={cx("h-3.5 w-3.5 shrink-0", iconClass)} aria-hidden />
+      <b className="font-semibold tabular-nums">{count}</b>
+      <span className="text-zinc-400 @max-[30rem]/bar:hidden"> {label}</span>
     </button>
   )
 }
@@ -302,9 +298,45 @@ function Fold({ cards, open, toggle, label, title, testId }: { cards: readonly C
 const hoursLabel = (h: number) => (h < 1 ? `${Math.round(h * 60)}m` : `${Number.isInteger(h) ? h : h.toFixed(1)}h`)
 
 /**
- * Over the cards: "N done today" and "N idle" side by side (stacked when narrow), Select and "Mark all idle as done" on
- * the right; in Select mode, its bar. Then the cards of whichever fold is open.
+ * On the filter bar's right (ProjectBar's `trailing`): "✓ N done today" and "☾ N idle", each opening its cards at the
+ * top of the list, and Select, which picks cards to mark done (Mark all idle as done is in its bar).
  */
+export const CardsBarPills = memo(function CardsBarPills({ layout }: { layout: CardsLayout }) {
+  const { live, idle, done } = layout
+  const [doneOpen, toggleDone] = useChipOpen("cards:done")
+  const [idleOpen, toggleIdle] = useChipOpen("cards:idle")
+  const selecting = useSelecting()
+  const hours = useAgentSettings().data?.settings.cardsIdleHours ?? CARDS_IDLE_HOURS.default
+  const resting = useMemo(() => [...idle, ...live], [idle, live])
+  const clearable = useClearable(resting)
+  return (
+    <>
+      {done.length > 0 && (
+        <Fold count={done.length} open={doneOpen} toggle={toggleDone} icon={CircleCheck} iconClass="text-emerald-400" label="done today" title="Cards whose tasks finished in the last day" testId="cards-done" />
+      )}
+      {idle.length > 0 && (
+        <Fold
+          count={idle.length}
+          open={idleOpen}
+          toggle={toggleIdle}
+          icon={Moon}
+          iconClass="text-zinc-400"
+          label="idle"
+          title={`Resting cards with no activity for ${hoursLabel(hours)} or more (Settings › Coordinator › Idle after)`}
+          testId="cards-idle"
+        />
+      )}
+      {!selecting && clearable.length > 0 && (
+        <button type="button" onClick={() => startSelecting()} data-testid="cards-select" aria-label="Select" title="Select cards to mark done" className={BAR_BUTTON}>
+          <ListChecks className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="@max-[36rem]/bar:hidden">Select</span>
+        </button>
+      )}
+    </>
+  )
+})
+
+/** Over the cards: in Select mode, its bar. Then the cards of whichever fold the filter bar has open. */
 function CardsBar({
   live,
   idle,
@@ -318,40 +350,15 @@ function CardsBar({
   newest: string | null
   onFollowUp: (text: string) => void
 }) {
-  const [doneOpen, toggleDone] = useChipOpen("cards:done")
-  const [idleOpen, toggleIdle] = useChipOpen("cards:idle")
+  const [doneOpen] = useChipOpen("cards:done")
+  const [idleOpen] = useChipOpen("cards:idle")
   const selecting = useSelecting()
-  const hours = useAgentSettings().data?.settings.cardsIdleHours ?? CARDS_IDLE_HOURS.default
   const resting = useMemo(() => [...idle, ...live], [idle, live])
   const clearable = useClearable(resting)
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <>
       {selecting && <SelectBar cards={resting} clearable={clearable} />}
-      {(done.length > 0 || idle.length > 0 || (!selecting && clearable.length > 0)) && (
-        <div data-testid="cards-bar" className="flex flex-wrap items-stretch gap-2">
-          {done.length > 0 && <Fold cards={done} open={doneOpen} toggle={toggleDone} label={`${done.length} done today`} title="Cards whose tasks finished in the last day" testId="cards-done" />}
-          {idle.length > 0 && (
-            <Fold
-              cards={idle}
-              open={idleOpen}
-              toggle={toggleIdle}
-              label={`${idle.length} idle`}
-              title={`Resting cards with no activity for ${hoursLabel(hours)} or more (Settings › Coordinator › Idle after)`}
-              testId="cards-idle"
-            />
-          )}
-          {!selecting && clearable.length > 0 && (
-            <span className="ml-auto flex shrink-0 items-stretch gap-1">
-              <button type="button" onClick={() => startSelecting()} data-testid="cards-select" aria-label="Select" title="Select cards to mark done" className={BAR_BUTTON}>
-                <ListChecks className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                <span className="@max-[30rem]:hidden">Select</span>
-              </button>
-              <ClearIdle tasks={clearable} />
-            </span>
-          )}
-        </div>
-      )}
       {doneOpen && done.map((c) => <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />)}
       {idleOpen && idle.map((c) => <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />)}
     </>
@@ -370,7 +377,7 @@ function useClearable(cards: readonly ChatCard[]): Task[] {
  * "Mark all idle as done": a popover listing the tasks it closes (the project bar's filter applies), each one a
  * checkbox to leave it out. Running and queued tasks and ones waiting on Cody are never in it.
  */
-function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
+function ClearIdle({ tasks, onDone }: { tasks: readonly Task[]; onDone: () => void }) {
   const { open, setOpen, root, trigger } = usePopover()
   const [left, setLeft] = useState<ReadonlySet<string>>(new Set())
   const mark = useMarkTasksDone()
@@ -398,7 +405,7 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
         aria-label="Mark all idle as done"
         title="Mark every resting task in these cards done"
         data-testid="cards-clear-idle"
-        className={BAR_BUTTON}
+        className={FOOT}
       >
         <CircleCheck className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span className="@max-[30rem]:hidden">Mark all idle as done</span>
@@ -441,6 +448,7 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
               onClick={() => {
                 setOpen(false)
                 mark(chosen)
+                onDone()
               }}
             >
               <CircleCheck className="h-3.5 w-3.5" /> Mark {chosen.length} done
@@ -452,7 +460,10 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
   )
 }
 
-/** Select mode's bar, pinned over the cards: how many are picked, Select all, Mark done, and Cancel (or Esc). */
+/**
+ * Select mode's bar, pinned over the cards: how many are picked, Mark all idle as done, Select all, Mark done, and
+ * Cancel (or Esc).
+ */
 function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable: readonly Task[] }) {
   const picked = usePickedKeys()
   const mark = useMarkTasksDone()
@@ -484,6 +495,7 @@ function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable
         {chosen.length ? `${chosen.length} task${chosen.length === 1 ? "" : "s"} selected` : "Pick cards to mark done"}
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1">
+        {clearable.length > 0 && <ClearIdle tasks={clearable} onDone={stopSelecting} />}
         <button type="button" onClick={() => setPicked(all ? [] : pickable.map((c) => c.key))} className={FOOT}>
           {all ? "Select none" : "Select all"}
         </button>

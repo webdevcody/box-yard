@@ -98,16 +98,21 @@ describe("project bar", () => {
     expect(ids()).toEqual([LEVEL.id])
     expect(coordinator()).toBeNull()
     expect(text()).not.toContain("hook fired")
-    expect(host.querySelector('[data-testid="project-filter-banner"]')?.textContent).toContain("Only Map 3")
+    // One bar: no "Only Map 3 / Show all" banner under it; the picked chip's × is Show all.
+    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
+    expect(text()).not.toContain("Only Map 3")
+    expect(pill("Map 3").querySelector('[data-testid="project-unpin"]')).toBeNull()
     click(chip("box-yard"))
     expect(ids()).toEqual([CARDS.id])
     expect(text()).toContain("Coordinator cards")
     click(chip("box-yard"))
     expect(ids()).toEqual([LEVEL.id, CARDS.id])
     click(chip("Map 3"))
-    const showAll = [...host.querySelectorAll('[data-testid="project-filter-banner"] button')].find((b) => b.textContent?.includes("Show all"))!
+    const showAll = pill("Map 3").querySelector<HTMLElement>('[data-testid="project-clear"]')!
+    expect(showAll.getAttribute("aria-label")).toBe("Show all projects")
     click(showAll)
-    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
+    expect(allChip().getAttribute("aria-pressed")).toBe("true")
+    expect(pill("Map 3").querySelector('[data-testid="project-clear"]')).toBeNull()
     expect(coordinator()!.textContent).toContain("is asking you something")
   })
 
@@ -263,14 +268,15 @@ describe("pinning and unpinning", () => {
     expect(readPins()[MAP.id]).toBe("pinned")
   })
 
-  it("unpinning the project the chat shows switches to All", () => {
+  it("the picked chip's × shows everything again and keeps it on the bar, where it can be unpinned", () => {
     render(createElement(ChatPanel))
     click(chip("Map 3"))
     expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
-    click(unpin("Map 3"))
+    click(pill("Map 3").querySelector<HTMLElement>('[data-testid="project-clear"]')!)
     expect(allChip().getAttribute("aria-pressed")).toBe("true")
+    expect(names()).toEqual(["box-yard", "Map 3"])
+    click(unpin("Map 3"))
     expect(names()).toEqual(["box-yard"])
-    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
   })
 
   it("a pinned project stays on the bar with nothing going on", () => {
