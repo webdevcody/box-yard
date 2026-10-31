@@ -20,7 +20,7 @@ import type { ChatMessage } from "../../../shared/types"
 
 /** The chip's line: taller under a finger, so a phone can hit it. */
 const CHIP_ROW =
-  "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-zinc-500 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none [@media(pointer:coarse)]:min-h-10"
+  "flex min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-zinc-500 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
 /** What an open chip shows, under its line. */
 const CHIP_BODY = "mt-0.5 mb-1 ml-2.5 border-l border-zinc-800 pl-3"
 const SOURCE_LINK = "min-w-0 max-w-[55%] shrink truncate font-medium text-yard-400 hover:underline"

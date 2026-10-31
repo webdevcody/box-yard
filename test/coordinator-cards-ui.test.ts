@@ -921,6 +921,58 @@ describe("A card's header", () => {
   })
 })
 
+describe("A card's event digest", () => {
+  const SHA = "ff8fc2305ab9c31e61cfc78f89fadf6c2d5d42ee"
+  const hook = notice(CARDS, `🚢 The Captain asked **Coordinator cards** to merge PR #9: https://github.com/o/r/pull/9`)
+  const done = notice(CARDS, `✅ **Coordinator cards** is done: PR #9 is merged into main as squash commit ${SHA}.`)
+  const report = msg("notice", `Captain for box-yard: I merged PR #9 ([Coordinator cards](/tasks/${CARDS.id})).`, { projectId: YARD.id, captain: true })
+  const answer = msg("assistant", `[Coordinator cards](/tasks/${CARDS.id}) is merged. Shall I restart Box Yard?`, { nextSteps: ["Restart Box Yard now", "Not yet"] })
+
+  it("folds the hook, done and report lines into one line with a short SHA; a tap shows each; the reply reads whole", async () => {
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    click(head(CARDS.id))
+    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
+    const digest = body.querySelector('[data-testid="event-digest"]')!
+    // The PR it opened, the merge request, done and the report.
+    expect(digest.querySelector('[data-testid="event-digest-summary"]')!.textContent).toBe("Merged as ff8fc23")
+    expect(digest.textContent).toContain("4 events")
+    expect(body.textContent).not.toContain(SHA)
+    expect(body.querySelectorAll('[data-testid="update-chip"]')).toHaveLength(0)
+    expect(body.textContent).toContain("Shall I restart Box Yard?")
+    // The Coordinator's reply in a task card has no "from:" line.
+    expect(body.querySelector('[data-testid="reply-sources"]')).toBeNull()
+    const line = digest.querySelector("button")!
+    expect(line.getAttribute("aria-expanded")).toBe("false")
+    click(line)
+    expect(line.getAttribute("aria-expanded")).toBe("true")
+    expect(digest.querySelectorAll('[data-testid="update-chip"]')).toHaveLength(4)
+    expect(digest.textContent).toContain("ff8fc23")
+    expect(digest.textContent).not.toContain(SHA)
+  })
+
+  it("opens to a message a link goes to", async () => {
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    act(() => revealChatMessage(done.id))
+    await frames()
+    await frames()
+    expect(card(CARDS.id).dataset.open).toBe("true")
+    expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')!.getAttribute("data-open")).toBe("true")
+    expect(card(CARDS.id).querySelector(`[data-chat-id="${done.id}"]`)).not.toBeNull()
+    vi.restoreAllMocks()
+  })
+
+  it("leaves a lone event a quiet chip, and the Coordinator card has no digest", async () => {
+    render()
+    click(head(CARDS.id))
+    expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')).toBeNull()
+    expect(card(CARDS.id).querySelectorAll('[data-testid="update-chip"]')).toHaveLength(1)
+    expect(coordinator().querySelector('[data-testid="event-digest"]')).toBeNull()
+  })
+})
+
 describe("Mark done in the cards", () => {
   // Resting since a turn 5 hours ago: past the 3 hour "Idle after".
   const OLD = task("task_old00001", MAP.id, "Map 3 PR #401: East Town", "idle")

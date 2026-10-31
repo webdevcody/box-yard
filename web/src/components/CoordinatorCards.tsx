@@ -54,6 +54,8 @@ import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, clearShownMessage, setTasksOnly, showCard, showMessage, useFocusCard, useShownMessage, useTasksOnly } from "../lib/coordinatorView"
 import { revealChatMessage } from "../lib/reveal"
+import { shortShas } from "../lib/linkify"
+import { digestEntries, digestSummary, eventLine, isEvent, type DigestPiece } from "../lib/cardDigest"
 import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../lib/cardJump"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
@@ -744,9 +746,9 @@ function entryLine(e: CardEntry): Line {
     return { icon, className, who: capitalise(publishedLabel(g.files.length)), text: g.files.map((f) => f.title).join(", ") }
   }
   const m = e.type === "message" ? e.message : itemMessages(e.item)[0]!
-  if (isSent(m)) return { icon: Send, className: "text-yard-400", who: "You", text: plainText(noticeText(m).text) }
-  if (m.role === "assistant") return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, "")) }
-  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: plainText(m.content) }
+  if (isSent(m)) return { icon: Send, className: "text-yard-400", who: "You", text: shortShas(plainText(noticeText(m).text)) }
+  if (m.role === "assistant") return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: shortShas(plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, ""))) }
+  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: shortShas(plainText(m.content)) }
   const v = chipView(m)
   if (v.captain) return { icon: Bot, className: "text-sky-400", who: v.source?.label ?? "Captain", text: v.preview }
   const { icon, className } = NOTICE_ICON[v.kind]
@@ -991,43 +993,98 @@ function CardEntries({
 }) {
   const local = useState(show)
   const [limit, setLimit] = paging ?? local
-  const shown = entries.length > limit ? entries.slice(-limit) : entries
-  const hidden = entries.length - shown.length
   const answers = useMemo(() => answersOf(entries), [entries])
-  // A link to one of its entries (lib/coordinatorView.ts showMessage): page back to it, then scroll to it in the cards.
+  // A task's card folds its runs of events into digests (lib/cardDigest.ts); the Coordinator card has none.
+  const pieces = useMemo(() => (own ? digestEntries(entries, answers) : entries.map((entry): DigestPiece => ({ type: "entry", entry }))), [own, entries, answers])
+  const shown = pieces.length > limit ? pieces.slice(-limit) : pieces
+  const hidden = pieces.slice(0, pieces.length - shown.length).reduce((n, p) => n + (p.type === "digest" ? p.entries.length : 1), 0)
+  // A link to one of its entries (lib/coordinatorView.ts showMessage): page back to it, open the digest it's in, then
+  // scroll to it in the cards.
   const wanted = useShownMessage()
-  const at = wanted ? entries.findIndex((e) => e.id === wanted) : -1
-  const need = at < 0 ? 0 : entries.length - at
+  const at = wanted ? pieces.findIndex((p) => (p.type === "digest" ? p.entries.some((e) => e.id === wanted) : p.entry.id === wanted)) : -1
+  const need = at < 0 ? 0 : pieces.length - at
+  const folded = at >= 0 && pieces[at]!.type === "digest" ? pieces[at]!.id : null
+  const [unfolded] = useChipOpen(digestKey(folded ?? ""))
   useEffect(() => {
     if (!wanted || !need) return
     if (need > limit) return setLimit(need)
+    if (folded && !unfolded) return setOpen([digestKey(folded)], true)
     requestAnimationFrame(() => {
       const el = findInCards(wanted)
       if (!el) return
       clearShownMessage(wanted)
       el.scrollIntoView?.({ block: "center", behavior: "smooth" })
     })
-  }, [wanted, need, limit, setLimit])
+  }, [wanted, need, limit, setLimit, folded, unfolded])
+  const entry = (e: CardEntry) =>
+    e.type === "message" ? (
+      <ChatLine key={e.id} m={e.message} sources={own ? null : e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
+    ) : answers.has(e.id) && e.item.type === "notice" ? (
+      <AgentReply key={e.id} m={e.item.message} own={own} />
+    ) : (
+      <UpdateChip key={e.id} item={e.item} own={own} />
+    )
   return (
     <>
       {hidden > 0 && (
-        <button type="button" onClick={() => setLimit(limit + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier" title={`Show ${Math.min(hidden, EARLIER_STEP)} more`}>
+        <button type="button" onClick={() => setLimit(limit + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier" title="Show more">
           <ChevronUp className="h-3 w-3" aria-hidden />
           {hidden} earlier
         </button>
       )}
-      {shown.map((e) =>
-        e.type === "message" ? (
-          <ChatLine key={e.id} m={e.message} sources={own ? null : e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
-        ) : answers.has(e.id) && e.item.type === "notice" ? (
-          <AgentReply key={e.id} m={e.item.message} own={own} />
+      {shown.map((p) =>
+        p.type === "digest" ? (
+          <EventDigest key={p.id} id={p.id} entries={p.entries} />
+        ) : own && p.entry.type === "message" && isEvent(p.entry, answers) ? (
+          // A lone event that's a message (a merge request): a quiet chip, like the rest.
+          <UpdateChip key={p.entry.id} item={{ type: "notice", id: p.entry.id, message: p.entry.message }} own />
         ) : (
-          <UpdateChip key={e.id} item={e.item} own={own} />
+          entry(p.entry)
         ),
       )}
     </>
   )
 }
+
+const digestKey = (id: string) => `digest:${id}`
+
+/**
+ * A task card's run of events as one quiet line: "Auto-merged as ff8fc23 · 3 events". A tap opens one chip per event
+ * under it (each opens to its whole text).
+ */
+const EventDigest = memo(function EventDigest({ id, entries }: { id: string; entries: readonly CardEntry[] }) {
+  const [open, toggle] = useChipOpen(digestKey(id))
+  const summary = useMemo(() => digestSummary(entries), [entries])
+  const newest = entries[entries.length - 1]!
+  return (
+    <div data-testid="event-digest" data-open={open || undefined}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        title={open ? "Hide these events" : entries.map(eventLine).join("\n")}
+        className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-zinc-500 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
+      >
+        <ListChecks className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+        <span data-testid="event-digest-summary" className="min-w-0 truncate text-zinc-300">
+          {summary}
+        </span>
+        <span className="shrink-0">· {entries.length} events</span>
+        <span className="shrink-0 @max-[24rem]:hidden">
+          <TimeAgo ts={newest.at} />
+        </span>
+        <ChevronDown className={cx("ml-auto h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform motion-reduce:transition-none", open && "rotate-180")} aria-hidden />
+      </button>
+      {open && (
+        <div data-testid="event-digest-events" className="mt-0.5 ml-2.5 border-l border-zinc-800 pl-2">
+          {entries.map((e) => (
+            <UpdateChip key={e.id} item={e.type === "update" ? e.item : { type: "notice", id: e.id, message: e.message }} own />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
 
 /** A message in the cards list (not the side panel): its root, or an update chip's. */
 export function findInCards(id: string): Element | null {
