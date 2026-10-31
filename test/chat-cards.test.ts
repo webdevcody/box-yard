@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest"
 import { jumpDirection, nextJump } from "../web/src/lib/cardJump.js"
-import { arrangeCards, batchTaskName, batchTitle, batchesOf, chatCards, newSince, stableCards, CARD_WINDOW_MS, type CardTask, type ChatCard } from "../web/src/lib/chatCards.js"
+import { arrangeCards, chatCards, newSince, stableCards, CARD_WINDOW_MS, type CardTask, type ChatCard } from "../web/src/lib/chatCards.js"
 import { coordinatorRows } from "../web/src/lib/chatUpdates.js"
 import { buildEntityIndex } from "../web/src/lib/linkify.js"
 import type { BadgeStatus } from "../web/src/lib/prState.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
 
 // The Coordinator chat as task cards: which card each update and reply goes to, the Coordinator card for the rest,
-// the cards' order, a batch's one card, and which cards show.
+// the cards' order (one card per task, a create_tasks call's together), and which cards show.
 
 const project = (id: string, name: string) => ({ id, name, repo: null, createdAt: 1, color: null }) as Project
 const task = (id: string, projectId: string, title: string, extra: Partial<Task> = {}) => ({ id, projectId, title, status: "idle" as TaskStatus, createdAt: 1, ...extra }) as Task
@@ -163,26 +163,42 @@ describe("chatCards", () => {
     expect(m.coordinator).toEqual([])
   })
 
-  it("gives a create_tasks batch of BATCH_MIN or more one card, and smaller ones a card each", () => {
+  it("gives every task of a create_tasks call its own card, next to each other in the order they were made", () => {
     const ask = user("Shoot every Map 3 area")
     const call = tool("create_tasks", { project: "Map 3", tasks: [HOLLOW, DAM, CAMP].map((t) => ({ title: t.title, prompt: "x" })) })
     const answer = reply("3 tasks started.")
     const q = notice(HOLLOW, "❓ **Map 3 PR #406: The Hollow cave** needs input: which entrance?")
     const pr = notice(DAM, "🔀 **Map 3 PR #409: Dam powerhouse** opened a pull request: https://github.com/o/r/pull/409")
-    // A Captain's report naming two of them is one entry on the batch card, not two.
+    // A Captain's report naming two of them is on both their cards.
     const report = captain(MAP, `${HOLLOW.id} and ${DAM.id} are moving.`)
     const pair = tool("create_tasks", { project: "box-yard", tasks: [{ title: "Write the docs", prompt: "a" }, { title: "Draft a tweet", prompt: "b" }] })
     const m = model([ask, call, answer, q, pr, report, user("And docs plus a tweet"), pair, reply("Both started.")])
-    expect(m.cards.map((c) => c.key)).toEqual([`batch:${B}`, DOCS.id, TWEET.id])
-    const batch = m.cards[0]!
-    // In the order they were made: one call shares a timestamp, so by title.
-    expect(batch.taskIds).toEqual([CAMP.id, HOLLOW.id, DAM.id])
-    expect(batch.batchId).toBe(B)
-    expect(batch.origin).toBe(ask)
-    expect(ids(batch.entries)).toEqual([q.id, pr.id, report.id])
-    expect(batch.entries[2]!.tasks).toEqual([HOLLOW.id, DAM.id])
-    expect(batchesOf(known()).get(B)).toEqual([CAMP.id, HOLLOW.id, DAM.id])
-    expect(batchesOf(known()).has(PAIR)).toBe(false)
+    // In the order they were made: one call's tasks share a millisecond, so in the order its call names them.
+    expect(m.cards.map((c) => c.key)).toEqual([HOLLOW.id, DAM.id, CAMP.id, DOCS.id, TWEET.id])
+    expect(m.cards.every((c) => c.taskId === c.key)).toBe(true)
+    expect(m.cards.slice(0, 3).every((c) => c.origin === ask)).toBe(true)
+    expect(ids(cardOf(m.cards, HOLLOW.id).entries)).toEqual([q.id, report.id])
+    expect(ids(cardOf(m.cards, DAM.id).entries)).toEqual([pr.id, report.id])
+    expect(cardOf(m.cards, DAM.id).entries[1]).toBe(cardOf(m.cards, HOLLOW.id).entries[1])
+    expect(cardOf(m.cards, DAM.id).entries[1]!.tasks).toEqual([HOLLOW.id, DAM.id])
+    expect(cardOf(m.cards, CAMP.id).entries).toEqual([])
+  })
+
+  it("keeps a create_tasks call's cards together where the chat first named any of them, whatever named the others", () => {
+    // HOLLOW's update comes first, then a user message, then the others': they still sit with HOLLOW.
+    const early = notice(HOLLOW, "▶️ **Map 3 PR #406: The Hollow cave** started")
+    const login = notice(LOGIN, "▶️ **Fix login** started")
+    const dam = notice(DAM, "▶️ **Map 3 PR #409: Dam powerhouse** started")
+    const camp = notice(CAMP, "▶️ **Map 3 PR #399: Dam Hamlet camp** started")
+    const m = model([early, login, dam, camp])
+    expect(m.cards.map((c) => c.key)).toEqual([HOLLOW.id, DAM.id, CAMP.id, LOGIN.id])
+    // Each card keeps its own first: only the order is the call's.
+    expect(cardOf(m.cards, DAM.id).first).toBe(dam.createdAt)
+    // Made in different milliseconds: by when, whatever the chat named first.
+    const later = known([{ ...HOLLOW, createdAt: 9 }, DAM, CAMP, LOGIN])
+    expect(model([early, login, dam, camp], later).cards.map((c) => c.key)).toEqual([DAM.id, CAMP.id, HOLLOW.id, LOGIN.id])
+    // A task left alone of its call is placed on its own.
+    expect(model([login, dam], known([DAM, LOGIN])).cards.map((c) => c.key)).toEqual([LOGIN.id, DAM.id])
   })
 
   it("keeps what Cody sends to a task from its card in it, and the agent's answer", () => {
@@ -225,7 +241,7 @@ describe("stableCards", () => {
 
 describe("arrangeCards", () => {
   const now = 10 * CARD_WINDOW_MS
-  const card = (key: string, taskIds: string[], last: number): ChatCard => ({ key, taskIds, batchId: null, entries: [], first: 0, last, origin: null })
+  const card = (key: string, last: number): ChatCard => ({ key, taskId: key, entries: [], first: 0, last, origin: null })
   const statuses: Record<string, BadgeStatus> = {}
   const projects: Record<string, string> = {}
   const arrange = (cards: ChatCard[], filter: string | null = null, stay?: (c: ChatCard) => boolean) => {
@@ -237,21 +253,13 @@ describe("arrangeCards", () => {
     Object.assign(statuses, { a: "working", b: "pr_ready", c: "idle", d: "idle", e: "merged", f: "done", g: "failed" })
     const old = now - CARD_WINDOW_MS - 1
     const recent = now - 60_000
-    const cards = [card("a", ["a"], old), card("b", ["b"], old), card("c", ["c"], old), card("d", ["d"], recent), card("e", ["e"], recent), card("f", ["f"], old), card("g", ["g"], recent), card("x", ["x"], recent)]
+    const cards = [card("a", old), card("b", old), card("c", old), card("d", recent), card("e", recent), card("f", old), card("g", recent), card("x", recent)]
     expect(arrange(cards)).toEqual({ live: ["a", "b", "d", "g"], done: ["e"] })
-  })
-
-  it("keeps a batch up while any of its tasks is, and folds it once all are finished", () => {
-    Object.assign(statuses, { k1: "merged", k2: "queued", k3: "done" })
-    const recent = now - 1
-    expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: ["batch:x"], done: [] })
-    statuses.k2 = "done"
-    expect(arrange([card("batch:x", ["k1", "k2", "k3"], recent)])).toEqual({ live: [], done: ["batch:x"] })
   })
 
   it("keeps a card it's told to where it is, finished or quiet", () => {
     Object.assign(statuses, { s1: "done", s2: "idle", s3: "done" })
-    const cards = [card("s1", ["s1"], now - 1), card("s2", ["s2"], now - CARD_WINDOW_MS - 1), card("s3", ["s3"], now - 1)]
+    const cards = [card("s1", now - 1), card("s2", now - CARD_WINDOW_MS - 1), card("s3", now - 1)]
     expect(arrange(cards)).toEqual({ live: [], done: ["s1", "s3"] })
     expect(arrange(cards, null, (c) => c.key !== "s3")).toEqual({ live: ["s1", "s2"], done: ["s3"] })
   })
@@ -259,7 +267,7 @@ describe("arrangeCards", () => {
   it("folds resting cards with no news for idleMs into idle, never ones at work, waiting on Cody, finished or kept", () => {
     Object.assign(statuses, { i1: "idle", i2: "pr_ready", i3: "failed", i4: "needs_input", i5: "working", i6: "done", i7: "idle" })
     const quiet = now - 3 * 3600_000 - 1
-    const cards = ["i1", "i2", "i3", "i4", "i5", "i6"].map((id) => card(id, [id], quiet)).concat(card("i7", ["i7"], now - 60_000))
+    const cards = ["i1", "i2", "i3", "i4", "i5", "i6"].map((id) => card(id, quiet)).concat(card("i7", now - 60_000))
     const r = arrangeCards(cards, (id) => statuses[id], () => YARD.id, now, null, (c) => c.key === "i3", 3 * 3600_000)
     expect({ live: r.live.map((c) => c.key), idle: r.idle.map((c) => c.key), done: r.done.map((c) => c.key) }).toEqual({ live: ["i3", "i4", "i5", "i7"], idle: ["i1", "i2"], done: ["i6"] })
     // 0 is never.
@@ -269,7 +277,7 @@ describe("arrangeCards", () => {
   it("keeps one project's cards", () => {
     Object.assign(statuses, { p1: "working", p2: "working" })
     Object.assign(projects, { p1: YARD.id, p2: MAP.id })
-    expect(arrange([card("p1", ["p1"], now), card("p2", ["p2"], now)], MAP.id)).toEqual({ live: ["p2"], done: [] })
+    expect(arrange([card("p1", now), card("p2", now)], MAP.id)).toEqual({ live: ["p2"], done: [] })
   })
 })
 
@@ -281,20 +289,6 @@ describe("card helpers", () => {
     expect(newSince(entries, entries[1]!.at)).toBe(1)
   })
 
-  it("titles a batch by the words its tasks start with", () => {
-    const titles = [CAMP.title, HOLLOW.title, DAM.title]
-    expect(batchTitle(titles)).toBe("Map 3 PR")
-    expect(batchTaskName(HOLLOW.title, "Map 3 PR")).toBe("#406: The Hollow cave")
-    expect(batchTitle(["Research pricing", "Write a summary", "Draft a tweet"])).toBeNull()
-    expect(batchTitle(["Fix: login", "Fix: logout"])).toBe("Fix")
-    // Not on a dangling "the".
-    expect(batchTitle(["Level 7: the Hollow cave", "Level 7: the dam"])).toBe("Level 7")
-    expect(batchTaskName("Level 7: the dam", "Level 7")).toBe("the dam")
-    expect(batchTitle(["The cave", "The dam"])).toBeNull()
-    // Never a whole title.
-    expect(batchTitle(["Ship it", "Ship it now"])).toBe("Ship")
-    expect(batchTaskName("Draft a tweet", null)).toBe("Draft a tweet")
-  })
 })
 
 describe("the new-cards pill's next card and arrow", () => {

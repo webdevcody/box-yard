@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// The Coordinator chat as cards: a card per task (a batch's one card), the Coordinator card with Cody's thread, opening
+// The Coordinator chat as cards: a card per task (a create_tasks call's side by side), the Coordinator card with Cody's thread, opening
 // a card, its ✓, links to a message going to its card, "N new" with the ↓ pill, "N done today" and the project bar.
 // A card's box replies to its task (the Coordinator only when the task refuses it); with a project picked, the panel
 // talks to its Captain, whose card takes the Coordinator card's place; either card folds to its header.
@@ -117,13 +117,14 @@ const frames = () => act(async () => await new Promise((r) => setTimeout(r, 50))
 const button = (scope: Element, text: string) => [...scope.querySelectorAll("button")].find((b) => b.textContent?.includes(text)) as HTMLElement
 
 describe("Coordinator cards", () => {
-  it("shows a card per task, a batch as one card, finished ones folded, and Cody's thread in the Coordinator card", () => {
+  it("shows a card per task, a create_tasks call's next to each other, finished ones folded, and Cody's thread in the Coordinator card", () => {
     render()
     // Cards are the only view: no Cards ⇄ Timeline toggle.
     expect(host.querySelector('button[aria-label="Timeline"], button[aria-label="Cards"]')).toBeNull()
     // In the order the chat first named them; a status change or new update never moves one.
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
-    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("1 done today")
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
+    // CAMP, done, folds on its own.
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("2 done today")
 
     const login = card(LOGIN.id)
     expect(login.querySelector('[data-testid="chat-card-title"]')!.textContent).toBe("Fix login")
@@ -132,10 +133,14 @@ describe("Coordinator cards", () => {
     expect(login.querySelector('[data-testid="chat-card-latest"]')!.textContent).toContain("Which page, the old one or the new one?")
     expect(card(CARDS.id).querySelector('a[href="https://github.com/o/r/pull/9"]')).not.toBeNull()
 
-    const batch = card(`batch:${B}`)
-    expect(batch.querySelector('[data-testid="chat-card-title"]')!.textContent).toBe("Map 3 PR · 3 tasks")
-    expect(batch.textContent).toContain("1 working")
-    expect(batch.querySelector('[data-testid="chat-card-latest"]')!.textContent).toContain("#406: The Hollow cave")
+    // No batch cards: each of the call's tasks has a card of its own.
+    const hollow = card(HOLLOW.id)
+    expect(hollow.querySelector('[data-testid="chat-card-title"]')!.textContent).toBe(HOLLOW.title)
+    expect(hollow.textContent).toContain("Working")
+    expect(hollow.querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Says: the entrance is lit")
+    expect(card(DAM.id).textContent).toContain("Queued")
+    expect(card(DAM.id).querySelector('[data-testid="chat-card-latest"]')!.textContent).toBe("Just started")
+    expect(host.querySelector('[data-testid="batch-tasks"], [data-testid="batch-task"]')).toBeNull()
 
     // Cody's messages and the replies to them, newest three; tool calls aren't shown.
     const thread = coordinator().textContent ?? ""
@@ -213,16 +218,22 @@ describe("Coordinator cards", () => {
     vi.restoreAllMocks()
   })
 
-  it("opens a batch into its tasks, each with its own updates, and where and how long the running ones have run", () => {
+  it("gives each task of a create_tasks call a whole card: its updates, where and how long it has run, its page, ⤢", () => {
     render()
-    click(head(`batch:${B}`))
-    const rows = [...card(`batch:${B}`).querySelectorAll('[data-testid="batch-task"]')] as HTMLElement[]
-    expect(rows.map((r) => r.dataset.task)).toEqual([CAMP.id, HOLLOW.id, DAM.id])
-    expect(rows.map((r) => r.querySelector("button")!.textContent)).toEqual(["#399: Dam Hamlet campMerged", "#406: The Hollow cave12mWorking", "#409: Dam powerhouse3mQueued"])
-    expect(rows.map((r) => r.querySelector('[data-testid="card-placement"]')?.getAttribute("aria-label") ?? null)).toEqual([null, expect.stringMatching(/^Runs on: /), expect.stringMatching(/^Runs on: /)])
-    click(rows[1]!.querySelector("button")!)
-    expect(rows[1]!.textContent).toContain("the entrance is lit")
-    expect(rows[1]!.querySelector(`a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
+    expect([HOLLOW.id, DAM.id].map((id) => card(id).querySelector('[data-testid="card-placement"]')?.getAttribute("aria-label"))).toEqual([
+      expect.stringMatching(/^Runs on: /),
+      expect.stringMatching(/^Runs on: /),
+    ])
+    expect(card(HOLLOW.id).textContent).toContain("12m")
+    expect(card(DAM.id).querySelector('[data-testid="chat-card-panel"]')).not.toBeNull()
+    click(head(HOLLOW.id))
+    const body = card(HOLLOW.id).querySelector('[data-testid="chat-card-body"]')!
+    expect(body.textContent).toContain("the entrance is lit")
+    expect(body.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Shoot every Map 3 area")
+    expect(body.querySelector(`a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
+    // The finished one is in "done today", a card like any other.
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    expect(card(CAMP.id).textContent).toContain("Merged")
   })
 
   it("says what's new on a card until it's opened, and the ↓ pill goes to it", async () => {
@@ -234,7 +245,7 @@ describe("Coordinator cards", () => {
     expect(pill.textContent).toContain("1 new")
     expect(pill.querySelector('[data-testid="new-cards-target"]')!.textContent).toBe("Coordinator cards")
     // The card got news without moving.
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
 
     click(head(CARDS.id))
     expect(card(CARDS.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
@@ -254,14 +265,15 @@ describe("Coordinator cards", () => {
     localStorage.setItem("boxyard:coordinator-timeline", "1")
     render()
     expect(host.querySelector('[data-testid="chat-cards"]')).not.toBeNull()
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
   })
 
   it("keeps one project's cards when the bar filters, with its Captain's card in the Coordinator card's place", () => {
     render()
     act(() => setChatProjectFilter(MAP.id))
-    expect(cards().map((c) => c.dataset.card)).toEqual([`batch:${B}`])
-    expect(host.querySelector('[data-testid="cards-done"]')).toBeNull()
+    expect(cards().map((c) => c.dataset.card)).toEqual([HOLLOW.id, DAM.id])
+    // Only Map 3's done task, not box-yard's.
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("1 done today")
     expect(coordinator()).toBeNull()
     expect(host.querySelector('[data-testid="captain-card"]')!.getAttribute("aria-label")).toBe("Map 3 Captain")
     // "All": the Coordinator card again.
@@ -410,15 +422,15 @@ describe("Reply in a card", () => {
     click(head(LOGIN.id))
     await setTasks(TASKS.map((t) => (t.id === LOGIN.id || t.id === CARDS.id ? { ...t, status: "done" as const } : t)))
     // The open one is still in the list, open; the closed one folded straight away.
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, `batch:${B}`])
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
-    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("2 done today")
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("3 done today")
 
     click(head(LOGIN.id))
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, `batch:${B}`])
+    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     await setChat([...CHAT, notice(HOLLOW, "💬 **Map 3 PR #406: The Hollow cave** says: halfway")])
-    expect(cards().map((c) => c.dataset.card)).toEqual([`batch:${B}`])
-    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("3 done today")
+    expect(cards().map((c) => c.dataset.card)).toEqual([HOLLOW.id, DAM.id])
+    expect(host.querySelector('[data-testid="cards-done"]')!.textContent).toContain("4 done today")
   })
 
   it("goes with an open card that leaves \"done today\" because its task is back at work", async () => {
@@ -434,27 +446,23 @@ describe("Reply in a card", () => {
       qc.setQueryData(keys.tasks, TASKS.map((t) => (t.id === DOCS.id ? { ...t, status: "queued" as const } : t)))
       await new Promise((r) => setTimeout(r, 50))
     })
-    expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, DOCS.id, `batch:${B}`])
+    expect(cards().map((c) => c.dataset.card)).toEqual([CAMP.id, LOGIN.id, CARDS.id, DOCS.id, HOLLOW.id, DAM.id])
     expect(card(DOCS.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
     expect(scrolled).toEqual([`card-${DOCS.id}`])
     vi.restoreAllMocks()
   })
 
-  it("gives each of a batch's tasks its own box, and the batch none of its own", async () => {
+  it("gives each task of a create_tasks call its own box, which sends to it", async () => {
     render()
-    click(head(`batch:${B}`))
-    const batch = card(`batch:${B}`)
-    const rows = [...batch.querySelectorAll('[data-testid="batch-task"]')] as HTMLElement[]
-    click(rows[1]!.querySelector("button")!)
-    click(rows[2]!.querySelector("button")!)
-    expect(rows[1]!.querySelector('[data-testid="card-working"]')!.textContent).toBe("#406: The Hollow cave is working")
-    expect(composer(rows[1]!).querySelector("textarea")!.placeholder).toBe("Queue another message…")
-    expect(rows[2]!.querySelector('[data-testid="card-working"]')).toBeNull()
-    await send(rows[2]!, "Shoot it at dusk")
+    click(head(HOLLOW.id))
+    click(head(DAM.id))
+    expect(card(HOLLOW.id).querySelector('[data-testid="card-working"]')!.textContent).toBe(`${HOLLOW.title} is working`)
+    expect(composer(card(HOLLOW.id)).querySelector("textarea")!.placeholder).toBe("Queue another message…")
+    expect(card(DAM.id).querySelector('[data-testid="card-working"]')).toBeNull()
+    await send(card(DAM.id), "Shoot it at dusk")
     expect(posts).toEqual([{ url: `/api/tasks/${DAM.id}/messages`, body: { content: "Shoot it at dusk", attachments: [], inChat: true } }])
-    const boxes = [...batch.querySelectorAll('[data-testid="card-composer"]')]
-    expect(boxes).toHaveLength(2)
-    expect(boxes.every((b) => b.closest('[data-testid="batch-task"]'))).toBe(true)
+    expect(card(HOLLOW.id).querySelectorAll('[data-testid="card-composer"]')).toHaveLength(1)
+    expect(card(DAM.id).querySelectorAll('[data-testid="card-composer"]')).toHaveLength(1)
   })
 })
 
@@ -567,17 +575,16 @@ describe("A card in the side panel", () => {
     expect(panel()!.textContent).toContain("opened PR #9")
   })
 
-  it("shows a batch with its tasks' rows, and no box of its own, Mark done or task page", () => {
+  it("shows a task of a create_tasks call like any other: its own box, Mark done and task page", () => {
     render()
-    click(expand(`batch:${B}`))
+    click(expand(HOLLOW.id))
     const p = panel()!
-    expect(p.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Map 3 PR")
-    expect(p.querySelectorAll('[data-testid="batch-task"]')).toHaveLength(3)
-    // Its updates are under its rows, so no "No updates yet".
-    expect(p.querySelector('[data-testid="card-panel-divider"]')).toBeNull()
-    expect(p.querySelector('[data-testid="card-composer"]')).toBeNull()
-    expect(p.querySelector('[data-testid="card-panel-done"]')).toBeNull()
-    expect(menu(p)).toEqual(["Show its card"])
+    expect(p.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe(HOLLOW.title)
+    expect(p.textContent).toContain("the entrance is lit")
+    expect(p.querySelector('[data-testid="card-panel-divider"]')!.textContent).toContain("1 update")
+    expect(p.querySelector('[data-testid="card-panel-done"]')).not.toBeNull()
+    expect(p.querySelector('[data-testid="card-composer"]')).not.toBeNull()
+    expect(menu(p)).toEqual(["Open the task page", "Stop answering", "Show its card"])
   })
 
   it("has the thread panel's ⋯: Open the task page and Show its card", () => {
@@ -850,7 +857,7 @@ describe("Mark done in the cards", () => {
 
   it("folds a resting card with no news for the Idle after hours into \"N idle\", next to \"N done today\"", () => {
     render()
-    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
     expect(fold("idle")!.textContent).toContain("1 idle")
     expect(fold("idle")!.title).toContain("3h")
     click(fold("idle")!)
@@ -884,13 +891,13 @@ describe("Mark done in the cards", () => {
     expect(check.nextElementSibling!.getAttribute("data-testid")).toBe("chat-card-panel")
     expect(card(CARDS.id).querySelector('[data-testid="chat-card-title"]')!.parentElement!.querySelector("button")).toBeNull()
     click(check)
-    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
-    expect(fold("done")!.textContent).toContain("2 done today")
+    expect(live()).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
+    expect(fold("done")!.textContent).toContain("3 done today")
     expect(toastTitles()).toEqual(["Marked done"])
     // Sent once the undo window is over, not before.
     expect(posts).toEqual([])
     undo()
-    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
   })
 
   it("marks a task waiting on Cody done from the open card's footer; no ✓ on a card that's running or asking", () => {
@@ -899,10 +906,11 @@ describe("Mark done in the cards", () => {
     click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
     expect(toastTitles()).toEqual(["Marked done"])
     // Open, it stays where it is (it folds once closed), and says it's done.
-    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
-    expect(card(`batch:${B}`).querySelector('[data-testid="chat-card-check"]')).toBeNull()
+    expect(card(HOLLOW.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
+    expect(card(DAM.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
   })
 
   it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
@@ -917,7 +925,7 @@ describe("Mark done in the cards", () => {
     expect(confirm.textContent).toContain("Mark 1 done")
     click(confirm)
     expect(host.querySelector('[data-testid="cards-clear-idle-popover"]')).toBeNull()
-    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     expect(fold("idle")!.textContent).toContain("1 idle")
     expect(toastTitles()).toEqual(["Marked done"])
   })
@@ -957,10 +965,10 @@ describe("Mark done in the cards", () => {
     expect(count()).toBe("1 task selected")
     click(host.querySelector('[data-testid="cards-select-done"]')!)
     expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
-    expect(live()).toEqual([LOGIN.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     expect(toastTitles()).toEqual(["Marked done"])
     undo()
-    expect(live()).toEqual([LOGIN.id, CARDS.id, `batch:${B}`])
+    expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
   })
 })
 
@@ -979,22 +987,24 @@ describe("Finding your way in the cards", () => {
 
   it("the pill names the card it goes to and points the way, then goes on to the next, round to the first", async () => {
     vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
-    place({ [LOGIN.id]: { top: -400, bottom: -300 }, [`batch:${B}`]: { top: 2000, bottom: 2100 } })
+    place({ [LOGIN.id]: { top: -400, bottom: -300 }, [HOLLOW.id]: { top: 2000, bottom: 2100 }, [DAM.id]: { top: 2200, bottom: 2300 } })
     render()
     await setChat([...CHAT, notice(LOGIN, "💬 **Fix login** says: the old page"), notice(HOLLOW, "💬 **Map 3 PR #406: The Hollow cave** says: lit"), notice(DAM, "💬 **Map 3 PR #409: Dam powerhouse** says: started")])
     expect(pill()!.textContent).toContain("3 new")
     expect(target()).toBe("Fix login")
     expect(pill()!.dataset.direction).toBe("up")
-    expect(pill()!.querySelector('[data-testid="new-cards-more"]')!.textContent).toBe("+1")
+    expect(pill()!.querySelector('[data-testid="new-cards-more"]')!.textContent).toBe("+2")
 
     click(pill()!)
     await act(async () => await new Promise((r) => requestAnimationFrame(() => r(null))))
     // It's there: ringed, and focused for the keyboard and screen readers.
     expect(document.activeElement).toBe(card(LOGIN.id))
     expect(card(LOGIN.id).classList.contains("card-flash")).toBe(true)
-    expect(target()).toBe("Map 3 PR")
+    expect(target()).toBe(HOLLOW.title)
     expect(pill()!.dataset.direction).toBe("down")
 
+    click(pill()!)
+    expect(target()).toBe(DAM.title)
     click(pill()!)
     expect(target()).toBe("Fix login")
   })
@@ -1007,14 +1017,12 @@ describe("Finding your way in the cards", () => {
     expect(pill()!.textContent).toContain("on screen")
   })
 
-  it("pulses the stripe of a card at work, and a batch's running and queued tasks in its strip", () => {
+  it("pulses the stripe of a card at work: running or queued", () => {
     render()
-    const batch = card(`batch:${B}`)
-    expect(batch.classList.contains("stripe-pulse")).toBe(true)
+    expect(card(HOLLOW.id).classList.contains("stripe-pulse")).toBe(true)
+    expect(card(DAM.id).classList.contains("stripe-pulse")).toBe(true)
     expect(card(CARDS.id).classList.contains("stripe-pulse")).toBe(false)
     expect(card(LOGIN.id).classList.contains("stripe-pulse")).toBe(false)
-    // Done, working, queued.
-    expect([...batch.querySelectorAll("i[title]")].map((i) => i.classList.contains("work-pulse"))).toEqual([false, true, true])
   })
 
   it("keeps the Coordinator card's header in reach and folds its history back with Show less", () => {

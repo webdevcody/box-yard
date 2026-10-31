@@ -31,7 +31,6 @@ export const COORDINATOR_NAMED_HEADING =
 
 /** In front of a task thread's first prompt (a question from a task's card in the Coordinator chat), and again when the task changed. */
 export const TASK_THREAD_HEADING = "[The task as it stands now: status, PR and the start of its last reply. get_task has the full reply and transcript]"
-export const BATCH_THREAD_HEADING = "[These tasks as they stand now: each one's status, PR and the start of its last reply. get_task has the full reply and transcript]"
 
 /** PrTracker's part (server/prs.ts). */
 export interface PrLookup {

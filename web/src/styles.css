@@ -215,22 +215,8 @@ body.resizing iframe {
 .stripe-pulse {
   animation: stripe-pulse 1.8s ease-in-out infinite;
 }
-/* The same for a compact row's stripe or dot (a batch's status strip). */
-@keyframes work-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-.work-pulse {
-  animation: work-pulse 1.8s ease-in-out infinite;
-}
 @media (prefers-reduced-motion: reduce) {
-  .stripe-pulse,
-  .work-pulse {
+  .stripe-pulse {
     animation: none;
   }
   .card-flash {

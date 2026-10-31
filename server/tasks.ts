@@ -1034,7 +1034,7 @@ export class TaskManager {
    * Start several tasks at once (create_tasks). Every input is checked before anything is written, and all
    * rows go in one transaction, so either every task exists or none does. The scheduler then runs once for the
    * whole batch, so their boxes are created together (up to Settings › Boxes created at once) rather than one
-   * per call. Two or more share a batch id (Task.batchId), which the Coordinator's cards view shows as one card.
+   * per call. Two or more share a batch id (Task.batchId), which the Coordinator's cards view keeps together.
    */
   createTasks(inputs: NewTask[]): Task[] {
     const projects = inputs.map((input) => {
