@@ -238,6 +238,49 @@ describe("centring the picked chip", () => {
   })
 })
 
+describe("running elsewhere", () => {
+  const elsewhere = () => host.querySelector<HTMLElement>('[data-testid="bar-elsewhere"]')
+
+  /** React Query tells its observers on a timer. */
+  const setTasks = (list: Task[]) =>
+    act(async () => {
+      qc.setQueryData(keys.tasks, list)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+  it("with a project picked, All says how many tasks are running in the others, and tapping it shows them", async () => {
+    render(createElement(ChatPanel))
+    expect(elsewhere()).toBeNull()
+    click(chip("Map 3"))
+    // box-yard's working task is out of view, and its question: "active", in amber.
+    expect(allChip().textContent).toBe("All · 2 active elsewhere")
+    expect(elsewhere()!.className).toContain("text-amber-300")
+    await setTasks([{ ...LOGIN, status: "working" }, CARDS, LEVEL])
+    expect(allChip().textContent).toBe("All · 2 running elsewhere")
+    // A narrow bar centres the picked chip and scrolls All away: there it's a line of its own, which shows all too.
+    expect(elsewhere()!.className).toContain("@max-[30rem]/bar:hidden")
+    const line = host.querySelector<HTMLElement>('[data-testid="bar-elsewhere-line"]')!
+    expect(line.className).toContain("@min-[30rem]/bar:hidden")
+    expect(line.textContent).toBe("2 running elsewhere·Show all")
+    click(line)
+    expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
+    expect(allChip().textContent).toBe("All · 3 active")
+    const ids = [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
+    expect(ids).toEqual([LEVEL.id, CARDS.id])
+  })
+
+  it("says nothing when the other projects are quiet", async () => {
+    render(createElement(ChatPanel))
+    click(chip("box-yard"))
+    expect(allChip().textContent).toBe("All · 1 running elsewhere")
+    await setTasks([LOGIN, CARDS, { ...LEVEL, status: "done" }])
+    expect(elsewhere()).toBeNull()
+    expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
+    // Back to the count of every project's (box-yard's two).
+    expect(allChip().textContent).toBe("All · 2 active")
+  })
+})
+
 describe("pinning and unpinning", () => {
   const names = () => chips().map((c) => c.textContent!.split(" · ")[0])
 

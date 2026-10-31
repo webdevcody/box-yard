@@ -1,4 +1,5 @@
-// The Coordinator chat's one filter bar, under its header: "All · 6 active", then a chip per project in its colour with
+// The Coordinator chat's one filter bar, under its header: "All · 6 active" ("All · 2 running elsewhere" while a project is
+// picked, so a running task never seems to vanish), then a chip per project in its colour with
 // what its tasks are doing ("1 needs you · 3 running"). A chip shows only that project's part of the chat; "All", the
 // pressed chip again or its × shows everything. The chips scroll sideways at any width (lib/projectBar.ts); `trailing`
 // (the cards' "✓ 24 done today", "N idle" and Select, CoordinatorCards.tsx) stays put on the right.
@@ -12,7 +13,7 @@ import { memo, useEffect, useMemo, useRef, type ReactNode } from "react"
 import { X } from "lucide-react"
 import { useProjects, useTasks } from "../lib/queries"
 import { useTiles } from "../lib/taskTiles"
-import { barCounts, centredScrollLeft, pickProject, pinProject, projectBarRows, setChatProjectFilter, unpinProject, useBarPins, useChatProjectFilter, type BarRow } from "../lib/projectBar"
+import { barCounts, centredScrollLeft, elsewhereLabel, pickProject, pinProject, projectBarRows, setChatProjectFilter, unpinProject, useBarPins, useChatProjectFilter, type BarRow } from "../lib/projectBar"
 import { projectColorStyle } from "./TaskIcon"
 import { cx } from "./ui"
 import type { ProjectColor } from "../../../shared/projectColors"
@@ -39,10 +40,11 @@ export const ProjectBar = memo(function ProjectBar({ recent, className, trailing
   const filter = useChatProjectFilter()
   const pins = useBarPins()
   const { colors } = useTiles()
-  const { rows, active, hidden } = useMemo(
+  const { rows, active, hidden, elsewhere } = useMemo(
     () => projectBarRows(projects.data ?? [], tasks.data ?? [], recent, filter, pins),
     [projects.data, tasks.data, recent, filter, pins],
   )
+  const away = filter ? elsewhereLabel(elsewhere) : null
   const bar = useRef<HTMLDivElement>(null)
   // A project that's gone (deleted) can't stay the filter.
   useEffect(() => {
@@ -64,7 +66,7 @@ export const ProjectBar = memo(function ProjectBar({ recent, className, trailing
       role="toolbar"
       aria-label="Filter the chat"
       data-testid="filter-bar"
-      className={cx("@container/bar flex min-w-0 items-center gap-1.5 border-b border-zinc-900 py-1.5 [&:not(:has(button))]:hidden", className)}
+      className={cx("@container/bar flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-zinc-900 py-1.5 [&:not(:has(button))]:hidden", className)}
     >
       {shown && (
         <div
@@ -78,14 +80,23 @@ export const ProjectBar = memo(function ProjectBar({ recent, className, trailing
             type="button"
             aria-pressed={!filter}
             onClick={() => setChatProjectFilter(null)}
-            title="The whole chat"
+            title={away ? `The whole chat: ${away}` : "The whole chat"}
             className={cx(CHIP, !filter ? "border-zinc-600 bg-zinc-800 text-zinc-50" : CHIP_OFF, "pointer-coarse:px-3.5")}
           >
             All
-            <span className="text-zinc-400 @max-[30rem]/bar:hidden">
-              {" · "}
-              <b className="font-semibold text-zinc-200 tabular-nums">{active}</b> active
-            </span>
+            {away ? (
+              // A project picked hides the others' cards: say plainly what's still going on there. A narrow bar scrolls
+              // "All" away to centre the picked chip, so there it's a line of its own under the chips.
+              <span data-testid="bar-elsewhere" className={cx(elsewhere.needs ? "text-amber-300" : "text-zinc-400", "@max-[30rem]/bar:hidden")}>
+                {" · "}
+                {away}
+              </span>
+            ) : (
+              <span className="text-zinc-400 @max-[30rem]/bar:hidden">
+                {" · "}
+                <b className="font-semibold text-zinc-200 tabular-nums">{active}</b> active
+              </span>
+            )}
           </button>
           {rows.map((row) => (
             <ProjectChip key={row.id} row={row} color={colors.get(row.id)} on={filter === row.id} dot={filter !== null && filter !== row.id} />
@@ -94,6 +105,20 @@ export const ProjectBar = memo(function ProjectBar({ recent, className, trailing
         </div>
       )}
       {trailing && <div className="ml-auto flex shrink-0 items-center gap-1.5 empty:hidden">{trailing}</div>}
+      {away && (
+        <button
+          type="button"
+          data-testid="bar-elsewhere-line"
+          onClick={() => setChatProjectFilter(null)}
+          title="Show the whole chat"
+          className="flex basis-full items-center gap-1.5 rounded-md text-left text-xs text-zinc-400 hover:text-zinc-200 focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:min-h-11 @min-[30rem]/bar:hidden"
+        >
+          <span aria-hidden className={cx("h-1.5 w-1.5 shrink-0 rounded-full", elsewhere.needs ? "bg-amber-300" : "bg-yard-400")} />
+          <span className={elsewhere.needs ? "text-amber-300" : undefined}>{away}</span>
+          <span aria-hidden>·</span>
+          <span className="text-yard-400">Show all</span>
+        </button>
+      )}
     </div>
   )
 })
