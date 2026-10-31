@@ -785,7 +785,7 @@ function LatestLine({ card }: { card: ChatCard }) {
           </span>
         </>
       ) : (
-        <span className="text-zinc-500">{card.origin ? "Just started" : "No updates yet"}</span>
+        <span className="text-zinc-500">{card.origin ? "Just started" : card.startedBy ? `Started by ${card.startedBy}` : "No updates yet"}</span>
       )}
     </div>
   )
@@ -831,6 +831,12 @@ function CardSession({
           <span className="shrink-0">From your message {clock(card.origin.createdAt)}:</span>
           <q className="min-w-0 truncate text-zinc-400 italic">{plainText(card.origin.content)}</q>
         </button>
+      )}
+      {!card.origin && !entries.length && card.startedBy && (
+        <div data-testid="chat-card-started" className="flex min-w-0 items-start gap-1.5 px-1 py-0.5 text-xs text-zinc-500">
+          <LineIcon icon={CornerDownRight} className="h-3 w-3" />
+          <span>Started by {card.startedBy}</span>
+        </div>
       )}
       {inPanel && (
         <div data-testid="card-panel-divider" className="flex items-center gap-2 pt-1 text-[11px] text-zinc-500">

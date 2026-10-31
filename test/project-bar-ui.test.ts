@@ -90,7 +90,8 @@ describe("project bar", () => {
     render(createElement(ChatPanel))
     const ids = () => [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
     const coordinator = () => host.querySelector('[data-testid="coordinator-card"]')
-    expect(ids()).toEqual([LEVEL.id, CARDS.id])
+    // LOGIN, named only in a reply to Cody, still has its card: every task has one.
+    expect(ids()).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
     expect(coordinator()!.textContent).toContain("is asking you something")
     click(chip("Map 3"))
     expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
@@ -103,10 +104,10 @@ describe("project bar", () => {
     expect(text()).not.toContain("Only Map 3")
     expect(pill("Map 3").querySelector('[data-testid="project-unpin"]')).toBeNull()
     click(chip("box-yard"))
-    expect(ids()).toEqual([CARDS.id])
+    expect(ids()).toEqual([LOGIN.id, CARDS.id])
     expect(text()).toContain("Coordinator cards")
     click(chip("box-yard"))
-    expect(ids()).toEqual([LEVEL.id, CARDS.id])
+    expect(ids()).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
     click(chip("Map 3"))
     const showAll = pill("Map 3").querySelector<HTMLElement>('[data-testid="project-clear"]')!
     expect(showAll.getAttribute("aria-label")).toBe("Show all projects")
@@ -265,8 +266,9 @@ describe("running elsewhere", () => {
     click(line)
     expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
     expect(allChip().textContent).toBe("All · 3 active")
+    // A card for each of the 3: LOGIN, named only in a reply to Cody, too.
     const ids = [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
-    expect(ids).toEqual([LEVEL.id, CARDS.id])
+    expect(ids).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
   })
 
   it("says nothing when the other projects are quiet", async () => {

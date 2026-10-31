@@ -10,22 +10,25 @@ import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
 // the cards' order (one card per task, a create_tasks call's together), and which cards show.
 
 const project = (id: string, name: string) => ({ id, name, repo: null, createdAt: 1, color: null }) as Project
-const task = (id: string, projectId: string, title: string, extra: Partial<Task> = {}) => ({ id, projectId, title, status: "idle" as TaskStatus, createdAt: 1, ...extra }) as Task
+// Made long before the chat names them, so their cards sit where the chat first named them.
+const OLD = -10 * CARD_WINDOW_MS
+const task = (id: string, projectId: string, title: string, extra: Partial<Task> = {}) => ({ id, projectId, title, status: "idle" as TaskStatus, createdAt: OLD, ...extra }) as Task
 
 const YARD = project("prj_yard0001", "box-yard")
 const MAP = project("prj_map00001", "Map 3")
 const LOGIN = task("task_login001", YARD.id, "Fix login")
 const CARDS = task("task_cards001", YARD.id, "Coordinator cards")
 const B = "batch_aaaabbbbcccc"
-const HOLLOW = task("task_hollow01", MAP.id, "Map 3 PR #406: The Hollow cave", { batchId: B, createdAt: 5 })
-const DAM = task("task_dam00001", MAP.id, "Map 3 PR #409: Dam powerhouse", { batchId: B, createdAt: 5 })
-const CAMP = task("task_camp0001", MAP.id, "Map 3 PR #399: Dam Hamlet camp", { batchId: B, createdAt: 5 })
+const HOLLOW = task("task_hollow01", MAP.id, "Map 3 PR #406: The Hollow cave", { batchId: B, createdAt: OLD + 5 })
+const DAM = task("task_dam00001", MAP.id, "Map 3 PR #409: Dam powerhouse", { batchId: B, createdAt: OLD + 5 })
+const CAMP = task("task_camp0001", MAP.id, "Map 3 PR #399: Dam Hamlet camp", { batchId: B, createdAt: OLD + 5 })
 const PAIR = "batch_pair00000000"
 const DOCS = task("task_docs0001", YARD.id, "Write the docs", { batchId: PAIR })
 const TWEET = task("task_tweet001", YARD.id, "Draft a tweet", { batchId: PAIR })
 const ALL = [LOGIN, CARDS, HOLLOW, DAM, CAMP, DOCS, TWEET]
 const index = buildEntityIndex({ projects: [YARD, MAP], tasks: ALL })
-const known = (tasks: Task[] = ALL) => new Map<string, CardTask>(tasks.map((t) => [t.id, { id: t.id, title: t.title, batchId: t.batchId ?? null, createdAt: t.createdAt }]))
+const known = (tasks: Task[] = ALL) =>
+  new Map<string, CardTask>(tasks.map((t) => [t.id, { id: t.id, title: t.title, batchId: t.batchId ?? null, createdAt: t.createdAt, startedBy: t.startedBy ?? null, projectName: t.projectId === MAP.id ? MAP.name : YARD.name }]))
 
 let seq = 0
 const msg = (role: ChatMessage["role"], content: string, meta?: Record<string, unknown>): ChatMessage => {
@@ -38,7 +41,11 @@ const tool = (name: string, input: Record<string, unknown>, extra: Record<string
 const notice = (t: Task, text: string) => msg("notice", text, { taskId: t.id, projectId: t.projectId })
 const captain = (p: Project, text: string) => msg("notice", `Captain for ${p.name}: ${text}`, { projectId: p.id, captain: true })
 
-const model = (messages: ChatMessage[], tasks = known()) => chatCards(coordinatorRows(messages), index, tasks)
+/** The cards of the tasks the chat named (every other known task has a card too: "gives a task the chat never named a card"). */
+const model = (messages: ChatMessage[], tasks = known()) => {
+  const m = chatCards(coordinatorRows(messages), index, tasks)
+  return { ...m, cards: m.cards.filter((c) => c.named) }
+}
 const ids = (entries: readonly { id: string }[]) => entries.map((e) => e.id)
 const cardOf = (cards: readonly ChatCard[], key: string) => cards.find((c) => c.key === key)!
 
@@ -117,7 +124,10 @@ describe("chatCards", () => {
     const CHECK = task("task_checkd01", STN.id, "Map 4 Checkpoint D: Wave 3 places review")
     const tasks = [MARK, GLACIER, CHECK]
     const stnIndex = buildEntityIndex({ projects: [YARD, STN], tasks })
-    const cards = (messages: ChatMessage[]) => chatCards(coordinatorRows(messages), stnIndex, known(tasks))
+    const cards = (messages: ChatMessage[]) => {
+      const m = chatCards(coordinatorRows(messages), stnIndex, known(tasks))
+      return { ...m, cards: m.cards.filter((c) => c.named) }
+    }
     const merge = notice(MARK, "🪝 **Cards view: mark done, bulk clear idle tasks** hook fired: box-yard: auto-merge ready PRs")
     const report = captain(STN, `[Map 4 #520: Glacier Lodge](/tasks/${GLACIER.id}) merged; Checkpoint D is reviewing (${CHECK.id}).`)
     const status = (text: string) => reply(`${text} [Glacier Lodge](/tasks/${GLACIER.id}) has merged (#520, #523); [Checkpoint D](/tasks/${CHECK.id}) is next.`)
@@ -163,6 +173,42 @@ describe("chatCards", () => {
     expect(m.coordinator).toEqual([])
   })
 
+  it("gives a task the chat never named a card (a Captain started it for Cody), where it was made, and keeps it there", () => {
+    // Cody asked nebula's Captain directly: its create_task is in the Captain's chat, and nothing reaches this one
+    // until the task's first update.
+    const ask = user("Fix login")
+    const call = tool("create_task", { project: "box-yard", title: "Fix login" }, { resultId: LOGIN.id })
+    const NESTED = task("task_nested01", MAP.id, "Nested list: v1 + v4", { createdAt: call.createdAt + 500, startedBy: `captain:${MAP.id}` })
+    const answer = reply("Started.")
+    const tasks = known([LOGIN, NESTED])
+    const cards = (messages: ChatMessage[]) => chatCards(coordinatorRows(messages), index, tasks).cards
+    const before = cards([ask, call, answer])
+    expect(before.map((c) => [c.key, c.named, c.entries.length, c.origin])).toEqual([
+      [LOGIN.id, true, 0, ask],
+      [NESTED.id, false, 0, null],
+    ])
+    expect(cardOf(before, NESTED.id).first).toBe(NESTED.createdAt)
+    expect(cardOf(before, NESTED.id).startedBy).toBe("the Map 3 Captain")
+    // Its first update names it: it gets the entry and stays where it was, under a card named in between.
+    const between = notice(CARDS, "▶️ **Coordinator cards** started")
+    const done = notice(NESTED, "✅ **Nested list: v1 + v4** is done")
+    const after = chatCards(coordinatorRows([ask, call, answer, between, done]), index, known([LOGIN, NESTED, { ...CARDS, createdAt: between.createdAt }])).cards
+    expect(after.map((c) => c.key)).toEqual([LOGIN.id, NESTED.id, CARDS.id])
+    expect(cardOf(after, NESTED.id).first).toBe(NESTED.createdAt)
+    expect(ids(cardOf(after, NESTED.id).entries)).toEqual([done.id])
+  })
+
+  it("says who started a card's task", () => {
+    const by = (startedBy: string | null) => chatCards([], index, known([task("task_by000001", MAP.id, "X", { startedBy })])).cards[0]!.startedBy
+    expect(by(`captain:${MAP.id}`)).toBe("the Map 3 Captain")
+    expect(by("orchestrator")).toBe("the Coordinator")
+    expect(by("cody")).toBe("you")
+    expect(by("hook:hook_aaaaaa")).toBe("a hook")
+    expect(by("agent:task_aaaaaa")).toBe("another task")
+    expect(by(null)).toBeNull()
+    expect(by("system")).toBeNull()
+  })
+
   it("gives every task of a create_tasks call its own card, next to each other in the order they were made", () => {
     const ask = user("Shoot every Map 3 area")
     const call = tool("create_tasks", { project: "Map 3", tasks: [HOLLOW, DAM, CAMP].map((t) => ({ title: t.title, prompt: "x" })) })
@@ -195,7 +241,7 @@ describe("chatCards", () => {
     // Each card keeps its own first: only the order is the call's.
     expect(cardOf(m.cards, DAM.id).first).toBe(dam.createdAt)
     // Made in different milliseconds: by when, whatever the chat named first.
-    const later = known([{ ...HOLLOW, createdAt: 9 }, DAM, CAMP, LOGIN])
+    const later = known([{ ...HOLLOW, createdAt: OLD + 9 }, DAM, CAMP, LOGIN])
     expect(model([early, login, dam, camp], later).cards.map((c) => c.key)).toEqual([DAM.id, CAMP.id, HOLLOW.id, LOGIN.id])
     // A task left alone of its call is placed on its own.
     expect(model([login, dam], known([DAM, LOGIN])).cards.map((c) => c.key)).toEqual([LOGIN.id, DAM.id])
@@ -213,7 +259,7 @@ describe("chatCards", () => {
     const answer2 = reply("Any time.")
     const rows = coordinatorRows([ask, call, answer, sent, turn, later, answer2])
     expect(rows.find((r) => r.id === sent.id)?.type).toBe("message")
-    const m = chatCards(rows, index, known())
+    const m = model([ask, call, answer, sent, turn, later, answer2])
     const card = cardOf(m.cards, LOGIN.id)
     expect(ids(card.entries)).toEqual([sent.id, turn.id])
     expect(card.entries.map((e) => e.type)).toEqual(["message", "update"])
@@ -241,7 +287,7 @@ describe("stableCards", () => {
 
 describe("arrangeCards", () => {
   const now = 10 * CARD_WINDOW_MS
-  const card = (key: string, last: number): ChatCard => ({ key, taskId: key, entries: [], first: 0, last, origin: null })
+  const card = (key: string, last: number, named = true): ChatCard => ({ key, taskId: key, entries: [], first: named ? 0 : last, last, origin: null, named, startedBy: null })
   const statuses: Record<string, BadgeStatus> = {}
   const projects: Record<string, string> = {}
   const arrange = (cards: ChatCard[], filter: string | null = null, stay?: (c: ChatCard) => boolean) => {
@@ -255,6 +301,16 @@ describe("arrangeCards", () => {
     const recent = now - 60_000
     const cards = [card("a", old), card("b", old), card("c", old), card("d", recent), card("e", recent), card("f", old), card("g", recent), card("x", recent)]
     expect(arrange(cards)).toEqual({ live: ["a", "b", "d", "g"], done: ["e"] })
+  })
+
+  it("shows a card the chat never named only while its task is at work or waiting, or for a day after it was made", () => {
+    Object.assign(statuses, { u1: "working", u2: "queued", u3: "pr_ready", u4: "idle", u5: "done", u6: "pr_ready", u7: "done" })
+    const old = now - CARD_WINDOW_MS - 1
+    const recent = now - 60_000
+    const cards = [card("u1", old, false), card("u2", old, false), card("u3", old, false), card("u4", old, false), card("u5", old, false), card("u6", recent, false), card("u7", recent, false)]
+    expect(arrange(cards)).toEqual({ live: ["u1", "u2", "u6"], done: ["u7"] })
+    Object.assign(projects, { u1: MAP.id, u2: YARD.id })
+    expect(arrange(cards.slice(0, 2), MAP.id)).toEqual({ live: ["u1"], done: [] })
   })
 
   it("keeps a card it's told to where it is, finished or quiet", () => {

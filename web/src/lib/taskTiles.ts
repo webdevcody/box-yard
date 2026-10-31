@@ -20,6 +20,8 @@ export interface TileInfo {
   /** The create_tasks call it came from, if that started more than one: the cards view keeps their cards together. */
   batchId: string | null
   createdAt: number
+  /** Who started it (Task.startedBy): a card nothing has been said about says so. */
+  startedBy: string | null
 }
 
 export interface Tiles {
@@ -35,14 +37,14 @@ export function buildTiles(tasks: readonly Task[], projects: readonly Project[])
   for (const t of tasks) {
     const color = colors.get(t.projectId)
     if (!color) continue
-    out.set(t.id, { id: t.id, title: t.title, projectId: t.projectId, projectName: names.get(t.projectId) ?? "", icon: taskIcon(t), color, batchId: t.batchId ?? null, createdAt: t.createdAt })
+    out.set(t.id, { id: t.id, title: t.title, projectId: t.projectId, projectName: names.get(t.projectId) ?? "", icon: taskIcon(t), color, batchId: t.batchId ?? null, createdAt: t.createdAt, startedBy: t.startedBy ?? null })
   }
   return { tasks: out, colors }
 }
 
 /** What the tiles depend on: a status update leaves it the same. */
 const signature = (tasks: readonly Task[], projects: readonly Project[]) =>
-  projects.map((p) => `${p.id}\t${p.name}\t${p.color ?? ""}\t${p.createdAt}`).join("\n") + "\u0000" + tasks.map((t) => `${t.id}\t${t.projectId}\t${t.title}\t${t.icon ?? ""}\t${t.batchId ?? ""}`).join("\n")
+  projects.map((p) => `${p.id}\t${p.name}\t${p.color ?? ""}\t${p.createdAt}`).join("\n") + "\u0000" + tasks.map((t) => `${t.id}\t${t.projectId}\t${t.title}\t${t.icon ?? ""}\t${t.batchId ?? ""}\t${t.startedBy ?? ""}`).join("\n")
 
 const EMPTY: Tiles = { tasks: new Map(), colors: new Map() }
 const NO_TASKS: Task[] = []
