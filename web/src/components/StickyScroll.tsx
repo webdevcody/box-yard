@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react"
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode, type Ref } from "react"
 import { ArrowDown } from "lucide-react"
 import { cx } from "./ui"
 import { takeSpot, watchScroll, type LiveSpot } from "../lib/scrollMemory"
@@ -37,6 +37,44 @@ function innerCanScrollUp(target: EventTarget | null, root: HTMLElement) {
   return false
 }
 
+/**
+ * Where "Jump to latest" lives when the list doesn't float it over itself: the Coordinator chat puts it in the line
+ * over its box (DockComposer.tsx), so it never covers a card. The list publishes whether it's away from the bottom
+ * and how many new items came since; `jump()` takes it there.
+ */
+export interface JumpStore {
+  get: () => JumpState
+  subscribe: (l: () => void) => () => void
+  set: (s: JumpState) => void
+  jump: () => void
+  /** The list's own jump, while it's mounted. */
+  run: (() => void) | null
+}
+export type JumpState = { away: boolean; unread: number }
+const NOT_AWAY: JumpState = { away: false, unread: 0 }
+
+export function createJumpStore(): JumpStore {
+  let state = NOT_AWAY
+  const listeners = new Set<() => void>()
+  const store: JumpStore = {
+    get: () => state,
+    subscribe: (l) => {
+      listeners.add(l)
+      return () => void listeners.delete(l)
+    },
+    set: (s) => {
+      if (s.away === state.away && s.unread === state.unread) return
+      state = s
+      listeners.forEach((l) => l())
+    },
+    jump: () => store.run?.(),
+    run: null,
+  }
+  return store
+}
+
+export const useJumpState = (store: JumpStore) => useSyncExternalStore(store.subscribe, store.get)
+
 /** What a chat view calls after a send: `scrollToEnd()` re-pins the list and glides to the bottom. */
 export type StickyScrollHandle = { scrollToEnd: () => void }
 
@@ -51,8 +89,9 @@ export type StickyScrollHandle = { scrollToEnd: () => void }
 // With `restoreKey`, browser Back/Forward to a page puts the list back where it was when that page was left
 // (lib/scrollMemory.ts): at the bottom if it was pinned there, else with the same row at the same height.
 // `handle.scrollToEnd()` (after a send) re-pins it and smooth-scrolls to the bottom, even from far up.
-// `overlay` floats bottom-center over the list, beside "Jump to latest" (the Coordinator cards' "↓ N new"), above
-// everything in it (sticky headers included), with room left under the last row so it covers nothing at the bottom.
+// `overlay` floats bottom-center over the list, beside "Jump to latest", above everything in it (sticky headers
+// included), with room left under the last row so it covers nothing at the bottom. With `jumpStore`, "Jump to latest"
+// is the caller's to show (JumpStore), not floated.
 export function StickyScroll({
   handle,
   count,
@@ -64,6 +103,7 @@ export function StickyScroll({
   className,
   contentClassName,
   overlay,
+  jumpStore,
   children,
 }: {
   handle?: Ref<StickyScrollHandle>
@@ -76,6 +116,7 @@ export function StickyScroll({
   className?: string
   contentClassName?: string
   overlay?: ReactNode
+  jumpStore?: JumpStore
   children: ReactNode
 }) {
   const scroller = useRef<HTMLDivElement>(null)
@@ -448,6 +489,18 @@ export function StickyScroll({
     toBottom("smooth")
     requestAnimationFrame(() => settleFrame(s))
   }
+  const jumpRef = useRef(jump)
+  jumpRef.current = jump
+  useEffect(() => {
+    if (!jumpStore) return
+    jumpStore.run = () => jumpRef.current()
+    return () => {
+      jumpStore.run = null
+      jumpStore.set(NOT_AWAY)
+    }
+  }, [jumpStore])
+  useEffect(() => jumpStore?.set({ away, unread }), [jumpStore, away, unread])
+  const floatJump = away && !jumpStore
 
   // After a send. Pinning makes the sent message's layout (the resize observer above) carry the list
   // to it whenever it renders; the frame covers a message that's already laid out, and settleFrame
@@ -489,10 +542,10 @@ export function StickyScroll({
         {/* Room under the last row while the overlay shows something, so at the bottom it covers nothing. */}
         <div aria-hidden data-testid="overlay-room" className="hidden h-12 group-has-[[data-overlay]>*]/sticky:block pointer-coarse:h-16" />
       </div>
-      {(away || overlay) && (
+      {(floatJump || overlay) && (
         <div data-overlay className="pointer-events-none absolute bottom-3 left-1/2 z-10 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-2 *:pointer-events-auto">
           {overlay}
-          {away && (
+          {floatJump && (
             <button
               onClick={jump}
               className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/95 px-3 py-1.5 text-xs font-medium whitespace-nowrap text-zinc-100 shadow-lg hover:bg-zinc-800"

@@ -174,10 +174,25 @@ export function githubRef(href: string): GithubRef | null {
   return { owner: m[1]!, repo: m[2]!, kind: m[3]!.toLowerCase() === "pull" ? "pull" : "issue", number: Number(m[4]) }
 }
 
-/** How a raw GitHub PR or issue URL reads: "PR #154", "owner/repo#154". Null for every other link. */
+/** How many characters of a commit SHA show: git's own short form. The link and its tooltip keep the whole SHA. */
+export const SHORT_SHA = 7
+
+/** A whole SHA-1 or SHA-256 in prose (40 or 64 hex digits, with a digit and a letter, so a hex word doesn't count). */
+const LONG_SHA = /(?<![\w-])(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])([0-9a-f]{40}|[0-9a-f]{64})(?![\w-])/g
+
+/** A commit SHA as it reads: its first SHORT_SHA characters. */
+export const shortSha = (sha: string) => sha.slice(0, SHORT_SHA)
+
+/** Plain text with every whole commit SHA cut to its short form ("ff8fc2305ab9…" → "ff8fc23"). */
+export const shortShas = (text: string) => text.replace(LONG_SHA, (sha) => shortSha(sha))
+
+/** How a raw GitHub PR, issue or commit URL reads: "PR #154", "owner/repo#154", "ff8fc23". Null for every other link. */
 export function shortGithubLabel(href: string): string | null {
   const ref = githubRef(href)
-  if (!ref) return null
+  if (!ref) {
+    const commit = /^https?:\/\/(?:www\.)?github\.com\/[\w.-]+\/[\w.-]+\/commit\/([0-9a-f]{7,64})(?:[/?#]|$)/i.exec(href)
+    return commit ? shortSha(commit[1]!) : null
+  }
   return ref.kind === "pull" ? `PR #${ref.number}` : `${ref.owner}/${ref.repo}#${ref.number}`
 }
 
@@ -206,7 +221,8 @@ const COLOUR_BEFORE = /(?:colou?r|background|fill|stroke|border)[\w-]*\s*[:=]?\s
 /** A cheap first look: false means splitGithubRefs would find nothing in `text`. */
 export const mayHaveGithubRef = (text: string) => /#[1-9]|[0-9a-f]{7}/.test(text)
 
-export type GithubSegment = { text: string; url?: string; kind?: "pull" | "issue" | "commit" }
+/** `label`: how a long commit SHA reads (its short form); `text` is what it stands for in the prose. */
+export type GithubSegment = { text: string; url?: string; kind?: "pull" | "issue" | "commit"; label?: string }
 
 /**
  * Splits prose into plain runs and GitHub references, linked to `repo` ("owner/repo"). With no repo (unknown or
@@ -232,7 +248,7 @@ export function splitGithubRefs(text: string, repo: string | null): GithubSegmen
       if (COLOUR_BEFORE.test(text.slice(Math.max(0, m.index - 24), m.index))) continue
       push(m.index, { text: m[0], url: `https://github.com/${repo}/issues/${g.n}`, kind: "issue" })
     } else if (g.sha && /\d/.test(g.sha) && /[a-f]/.test(g.sha)) {
-      push(m.index, { text: m[0], url: `https://github.com/${repo}/commit/${g.sha}`, kind: "commit" })
+      push(m.index, { text: m[0], url: `https://github.com/${repo}/commit/${g.sha}`, kind: "commit", ...(g.sha.length > 12 ? { label: shortSha(g.sha) } : {}) })
     }
   }
   if (!out.length) return [{ text }]
@@ -395,7 +411,9 @@ function linkChildren(parent: Parent, index: EntityIndex, found: EntityRef[]) {
 const githubLinkNode = (seg: GithubSegment): Link => ({
   type: "link",
   url: seg.url!,
-  children: [{ type: "text", value: seg.text }],
+  // A short SHA keeps the whole one in its tooltip.
+  title: seg.label ? seg.text : null,
+  children: [{ type: "text", value: seg.label ?? seg.text }],
   data: { hProperties: { "data-github": seg.kind } },
 })
 

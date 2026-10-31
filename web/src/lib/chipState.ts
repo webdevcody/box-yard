@@ -67,3 +67,8 @@ export function useChipOpen(key: string): [boolean, () => void] {
 export function useAllOpen(keys: readonly string[]): boolean {
   return useSyncExternalStore(subscribe, () => keys.length > 0 && keys.every((k) => open.has(k)))
 }
+
+/** Which of these are open, joined by newlines (a string, so the snapshot compares by value). */
+export function useOpenAmong(keys: readonly string[]): string {
+  return useSyncExternalStore(subscribe, () => keys.filter((k) => open.has(k)).join("\n"))
+}

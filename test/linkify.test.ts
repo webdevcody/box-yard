@@ -3,7 +3,7 @@ import { createElement } from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { buildEntityIndex, followAppLink, githubRef, isExternal, linkTarget, refForHref, remarkEntityLinks, shortGithubLabel, splitText, toolMentions, type EntityIndex } from "../web/src/lib/linkify.js"
+import { buildEntityIndex, followAppLink, githubRef, isExternal, linkTarget, refForHref, remarkEntityLinks, shortGithubLabel, shortShas, splitText, toolMentions, type EntityIndex } from "../web/src/lib/linkify.js"
 import { createdId } from "../server/orchestrator.js"
 import type { Artifact, BoxInfo, Project, Schedule, Task } from "../shared/types.js"
 
@@ -177,6 +177,14 @@ describe("GitHub link labels", () => {
   it("shortens a PR to 'PR #154' and an issue to 'owner/repo#154'", () => {
     expect(shortGithubLabel("https://github.com/webdevcody/box-yard/pull/154")).toBe("PR #154")
     expect(shortGithubLabel("https://github.com/webdevcody/box-yard/issues/154")).toBe("webdevcody/box-yard#154")
+  })
+
+  it("shortens a commit URL and a whole SHA in prose to git's short form, never the 40 characters", () => {
+    const sha = "ff8fc2305ab9c31e61cfc78f89fadf6c2d5d42ee"
+    expect(shortGithubLabel(`https://github.com/webdevcody/box-yard/commit/${sha}`)).toBe("ff8fc23")
+    expect(shortShas(`merged into main as squash commit ${sha}. Main merged cleanly`)).toBe("merged into main as squash commit ff8fc23. Main merged cleanly")
+    // Not a SHA: too short, all letters or digits, or part of a longer word.
+    for (const text of ["deadbeef", "a".repeat(40), "1".repeat(40), `x${sha}`]) expect(shortShas(text)).toBe(text)
   })
 
   it("leaves other links alone", () => {
