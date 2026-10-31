@@ -6,7 +6,7 @@ import type { Config } from "./config.js"
 import type { Hub } from "./hub.js"
 import type { Store } from "./store.js"
 import { ORCHESTRATOR_PROMPT } from "./prompts.js"
-import { BATCH_THREAD_HEADING, COORDINATOR_NAMED_HEADING, namedState, TASK_THREAD_HEADING, tasksState, type PrLookup } from "./handoff.js"
+import { COORDINATOR_NAMED_HEADING, namedState, TASK_THREAD_HEADING, tasksState, type PrLookup } from "./handoff.js"
 import { updatesBlock } from "./noticeBatch.js"
 import { withOwner } from "../shared/owner.js"
 import type { Attachment, CaptainToolResult, ChatMessage, CompactionTaskSnapshot, ContextUsage, Effort, OrchestratorState, ScheduleRun, Task } from "../shared/types.js"
@@ -520,7 +520,7 @@ export class Orchestrator {
       caller: { kind: "coordinator" },
       claudeLogin: () => null,
       usage: { source: "orchestrator", projectId: null },
-      taskState: (tasks) => tasksState(tasks, this.stateOptions(), tasks.length === 1 ? TASK_THREAD_HEADING : BATCH_THREAD_HEADING),
+      taskState: (task) => tasksState([task], this.stateOptions(), TASK_THREAD_HEADING),
       statusOnly: (projectId) => this.statusOnly(projectId),
     }
   }

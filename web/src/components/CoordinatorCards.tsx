@@ -5,7 +5,7 @@
 // and the way to its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
 // instead, with its whole history. With a project picked in the bar, that project's Captain card (BottomCard.tsx)
 // takes the Coordinator card's place.
-// A create_tasks batch is one card whose tasks open in place. Finished cards fold into "N done today" at the top, and
+// Every task has its own card, one create_tasks call's next to each other. Finished cards fold into "N done today" at the top, and
 // resting ones quiet for Settings' cardsIdleHours into "N idle" next to it; a card with news says "N new" until
 // opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
 // over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
@@ -25,7 +25,6 @@ import {
   ListChecks,
   CornerDownRight,
   LayoutGrid,
-  Layers,
   Link2,
   Maximize2,
   Minimize2,
@@ -38,12 +37,12 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react"
-import { useAgentSettings, useBadgeStatuses, useMarkDoneFromInbox, useMarkTasksDone, useStopTask, useTasksIn } from "../lib/queries"
+import { useAgentSettings, useBadgeStatuses, useMarkDoneFromInbox, useMarkTasksDone, useStopTask, useTask, useTasksIn } from "../lib/queries"
 import { undoClose, usePendingCloses } from "../lib/inbox"
 import { useEntityIndex } from "../lib/entities"
 import { useTaskTile, useTiles } from "../lib/taskTiles"
 import { badgeStatus, type BadgeStatus } from "../lib/prState"
-import { CLEARABLE, arrangeCards, batchTaskName, batchTitle, chatCards, newSince, stableCards, type CardEntry, type CardsModel, type ChatCard } from "../lib/chatCards"
+import { CLEARABLE, arrangeCards, chatCards, newSince, stableCards, type CardEntry, type CardsModel, type ChatCard } from "../lib/chatCards"
 import { setPicked, startSelecting, stopSelecting, togglePicked, usePicked, usePickedKeys, useSelecting } from "../lib/cardSelection"
 import { confirmDialog } from "../lib/confirm"
 import { chipView, isSent, itemMessages, noticeText, type CoordinatorRow } from "../lib/chatUpdates"
@@ -71,7 +70,7 @@ import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
 import { usePopover } from "./TaskHeader"
-import { AppLink, Button, Elapsed, InRepo, LineIcon, MERGED_BADGE, Markdown, PrChip, PriorityPill, STATUS, StatusBadge, TimeAgo, cx } from "./ui"
+import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, TimeAgo, cx } from "./ui"
 import { CARDS_IDLE_HOURS, type ChatMessage, type Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
@@ -234,8 +233,8 @@ export const CardsView = memo(function CardsView({
   const project = useChatProjectFilter()
   useEffect(() => {
     if (!focus) return
-    // A card's key, or a task's id (a message's "Open card"): a batch's task opens its row too.
-    const find = (cards: readonly ChatCard[]) => cards.find((c) => c.key === focus) ?? cards.find((c) => c.taskIds.includes(focus))
+    // A card's key: its task's id (a message's "Open card").
+    const find = (cards: readonly ChatCard[]) => cards.find((c) => c.key === focus)
     const finished = find(done)
     const quiet = finished ? undefined : find(idle)
     const card = finished ?? quiet ?? find(live)
@@ -247,7 +246,6 @@ export const CardsView = memo(function CardsView({
     }
     if (finished) setOpen(["cards:done"], true)
     if (quiet) setOpen(["cards:idle"], true)
-    if (card.batchId && card.key !== focus) setOpen([`kid:${focus}`], true)
     clearFocusCard()
     scrollToCard(card.key)
   }, [focus, live, idle, done, project])
@@ -293,7 +291,7 @@ function Fold({ cards, open, toggle, label, title, testId }: { cards: readonly C
       <span className="shrink-0">{label}</span>
       <span className="flex min-w-0 gap-0.5 overflow-hidden">
         {cards.map((c) => (
-          <TaskTile key={c.key} id={c.taskIds[0]} />
+          <TaskTile key={c.key} id={c.taskId} />
         ))}
       </span>
       <span className="ml-auto shrink-0 @max-[20rem]:hidden">{open ? "hide" : "show"}</span>
@@ -362,7 +360,7 @@ function CardsBar({
 
 /** The tasks of `cards` that Mark done may close in bulk (lib/chatCards.ts CLEARABLE), in card order, none marked yet. */
 function useClearable(cards: readonly ChatCard[]): Task[] {
-  const ids = useMemo(() => cards.flatMap((c) => c.taskIds), [cards])
+  const ids = useMemo(() => cards.map((c) => c.taskId), [cards])
   const tasks = useTasksIn(ids).data ?? NO_TASKS
   const closing = usePendingCloses()
   return useMemo(() => tasks.filter((t) => CLEARABLE.has(t.status) && !closing.has(t.id)), [tasks, closing])
@@ -460,9 +458,9 @@ function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable
   const mark = useMarkTasksDone()
   const ids = useMemo(() => new Set(clearable.map((t) => t.id)), [clearable])
   // Only cards with a task Mark done may close can be picked.
-  const pickable = useMemo(() => cards.filter((c) => c.taskIds.some((id) => ids.has(id))), [cards, ids])
+  const pickable = useMemo(() => cards.filter((c) => ids.has(c.taskId)), [cards, ids])
   const chosen = useMemo(() => {
-    const keys = new Set(pickable.filter((c) => picked.has(c.key)).flatMap((c) => c.taskIds))
+    const keys = new Set(pickable.filter((c) => picked.has(c.key)).map((c) => c.taskId))
     return clearable.filter((t) => keys.has(t.id))
   }, [pickable, picked, clearable])
   const all = pickable.length > 0 && pickable.every((c) => picked.has(c.key))
@@ -511,92 +509,68 @@ function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable
 }
 
 /**
- * What Mark done does for a card: its task, or a batch's tasks Mark done may close (the running ones and ones asking
- * go on). Null when there's nothing to mark. A running or queued single task is stopped first, so that asks.
+ * What Mark done does for a card: closes its task. Null when there's nothing to mark. A running or queued task is
+ * stopped first, so that asks.
  */
-function useCardMarkDone(card: ChatCard, tasks: readonly Task[]): { label: string; title: string; run: () => void } | null {
+function useCardMarkDone(task: Task | undefined): { label: string; title: string; run: () => void } | null {
   const mark = useMarkTasksDone()
   const closing = usePendingCloses()
-  const open = tasks.filter((t) => t.status !== "done" && !closing.has(t.id))
-  if (!card.batchId) {
-    const t = open[0]
-    if (!t) return null
-    const busy = t.status === "working" || t.status === "starting" || t.status === "queued"
-    const run = async () => {
-      if (busy && !(await confirmDialog({ title: "Stop it and mark it done?", body: `${t.title} is ${t.status === "queued" ? "queued" : "running"}. Mark done stops it and closes it.`, confirmLabel: "Stop and mark done", danger: true })))
-        return
-      mark([t])
-    }
-    return { label: "Mark done", title: "Close the task (its workspace is archived). Messaging it picks it back up.", run: () => void run() }
+  if (!task || task.status === "done" || closing.has(task.id)) return null
+  const t = task
+  const busy = t.status === "working" || t.status === "starting" || t.status === "queued"
+  const run = async () => {
+    if (busy && !(await confirmDialog({ title: "Stop it and mark it done?", body: `${t.title} is ${t.status === "queued" ? "queued" : "running"}. Mark done stops it and closes it.`, confirmLabel: "Stop and mark done", danger: true })))
+      return
+    mark([t])
   }
-  const these = open.filter((t) => CLEARABLE.has(t.status))
-  if (!these.length) return null
-  const label = these.length === open.length ? "Mark done" : `Mark ${these.length} task${these.length === 1 ? "" : "s"} done`
-  return { label, title: "Close its resting tasks; running ones and ones waiting on you go on", run: () => mark(these) }
+  return { label: "Mark done", title: "Close the task (its workspace is archived). Messaging it picks it back up.", run: () => void run() }
 }
 
 const FINISHED: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["done", "merged"])
 /** At work: its card's stripe pulses (styles.css .stripe-pulse). */
 const AT_WORK: ReadonlySet<BadgeStatus> = new Set<BadgeStatus>(["working", "starting", "queued"])
 
-/** What a card's header says: its title (a batch's is what its tasks' titles share), its tasks and their statuses. */
+/** What a card's header says: its task's tile (title, project), the task, and its status. */
 function useCardHead(card: ChatCard) {
-  const tiles = useTiles().tasks
-  const tasks = useTasksIn(card.taskIds).data ?? NO_TASKS
-  const first = tiles.get(card.taskIds[0]!)
-  const batch = card.batchId ? batchTitle(card.taskIds.map((id) => tiles.get(id)?.title ?? "")) : null
-  const title = card.batchId ? (batch ?? `${first?.projectName ?? "A"} batch`) : (first?.title ?? card.key)
-  const statuses = useMemo(() => tasks.map(badgeStatus), [tasks])
-  return { first, tasks, batch, title, statuses }
+  const tile = useTaskTile(card.taskId)
+  const task = useTask(card.taskId).data ?? undefined
+  const title = tile?.title ?? card.key
+  const status = task ? badgeStatus(task) : undefined
+  return { tile, task, title, status }
 }
 
 type CardHead = ReturnType<typeof useCardHead>
 
-/** A card's icon: its task's tile, or a batch's stack. */
-function CardIcon({ card, size }: { card: ChatCard; size?: "lg" }) {
-  if (!card.batchId) return <TaskTile id={card.taskIds[0]} size={size} />
-  return (
-    <span aria-hidden className={cx("grid shrink-0 place-items-center rounded-md bg-(--pc)/15 text-(--pc)", size === "lg" ? "h-[22px] w-[22px]" : "h-4 w-4")}>
-      <Layers className={size === "lg" ? "h-[13px] w-[13px]" : "h-3 w-3"} />
-    </span>
-  )
-}
-
-/** A card's full-width title: a batch's says how many tasks it holds. */
-function CardTitle({ card, title }: { card: ChatCard; title: string }) {
+/** A card's full-width title. */
+function CardTitle({ title }: { title: string }) {
   return (
     <span data-testid="chat-card-title" className="min-w-0 flex-1 text-[13.5px] leading-[22px] font-semibold wrap-anywhere text-zinc-100">
       {title}
-      {card.batchId && <span className="text-xs font-normal text-zinc-500"> · {card.taskIds.length} tasks</span>}
     </span>
   )
 }
 
 /**
- * The line under a card's title: its project, status, run time and PR (a batch's counts), what it holds, and when.
- * `children` go at its end (a card's new count, ✓ and ⤢), so the title keeps the card's width.
+ * The line under a card's title: its project, status, run time and PR, what it holds, and when. `children` go at its
+ * end (a card's new count, ✓ and ⤢), so the title keeps the card's width.
  */
 function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; children?: ReactNode }) {
-  const { first, tasks, statuses } = head
+  const { tile, task, status } = head
   const updates = card.entries.filter((e) => e.type === "update").length
   const replies = card.entries.length - updates
   return (
     <div className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
       <span className="flex min-w-0 items-center gap-1.5">
-        <ProjectDot projectId={first?.projectId} />
-        <span className="truncate text-zinc-400">{first?.projectName}</span>
+        <ProjectDot projectId={tile?.projectId} />
+        <span className="truncate text-zinc-400">{tile?.projectName}</span>
       </span>
-      {card.batchId ? (
-        <BatchCounts statuses={statuses} />
-      ) : (
-        tasks[0] && (
-          <>
-            <StatusBadge status={statuses[0]!} />
-            <PriorityPill task={tasks[0]} />
-            <Running task={tasks[0]} />
-            <PrChip task={tasks[0]} variant="link" className="text-[11.5px]" />
-          </>
-        )
+      {task && status && (
+        <>
+          <StatusBadge status={status} />
+          <PriorityPill task={task} />
+          <Running task={task} />
+          <PrChip task={task} variant="link" className="text-[11.5px]" />
+        </>
       )}
       {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
       <TimeAgo ts={card.last} />
@@ -605,26 +579,22 @@ function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; ch
   )
 }
 
-/** One task's card, or a batch's. */
+/** One task's card. */
 const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
   const [open, toggle] = useChipOpen(cardOpenKey(card.key))
   const inPanel = useCardShown(COORDINATOR_CHAT, card.key)
   const head = useCardHead(card)
-  const { first, tasks, batch, title, statuses } = head
-  const asks = statuses.includes("needs_input")
-  const finished = statuses.length > 0 && statuses.every((s) => FINISHED.has(s))
-  const atWork = statuses.some((s) => AT_WORK.has(s))
-  const markDone = useCardMarkDone(card, tasks)
+  const { tile, task, title, status } = head
+  const asks = status === "needs_input"
+  const finished = status !== undefined && FINISHED.has(status)
+  const atWork = status !== undefined && AT_WORK.has(status)
+  const markDone = useCardMarkDone(task)
   const selecting = useSelecting()
   // The header's ✓: only on a resting card (as Mark all idle), so it never stops a turn or skips a question.
-  const resting = useMemo(() => {
-    const left = tasks.filter((t) => t.status !== "done")
-    return left.length > 0 && left.every((t) => CLEARABLE.has(t.status))
-  }, [tasks])
-  const quickDone = resting ? markDone : null
+  const quickDone = task && CLEARABLE.has(task.status) ? markDone : null
   const picked = usePicked(card.key)
   const closing = usePendingCloses()
-  const pickable = selecting && tasks.some((t) => CLEARABLE.has(t.status) && !closing.has(t.id))
+  const pickable = selecting && Boolean(task && CLEARABLE.has(task.status) && !closing.has(task.id))
   const unread = newSince(card.entries, useSeenAt(card.key))
   // Open, its news is in front of Cody.
   useEffect(() => {
@@ -650,7 +620,7 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
       data-at-work={atWork || undefined}
       aria-label={title}
       tabIndex={-1}
-      style={projectColorStyle(first?.color)}
+      style={projectColorStyle(tile?.color)}
       className={cx(
         CARD,
         "border-l-(--pc)",
@@ -681,8 +651,8 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
               {picked && pickable ? <SquareCheck className="h-4 w-4" /> : <Square className="h-4 w-4" />}
             </span>
           )}
-          <CardIcon card={card} size="lg" />
-          <CardTitle card={card} title={title} />
+          <TaskTile id={card.taskId} size="lg" />
+          <CardTitle title={title} />
           <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
         <CardMeta card={card} head={head}>
@@ -705,10 +675,9 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
             <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
           </button>
         </CardMeta>
-        {!open && <LatestLine card={card} batch={batch} />}
-        {!open && card.batchId && <BatchBar ids={card.taskIds} statuses={statuses} />}
+        {!open && <LatestLine card={card} />}
       </div>
-      {open && <CardBody card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} markDone={markDone} />}
+      {open && <CardBody card={card} task={task} next={next} onFollowUp={onFollowUp} markDone={markDone} />}
     </section>
   )
 })
@@ -748,37 +717,6 @@ function Running({ task }: { task: Task }) {
 const countLabel = (updates: number, replies: number) =>
   [updates && `${updates} update${updates === 1 ? "" : "s"}`, replies && `${replies} repl${replies === 1 ? "y" : "ies"}`].filter(Boolean).join(" · ")
 
-const statusStyle = (s: BadgeStatus) => (s === "merged" ? MERGED_BADGE : STATUS[s])
-
-/** A batch's statuses in a line: "1 needs you · 2 working · 3 merged". */
-function BatchCounts({ statuses }: { statuses: readonly BadgeStatus[] }) {
-  const counts = new Map<BadgeStatus, number>()
-  for (const s of statuses) counts.set(s, (counts.get(s) ?? 0) + 1)
-  return (
-    <span className="flex flex-wrap items-center gap-x-1.5">
-      {[...counts].map(([s, n], i) => (
-        <span key={s} className={cx("inline-flex items-center gap-1", s === "needs_input" && "text-amber-300")}>
-          {i > 0 && <span className="text-zinc-700">·</span>}
-          <span aria-hidden className={cx("h-1.5 w-1.5 rounded-full", statusStyle(s).dot)} />
-          {n} {statusStyle(s).label.toLowerCase()}
-        </span>
-      ))}
-    </span>
-  )
-}
-
-/** A closed batch card's tasks as a strip of status colours. */
-function BatchBar({ ids, statuses }: { ids: readonly string[]; statuses: readonly BadgeStatus[] }) {
-  const tiles = useTiles().tasks
-  return (
-    <div aria-hidden className={cx(UNDER_TITLE, "mt-1.5 flex flex-wrap gap-[3px]")}>
-      {ids.map((id, i) => (
-        <i key={id} title={`${tiles.get(id)?.title ?? id}: ${statuses[i] ? statusStyle(statuses[i]).label : ""}`} className={cx("h-1.5 w-3.5 rounded-[3px]", statuses[i] ? statusStyle(statuses[i]).dot.replace("animate-pulse", "") : "bg-zinc-700", statuses[i] && AT_WORK.has(statuses[i]) && "work-pulse")} />
-      ))}
-    </div>
-  )
-}
-
 type Line = { icon: LucideIcon; className: string; who: string; text: string }
 
 /** One line of what a card's newest entry says: its icon, then who, then the text. */
@@ -800,13 +738,11 @@ function entryLine(e: CardEntry): Line {
 
 const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
-/** A closed card's newest entry, two lines at most. In a batch, the task it's about leads. */
-function LatestLine({ card, batch }: { card: ChatCard; batch: string | null }) {
+/** A closed card's newest entry, two lines at most. */
+function LatestLine({ card }: { card: ChatCard }) {
   const e = card.entries[card.entries.length - 1]
   const line = useMemo(() => (e ? entryLine(e) : null), [e])
-  const kid = card.batchId && e?.tasks.length === 1 ? e.tasks[0]! : null
-  const kidTile = useTaskTile(kid)
-  const who = line && kid && kidTile ? `${batchTaskName(kidTile.title, batch)}${line.who ? ` ${line.who.toLowerCase()}` : ""}` : line?.who
+  const who = line?.who
   return (
     <div data-testid="chat-card-latest" className={cx(UNDER_TITLE, "mt-1 flex items-start gap-1.5 text-[12.5px] leading-normal text-zinc-400")}>
       {line ? (
@@ -830,30 +766,26 @@ const clock = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: "2-dig
 const PANEL_SHOW = 50
 
 /**
- * A card's session, in the card or in the side panel: where it came from, a batch's tasks, its newest entries, and
- * who's answering. In the panel, its history goes under a divider.
+ * A card's session, in the card or in the side panel: where it came from, its newest entries, and who's answering. In
+ * the panel, its history goes under a divider.
  */
 function CardSession({
   card,
-  batch,
-  title,
-  tasks,
+  task,
   next,
   onFollowUp,
   inPanel = false,
 }: {
   card: ChatCard
-  batch: string | null
-  title: string
-  tasks: readonly Task[]
+  /** Undefined once it's deleted. */
+  task: Task | undefined
   next: string | null
   onFollowUp: (text: string) => void
   inPanel?: boolean
 }) {
-  // A batch's tasks keep their own entries under their rows; the card has what's about several, and replies.
-  const own = useMemo(() => (card.batchId ? card.entries.filter((e) => e.type === "message" || e.tasks.length !== 1) : card.entries), [card])
-  const updates = own.filter((e) => e.type === "update").length
-  const label = own.length ? countLabel(updates, own.length - updates) : "No updates yet"
+  const entries = card.entries
+  const updates = entries.filter((e) => e.type === "update").length
+  const label = entries.length ? countLabel(updates, entries.length - updates) : "No updates yet"
   return (
     <>
       {card.origin && (
@@ -869,58 +801,44 @@ function CardSession({
           <q className="min-w-0 truncate text-zinc-400 italic">{plainText(card.origin.content)}</q>
         </button>
       )}
-      {card.batchId && (
-        <div data-testid="batch-tasks" className="flex flex-col gap-0.5">
-          {card.taskIds.map((id) => (
-            <BatchTask key={id} id={id} task={tasks.find((t) => t.id === id)} entries={card.entries} batch={batch} next={next} onFollowUp={onFollowUp} />
-          ))}
-        </div>
-      )}
-      {/* A batch's history is under its rows: its own divider only when it has some of its own. */}
-      {inPanel && (own.length > 0 || !card.batchId) && (
+      {inPanel && (
         <div data-testid="card-panel-divider" className="flex items-center gap-2 pt-1 text-[11px] text-zinc-500">
           <span className="shrink-0">{label}</span>
           <span className="h-px flex-1 bg-zinc-800" />
         </div>
       )}
-      <CardEntries entries={own} show={inPanel ? PANEL_SHOW : CARD_SHOW} own={!card.batchId} next={next} onFollowUp={onFollowUp} />
-      {!card.batchId && tasks[0] && isWorking(tasks[0]) && <WorkingLine who={tasks[0].title} />}
+      <CardEntries entries={entries} show={inPanel ? PANEL_SHOW : CARD_SHOW} own next={next} onFollowUp={onFollowUp} />
+      {task && isWorking(task) && <WorkingLine who={task.title} />}
     </>
   )
 }
 
-/** An open card: its session, the box to reply in (a batch's are in its tasks' rows), and the way to the side panel and its page. */
+/** An open card: its session, the box to reply in, and the way to the side panel and its page. */
 function CardBody({
   card,
-  batch,
-  title,
-  tasks,
+  task,
   next,
   onFollowUp,
   markDone,
 }: {
   card: ChatCard
-  batch: string | null
-  title: string
-  tasks: readonly Task[]
+  task: Task | undefined
   next: string | null
   onFollowUp: (text: string) => void
   markDone: ReturnType<typeof useCardMarkDone>
 }) {
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
-      <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} />
-      {!card.batchId && tasks[0] && <CardComposer task={tasks[0]} />}
+      <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} />
+      {task && <CardComposer task={task} />}
       <div className="flex flex-wrap items-center gap-1 pt-0.5">
         <button type="button" onClick={() => openCard(COORDINATOR_CHAT, card.key)} className={FOOT} data-testid="chat-card-open-panel">
           <Maximize2 className="h-3 w-3" aria-hidden />
           Open in panel
         </button>
-        {!card.batchId && (
-          <AppLink href={`/tasks/${card.taskIds[0]}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-            Task page
-          </AppLink>
-        )}
+        <AppLink href={`/tasks/${card.taskId}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
+          Task page
+        </AppLink>
         {markDone && (
           <button type="button" onClick={markDone.run} title={markDone.title} className={cx(FOOT, "ml-auto")} data-testid="chat-card-mark-done">
             <CircleCheck className="h-3 w-3" aria-hidden />
@@ -964,8 +882,7 @@ function CardPanelView({
   onFollowUp,
 }: CardPanelProps & { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
   const head = useCardHead(card)
-  const { first, tasks, batch, title } = head
-  const task = card.batchId ? null : (tasks[0] ?? null)
+  const { tile, task, title } = head
   const pane = useRef<HTMLDivElement>(null)
   const more = useRef<HTMLButtonElement>(null)
   const [menu, setMenu] = useState(false)
@@ -1012,8 +929,8 @@ function CardPanelView({
         closeLabel="Close"
         closeTitle="Close (Esc). The card stays in the chat."
         title={
-          <span style={projectColorStyle(first?.color)} title={title} className="flex min-w-0 items-center gap-1.5">
-            <CardIcon card={card} />
+          <span style={projectColorStyle(tile?.color)} title={title} className="flex min-w-0 items-center gap-1.5">
+            <TaskTile id={card.taskId} />
             <span data-testid="card-panel-title" className="min-w-0 truncate text-zinc-400">
               {title}
             </span>
@@ -1047,89 +964,16 @@ function CardPanelView({
         </button>
       </PanelHeader>
       <StickyScroll count={card.entries.length} resetKey={card.key} className={cx("px-3 py-3", wide)} contentClassName="space-y-2.5">
-        <div data-testid="card-panel-head" style={projectColorStyle(first?.color)} className="rounded-[10px] border border-l-[3px] border-zinc-800/80 border-l-(--pc) bg-zinc-900/40 py-2 pr-2.5 pl-3">
+        <div data-testid="card-panel-head" style={projectColorStyle(tile?.color)} className="rounded-[10px] border border-l-[3px] border-zinc-800/80 border-l-(--pc) bg-zinc-900/40 py-2 pr-2.5 pl-3">
           <div className="flex items-start gap-2">
-            <CardIcon card={card} size="lg" />
-            <CardTitle card={card} title={title} />
+            <TaskTile id={card.taskId} size="lg" />
+            <CardTitle title={title} />
           </div>
           <CardMeta card={card} head={head} />
         </div>
-        <CardSession card={card} batch={batch} title={title} tasks={tasks} next={next} onFollowUp={onFollowUp} inPanel />
+        <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} inPanel />
       </StickyScroll>
       {task && <CardComposer task={task} className={cx(PANEL_BOX, wide)} />}
-    </div>
-  )
-}
-
-/** One of a batch's tasks: a row that opens into its own entries. */
-const BatchTask = memo(function BatchTask({
-  id,
-  task,
-  entries,
-  batch,
-  next,
-  onFollowUp,
-}: {
-  id: string
-  /** Undefined once it's deleted. */
-  task: Task | undefined
-  entries: readonly CardEntry[]
-  batch: string | null
-  next: string | null
-  onFollowUp: (text: string) => void
-}) {
-  const [open, toggle] = useChipOpen(`kid:${id}`)
-  const tile = useTaskTile(id)
-  const status = task && badgeStatus(task)
-  const own = useMemo(() => entries.filter((e) => e.tasks.includes(id)), [entries, id])
-  return (
-    <div data-testid="batch-task" data-task={id} className={cx("rounded-lg", open && "border border-zinc-800 bg-zinc-950/50", status === "needs_input" && "bg-amber-500/[0.07]")}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={toggle}
-        className="flex w-full min-w-0 items-center gap-2 rounded-lg py-1 pr-1 pl-1.5 text-left text-[12.5px] text-zinc-300 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-10"
-      >
-        <TaskTile id={id} />
-        <span className="min-w-0 flex-1 truncate">{batchTaskName(tile?.title ?? id, batch)}</span>
-        {task && (
-          <span className="text-[11px] text-zinc-500 @max-[22rem]:hidden">
-            <Running task={task} />
-          </span>
-        )}
-        {task && <PriorityPill task={task} compact />}
-        {status && <StatusBadge status={status} />}
-        <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
-      </button>
-      {open && <BatchTaskBody id={id} task={task} entries={own} name={batchTaskName(tile?.title ?? id, batch)} next={next} onFollowUp={onFollowUp} />}
-    </div>
-  )
-})
-
-/** An open batch task: its entries, who's working, and its box. */
-function BatchTaskBody({
-  id,
-  task,
-  entries,
-  name,
-  next,
-  onFollowUp,
-}: {
-  id: string
-  task: Task | undefined
-  entries: readonly CardEntry[]
-  name: string
-  next: string | null
-  onFollowUp: (text: string) => void
-}) {
-  return (
-    <div className="space-y-1.5 px-2 pt-1 pb-2">
-      {entries.length ? <CardEntries entries={entries} show={CARD_SHOW} own next={next} onFollowUp={onFollowUp} /> : <div className="text-xs text-zinc-500">No updates yet.</div>}
-      {task && isWorking(task) && <WorkingLine who={name} />}
-      {task && <CardComposer task={task} />}
-      <AppLink href={`/tasks/${id}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-        Task page
-      </AppLink>
     </div>
   )
 }
@@ -1218,11 +1062,9 @@ export function revealInCards(layout: CardsLayout | null, id: string): boolean {
   }
   if (!layout) return false
   const card = layout.all.find((c) => c.entries.some((e) => e.id === id))
-  const entry = card?.entries.find((e) => e.id === id)
-  if (card && entry) {
+  if (card) {
     showMessage(id)
-    // A batch's task keeps its own entries in its row: open that.
-    showCard(card.batchId && entry.tasks.length === 1 ? entry.tasks[0]! : card.key)
+    showCard(card.key)
   } else if (layout.allCoordinator.some((e) => e.id === id)) {
     showMessage(id)
     // The Coordinator card shows only under "All", unfolded, and without "Tasks only".
@@ -1429,12 +1271,12 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
 
 /** The card the pill goes to: its icon and title, cut short. A phone has room for the icon only; the title is still read out. */
 function PillTarget({ card, where }: { card: ChatCard; where: string }) {
-  const { first, title } = useCardHead(card)
+  const tile = useTaskTile(card.taskId)
   return (
-    <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(first?.color)}>
-      <CardIcon card={card} />
+    <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(tile?.color)}>
+      <TaskTile id={card.taskId} />
       <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 max-[26rem]:sr-only">
-        {title}
+        {tile?.title ?? card.key}
       </span>
       <span className="sr-only">, {where}</span>
     </span>

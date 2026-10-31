@@ -5,7 +5,7 @@ import path from "node:path"
 import type { Server } from "node:http"
 import { createBoxYard, type BoxYard } from "../server/app.js"
 import { searchHistory } from "../server/history.js"
-import { BATCH_THREAD_HEADING, TASK_THREAD_HEADING } from "../server/handoff.js"
+import { TASK_THREAD_HEADING } from "../server/handoff.js"
 import type { ChatMessage, Project, SideThread, SideThreadMessage, Task } from "../shared/types.js"
 import { freePort, testConfig, tmpDir, waitFor } from "./helpers.js"
 
@@ -162,24 +162,23 @@ describe("reply in a card", () => {
     expect((await call<SideThread[]>(r, "GET", "/api/threads")).map((x) => [x.id, x.kind])).toEqual([[thread.id, "task"]])
   })
 
-  it("Coordinator, from a batch card: the thread is the batch's, told every task's state", async () => {
+  it("keeps an old batch card's thread: listed and readable, a new message ends in an error, and no new ones", async () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const a = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Level 1: map", prompt: "x" })
-    const b = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Level 2: map", prompt: "x" })
     await settled(r, a.id)
-    await settled(r, b.id)
-    r.yard.store.db.prepare("UPDATE tasks SET batch_id = 'bat_levels' WHERE id IN (?, ?)").run(a.id, b.id)
+    r.yard.store.db.prepare("UPDATE tasks SET batch_id = 'bat_levels' WHERE id = ?").run(a.id)
+    // A thread from before batch cards went (#193 to #203).
+    const old = r.yard.store.createSideThread({ projectId: null, anchorId: "batch:bat_levels", kind: "task", quote: "Level 1: map (and 1 more)", sessionId: "s-old" })
+    r.yard.store.addSideThreadMessage(old.id, "user", "which is behind?", null)
+    r.yard.store.addSideThreadMessage(old.id, "assistant", "Level 2.", null)
 
-    const { thread } = await call<{ thread: SideThread }>(r, "POST", "/api/threads", { kind: "task", anchorId: "batch:bat_levels", question: "which is behind?" })
-    expect(thread).toMatchObject({ anchorId: "batch:bat_levels", kind: "task", quote: "Level 1: map (and 1 more)" })
-    await answers(r, thread.id, 1)
-    const prompt = fakeSession(r.yard.store.sideThreadSession(thread.id)!.sessionId).turns.at(-1)!.prompt
-    expect(prompt).toContain('from the card of the batch of tasks "Level 1: map (and 1 more)"')
-    expect(prompt).toContain(BATCH_THREAD_HEADING)
-    expect(prompt).toContain(`- ${a.id} "Level 1: map"`)
-    expect(prompt).toContain(`- ${b.id} "Level 2: map"`)
-    expect(prompt).toContain("Their updates in the chat")
+    expect((await call<SideThread[]>(r, "GET", "/api/threads")).map((x) => [x.id, x.anchorId])).toEqual([[old.id, "batch:bat_levels"]])
+    expect((await call<SideThreadMessage[]>(r, "GET", `/api/threads/${old.id}/messages`)).map((m) => m.content)).toEqual(["which is behind?", "Level 2."])
+    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "batch:bat_levels", question: "and now?" })).rejects.toThrow(/-> 400.*no task batch:bat_levels/)
+    await call(r, "POST", `/api/threads/${old.id}/messages`, { content: "and now?" })
+    const log = await answers(r, old.id, 2)
+    expect(log.at(-1)).toMatchObject({ role: "error", content: expect.stringContaining("Its task was deleted.") })
   })
 
   it("Coordinator, for a status-only project: the thread gets the task's status, not what it said", async () => {
@@ -204,7 +203,7 @@ describe("reply in a card", () => {
     const r = await start()
     const p = await call<Project>(r, "POST", "/api/projects", { name: "demo" })
     const t = await call<Task>(r, "POST", "/api/tasks", { projectId: p.id, title: "Haiku", prompt: "write a haiku" })
-    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "task_gone123456", question: "hi" })).rejects.toThrow(/-> 400.*no task or batch/)
+    await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "task_gone123456", question: "hi" })).rejects.toThrow(/-> 400.*no task task_gone123456/)
     await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: "batch:nope", question: "hi" })).rejects.toThrow(/-> 400/)
     await expect(call(r, "POST", "/api/threads", { kind: "task", anchorId: t.id, projectId: p.id, question: "hi" })).rejects.toThrow(/-> 400.*only the Coordinator chat/)
     expect(r.yard.store.listSideThreads(null)).toEqual([])

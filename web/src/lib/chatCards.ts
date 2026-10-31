@@ -1,5 +1,5 @@
-// The Coordinator chat as task cards (components/CoordinatorCards.tsx): which card each update and reply belongs to,
-// the cards' order, a batch's one card, and the Coordinator card for the rest. Pure, so it is unit tested.
+// The Coordinator chat as task cards (components/CoordinatorCards.tsx), one per task: which card each update and reply
+// belongs to, the cards' order, and the Coordinator card for the rest. Pure, so it is unit tested.
 //
 // - A task's updates (notices, published files) go to its card; a Captain's report to the cards of the tasks it names.
 // - A reply the Coordinator wrote on its own (after reading updates, the "from:" line in lib/chatUpdates.ts) goes to the
@@ -10,16 +10,14 @@
 //   as Cody's message (lib/reroute.ts), so it's in the Coordinator card.
 // - Everything else is the Coordinator card's: Cody's messages, the replies to them, errors, and notices about no task.
 //   Tool calls aren't shown.
-// - A card's place is where the chat first named its task, so new activity never moves it.
-// - The tasks one create_tasks call started (Task.batchId) share one card when there are BATCH_MIN or more.
+// - An entry about several tasks is on each of their cards.
+// - A card's place is where the chat first named its task, so new activity never moves it. The tasks one create_tasks
+//   call started (Task.batchId) sit together, in the order they were made, where the chat first named any of them.
 import type { ChatMessage, TaskStatus } from "../../../shared/types"
 import type { BadgeStatus } from "./prState"
 import type { EntityIndex } from "./linkify"
 import { itemMessages, type CoordinatorRow, type UpdateItem, type UpdateSource } from "./chatUpdates"
 import { messageRefs } from "./chatProvenance"
-
-/** A create_tasks call this big or bigger is one card; smaller ones are a card per task. */
-export const BATCH_MIN = 3
 
 /** How long a finished or resting task keeps its card after the chat last said something about it. */
 export const CARD_WINDOW_MS = 24 * 60 * 60_000
@@ -39,14 +37,12 @@ export type CardEntry = EntryBody & {
 }
 
 export interface ChatCard {
-  /** The task's id, or `batch:<batch id>`. */
+  /** Its task's id. */
   key: string
-  /** Its task, or a batch's tasks in the order they were made. */
-  taskIds: readonly string[]
-  batchId: string | null
+  taskId: string
   /** Oldest first. */
   entries: readonly CardEntry[]
-  /** When the chat first named it: its place in the list. */
+  /** When the chat first named it: its place in the list (a create_tasks call's tasks: the first of them named). */
   first: number
   /** When its newest entry came in (`first` while it has none). */
   last: number
@@ -90,23 +86,6 @@ function startedBy(m: ChatMessage, index: EntityIndex): readonly string[] {
   if (m.content === "create_task") return typeof m.meta?.resultId === "string" ? [m.meta.resultId] : NO_TASKS
   if (m.content === "create_tasks") return messageRefs(m, index).tasks
   return NO_TASKS
-}
-
-/** A batch's tasks in the order they were made (one create_tasks call shares a timestamp, so then by title). */
-const byCreation = (a: CardTask, b: CardTask) => a.createdAt - b.createdAt || a.title.localeCompare(b.title, undefined, { numeric: true }) || a.id.localeCompare(b.id)
-
-/** Each batch of BATCH_MIN or more, by its id: its tasks in order. */
-export function batchesOf(tasks: ReadonlyMap<string, CardTask>): Map<string, string[]> {
-  const groups = new Map<string, CardTask[]>()
-  for (const t of tasks.values()) {
-    if (!t.batchId) continue
-    let g = groups.get(t.batchId)
-    if (!g) groups.set(t.batchId, (g = []))
-    g.push(t)
-  }
-  const out = new Map<string, string[]>()
-  for (const [id, g] of groups) if (g.length >= BATCH_MIN) out.set(id, g.sort(byCreation).map((t) => t.id))
-  return out
 }
 
 /**
@@ -163,52 +142,52 @@ export function chatCards(rows: readonly CoordinatorRow[], index: EntityIndex, t
     }
   }
 
-  // Each task's card: its own, or its batch's.
-  const batches = batchesOf(tasks)
-  const keyOf = (id: string) => {
-    const b = tasks.get(id)?.batchId
-    return b && batches.has(b) ? `batch:${b}` : id
-  }
+  // One card per task, placed where the chat first named it.
   const cards = new Map<string, ChatCard & { entries: CardEntry[] }>()
   const seq = new Map<string, number>()
   const card = (id: string) => {
-    const key = keyOf(id)
-    let c = cards.get(key)
+    let c = cards.get(id)
     if (!c) {
-      const batchId = key === id ? null : tasks.get(id)!.batchId!
-      const taskIds = batchId ? batches.get(batchId)! : [id]
-      // The member the chat named first places the card and says where it came from.
-      let first = Infinity
-      let origin: ChatMessage | null = null
-      for (const t of taskIds) {
-        const n = named.get(t)
-        if (n && (n.at < first || (n.at === first && n.seq < seq.get(key)!))) {
-          first = n.at
-          origin = n.origin
-          seq.set(key, n.seq)
-        }
-      }
-      cards.set(key, (c = { key, taskIds, batchId, entries: [], first, last: first, origin }))
+      const n = named.get(id)
+      if (n) seq.set(id, n.seq)
+      cards.set(id, (c = { key: id, taskId: id, entries: [], first: n?.at ?? Infinity, last: n?.at ?? Infinity, origin: n?.origin ?? null }))
     }
     return c
   }
   for (const id of started) if (tasks.has(id)) card(id)
-  for (const e of placed) {
-    const seen = new Set<string>()
-    for (const t of e.tasks) {
-      const c = card(t)
-      if (seen.has(c.key)) continue
-      seen.add(c.key)
-      c.entries.push(e)
-    }
-  }
+  for (const e of placed) for (const t of new Set(e.tasks)) card(t).entries.push(e)
   const out = [...cards.values()]
   for (const c of out) {
     if (!Number.isFinite(c.first)) c.first = c.entries[0]?.at ?? 0
     c.last = Math.max(c.first, ...c.entries.map((e) => e.at))
   }
-  const rank = (c: ChatCard) => seq.get(c.key) ?? Infinity
-  out.sort((a, b) => a.first - b.first || rank(a) - rank(b) || a.key.localeCompare(b.key))
+  // A create_tasks call's tasks stay together, in the order they were made, where the chat first named any of them.
+  type Place = { first: number; seq: number; made: number }
+  const own = (c: ChatCard): Place => ({ first: c.first, seq: seq.get(c.key) ?? Infinity, made: 0 })
+  const before = (a: Place, b: Place) => a.first - b.first || a.seq - b.seq
+  const groups = new Map<string, ChatCard[]>()
+  for (const c of out) {
+    const b = tasks.get(c.taskId)?.batchId
+    if (!b) continue
+    let g = groups.get(b)
+    if (!g) groups.set(b, (g = []))
+    g.push(c)
+  }
+  const slots = new Map<string, Place>()
+  for (const g of groups.values()) {
+    if (g.length < 2) continue
+    const at = g.map(own).reduce((a, b) => (before(b, a) < 0 ? b : a))
+    // The order they were made: one call's tasks often share a millisecond, and its call names them in that order.
+    const made = (c: ChatCard) => tasks.get(c.taskId)!
+    g.sort((a, b) => made(a).createdAt - made(b).createdAt || own(a).seq - own(b).seq || made(a).title.localeCompare(made(b).title, undefined, { numeric: true }) || a.key.localeCompare(b.key))
+    g.forEach((c, i) => slots.set(c.key, { ...at, made: i }))
+  }
+  const placeOf = (c: ChatCard) => slots.get(c.key) ?? own(c)
+  out.sort((a, b) => {
+    const pa = placeOf(a)
+    const pb = placeOf(b)
+    return before(pa, pb) || pa.made - pb.made || a.key.localeCompare(b.key)
+  })
   return { cards: out, coordinator }
 }
 
@@ -237,7 +216,7 @@ export function stableCards(prev: CardsModel | null, next: CardsModel): CardsMod
   const cards = next.cards.map((c) => {
     const kept = keep(c.entries)
     const p = byKey.get(c.key)
-    if (p && p.first === c.first && p.last === c.last && p.origin === c.origin && p.batchId === c.batchId && sameList(p.taskIds, c.taskIds) && sameList(p.entries, kept)) return p
+    if (p && p.first === c.first && p.last === c.last && p.origin === c.origin && p.taskId === c.taskId && sameList(p.entries, kept)) return p
     return { ...c, entries: kept }
   })
   const coordinator = keep(next.coordinator)
@@ -268,7 +247,7 @@ export interface CardsArrangement {
  * Which cards show: those with work going on, waiting on Cody or with a PR open; the rest while the chat said something
  * about them in the last CARD_WINDOW_MS. Finished ones fold into "N done" at the top, and with `idleMs` set, resting
  * ones (nothing running, queued or waiting) quiet that long into "N idle". `project` keeps one project's. `stay` keeps a
- * card where it is whatever its tasks do (one open as its task finishes: Cody is reading its reply).
+ * card where it is whatever its task does (one open as its task finishes: Cody is reading its reply).
  */
 export function arrangeCards(
   cards: readonly ChatCard[],
@@ -283,12 +262,12 @@ export function arrangeCards(
   const idle: ChatCard[] = []
   const done: ChatCard[] = []
   for (const c of cards) {
-    if (project && projectOf(c.taskIds[0]!) !== project) continue
-    const statuses = c.taskIds.map(statusOf).filter((s): s is BadgeStatus => s !== undefined)
-    if (!statuses.length) continue
-    if (stay(c) || statuses.some((s) => ACTIVE.has(s))) live.push(c)
-    else if (c.last < now - CARD_WINDOW_MS && !statuses.some((s) => OPEN.has(s))) continue
-    else if (statuses.every((s) => FINISHED.has(s))) done.push(c)
+    if (project && projectOf(c.taskId) !== project) continue
+    const status = statusOf(c.taskId)
+    if (!status) continue
+    if (stay(c) || ACTIVE.has(status)) live.push(c)
+    else if (c.last < now - CARD_WINDOW_MS && !OPEN.has(status)) continue
+    else if (FINISHED.has(status)) done.push(c)
     else if (idleMs > 0 && c.last < now - idleMs) idle.push(c)
     else live.push(c)
   }
@@ -297,23 +276,3 @@ export function arrangeCards(
 
 /** The entries that came in after `since`: a card's "N new". */
 export const newSince = (entries: readonly CardEntry[], since: number) => entries.reduce((n, e) => (e.at > since ? n + 1 : n), 0)
-
-/** Words a batch title doesn't end on ("Level 7: the" → "Level 7"). */
-const DANGLING = new Set(["a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "with", "from", "by"])
-
-/** A batch's title: the words its tasks' titles start with ("Map 3 PR #399: …", "Map 3 PR #400: …" → "Map 3 PR"), or null. */
-export function batchTitle(titles: readonly string[]): string | null {
-  if (titles.length < 2) return null
-  const words = titles.map((t) => t.trim().split(/\s+/))
-  const common: string[] = []
-  for (let i = 0; words.every((w) => i < w.length - 1 && w[i] === words[0]![i]); i++) common.push(words[0]![i]!)
-  while (common.length && DANGLING.has(common.at(-1)!.toLowerCase())) common.pop()
-  const title = common.join(" ").replace(/[\s:·—–#-]+$/, "")
-  return /[\p{L}\p{N}]/u.test(title) ? title : null
-}
-
-/** A batch task's name inside its card: its title without the words every task in the batch starts with. */
-export function batchTaskName(title: string, batch: string | null): string {
-  if (!batch || !title.startsWith(batch)) return title
-  return title.slice(batch.length).replace(/^[\s:·—–-]+/, "") || title
-}

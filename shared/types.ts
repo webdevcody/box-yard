@@ -258,7 +258,7 @@ export interface Task {
   pushState?: PushState | null
   /** The icon it was given (shared/taskIcons.ts: create_task's `icon`); null: one from its title (taskIcon()). */
   icon?: TaskIconName | null
-  /** Shared by the tasks one create_tasks call started (the Coordinator's cards view shows them as one card); null when started on its own. */
+  /** Shared by the tasks one create_tasks call started (the Coordinator's cards view keeps their cards together); null when started on its own. */
   batchId?: string | null
   /** "high": its next turn goes before every normal task waiting for a slot (shared/priority.ts). Sticky until changed. */
   priority?: TaskPriority
