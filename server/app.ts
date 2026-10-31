@@ -235,7 +235,7 @@ const schemas = {
     /** Omitted or null: the Coordinator chat; else that project's Captain chat. */
     projectId: z.string().min(1).nullish(),
     anchorId: z.string().min(1).max(100),
-    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. "task": from a task card (anchorId: the task, or `batch:<id>`). */
+    /** "ask" (the default): a question about `quote`. "reply": a reply to the whole message; no quote. "task": from a task card (anchorId: the task). */
     kind: z.enum(["ask", "reply", "task"]).optional(),
     quote: z.string().trim().max(MAX_QUOTE_CHARS).optional(),
     question: z.string().trim().min(1).max(MAX_QUESTION_CHARS),

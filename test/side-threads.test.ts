@@ -118,14 +118,12 @@ describe("side thread context", () => {
 })
 
 describe("task threads", () => {
-  it("are one per card, and find a card's tasks and their updates in the chat", () => {
+  it("are one per card, and find a card's task's updates in the chat", () => {
     const store = memStore()
     const p = store.createProject({ name: "demo" })
     const a = store.createTask({ projectId: p.id, title: "Level 1", prompt: "x", batchId: "bat_1" })
     const b = store.createTask({ projectId: p.id, title: "Level 2", prompt: "x", batchId: "bat_1" })
     const c = store.createTask({ projectId: p.id, title: "Other", prompt: "x" })
-    expect(store.tasksInBatch("bat_1").map((t) => t.id)).toEqual([a.id, b.id])
-    expect(store.tasksInBatch("bat_none")).toEqual([])
 
     const t = store.createSideThread({ projectId: null, anchorId: a.id, quote: "Level 1", sessionId: "s-1", kind: "task" })
     expect(t.kind).toBe("task")
@@ -145,7 +143,7 @@ describe("task threads", () => {
   })
 
   it("start from the card, the task's state and its updates", () => {
-    const prompt = taskThreadPrompt({ title: "Haiku", batch: false, state: "[The task]\n- task_1 \"Haiku\" done", notices: "- ✅ **Haiku** is done", question: "Any good?", context: null, ownerName: "Sam" })
+    const prompt = taskThreadPrompt({ title: "Haiku", state: "[The task]\n- task_1 \"Haiku\" done", notices: "- ✅ **Haiku** is done", question: "Any good?", context: null, ownerName: "Sam" })
     expect(prompt).toMatch(/^\[Box Yard side thread\] Sam is asking you about a task, from the card of the task "Haiku" in the Coordinator chat\./)
     expect(prompt).toContain("the main chat never sees it")
     expect(prompt).toContain('[The task]\n- task_1 "Haiku" done\n\nIts updates in the chat, oldest first:\n- ✅ **Haiku** is done')
@@ -153,23 +151,22 @@ describe("task threads", () => {
     expect(prompt).toMatch(/Sam's question:\nAny good\?$/)
     expect(prompt).not.toContain("started fresh")
 
-    const batch = taskThreadPrompt({ title: "Level 1 (and 1 more)", batch: true, state: "[These tasks]", notices: "", question: "?", context: "the summary" })
-    expect(batch).toContain('from the card of the batch of tasks "Level 1 (and 1 more)"')
-    expect(batch).toContain("started fresh, from your notes.]\n\nthe summary")
-    expect(batch).toContain("about these tasks")
-    expect(batch).not.toContain("updates in the chat")
+    const fresh = taskThreadPrompt({ title: "Haiku", state: "[The task]", notices: "", question: "?", context: "the summary" })
+    expect(fresh).toContain("started fresh, from your notes.]\n\nthe summary")
+    expect(fresh).toContain("about this task")
+    expect(fresh).not.toContain("updates in the chat")
   })
 
   it("tell a later turn the task's state again only when the task changed, not when time passed", () => {
     const store = memStore()
     const p = store.createProject({ name: "demo" })
     const t = store.createTask({ projectId: p.id, title: "Haiku", prompt: "x" })
-    const key = taskKey([store.getTask(t.id)!])
-    expect(taskKey([store.getTask(t.id)!])).toBe(key)
+    const key = taskKey(store.getTask(t.id)!)
+    expect(taskKey(store.getTask(t.id)!)).toBe(key)
     const pr = { ...store.getTask(t.id)!, prState: "merged" as const }
-    expect(taskKey([pr])).not.toBe(key)
+    expect(taskKey(pr)).not.toBe(key)
     store.updateTask(t.id, { status: "done" })
-    expect(taskKey([store.getTask(t.id)!])).not.toBe(key)
+    expect(taskKey(store.getTask(t.id)!)).not.toBe(key)
   })
 })
 

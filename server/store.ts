@@ -2405,11 +2405,6 @@ export class Store {
     return r ? sideThreadFrom(r) : null
   }
 
-  /** The tasks one create_tasks call started (Task.batchId), oldest first. */
-  tasksInBatch(batchId: string): Task[] {
-    return (this.db.prepare("SELECT * FROM tasks WHERE batch_id = ? ORDER BY created_at ASC, rowid ASC").all(batchId) as TaskRow[]).map((r) => this.taskFromRow(r))
-  }
-
   /** The newest `limit` Coordinator chat notices about any of these tasks (meta.taskId), oldest first. */
   taskNotices(taskIds: readonly string[], limit = 20): ChatMessage[] {
     if (!taskIds.length) return []

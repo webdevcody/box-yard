@@ -8,10 +8,11 @@
 // a fresh session instead, with the summary of the compaction before the highlighted message plus the messages from
 // there up to it (context "summary").
 //
-// A task's card in the Coordinator chat has a thread too (kind "task", one per card, anchored on the task's id or a
-// batch's `batch:<id>`): Cody's questions to the Coordinator about that task, answered in the card. It forks the
-// Coordinator's session at its newest answer and starts from the task as it stands now (ThreadHost.taskState) and its
-// updates in the chat. Like every thread, the main chat and its session never see it.
+// A task's card in the Coordinator chat has a thread too (kind "task", one per card, anchored on the task's id): Cody's
+// questions to the Coordinator about that task, answered in the card. It forks the Coordinator's session at its newest
+// answer and starts from the task as it stands now (ThreadHost.taskState) and its updates in the chat. Like every
+// thread, the main chat and its session never see it. Old ones on a batch card (`batch:<id>`, before every task had its
+// own card) stay listed and readable, but have no task to go on with.
 //
 // Threads are for questions: they see the chat's tools (so the fork keeps the chat's prompt cache) but may only use
 // the read-only ones in THREAD_TOOLS. The CLI refuses the rest (dontAsk with an allowlist), and so does the MCP
@@ -48,10 +49,6 @@ const FALLBACK_MESSAGES = 30
 const FALLBACK_MESSAGE_CHARS = 1500
 /** A task thread starts with at most this many of the task's updates in the chat. */
 const TASK_NOTICES = 12
-/** A batch card's thread starts with at most this many of its tasks in full. */
-const TASK_THREAD_TASKS = 20
-/** A task card's thread anchor: the task's id, or a batch's `batch:<batch id>` (lib/chatCards.ts's card key). */
-export const BATCH_ANCHOR = "batch:"
 
 /**
  * The Box Yard tools a side thread may call: lookups that change nothing. Every other tool is listed (the fork keeps
@@ -122,7 +119,7 @@ export interface ThreadHost {
    * These tasks as they stand now (status, PR, question, last reply), as the chat may see them: a task thread starts
    * from it. Only the Coordinator's chat has task threads.
    */
-  taskState?(tasks: Task[]): Promise<string>
+  taskState?(task: Task): Promise<string>
   /** The project shows the chat its tasks' status only (docs/identities.md): a task thread gets none of their updates. */
   statusOnly?(projectId: string): boolean
 }
@@ -234,20 +231,19 @@ export function noticeLines(notices: ChatMessage[]): string {
 }
 
 /**
- * A task thread's first prompt: which card Cody asks from, the task (or batch) as it stands now, its updates in the
- * chat, and the question. `context`: a fresh session's notes, when the chat's session couldn't be forked.
+ * A task thread's first prompt: which card Cody asks from, the task as it stands now, its updates in the chat, and the
+ * question. `context`: a fresh session's notes, when the chat's session couldn't be forked.
  */
-export function taskThreadPrompt(o: { title: string; batch: boolean; state: string; notices: string; question: string; context: string | null; ownerName?: string }): string {
+export function taskThreadPrompt(o: { title: string; state: string; notices: string; question: string; context: string | null; ownerName?: string }): string {
   const own = (t: string) => withOwner(t, o.ownerName)
-  const which = o.batch ? `the card of the batch of tasks "${o.title}"` : `the card of the task "${o.title}"`
   return [
     own(
-      `[Box Yard side thread] Cody is asking you about a task, from ${which} in the Coordinator chat. This thread is separate from the main conversation: the main chat never sees it, and it starts at your newest message there.`,
+      `[Box Yard side thread] Cody is asking you about a task, from the card of the task "${o.title}" in the Coordinator chat. This thread is separate from the main conversation: the main chat never sees it, and it starts at your newest message there.`,
     ),
     o.context ? `[Your session for this thread was started fresh, from your notes.]\n\n${o.context}` : null,
     o.state,
-    o.notices ? `${o.batch ? "Their" : "Its"} updates in the chat, oldest first:\n${o.notices}` : null,
-    own(`Answer briefly and directly, about ${o.batch ? "these tasks" : "this task"}. ${READ_ONLY_RULE}`),
+    o.notices ? `Its updates in the chat, oldest first:\n${o.notices}` : null,
+    own(`Answer briefly and directly, about this task. ${READ_ONLY_RULE}`),
     `${own("Cody")}'s question:\n${o.question}`,
   ]
     .filter(Boolean)
@@ -258,8 +254,8 @@ export function taskThreadPrompt(o: { title: string; batch: boolean; state: stri
  * What a task thread's state says, without its "updated 3m ago"s: a later turn is told the state again only when this
  * changed, not because a minute passed.
  */
-export function taskKey(tasks: Task[]): string {
-  return JSON.stringify(tasks.map((t) => [t.id, t.status, t.updatedAt, t.prUrl ?? null, t.prState ?? null, t.pendingCount ?? 0, t.question ?? null, t.error ?? null]))
+export function taskKey(t: Task): string {
+  return JSON.stringify([t.id, t.status, t.updatedAt, t.prUrl ?? null, t.prState ?? null, t.pendingCount ?? 0, t.question ?? null, t.error ?? null])
 }
 
 interface RunState {
@@ -325,7 +321,7 @@ export class SideThreads {
    * Open a thread on a chat message with Cody's first message: a question about a highlighted passage (kind "ask"),
    * or a reply to the whole message (kind "reply", no quote needed). A message has one reply thread: replying to it
    * again adds to that thread. Kind "task": a question from a task's card in the Coordinator chat (anchorId: the
-   * task's id, or `batch:<batch id>`); a card has one thread too.
+   * task's id); a card has one thread too.
    */
   create(input: { projectId: string | null; anchorId: string; quote?: string; question: string; kind?: SideThreadKind; id?: string; messageId?: string }): {
     thread: SideThread
@@ -357,29 +353,18 @@ export class SideThreads {
   /** A task card's thread: its first question, or the next one in the thread it has. */
   private createOnCard(input: { projectId: string | null; anchorId: string; id?: string; messageId?: string }, question: string) {
     if (input.projectId) throw new BadRequestError("kind: only the Coordinator chat has task cards")
-    const card = this.cardOf(input.anchorId)
-    if (!card) throw new BadRequestError(`anchorId: no task or batch ${input.anchorId}`)
+    const task = this.store.getTask(input.anchorId)
+    if (!task) throw new BadRequestError(`anchorId: no task ${input.anchorId}`)
     const existing = this.store.threadOn(null, input.anchorId, "task")
     if (existing) {
       const message = this.send(existing.id, question, input.messageId)
       return { thread: this.get(existing.id), message }
     }
     if (input.id && this.store.getSideThread(input.id)) throw new BadRequestError(`A side thread ${input.id} already exists`)
-    const thread = this.store.createSideThread({ id: input.id, projectId: null, anchorId: input.anchorId, kind: "task", quote: card.title.slice(0, MAX_QUOTE_CHARS), sessionId: randomUUID() })
+    const thread = this.store.createSideThread({ id: input.id, projectId: null, anchorId: input.anchorId, kind: "task", quote: task.title.slice(0, MAX_QUOTE_CHARS), sessionId: randomUUID() })
     this.hub.broadcast({ type: "thread", thread: this.decorate(thread) })
     const message = this.send(thread.id, question, input.messageId)
     return { thread: this.get(thread.id), message }
-  }
-
-  /** A task card's tasks (a batch's, oldest first) and what to call it. null when there's no such task or batch. */
-  private cardOf(anchorId: string): { tasks: Task[]; title: string; batch: boolean } | null {
-    if (anchorId.startsWith(BATCH_ANCHOR)) {
-      const tasks = this.store.tasksInBatch(anchorId.slice(BATCH_ANCHOR.length))
-      if (!tasks.length) return null
-      return { tasks, title: tasks.length === 1 ? tasks[0]!.title : `${tasks[0]!.title} (and ${tasks.length - 1} more)`, batch: true }
-    }
-    const task = this.store.getTask(anchorId)
-    return task ? { tasks: [task], title: task.title, batch: false } : null
   }
 
   /** Cody's next message in a thread; answered right away, or after the turn that's running. It reopens a resolved thread. */
@@ -549,20 +534,20 @@ export class SideThreads {
     session: { sessionId: string; started: boolean },
     owner: string | undefined,
   ) {
-    const card = this.cardOf(thread.anchorId)
-    if (!card || !host.taskState) {
-      this.finish(id, { ok: false, error: card ? "This chat has no task cards." : "Its task was deleted.", noSession: true })
+    // An old batch card's thread (`batch:<id>`) has no task: like a deleted one's, it can't go on.
+    const task = this.store.getTask(thread.anchorId)
+    if (!task || !host.taskState) {
+      this.finish(id, { ok: false, error: task ? "This chat has no task cards." : "Its task was deleted.", noSession: true })
       return
     }
-    const tasks = card.tasks.slice(-TASK_THREAD_TASKS)
-    const state = await host.taskState(tasks)
+    const state = await host.taskState(task)
     if (this.stopped || !this.store.getSideThread(id)) return
-    const key = taskKey(tasks.map((t) => this.store.getTask(t.id) ?? t))
+    const key = taskKey(this.store.getTask(task.id) ?? task)
     const changed = key !== r.taskKey
     r.taskKey = key
 
     if (session.started) {
-      const prompt = changed ? `[${card.batch ? "These tasks" : "The task"} now:]\n${state}\n\n${question}` : question
+      const prompt = changed ? `[The task now:]\n${state}\n\n${question}` : question
       const result = await this.run(id, r, host, prompt, ["--resume", session.sessionId], session.sessionId, true)
       // Its session is gone, or belongs to the CLI the chat ran on before: start over from the summary.
       if (result.ok || !MISSING_SESSION.test(result.error) || this.stopped || !this.store.getSideThread(id)) return this.finish(id, result)
@@ -573,10 +558,8 @@ export class SideThreads {
     const compactions = this.compactions(host.compactionsDir)
     // Codex can't fork a session at a message: a thread on a Codex chat always starts from the summary.
     const fork = main.started && host.cli() === "claude" ? forkPoint(recent, main.id, compactions.at(-1)?.at ?? null) : null
-    const open = tasks.filter((t) => !host.statusOnly?.(t.projectId)).map((t) => t.id)
-    const notices = noticeLines(this.store.taskNotices(open, TASK_NOTICES))
-    const first = (context: string | null) =>
-      taskThreadPrompt({ title: card.title, batch: card.batch, state, notices, question, context, ownerName: owner })
+    const notices = host.statusOnly?.(task.projectId) ? "" : noticeLines(this.store.taskNotices([task.id], TASK_NOTICES))
+    const first = (context: string | null) => taskThreadPrompt({ title: task.title, state, notices, question, context, ownerName: owner })
     if (fork) {
       const args = ["--resume", main.id, "--resume-session-at", fork.uuid, "--fork-session", "--session-id", session.sessionId]
       const result = await this.run(id, r, host, first(null), args, session.sessionId, true, "fork")
