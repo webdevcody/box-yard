@@ -133,7 +133,7 @@ describe("Zen mode", () => {
     // Every row pads in to the one centered column: the header, the project bar (a task is running), the thread
     // and the composer.
     expect(chat()!.querySelectorAll(".zen-column").length).toBe(4)
-    expect(chat()!.querySelector('[data-testid="project-bar"]')!.classList.contains("zen-column")).toBe(true)
+    expect(chat()!.querySelector('[data-testid="filter-bar"]')!.classList.contains("zen-column")).toBe(true)
   })
 
   it("puts the context reading and Compact in the header, left of the other controls, and nowhere else", async () => {
