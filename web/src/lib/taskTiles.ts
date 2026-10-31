@@ -17,7 +17,7 @@ export interface TileInfo {
   projectName: string
   icon: TaskIconName
   color: ProjectColor
-  /** The create_tasks call it came from, if that started more than one (the cards view's batch card). */
+  /** The create_tasks call it came from, if that started more than one: the cards view keeps their cards together. */
   batchId: string | null
   createdAt: number
 }
