@@ -266,8 +266,9 @@ describe("running elsewhere", () => {
     click(line)
     expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
     expect(allChip().textContent).toBe("All · 3 active")
+    // A card for each of the 3: LOGIN, named only in a reply to Cody, too.
     const ids = [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
-    expect(ids).toEqual([LEVEL.id, CARDS.id])
+    expect(ids).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
   })
 
   it("says nothing when the other projects are quiet", async () => {
