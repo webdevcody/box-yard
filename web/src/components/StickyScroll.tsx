@@ -112,7 +112,8 @@ export function StickyScroll({
   const toBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scroller.current
     if (!el) return
-    if (behavior === "auto") return setTop(el, el.scrollHeight)
+    // Under prefers-reduced-motion a glide is a jump.
+    if (behavior === "auto" || reducedMotion()) return setTop(el, el.scrollHeight)
     // From far up, jump to a screen above the bottom and glide only that last stretch.
     const near = el.scrollHeight - 2 * el.clientHeight
     if (el.scrollTop < near) setTop(el, near)
@@ -505,3 +506,5 @@ export function StickyScroll({
     </div>
   )
 }
+
+const reducedMotion = () => typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches

@@ -336,6 +336,29 @@ describe("StickyScroll", () => {
       expect(jumpButton()).toBeUndefined()
     })
 
+    it("glides smoothly, and jumps instead under prefers-reduced-motion", () => {
+      const glides: (ScrollBehavior | undefined)[] = []
+      const scrollTo = scroller.scrollTo
+      scroller.scrollTo = ((opts: ScrollToOptions) => {
+        glides.push(opts.behavior)
+        scrollTo.call(scroller, opts)
+      }) as typeof scroller.scrollTo
+      readHistory()
+      send()
+      nextFrame()
+      expect(glides).toContain("smooth")
+      expect(atBottom()).toBe(true)
+
+      glides.length = 0
+      vi.stubGlobal("matchMedia", (q: string) => ({ matches: q === "(prefers-reduced-motion: reduce)", media: q }))
+      readHistory()
+      send()
+      nextFrame()
+      flush()
+      expect(glides).toEqual([])
+      expect(atBottom()).toBe(true)
+    })
+
     it("lands on the sent message when it renders after the frame", () => {
       readHistory()
       send()

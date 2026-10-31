@@ -38,10 +38,9 @@ import { ProjectBar, ProjectFilterBanner } from "./ProjectBar"
 import { chatProvenance, recentProjects, type Provenance } from "../lib/chatProvenance"
 import { pickProject, setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { CardPanel, CardsView, NewCardsPill, TasksOnlyToggle, revealInCards, useCards } from "./CoordinatorCards"
-import { CaptainCard } from "./BottomCard"
+import { CaptainCard, showBottomCard } from "./BottomCard"
 import { projectColorStyle } from "./TaskIcon"
 import { useTiles } from "../lib/taskTiles"
-import { setTasksOnly } from "../lib/coordinatorView"
 import { COORDINATOR_CHAT } from "../lib/threads"
 import { projectContext, type SelectionTaskSource } from "../lib/selectionTask"
 import { ZEN_SHORTCUT_LABEL, enterZen, leaveZen } from "../lib/zen"
@@ -127,8 +126,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
       if (!content && !attachments.length) return
       const sending = send.mutateAsync({ id: newClientId("chat"), content, attachments })
       sending.catch(() => {}) // onError already says so; the Composer puts the text back.
-      // Its answer lands in the Coordinator card: "Tasks only" shows it again.
-      setTasksOnly(false)
+      // Its answer lands in the Coordinator card: it unfolds, and "Tasks only" shows it again.
+      showBottomCard()
       scroller.current?.scrollToEnd()
       markTryFirstDone()
       return sending
@@ -143,8 +142,8 @@ export const ChatPanel = memo(function ChatPanel({ onClose, zen = false }: { onC
         if (!content && !attachments.length) return
         sending = sendCaptain.mutateAsync({ id: newClientId("chat"), content, attachments })
         sending.catch(() => {}) // onError already says so; the Composer puts the text back.
-        // Its answer lands in the Captain card: "Tasks only" shows it again.
-        setTasksOnly(false, true)
+        // Its answer lands in the Captain card: it unfolds, and "Tasks only" shows it again.
+        showBottomCard(true)
         scroller.current?.scrollToEnd()
       } else sending = followUp(text, attachments)
       box.current?.focus()
