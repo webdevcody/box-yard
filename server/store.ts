@@ -1323,6 +1323,7 @@ export class Store {
       queueRev: pending.n ? `${pending.n}.${pending.v}.${pending.d}.${pending.t}` : "",
       lastArchivedAt: row.last_archived_at,
       scheduleId: row.schedule_id ?? null,
+      startedBy: row.source ?? null,
       outcome: parseOutcome(row.outcome),
       contextTokens: row.context_tokens ?? null,
       contextWindow: row.context_window ?? null,
