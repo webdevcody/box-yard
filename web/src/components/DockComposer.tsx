@@ -24,7 +24,7 @@ export type ChatTarget = { label: string; color?: ProjectColor }
 
 /** The line's pills: 28px with a mouse, 44px under a finger. */
 const LINE_PILL =
-  "flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium whitespace-nowrap focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-3.5"
+  "flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium whitespace-nowrap focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-3.5"
 
 export const DockComposer = memo(function DockComposer({
   layout,
@@ -61,7 +61,7 @@ export const DockComposer = memo(function DockComposer({
     <div data-testid="chat-footer" data-docked={docked || undefined} className={cx(COMPOSER_FOOTER, "px-3", className)}>
       <div data-testid="dock-line" className="@container/dock mb-2 flex min-w-0 items-center gap-1.5 [&:not(:has(button))]:hidden">
         {docked && <DockTo layout={layout} target={target} chat={chat} />}
-        <span className="ml-auto flex min-w-0 shrink items-center justify-end gap-1.5">
+        <span className="ml-auto flex shrink-0 items-center justify-end gap-1.5 empty:hidden">
           {layout && <NewCardsPill cards={layout.live} />}
           <JumpPill store={jumpStore} />
         </span>
@@ -102,7 +102,7 @@ function DockTo({ layout, target, chat }: { layout: CardsLayout | null; target: 
         aria-haspopup="menu"
         aria-expanded={menu}
         title={target ? "Goes straight to this task's agent. Pick where else to send" : `Goes to ${chat.label}. Open a card to reply to its task`}
-        className={cx(LINE_PILL, "min-w-0 border-zinc-800 bg-zinc-900/60 pl-2 font-normal text-zinc-400 hover:border-zinc-700 hover:text-zinc-100")}
+        className={cx(LINE_PILL, "min-w-0 shrink border-zinc-800 bg-zinc-900/60 pl-2 font-normal text-zinc-400 hover:border-zinc-700 hover:text-zinc-100")}
       >
         <span className="shrink-0">To</span>
         {target ? <TargetName task={target} /> : <ChatName chat={chat} />}
@@ -138,7 +138,7 @@ function JumpPill({ store }: { store: JumpStore }) {
   if (!away) return null
   const label = unread > 0 ? `${unread} new message${unread === 1 ? "" : "s"}` : "Jump to latest"
   return (
-    <button type="button" data-testid="jump-latest" onClick={store.jump} aria-label={label} title={label} className={cx(LINE_PILL, "border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800")}>
+    <button type="button" data-testid="jump-latest" onClick={store.jump} aria-label={label} title={label} className={cx(LINE_PILL, "shrink-0 border-zinc-700 bg-zinc-900 text-zinc-100 hover:bg-zinc-800")}>
       <ArrowDown className="h-3.5 w-3.5" aria-hidden />
       <span className="@max-[22rem]/dock:sr-only">{label}</span>
     </button>

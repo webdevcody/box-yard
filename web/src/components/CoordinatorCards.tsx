@@ -576,29 +576,32 @@ function CardMeta({ head, last, unread = 0, actions }: { head: CardHead; last: n
   const picked = useChatProjectFilter() !== null
   const merged = status === "merged" && Boolean(task?.prUrl)
   return (
-    <div data-testid="chat-card-meta" className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
-      {!picked && tile?.projectName && (
-        <span data-testid="chat-card-project" className="flex min-w-0 items-center gap-1.5 @max-[30rem]:hidden">
-          <ProjectDot projectId={tile.projectId} />
-          <span className="truncate text-zinc-400">{tile.projectName}</span>
-        </span>
-      )}
-      {task && status && (
-        <>
-          {!merged && <StatusDot status={status} className="text-[11.5px]" />}
-          <PriorityPill task={task} />
-          <Running task={task} />
-          <PrChip task={task} className="text-[11.5px]" />
-        </>
-      )}
-      {unread > 0 && (
-        <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
-          <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
-          {unread} new
-        </span>
-      )}
-      <TimeAgo ts={last} />
-      {actions && <span className="ml-auto flex shrink-0 items-center gap-0.5">{actions}</span>}
+    <div data-testid="chat-card-meta" className={cx(UNDER_TITLE, "mt-0.5 flex items-center gap-2 text-[11.5px] text-zinc-500")}>
+      {/* What it says wraps in its own space; the buttons keep the line's end, so they never take a line of their own. */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+        {!picked && tile?.projectName && (
+          <span data-testid="chat-card-project" className="flex min-w-0 items-center gap-1.5 @max-[30rem]:hidden">
+            <ProjectDot projectId={tile.projectId} />
+            <span className="truncate text-zinc-400">{tile.projectName}</span>
+          </span>
+        )}
+        {task && status && (
+          <>
+            {!merged && <StatusDot status={status} className="text-[11.5px]" />}
+            <PriorityPill task={task} />
+            <Running task={task} />
+            <PrChip task={task} className="text-[11.5px]" />
+          </>
+        )}
+        {unread > 0 && (
+          <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
+            {unread} new
+          </span>
+        )}
+        <TimeAgo ts={last} />
+      </div>
+      {actions && <span className="flex shrink-0 items-center gap-0.5">{actions}</span>}
     </div>
   )
 }
@@ -777,7 +780,7 @@ function LatestLine({ card }: { card: ChatCard }) {
         <>
           <LineIcon icon={line.icon} className={cx("h-3.5 w-3.5", line.className)} />
           <span className="line-clamp-2 min-w-0 wrap-anywhere">
-            {who && <b className="font-medium text-zinc-300">{who}: </b>}
+            {who && <b className="font-medium text-zinc-300">{line.text ? `${who}: ` : who}</b>}
             {line.text}
           </span>
         </>
@@ -822,7 +825,7 @@ function CardSession({
           onClick={() => revealChatMessage(card.origin!.id)}
           title="Show it in the Coordinator card"
           data-testid="chat-card-origin"
-          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-11"
+          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-11 pointer-coarse:items-center"
         >
           <LineIcon icon={CornerDownRight} className="h-3 w-3" />
           <span className="shrink-0">From your message {clock(card.origin.createdAt)}:</span>
@@ -1373,7 +1376,7 @@ function PillTarget({ card, where }: { card: ChatCard; where: string }) {
 }
 
 const TOGGLE_BUTTON =
-  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-2.5"
+  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:min-w-11 pointer-coarse:justify-center pointer-coarse:px-2.5"
 
 /**
  * "Tasks only", in the chat's header: hides the card under the task cards, the Coordinator's under "All" or the picked
@@ -1384,7 +1387,7 @@ export const TasksOnlyToggle = memo(function TasksOnlyToggle() {
   const tasksOnly = useTasksOnly(picked)
   const card = picked ? "the Captain card" : "the Coordinator card"
   return (
-    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
+    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5 pointer-coarse:border-0 pointer-coarse:p-0">
       <button
         type="button"
         aria-pressed={tasksOnly}
