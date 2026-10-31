@@ -20,6 +20,7 @@ import { currentToasts, dismiss } from "../web/src/lib/toast.js"
 import { COORDINATOR_CHAT, closeThread, forgetThread, openThread, openThreadId } from "../web/src/lib/threads.js"
 import { contextLabel } from "../web/src/components/ContextMeter.js"
 import { revealChatMessage } from "../web/src/lib/reveal.js"
+import { resetDock } from "../web/src/lib/dockComposer.js"
 import type { CaptainMessage, CaptainState, ChatMessage, Project, SettingsInfo, Task, TaskStatus } from "../shared/types.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -73,6 +74,7 @@ beforeEach(() => {
   sessionStorage.clear()
   resetCardsSeen()
   resetChipState()
+  resetDock()
   vi.stubGlobal("fetch", () => new Promise(() => {}))
   history.replaceState(null, "", "/")
   qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
@@ -165,7 +167,10 @@ describe("Coordinator cards", () => {
     expect(origin.textContent).toContain("Fix login and build the cards")
     // Its question.
     expect(body.textContent).toContain("Which page, the old one or the new one?")
-    expect([...body.querySelectorAll(`a[href="/tasks/${LOGIN.id}"]`)].some((a) => a.textContent === "Task page")).toBe(true)
+    // Its page is a button in its header, not a footer link.
+    expect(card(LOGIN.id).querySelector(`[data-testid="chat-card-meta"] a[href="/tasks/${LOGIN.id}"]`)!.textContent).toBe("Task page")
+    expect(body.textContent).not.toContain("Task page")
+    expect(body.textContent).not.toContain("Open in panel")
     // In its own card a task's update leads with what happened, not the task's name.
     click(head(CARDS.id))
     const chip = card(CARDS.id).querySelector('[data-testid="update-chip"]')!
@@ -230,7 +235,7 @@ describe("Coordinator cards", () => {
     const body = card(HOLLOW.id).querySelector('[data-testid="chat-card-body"]')!
     expect(body.textContent).toContain("the entrance is lit")
     expect(body.querySelector('[data-testid="chat-card-origin"]')!.textContent).toContain("Shoot every Map 3 area")
-    expect(body.querySelector(`a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
+    expect(card(HOLLOW.id).querySelector(`[data-testid="chat-card-meta"] a[href="/tasks/${HOLLOW.id}"]`)).not.toBeNull()
     // The finished one is in "done today", a card like any other.
     click(host.querySelector('[data-testid="cards-done"]')!)
     expect(card(CAMP.id).textContent).toContain("Merged")
@@ -243,6 +248,9 @@ describe("Coordinator cards", () => {
     expect(card(LOGIN.id).querySelector('[data-testid="chat-card-unread"]')).toBeNull()
     const pill = host.querySelector('[data-testid="new-cards-pill"]')!
     expect(pill.textContent).toContain("1 new")
+    // In the line over the box, not floating over the cards.
+    expect(pill.closest('[data-testid="dock-line"]')).not.toBeNull()
+    expect(host.querySelector("[data-overlay]")).toBeNull()
     expect(pill.querySelector('[data-testid="new-cards-target"]')!.textContent).toBe("Coordinator cards")
     // The card got news without moving.
     expect(cards().map((c) => c.dataset.card)).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
@@ -360,9 +368,10 @@ describe("Reply in a card", () => {
     expect(bubble.textContent).toContain("to this task")
     expect(bubble.textContent).toContain("The new one")
     expect(bubble.textContent).not.toContain("got a message")
-    // It answers Cody, so it reads as the agent's reply, not a chip.
+    // It answers Cody, so it reads as the agent's reply, not a chip; the card's header names the task, so it doesn't.
     const reply = body.querySelector('[data-testid="agent-reply"]')!
-    expect(reply.textContent).toContain("Fix login")
+    expect(reply.textContent).toContain("finished its turn")
+    expect(reply.textContent).not.toContain("Fix login")
     expect(reply.textContent).toContain("Switched to the new page.")
     expect(reply.querySelector("strong")?.textContent).toBe("the new page")
     expect([...body.querySelectorAll('[data-testid="update-chip"]')].some((c) => c.textContent?.includes("Switched"))).toBe(false)
@@ -566,10 +575,11 @@ describe("A card in the side panel", () => {
     expect(card(LOGIN.id).dataset.inPanel).toBeUndefined()
   })
 
-  it("opens from an open card's footer", () => {
+  it("opens from an open card's ⤢, in its header", () => {
     render()
     click(head(CARDS.id))
-    click(button(card(CARDS.id), "Open in panel"))
+    expect(card(CARDS.id).querySelector('[data-testid="chat-card-open-panel"]')).toBeNull()
+    click(expand(CARDS.id))
     expect(panel()!.dataset.card).toBe(CARDS.id)
     expect(panel()!.querySelector('[data-testid="card-panel-title"]')!.textContent).toBe("Coordinator cards")
     expect(panel()!.textContent).toContain("opened PR #9")
@@ -872,6 +882,203 @@ describe("The bottom panel with a project picked", () => {
   })
 })
 
+describe("A card's header", () => {
+  const meta = (key: string) => card(key).querySelector('[data-testid="chat-card-meta"]') as HTMLElement
+  it("holds the title once, then one row with its status, one PR chip (↗), its age and ✓ ⤢ → and fold", () => {
+    render()
+    const c = card(CARDS.id)
+    expect(c.querySelectorAll('[data-testid="chat-card-title"]')).toHaveLength(1)
+    expect(meta(CARDS.id).textContent).toContain("PR ready")
+    const pr = meta(CARDS.id).querySelectorAll('a[href="https://github.com/o/r/pull/9"]')
+    expect(pr).toHaveLength(1)
+    expect(pr[0]!.getAttribute("target")).toBe("_blank")
+    expect(pr[0]!.querySelector("[data-external-mark]")).not.toBeNull()
+    expect([...meta(CARDS.id).querySelectorAll("button, a")].map((b) => b.getAttribute("aria-label") ?? b.textContent?.trim())).toEqual([
+      expect.stringContaining("PR #9"),
+      "Mark done",
+      "Open in the side panel",
+      "Task page",
+      "Open the card",
+    ])
+    // Open, the body doesn't repeat it: no PR chip, no counts, no footer.
+    click(c.querySelector('[data-testid="chat-card-fold"]')!)
+    expect(c.dataset.open).toBe("true")
+    expect(c.querySelector('[data-testid="chat-card-fold"]')!.getAttribute("aria-label")).toBe("Fold the card")
+    const body = c.querySelector('[data-testid="chat-card-body"]')!
+    expect(body.querySelector('a[href="https://github.com/o/r/pull/9"]')).toBeNull()
+    expect(c.textContent).not.toMatch(/\d+ updates?\b/)
+    click(c.querySelector('[data-testid="chat-card-fold"]')!)
+    expect(c.dataset.open).toBeUndefined()
+  })
+
+  it("says Merged once, in its PR chip", () => {
+    render()
+    click(host.querySelector('[data-testid="cards-done"]')!)
+    expect(meta(CAMP.id).textContent!.match(/Merged/g)).toHaveLength(1)
+    expect(meta(CAMP.id).querySelector('[data-pr-state="merged"]')!.textContent).toContain("Merged #399")
+  })
+
+  it("names its project only under All", () => {
+    render()
+    expect(meta(CARDS.id).querySelector('[data-testid="chat-card-project"]')!.textContent).toBe(YARD.name)
+    act(() => setChatProjectFilter(YARD.id))
+    expect(meta(CARDS.id).querySelector('[data-testid="chat-card-project"]')).toBeNull()
+  })
+})
+
+describe("A card's event digest", () => {
+  const SHA = "ff8fc2305ab9c31e61cfc78f89fadf6c2d5d42ee"
+  const hook = notice(CARDS, `🚢 The Captain asked **Coordinator cards** to merge PR #9: https://github.com/o/r/pull/9`)
+  const done = notice(CARDS, `✅ **Coordinator cards** is done: PR #9 is merged into main as squash commit ${SHA}.`)
+  const report = msg("notice", `Captain for box-yard: I merged PR #9 ([Coordinator cards](/tasks/${CARDS.id})).`, { projectId: YARD.id, captain: true })
+  const answer = msg("assistant", `[Coordinator cards](/tasks/${CARDS.id}) is merged. Shall I restart Box Yard?`, { nextSteps: ["Restart Box Yard now", "Not yet"] })
+
+  it("folds the hook, done and report lines into one line with a short SHA; a tap shows each; the reply reads whole", async () => {
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    click(head(CARDS.id))
+    const body = card(CARDS.id).querySelector('[data-testid="chat-card-body"]')!
+    const digest = body.querySelector('[data-testid="event-digest"]')!
+    // The PR it opened, the merge request, done and the report.
+    expect(digest.querySelector('[data-testid="event-digest-summary"]')!.textContent).toBe("Merged as ff8fc23")
+    expect(digest.textContent).toContain("4 events")
+    expect(body.textContent).not.toContain(SHA)
+    expect(body.querySelectorAll('[data-testid="update-chip"]')).toHaveLength(0)
+    expect(body.textContent).toContain("Shall I restart Box Yard?")
+    // The Coordinator's reply in a task card has no "from:" line.
+    expect(body.querySelector('[data-testid="reply-sources"]')).toBeNull()
+    // Its next steps are the card's answer buttons, the first the primary one, right under the reply.
+    const answers = body.querySelector('[data-testid="chat-reply"] [data-testid="answer-buttons"]')!
+    expect(answers.getAttribute("aria-label")).toBe("Next steps")
+    expect([...answers.querySelectorAll("button")].map((b) => [b.textContent, b.hasAttribute("data-primary")])).toEqual([
+      ["Restart Box Yard now", true],
+      ["Not yet", false],
+    ])
+    expect(answers.previousElementSibling!.textContent).toContain("Shall I restart Box Yard?")
+    const line = digest.querySelector("button")!
+    expect(line.getAttribute("aria-expanded")).toBe("false")
+    click(line)
+    expect(line.getAttribute("aria-expanded")).toBe("true")
+    expect(digest.querySelectorAll('[data-testid="update-chip"]')).toHaveLength(4)
+    expect(digest.textContent).toContain("ff8fc23")
+    expect(digest.textContent).not.toContain(SHA)
+  })
+
+  it("opens to a message a link goes to", async () => {
+    vi.spyOn(HTMLElement.prototype, "scrollIntoView").mockImplementation(() => {})
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    act(() => revealChatMessage(done.id))
+    await frames()
+    await frames()
+    expect(card(CARDS.id).dataset.open).toBe("true")
+    expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')!.getAttribute("data-open")).toBe("true")
+    expect(card(CARDS.id).querySelector(`[data-chat-id="${done.id}"]`)).not.toBeNull()
+    vi.restoreAllMocks()
+  })
+
+  it("an answer button sends its step to the Coordinator", async () => {
+    const posts: { url: string; body: Record<string, unknown> }[] = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+    render()
+    await setChat([...CHAT, hook, done, report, answer])
+    click(head(CARDS.id))
+    click(card(CARDS.id).querySelector('[data-testid="answer-buttons"] button')!)
+    await frames()
+    expect(posts).toEqual([{ url: "/api/chat", body: expect.objectContaining({ content: "Restart Box Yard now" }) }])
+  })
+
+  it("leaves a lone event a quiet chip, and the Coordinator card has no digest", async () => {
+    render()
+    click(head(CARDS.id))
+    expect(card(CARDS.id).querySelector('[data-testid="event-digest"]')).toBeNull()
+    expect(card(CARDS.id).querySelectorAll('[data-testid="update-chip"]')).toHaveLength(1)
+    expect(coordinator().querySelector('[data-testid="event-digest"]')).toBeNull()
+  })
+})
+
+describe("The docked box (a narrow chat)", () => {
+  let posts: { url: string; body: Record<string, unknown> }[]
+  beforeEach(() => {
+    posts = []
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> })
+      return new Promise(() => {})
+    })
+  })
+  afterEach(() => vi.restoreAllMocks())
+  /** The chat column measures `width` px: a phone's, or a wide panel's. */
+  const narrow = (width = 390) => vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, bottom: 800, right: width, width, height: 800, toJSON: () => ({}) } as DOMRect)
+  const footer = () => host.querySelector('[data-testid="chat-footer"]') as HTMLElement
+  const to = () => footer().querySelector('[data-testid="dock-to-target"]')?.textContent
+  const textarea = () => footer().querySelector("textarea")!
+  const send = async (text: string) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea(), text)
+      textarea().dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void footer().querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+  }
+
+  it("is the only box: it follows the card Cody opens, says so, and sends to its task", async () => {
+    narrow()
+    render()
+    expect(footer().dataset.docked).toBe("true")
+    expect(to()).toBe("Coordinator")
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+    click(head(LOGIN.id))
+    // No box in the card: the one at the bottom is its.
+    expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).toBeNull()
+    expect(to()).toBe("Fix login")
+    expect(textarea().placeholder).toBe("Answer the agent…")
+    await send("The new one")
+    expect(posts).toEqual([{ url: `/api/tasks/${LOGIN.id}/messages`, body: { content: "The new one", attachments: [], inChat: true } }])
+    // Another card opened: the box goes with it. Closed: back to the Coordinator.
+    click(head(CARDS.id))
+    expect(to()).toBe("Coordinator cards")
+    click(head(CARDS.id))
+    expect(to()).toBe("Coordinator")
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+  })
+
+  it("its To menu sends to the Coordinator or another open card", () => {
+    narrow()
+    render()
+    click(head(LOGIN.id))
+    click(head(CARDS.id))
+    click(footer().querySelector('[data-testid="dock-to"]')!)
+    const items = [...document.querySelectorAll('[role="menuitem"]')] as HTMLElement[]
+    expect(items.map((i) => i.textContent)).toEqual(["To the Coordinator", "To Fix login", "To Coordinator cards"])
+    click(items[1]!)
+    expect(to()).toBe("Fix login")
+    click(footer().querySelector('[data-testid="dock-to"]')!)
+    click(document.querySelector('[role="menuitem"]')!)
+    expect(to()).toBe("Coordinator")
+  })
+
+  it("names the picked project's Captain as the chat's own", () => {
+    narrow()
+    act(() => setChatProjectFilter(YARD.id))
+    render()
+    expect(to()).toBe("box-yard Captain")
+  })
+
+  it("isn't there in a wide chat: each open card keeps its own box", () => {
+    narrow(800)
+    render()
+    expect(footer().dataset.docked).toBeUndefined()
+    click(head(LOGIN.id))
+    expect(footer().querySelector('[data-testid="dock-to"]')).toBeNull()
+    expect(card(LOGIN.id).querySelector('[data-testid="card-composer"]')).not.toBeNull()
+    expect(textarea().placeholder).toBe("Ask the Coordinator…")
+  })
+})
+
 describe("Mark done in the cards", () => {
   // Resting since a turn 5 hours ago: past the 3 hour "Idle after".
   const OLD = task("task_old00001", MAP.id, "Map 3 PR #401: East Town", "idle")
@@ -946,10 +1153,14 @@ describe("Mark done in the cards", () => {
     expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
   })
 
-  it("marks a task waiting on Cody done from the open card's footer; no ✓ on a card that's running or asking", () => {
+  it("marks a task waiting on Cody done from the open card's ✓; no ✓ on a closed card that's running or asking", () => {
     render()
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
     click(head(LOGIN.id))
-    click(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')!)
+    expect(card(LOGIN.id).querySelector('[data-testid="chat-card-mark-done"]')).toBeNull()
+    const check = card(LOGIN.id).querySelector('[data-testid="chat-card-check"]') as HTMLElement
+    expect(check.title).toContain("Close the task")
+    click(check)
     expect(toastTitles()).toEqual(["Marked done"])
     // Open, it stays where it is (it folds once closed), and says it's done.
     expect(live()).toEqual([LOGIN.id, CARDS.id, HOLLOW.id, DAM.id])
@@ -959,8 +1170,10 @@ describe("Mark done in the cards", () => {
     expect(card(DAM.id).querySelector('[data-testid="chat-card-check"]')).toBeNull()
   })
 
-  it("Mark all idle as done lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
+  it("Mark all idle as done (in Select's bar) lists the resting tasks, never the ones running or waiting on Cody, and marks the ticked ones", () => {
     render()
+    expect(host.querySelector('[data-testid="cards-clear-idle"]')).toBeNull()
+    click(host.querySelector('[data-testid="cards-select"]')!)
     click(host.querySelector('[data-testid="cards-clear-idle"]')!)
     const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
     expect(pop.textContent).toContain("Mark 2 tasks done?")
@@ -971,6 +1184,8 @@ describe("Mark done in the cards", () => {
     expect(confirm.textContent).toContain("Mark 1 done")
     click(confirm)
     expect(host.querySelector('[data-testid="cards-clear-idle-popover"]')).toBeNull()
+    // Done with Select too.
+    expect(host.querySelector('[data-testid="cards-select-bar"]')).toBeNull()
     expect(live()).toEqual([LOGIN.id, HOLLOW.id, DAM.id])
     expect(fold("idle")!.textContent).toContain("1 idle")
     expect(toastTitles()).toEqual(["Marked done"])
@@ -979,6 +1194,7 @@ describe("Mark done in the cards", () => {
   it("keeps to the project bar's filter", () => {
     render()
     act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="cards-select"]')!)
     click(host.querySelector('[data-testid="cards-clear-idle"]')!)
     const pop = host.querySelector('[data-testid="cards-clear-idle-popover"]') as HTMLElement
     expect(pop.textContent).toContain("Mark 1 task done?")

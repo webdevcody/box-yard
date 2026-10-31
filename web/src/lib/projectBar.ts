@@ -29,7 +29,8 @@ export type BarPins = Readonly<Record<string, PinState>>
  * talked about lately (`recent`), and the one it's filtered to; never an unpinned one, unless it's the filter. In the
  * sidebar's order, so a chip never moves as counts change. `active` is the "All" chip's count: tasks asking, running
  * or queued, every project's. `hidden`: unpinned projects with a task asking Cody, which the bar sums up as
- * "+1 needs you" so a question is never out of sight.
+ * "+1 needs you" so a question is never out of sight. `elsewhere`: with a project picked, the other projects' tasks
+ * asking, running or queued (`needs` of them asking), which "All" says so a running task never seems to vanish.
  */
 export function projectBarRows(
   projects: readonly Project[],
@@ -37,7 +38,7 @@ export function projectBarRows(
   recent: ReadonlySet<string>,
   filter: string | null,
   pins: BarPins = {},
-): { rows: BarRow[]; active: number; hidden: BarRow[] } {
+): { rows: BarRow[]; active: number; hidden: BarRow[]; elsewhere: { busy: number; needs: number } } {
   const counts = new Map<string, BarRow>()
   for (const p of projects) counts.set(p.id, { id: p.id, name: p.name, needs: 0, running: 0, queued: 0, prReady: 0 })
   for (const t of tasks) {
@@ -49,18 +50,29 @@ export function projectBarRows(
     else if (t.status === "pr_ready") row.prReady++
   }
   let active = 0
+  const elsewhere = { busy: 0, needs: 0 }
   const rows: BarRow[] = []
   const hidden: BarRow[] = []
   for (const row of counts.values()) {
     const busy = row.needs + row.running + row.queued
     active += busy
+    if (filter && row.id !== filter) {
+      elsewhere.busy += busy
+      elsewhere.needs += row.needs
+    }
     const pin = pins[row.id]
     if (row.id === filter || pin === "pinned") rows.push(row)
     else if (pin === "unpinned") {
       if (row.needs) hidden.push(row)
     } else if (busy || row.prReady || recent.has(row.id)) rows.push(row)
   }
-  return { rows, active, hidden }
+  return { rows, active, hidden, elsewhere }
+}
+
+/** What "All" adds with a project picked: "2 running elsewhere", or "2 active elsewhere" when one of them is asking. */
+export function elsewhereLabel(elsewhere: { busy: number; needs: number }): string | null {
+  if (!elsewhere.busy) return null
+  return `${elsewhere.busy} ${elsewhere.needs ? "active" : "running"} elsewhere`
 }
 
 /**

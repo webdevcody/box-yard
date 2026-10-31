@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { act, createElement, createRef } from "react"
 import { createRoot, type Root } from "react-dom/client"
-import { StickyScroll, type StickyScrollHandle } from "../web/src/components/StickyScroll.js"
+import { StickyScroll, createJumpStore, type JumpStore, type StickyScrollHandle } from "../web/src/components/StickyScroll.js"
 import { useTail } from "../web/src/lib/tail.js"
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -93,11 +93,13 @@ const userScroll = (dy: number) => {
 }
 
 const handle = createRef<StickyScrollHandle>()
+// Where "Jump to latest" goes when the caller shows it (the Coordinator chat's line over its box).
+let jumpStore: JumpStore | undefined
 
 function Thread({ heights }: { heights: number[] }) {
   return createElement(
     StickyScroll,
-    { handle, count: heights.length, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
+    { handle, count: heights.length, jumpStore, children: heights.map((h, i) => createElement("div", { key: i, "data-h": h }, `row ${i}`)) },
   )
 }
 
@@ -117,6 +119,7 @@ const nextFrame = () => act(() => frames.splice(0).forEach((cb) => cb(0)))
 let viewport: EventTarget
 
 beforeEach(() => {
+  jumpStore = undefined
   frames = []
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb))
   viewport = new EventTarget()
@@ -283,6 +286,24 @@ describe("StickyScroll", () => {
     expect(atBottom()).toBe(true)
     streamDelta()
     expect(atBottom()).toBe(true)
+  })
+
+  it("with a jumpStore, says it's away and how much is new instead of floating its button; the store's jump re-pins", () => {
+    const store = (jumpStore = createJumpStore())
+    render()
+    expect(store.get()).toEqual({ away: false, unread: 0 })
+    userScroll(-300)
+    frame()
+    expect(jumpButton()).toBeUndefined()
+    expect(store.get().away).toBe(true)
+    heights.push(100)
+    render()
+    frame()
+    expect(store.get()).toEqual({ away: true, unread: 1 })
+    act(() => store.jump())
+    frame()
+    expect(atBottom()).toBe(true)
+    expect(store.get()).toEqual({ away: false, unread: 0 })
   })
 
   it("holds the row being read still when content above it grows", () => {

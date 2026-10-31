@@ -5,7 +5,7 @@ import { useLocation } from "wouter"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowUpRight, Bot, Box, Check, ChevronsUp, Copy, GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft, HardDrive, Loader2, type LucideIcon } from "lucide-react"
 import { hintForHref, useEntityIndex } from "../lib/entities"
-import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
+import { followAppLink, githubRef, linkTarget, mayHaveGithubRef, MENTIONS, remarkEntityLinks, shortGithubLabel, shortSha, splitGithubRefs, type EntityIndex, type RepoScope } from "../lib/linkify"
 import { RepoContext, repoScopeKey, resolveRepoScope, useRepoScopeKey } from "../lib/repoScope"
 import { FileLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskTile } from "./TaskIcon"
@@ -342,8 +342,8 @@ function GithubRefText({ text, inLink }: { text: string; inLink?: boolean }) {
   if (parts.length === 1 && !parts[0]!.url) return text
   return parts.map((p, i) =>
     p.url ? (
-      <GithubTextLink key={i} href={p.url} inLink={inLink} className={EXTERNAL_TEXT_LINK}>
-        {p.text}
+      <GithubTextLink key={i} href={p.url} inLink={inLink} title={p.label ? p.text : undefined} className={EXTERNAL_TEXT_LINK}>
+        {p.label ?? p.text}
       </GithubTextLink>
     ) : (
       p.text
@@ -357,12 +357,14 @@ const TASK_HREF = /^(?:https?:\/\/[^/]+)?\/tasks\/(task_[A-Za-z0-9-]{6,40})\/?$/
 const MARKDOWN_COMPONENTS: Components = {
   a: ({ href = "", title, children }) => {
     const taskId = TASK_HREF.exec(href)?.[1]
+    // A whole commit SHA as the link's text reads as its short form, the whole one in its tooltip.
+    const sha = typeof children === "string" && isLongSha(children) ? children : null
     return (
-      <AppLink href={href} title={title}>
+      <AppLink href={href} title={title ?? sha ?? undefined}>
         {/* A task link leads with the task's tile, in its project's colour. */}
         {taskId && <TaskTile id={taskId} bare className="mr-0.5 align-[-1px]" />}
         {/* A bare URL the model pasted (GFM autolinks it, text = href): "PR #154" reads better than the whole URL. */}
-        {(typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
+        {(sha && shortSha(sha)) || (typeof children === "string" && isRawUrl(children, href) && shortGithubLabel(href)) || children}
       </AppLink>
     )
   },
@@ -395,6 +397,8 @@ function ChatImage({ src, alt, title }: { src: string; alt?: string; title?: str
     />
   )
 }
+
+const isLongSha = (text: string) => /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(text)
 
 const isRawUrl = (text: string, href: string) => text === href || text.replace(/\/$/, "") === href.replace(/\/$/, "")
 

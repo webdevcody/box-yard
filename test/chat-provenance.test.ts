@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { chatProvenance, messageRefs, recentProjects } from "../web/src/lib/chatProvenance.js"
 import { coordinatorRows, sourceNames } from "../web/src/lib/chatUpdates.js"
 import { buildEntityIndex } from "../web/src/lib/linkify.js"
-import { barCounts, projectBarRows } from "../web/src/lib/projectBar.js"
+import { barCounts, elsewhereLabel, projectBarRows } from "../web/src/lib/projectBar.js"
 import { buildTiles } from "../web/src/lib/taskTiles.js"
 import type { ChatMessage, Project, Task, TaskStatus } from "../shared/types.js"
 
@@ -123,6 +123,17 @@ describe("projectBarRows", () => {
     // box-yard has a task asking; Map 3 is only busy.
     expect(hidden.map((r) => r.name)).toEqual(["box-yard"])
     expect(projectBarRows(PROJECTS, tasks, new Set(), MAP.id, pins).rows.map((r) => r.name)).toEqual(["Map 3", "Notes"])
+  })
+
+  it("with a project picked, counts the other projects' tasks asking, running or queued, and says so plainly", () => {
+    expect(projectBarRows(PROJECTS, tasks, new Set(), null).elsewhere).toEqual({ busy: 0, needs: 0 })
+    expect(projectBarRows(PROJECTS, tasks, new Set(), YARD.id).elsewhere).toEqual({ busy: 2, needs: 0 })
+    expect(projectBarRows(PROJECTS, tasks, new Set(), MAP.id).elsewhere).toEqual({ busy: 2, needs: 1 })
+    // An unpinned project's chip is off the bar, but its running tasks still count.
+    expect(projectBarRows(PROJECTS, tasks, new Set(), NOTES.id, { [YARD.id]: "unpinned", [MAP.id]: "unpinned" }).elsewhere.busy).toBe(4)
+    expect(elsewhereLabel({ busy: 0, needs: 0 })).toBeNull()
+    expect(elsewhereLabel({ busy: 2, needs: 0 })).toBe("2 running elsewhere")
+    expect(elsewhereLabel({ busy: 2, needs: 1 })).toBe("2 active elsewhere")
   })
 
   it("shows a quiet project the chat talked about, and the one it's filtered to", () => {

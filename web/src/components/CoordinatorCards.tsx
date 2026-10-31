@@ -1,23 +1,24 @@
 // The Coordinator chat as cards: one per task, in the order the chat first named them, so new activity never moves
 // one, and the Coordinator's own card (Cody's messages and the answers to them) pinned under them. A card's header is
-// its title (full width), then its project, status, PR, how much it holds and when it last changed; closed, its
-// latest line. Open, it shows where it came from, its newest entries, a box that replies to its task (CardComposer.tsx),
-// and the way to its task page. ⤢ opens it in the side panel reply threads use (SideThread.tsx)
-// instead, with its whole history. With a project picked in the bar, that project's Captain card (BottomCard.tsx)
-// takes the Coordinator card's place.
+// its title (full width), then one row with its status, its PR chip, its news and age, and its actions as buttons
+// (44px under a finger): ✓ Mark done, ⤢ the side panel, → its task page and fold. Closed, its latest line. Open, it
+// shows where it came from, its newest entries and a box that replies to its task (CardComposer.tsx); nothing in it
+// repeats the header. ⤢ opens it in the side panel reply threads use (SideThread.tsx) instead, with its whole
+// history. With a project picked in the bar, that project's Captain card (BottomCard.tsx) takes the Coordinator card's place.
 // Every task has its own card, one create_tasks call's next to each other. Finished cards fold into "N done today" at the top, and
 // resting ones quiet for Settings' cardsIdleHours into "N idle" next to it; a card with news says "N new" until
-// opened, and the ↓ pill steps through them. Mark done (a card's ⋯, an open card, Select, or "Mark all idle as done"
-// over the cards) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
+// opened, and the ↓ pill steps through them. Mark done (a card's ✓, Select, or "Mark all idle as done" in Select's
+// bar) closes tasks as close_task does, after an undo window. What goes in which card is lib/chatCards.ts;
 // "Tasks only" is the chat header's TasksOnlyToggle (lib/coordinatorView.ts).
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react"
 import { useLocation } from "wouter"
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowRight,
   ArrowUp,
   Bot,
-  ChevronRight,
+  ChevronDown,
   ChevronUp,
   ChevronsDownUp,
   LocateFixed,
@@ -28,6 +29,7 @@ import {
   Link2,
   Maximize2,
   Minimize2,
+  Moon,
   MoreHorizontal,
   PanelBottomClose,
   Send,
@@ -48,15 +50,18 @@ import { confirmDialog } from "../lib/confirm"
 import { chipView, isSent, itemMessages, noticeText, type CoordinatorRow } from "../lib/chatUpdates"
 import { plainText } from "../lib/captainTranscript"
 import { publishedLabel } from "../lib/publishedNotices"
-import { isOpen, setOpen, useChipOpen } from "../lib/chipState"
+import { isOpen, setOpen, useChipOpen, useOpenAmong } from "../lib/chipState"
 import { markSeen, seenAt, startSeen, useSeen, useSeenAt } from "../lib/cardsSeen"
 import { clearFocusCard, clearShownMessage, setTasksOnly, showCard, showMessage, useFocusCard, useShownMessage, useTasksOnly } from "../lib/coordinatorView"
 import { revealChatMessage } from "../lib/reveal"
+import { dockTarget, setDockTarget, useDocked, useDockTarget } from "../lib/dockComposer"
+import { shortShas } from "../lib/linkify"
+import { digestEntries, digestSummary, eventLine, isEvent, type DigestPiece } from "../lib/cardDigest"
 import { jumpDirection, nextJump, scrollParent, type JumpDirection } from "../lib/cardJump"
 import { setChatProjectFilter, useChatProjectFilter } from "../lib/projectBar"
 import { isRunning, runningSince } from "../lib/runningTasks"
 import type { Provenance } from "../lib/chatProvenance"
-import { COORDINATOR_CHAT, closeThread, openCard, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
+import { COORDINATOR_CHAT, closeThread, toggleCard, toggleExpanded, useCardShown } from "../lib/threads"
 import { openInZenPanel } from "../lib/zenPanel"
 import { NOTICE_ICON } from "./noticeIcons"
 import { ChatLine, FullReplyLink } from "./ChatLine"
@@ -70,7 +75,8 @@ import { UpdateChip } from "./UpdateChips"
 import { ProjectDot, TaskTile, projectColorStyle } from "./TaskIcon"
 import { PlacementCardChip } from "./PlacementChip"
 import { usePopover } from "./TaskHeader"
-import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, TimeAgo, cx } from "./ui"
+import { BAR_CHIP, CHIP_OFF } from "./ProjectBar"
+import { AppLink, Button, Elapsed, InRepo, LineIcon, Markdown, PrChip, PriorityPill, StatusBadge, StatusDot, TimeAgo, cx } from "./ui"
 import { CARDS_IDLE_HOURS, type ChatMessage, type Task } from "../../../shared/types"
 
 /** How many entries an open card shows before "N earlier", and how many more each click adds. */
@@ -78,15 +84,15 @@ const CARD_SHOW = 4
 const COORDINATOR_SHOW = 3
 const EARLIER_STEP = 10
 
-const CARD = "scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px] bg-zinc-900/40"
+const CARD = "@container scroll-mt-3 rounded-[10px] border border-zinc-800/80 border-l-[3px] bg-zinc-900/40"
 const CARD_HEAD =
   "block w-full cursor-pointer rounded-[9px] py-2 pr-2 pl-3 text-left hover:bg-zinc-900/50 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none"
 const CARD_BODY = "space-y-2 border-t border-zinc-800/70 py-2 pr-2.5 pl-3"
-/** The line under a card's title, lined up with it past the tile. */
-const UNDER_TITLE = "ml-[30px]"
+/** The lines under a card's title, lined up with it past the tile (a narrow card has no tile). */
+const UNDER_TITLE = "ml-[30px] @max-[30rem]:ml-0"
 const FOOT =
-  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-9"
-const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-9"
+  "inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
+const EARLIER = "flex items-center gap-1 rounded-md px-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 pointer-coarse:min-h-11"
 
 export interface CardsLayout {
   /** Every card, unfiltered and unfolded: the side panel finds its card here. */
@@ -278,23 +284,17 @@ export const CardsView = memo(function CardsView({
   )
 })
 
-const FOLD =
-  "flex min-w-0 flex-1 basis-[13rem] items-center gap-2 rounded-[10px] border border-dashed border-zinc-800 px-2 py-1.5 text-left text-xs text-zinc-500 hover:text-zinc-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-10"
-const BAR_BUTTON =
-  "inline-flex h-full min-h-7 items-center gap-1 rounded-lg border border-zinc-800 px-2 text-xs text-zinc-400 hover:bg-zinc-900 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-expanded:bg-zinc-900 aria-expanded:text-zinc-100 pointer-coarse:min-h-10"
+/** A count pill on the filter bar's right: "✓ 24 done today", "☾ 3 idle"; its icon and number alone when narrow. */
+const FOLD_PILL = cx(BAR_CHIP, CHIP_OFF, "pr-2 pointer-coarse:px-3 aria-expanded:border-zinc-600 aria-expanded:bg-zinc-800 aria-expanded:text-zinc-50")
+const BAR_BUTTON = cx(BAR_CHIP, CHIP_OFF, "px-2 text-zinc-400 hover:text-zinc-100 pointer-coarse:w-11 pointer-coarse:justify-center pointer-coarse:px-0")
 
-/** "3 done today" or "4 idle" with their tiles: opens into the cards. */
-function Fold({ cards, open, toggle, label, title, testId }: { cards: readonly ChatCard[]; open: boolean; toggle: () => void; label: string; title: string; testId: string }) {
+/** "✓ 24 done today" or "☾ 4 idle": opens its cards over the list. */
+function Fold({ count, open, toggle, icon: Icon, iconClass, label, title, testId }: { count: number; open: boolean; toggle: () => void; icon: LucideIcon; iconClass: string; label: string; title: string; testId: string }) {
   return (
-    <button type="button" aria-expanded={open} onClick={toggle} data-testid={testId} title={title} className={FOLD}>
-      <ChevronRight className={cx("h-3.5 w-3.5 shrink-0 transition-transform", open && "rotate-90")} aria-hidden />
-      <span className="shrink-0">{label}</span>
-      <span className="flex min-w-0 gap-0.5 overflow-hidden">
-        {cards.map((c) => (
-          <TaskTile key={c.key} id={c.taskId} />
-        ))}
-      </span>
-      <span className="ml-auto shrink-0 @max-[20rem]:hidden">{open ? "hide" : "show"}</span>
+    <button type="button" aria-expanded={open} onClick={toggle} data-testid={testId} title={title} aria-label={`${count} ${label}`} className={FOLD_PILL}>
+      <Icon className={cx("h-3.5 w-3.5 shrink-0", iconClass)} aria-hidden />
+      <b className="font-semibold tabular-nums">{count}</b>
+      <span className="text-zinc-400 @max-[30rem]/bar:hidden"> {label}</span>
     </button>
   )
 }
@@ -302,9 +302,45 @@ function Fold({ cards, open, toggle, label, title, testId }: { cards: readonly C
 const hoursLabel = (h: number) => (h < 1 ? `${Math.round(h * 60)}m` : `${Number.isInteger(h) ? h : h.toFixed(1)}h`)
 
 /**
- * Over the cards: "N done today" and "N idle" side by side (stacked when narrow), Select and "Mark all idle as done" on
- * the right; in Select mode, its bar. Then the cards of whichever fold is open.
+ * On the filter bar's right (ProjectBar's `trailing`): "✓ N done today" and "☾ N idle", each opening its cards at the
+ * top of the list, and Select, which picks cards to mark done (Mark all idle as done is in its bar).
  */
+export const CardsBarPills = memo(function CardsBarPills({ layout }: { layout: CardsLayout }) {
+  const { live, idle, done } = layout
+  const [doneOpen, toggleDone] = useChipOpen("cards:done")
+  const [idleOpen, toggleIdle] = useChipOpen("cards:idle")
+  const selecting = useSelecting()
+  const hours = useAgentSettings().data?.settings.cardsIdleHours ?? CARDS_IDLE_HOURS.default
+  const resting = useMemo(() => [...idle, ...live], [idle, live])
+  const clearable = useClearable(resting)
+  return (
+    <>
+      {done.length > 0 && (
+        <Fold count={done.length} open={doneOpen} toggle={toggleDone} icon={CircleCheck} iconClass="text-emerald-400" label="done today" title="Cards whose tasks finished in the last day" testId="cards-done" />
+      )}
+      {idle.length > 0 && (
+        <Fold
+          count={idle.length}
+          open={idleOpen}
+          toggle={toggleIdle}
+          icon={Moon}
+          iconClass="text-zinc-400"
+          label="idle"
+          title={`Resting cards with no activity for ${hoursLabel(hours)} or more (Settings › Coordinator › Idle after)`}
+          testId="cards-idle"
+        />
+      )}
+      {!selecting && clearable.length > 0 && (
+        <button type="button" onClick={() => startSelecting()} data-testid="cards-select" aria-label="Select" title="Select cards to mark done" className={BAR_BUTTON}>
+          <ListChecks className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span className="@max-[36rem]/bar:hidden">Select</span>
+        </button>
+      )}
+    </>
+  )
+})
+
+/** Over the cards: in Select mode, its bar. Then the cards of whichever fold the filter bar has open. */
 function CardsBar({
   live,
   idle,
@@ -318,40 +354,15 @@ function CardsBar({
   newest: string | null
   onFollowUp: (text: string) => void
 }) {
-  const [doneOpen, toggleDone] = useChipOpen("cards:done")
-  const [idleOpen, toggleIdle] = useChipOpen("cards:idle")
+  const [doneOpen] = useChipOpen("cards:done")
+  const [idleOpen] = useChipOpen("cards:idle")
   const selecting = useSelecting()
-  const hours = useAgentSettings().data?.settings.cardsIdleHours ?? CARDS_IDLE_HOURS.default
   const resting = useMemo(() => [...idle, ...live], [idle, live])
   const clearable = useClearable(resting)
   const holder = (c: ChatCard) => (newest && c.entries.some((e) => e.id === newest) ? newest : null)
   return (
     <>
       {selecting && <SelectBar cards={resting} clearable={clearable} />}
-      {(done.length > 0 || idle.length > 0 || (!selecting && clearable.length > 0)) && (
-        <div data-testid="cards-bar" className="flex flex-wrap items-stretch gap-2">
-          {done.length > 0 && <Fold cards={done} open={doneOpen} toggle={toggleDone} label={`${done.length} done today`} title="Cards whose tasks finished in the last day" testId="cards-done" />}
-          {idle.length > 0 && (
-            <Fold
-              cards={idle}
-              open={idleOpen}
-              toggle={toggleIdle}
-              label={`${idle.length} idle`}
-              title={`Resting cards with no activity for ${hoursLabel(hours)} or more (Settings › Coordinator › Idle after)`}
-              testId="cards-idle"
-            />
-          )}
-          {!selecting && clearable.length > 0 && (
-            <span className="ml-auto flex shrink-0 items-stretch gap-1">
-              <button type="button" onClick={() => startSelecting()} data-testid="cards-select" aria-label="Select" title="Select cards to mark done" className={BAR_BUTTON}>
-                <ListChecks className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                <span className="@max-[30rem]:hidden">Select</span>
-              </button>
-              <ClearIdle tasks={clearable} />
-            </span>
-          )}
-        </div>
-      )}
       {doneOpen && done.map((c) => <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />)}
       {idleOpen && idle.map((c) => <TaskChatCard key={c.key} card={c} next={holder(c)} onFollowUp={onFollowUp} />)}
     </>
@@ -370,7 +381,7 @@ function useClearable(cards: readonly ChatCard[]): Task[] {
  * "Mark all idle as done": a popover listing the tasks it closes (the project bar's filter applies), each one a
  * checkbox to leave it out. Running and queued tasks and ones waiting on Cody are never in it.
  */
-function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
+function ClearIdle({ tasks, onDone }: { tasks: readonly Task[]; onDone: () => void }) {
   const { open, setOpen, root, trigger } = usePopover()
   const [left, setLeft] = useState<ReadonlySet<string>>(new Set())
   const mark = useMarkTasksDone()
@@ -398,7 +409,7 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
         aria-label="Mark all idle as done"
         title="Mark every resting task in these cards done"
         data-testid="cards-clear-idle"
-        className={BAR_BUTTON}
+        className={FOOT}
       >
         <CircleCheck className="h-3.5 w-3.5 shrink-0" aria-hidden />
         <span className="@max-[30rem]:hidden">Mark all idle as done</span>
@@ -441,6 +452,7 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
               onClick={() => {
                 setOpen(false)
                 mark(chosen)
+                onDone()
               }}
             >
               <CircleCheck className="h-3.5 w-3.5" /> Mark {chosen.length} done
@@ -452,7 +464,10 @@ function ClearIdle({ tasks }: { tasks: readonly Task[] }) {
   )
 }
 
-/** Select mode's bar, pinned over the cards: how many are picked, Select all, Mark done, and Cancel (or Esc). */
+/**
+ * Select mode's bar, pinned over the cards: how many are picked, Mark all idle as done, Select all, Mark done, and
+ * Cancel (or Esc).
+ */
 function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable: readonly Task[] }) {
   const picked = usePickedKeys()
   const mark = useMarkTasksDone()
@@ -484,6 +499,7 @@ function SelectBar({ cards, clearable }: { cards: readonly ChatCard[]; clearable
         {chosen.length ? `${chosen.length} task${chosen.length === 1 ? "" : "s"} selected` : "Pick cards to mark done"}
       </span>
       <span className="ml-auto flex shrink-0 items-center gap-1">
+        {clearable.length > 0 && <ClearIdle tasks={clearable} onDone={stopSelecting} />}
         <button type="button" onClick={() => setPicked(all ? [] : pickable.map((c) => c.key))} className={FOOT}>
           {all ? "Select none" : "Select all"}
         </button>
@@ -551,33 +567,48 @@ function CardTitle({ title }: { title: string }) {
 }
 
 /**
- * The line under a card's title: its project, status, run time and PR, what it holds, and when. `children` go at its
- * end (a card's new count, ✓ and ⤢), so the title keeps the card's width.
+ * The line under a card's title: its status (unless its PR chip says "Merged" already), run time, PR, news and age;
+ * its project only under "All" in a wide card (the stripe is its colour). `actions` go at its end, so the title keeps
+ * the card's whole width.
  */
-function CardMeta({ card, head, children }: { card: ChatCard; head: CardHead; children?: ReactNode }) {
+function CardMeta({ head, last, unread = 0, actions }: { head: CardHead; last: number; unread?: number; actions?: ReactNode }) {
   const { tile, task, status } = head
-  const updates = card.entries.filter((e) => e.type === "update").length
-  const replies = card.entries.length - updates
+  const picked = useChatProjectFilter() !== null
+  const merged = status === "merged" && Boolean(task?.prUrl)
   return (
-    <div className={cx(UNDER_TITLE, "mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-zinc-500")}>
-      <span className="flex min-w-0 items-center gap-1.5">
-        <ProjectDot projectId={tile?.projectId} />
-        <span className="truncate text-zinc-400">{tile?.projectName}</span>
-      </span>
-      {task && status && (
-        <>
-          <StatusBadge status={status} />
-          <PriorityPill task={task} />
-          <Running task={task} />
-          <PrChip task={task} variant="link" className="text-[11.5px]" />
-        </>
-      )}
-      {card.entries.length > 0 && <span>{countLabel(updates, replies)}</span>}
-      <TimeAgo ts={card.last} />
-      {children && <span className="ml-auto flex shrink-0 items-center gap-0.5">{children}</span>}
+    <div data-testid="chat-card-meta" className={cx(UNDER_TITLE, "mt-0.5 flex items-center gap-2 text-[11.5px] text-zinc-500")}>
+      {/* What it says wraps in its own space; the buttons keep the line's end, so they never take a line of their own. */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+        {!picked && tile?.projectName && (
+          <span data-testid="chat-card-project" className="flex min-w-0 items-center gap-1.5 @max-[30rem]:hidden">
+            <ProjectDot projectId={tile.projectId} />
+            <span className="truncate text-zinc-400">{tile.projectName}</span>
+          </span>
+        )}
+        {task && status && (
+          <>
+            {!merged && <StatusDot status={status} className="text-[11.5px]" />}
+            <PriorityPill task={task} />
+            <Running task={task} />
+            <PrChip task={task} className="text-[11.5px]" />
+          </>
+        )}
+        {unread > 0 && (
+          <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
+            <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
+            {unread} new
+          </span>
+        )}
+        <TimeAgo ts={last} />
+      </div>
+      {actions && <span className="flex shrink-0 items-center gap-0.5">{actions}</span>}
     </div>
   )
 }
+
+/** A card header's buttons: 28px with a mouse, 44px under a finger. */
+const HEAD_BUTTON =
+  "grid h-7 w-7 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:w-11"
 
 /** One task's card. */
 const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { card: ChatCard; next: string | null; onFollowUp: (text: string) => void }) {
@@ -590,8 +621,9 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   const atWork = status !== undefined && AT_WORK.has(status)
   const markDone = useCardMarkDone(task)
   const selecting = useSelecting()
-  // The header's ✓: only on a resting card (as Mark all idle), so it never stops a turn or skips a question.
-  const quickDone = task && CLEARABLE.has(task.status) ? markDone : null
+  // The ✓ on a closed card: only a resting one (as Mark all idle), so a glance never stops a turn or skips a question.
+  // Open, any task's (a running one asks first).
+  const check = open ? markDone : task && CLEARABLE.has(task.status) ? markDone : null
   const picked = usePicked(card.key)
   const closing = usePendingCloses()
   const pickable = selecting && Boolean(task && CLEARABLE.has(task.status) && !closing.has(task.id))
@@ -600,8 +632,16 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
   useEffect(() => {
     if (open && unread) markSeen(card.key, card.last)
   }, [open, unread, card.key, card.last])
+  // The docked box (DockComposer.tsx) follows the card Cody opens, and goes back to the chat's own when it closes.
+  const wasOpen = useRef(open)
+  useEffect(() => {
+    if (open === wasOpen.current) return
+    wasOpen.current = open
+    if (open) setDockTarget(card.key)
+    else if (dockTarget() === card.key) setDockTarget(null)
+  }, [open, card.key])
   const onHead = (e: MouseEvent | KeyboardEvent) => {
-    // Its PR link, its ✓ and its ⤢ keep their click.
+    // Its PR link and its buttons keep their click.
     if ((e.target as HTMLElement).closest("a, button")) return
     if ("key" in e && e.key !== "Enter" && e.key !== " ") return
     e.preventDefault()
@@ -610,6 +650,33 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
       if (pickable) togglePicked(card.key)
     } else toggle()
   }
+  const actions = !selecting && (
+    <>
+      {check && (
+        <button type="button" data-testid="chat-card-check" onClick={check.run} aria-label={check.label} title={open ? check.title : check.label} className={cx(HEAD_BUTTON, "hover:bg-emerald-500/10 hover:text-emerald-300")}>
+          <CircleCheck className="h-[15px] w-[15px]" aria-hidden />
+        </button>
+      )}
+      <button
+        type="button"
+        data-testid="chat-card-panel"
+        onClick={() => toggleCard(COORDINATOR_CHAT, card.key)}
+        aria-pressed={inPanel}
+        aria-label="Open in the side panel"
+        title={inPanel ? "Close the side panel" : "Open in the side panel"}
+        className={cx(HEAD_BUTTON, "aria-pressed:text-yard-300")}
+      >
+        <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
+      </button>
+      <AppLink href={`/tasks/${card.taskId}`} title="Open the task page" className={cx(HEAD_BUTTON, "text-yard-400 hover:text-yard-300")}>
+        <ArrowRight className="h-[15px] w-[15px]" aria-hidden />
+        <span className="sr-only">Task page</span>
+      </AppLink>
+      <button type="button" data-testid="chat-card-fold" onClick={toggle} aria-expanded={open} aria-label={open ? "Fold the card" : "Open the card"} title={open ? "Fold" : "Open"} className={HEAD_BUTTON}>
+        <ChevronDown className={cx("h-4 w-4 transition-transform motion-reduce:transition-none", open && "rotate-180")} aria-hidden />
+      </button>
+    </>
+  )
   return (
     <section
       id={`card-${card.key}`}
@@ -651,52 +718,16 @@ const TaskChatCard = memo(function TaskChatCard({ card, next, onFollowUp }: { ca
               {picked && pickable ? <SquareCheck className="h-4 w-4" /> : <Square className="h-4 w-4" />}
             </span>
           )}
-          <TaskTile id={card.taskId} size="lg" />
+          <TaskTile id={card.taskId} size="lg" className="@max-[30rem]:hidden" />
           <CardTitle title={title} />
-          <ChevronRight className={cx("mt-1 h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
         </div>
-        <CardMeta card={card} head={head}>
-          {unread > 0 && (
-            <span data-testid="chat-card-unread" title={`${unread} new since you last opened it`} className="mr-1 inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap text-yard-400">
-              <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-yard-400" />
-              {unread} new
-            </span>
-          )}
-          {!selecting && quickDone && <CardCheck markDone={quickDone} />}
-          <button
-            type="button"
-            data-testid="chat-card-panel"
-            onClick={() => toggleCard(COORDINATOR_CHAT, card.key)}
-            aria-pressed={inPanel}
-            aria-label="Open in the side panel"
-            title={inPanel ? "Close the side panel" : "Open in the side panel"}
-            className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none aria-pressed:text-yard-300 pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
-          >
-            <Maximize2 className="h-[13px] w-[13px]" aria-hidden />
-          </button>
-        </CardMeta>
+        <CardMeta head={head} last={card.last} unread={unread} actions={actions} />
         {!open && <LatestLine card={card} />}
       </div>
-      {open && <CardBody card={card} task={task} next={next} onFollowUp={onFollowUp} markDone={markDone} />}
+      {open && <CardBody card={card} task={task} next={next} onFollowUp={onFollowUp} />}
     </section>
   )
 })
-
-/** A resting card's ✓ at the end of its meta line: Mark done in one click, with the toast's Undo. */
-function CardCheck({ markDone }: { markDone: NonNullable<ReturnType<typeof useCardMarkDone>> }) {
-  return (
-    <button
-      type="button"
-      data-testid="chat-card-check"
-      onClick={markDone.run}
-      aria-label={markDone.label}
-      title={markDone.label}
-      className="-my-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md text-zinc-500 hover:bg-emerald-500/10 hover:text-emerald-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:-my-2 pointer-coarse:h-9 pointer-coarse:w-9"
-    >
-      <CircleCheck className="h-[14px] w-[14px]" aria-hidden />
-    </button>
-  )
-}
 
 const NO_TASKS: Task[] = []
 
@@ -727,9 +758,9 @@ function entryLine(e: CardEntry): Line {
     return { icon, className, who: capitalise(publishedLabel(g.files.length)), text: g.files.map((f) => f.title).join(", ") }
   }
   const m = e.type === "message" ? e.message : itemMessages(e.item)[0]!
-  if (isSent(m)) return { icon: Send, className: "text-yard-400", who: "You", text: plainText(noticeText(m).text) }
-  if (m.role === "assistant") return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, "")) }
-  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: plainText(m.content) }
+  if (isSent(m)) return { icon: Send, className: "text-yard-400", who: "You", text: shortShas(plainText(noticeText(m).text)) }
+  if (m.role === "assistant") return { icon: Bot, className: "text-yard-400", who: "Coordinator", text: shortShas(plainText(m.content.replace(/^\s*(#{1,6}|[-*+]|\d+\.)\s+/gm, ""))) }
+  if (m.role === "error") return { icon: AlertTriangle, className: "text-red-400", who: "Error", text: shortShas(plainText(m.content)) }
   const v = chipView(m)
   if (v.captain) return { icon: Bot, className: "text-sky-400", who: v.source?.label ?? "Captain", text: v.preview }
   const { icon, className } = NOTICE_ICON[v.kind]
@@ -749,7 +780,7 @@ function LatestLine({ card }: { card: ChatCard }) {
         <>
           <LineIcon icon={line.icon} className={cx("h-3.5 w-3.5", line.className)} />
           <span className="line-clamp-2 min-w-0 wrap-anywhere">
-            {who && <b className="font-medium text-zinc-300">{who}: </b>}
+            {who && <b className="font-medium text-zinc-300">{line.text ? `${who}: ` : who}</b>}
             {line.text}
           </span>
         </>
@@ -794,7 +825,7 @@ function CardSession({
           onClick={() => revealChatMessage(card.origin!.id)}
           title="Show it in the Coordinator card"
           data-testid="chat-card-origin"
-          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-9"
+          className="flex w-full min-w-0 items-start gap-1.5 rounded-md px-1 py-0.5 text-left text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 pointer-coarse:min-h-11 pointer-coarse:items-center"
         >
           <LineIcon icon={CornerDownRight} className="h-3 w-3" />
           <span className="shrink-0">From your message {clock(card.origin.createdAt)}:</span>
@@ -819,41 +850,40 @@ function CardSession({
   )
 }
 
-/** An open card: its session, the box to reply in, and the way to the side panel and its page. */
-function CardBody({
-  card,
-  task,
-  next,
-  onFollowUp,
-  markDone,
-}: {
-  card: ChatCard
-  task: Task | undefined
-  next: string | null
-  onFollowUp: (text: string) => void
-  markDone: ReturnType<typeof useCardMarkDone>
-}) {
+/**
+ * An open card: its session and the box to reply in, which a narrow chat docks at its bottom instead
+ * (DockComposer.tsx). Its header has the way to the side panel, its page and Mark done.
+ */
+function CardBody({ card, task, next, onFollowUp }: { card: ChatCard; task: Task | undefined; next: string | null; onFollowUp: (text: string) => void }) {
+  const docked = useDocked()
   return (
     <div data-testid="chat-card-body" className={CARD_BODY}>
       <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} />
-      {task && <CardComposer task={task} />}
-      <div className="flex flex-wrap items-center gap-1 pt-0.5">
-        <button type="button" onClick={() => openCard(COORDINATOR_CHAT, card.key)} className={FOOT} data-testid="chat-card-open-panel">
-          <Maximize2 className="h-3 w-3" aria-hidden />
-          Open in panel
-        </button>
-        <AppLink href={`/tasks/${card.taskId}`} className={cx(FOOT, "text-yard-400 hover:text-yard-300")}>
-          Task page
-        </AppLink>
-        {markDone && (
-          <button type="button" onClick={markDone.run} title={markDone.title} className={cx(FOOT, "ml-auto")} data-testid="chat-card-mark-done">
-            <CircleCheck className="h-3 w-3" aria-hidden />
-            {markDone.label}
-          </button>
-        )}
-      </div>
+      {task && !docked && <CardComposer task={task} />}
     </div>
   )
+}
+
+/**
+ * The card the docked box sends to: the one Cody opened last (lib/dockComposer.ts), while it's open and shown (not
+ * folded away or behind another project). Null: the chat's own box.
+ */
+export function useDockCard(layout: CardsLayout | null): ChatCard | null {
+  const key = useDockTarget()
+  const [open] = useChipOpen(cardOpenKey(key ?? ""))
+  if (!key || !open || !layout) return null
+  return layout.live.find((c) => c.key === key) ?? layout.idle.find((c) => c.key === key) ?? layout.done.find((c) => c.key === key) ?? null
+}
+
+/** The open cards the docked box can send to, in the list's order: its "To" menu. */
+export function useOpenCards(layout: CardsLayout | null): ChatCard[] {
+  const cards = useMemo(() => (layout ? [...layout.live, ...layout.idle, ...layout.done] : []), [layout])
+  const keys = useMemo(() => cards.map((c) => cardOpenKey(c.key)), [cards])
+  const open = useOpenAmong(keys)
+  return useMemo(() => {
+    const on = new Set(open.split("\n"))
+    return cards.filter((c) => on.has(cardOpenKey(c.key)))
+  }, [cards, open])
 }
 
 /** The panel's box: the chat's sticky footer. */
@@ -975,7 +1005,7 @@ function CardPanelView({
             <TaskTile id={card.taskId} size="lg" />
             <CardTitle title={title} />
           </div>
-          <CardMeta card={card} head={head} />
+          <CardMeta head={head} last={card.last} />
         </div>
         <CardSession card={card} task={task} next={next} onFollowUp={onFollowUp} inPanel />
       </StickyScroll>
@@ -1007,43 +1037,98 @@ function CardEntries({
 }) {
   const local = useState(show)
   const [limit, setLimit] = paging ?? local
-  const shown = entries.length > limit ? entries.slice(-limit) : entries
-  const hidden = entries.length - shown.length
   const answers = useMemo(() => answersOf(entries), [entries])
-  // A link to one of its entries (lib/coordinatorView.ts showMessage): page back to it, then scroll to it in the cards.
+  // A task's card folds its runs of events into digests (lib/cardDigest.ts); the Coordinator card has none.
+  const pieces = useMemo(() => (own ? digestEntries(entries, answers) : entries.map((entry): DigestPiece => ({ type: "entry", entry }))), [own, entries, answers])
+  const shown = pieces.length > limit ? pieces.slice(-limit) : pieces
+  const hidden = pieces.slice(0, pieces.length - shown.length).reduce((n, p) => n + (p.type === "digest" ? p.entries.length : 1), 0)
+  // A link to one of its entries (lib/coordinatorView.ts showMessage): page back to it, open the digest it's in, then
+  // scroll to it in the cards.
   const wanted = useShownMessage()
-  const at = wanted ? entries.findIndex((e) => e.id === wanted) : -1
-  const need = at < 0 ? 0 : entries.length - at
+  const at = wanted ? pieces.findIndex((p) => (p.type === "digest" ? p.entries.some((e) => e.id === wanted) : p.entry.id === wanted)) : -1
+  const need = at < 0 ? 0 : pieces.length - at
+  const folded = at >= 0 && pieces[at]!.type === "digest" ? pieces[at]!.id : null
+  const [unfolded] = useChipOpen(digestKey(folded ?? ""))
   useEffect(() => {
     if (!wanted || !need) return
     if (need > limit) return setLimit(need)
+    if (folded && !unfolded) return setOpen([digestKey(folded)], true)
     requestAnimationFrame(() => {
       const el = findInCards(wanted)
       if (!el) return
       clearShownMessage(wanted)
       el.scrollIntoView?.({ block: "center", behavior: "smooth" })
     })
-  }, [wanted, need, limit, setLimit])
+  }, [wanted, need, limit, setLimit, folded, unfolded])
+  const entry = (e: CardEntry) =>
+    e.type === "message" ? (
+      <ChatLine key={e.id} m={e.message} sources={own ? null : e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
+    ) : answers.has(e.id) && e.item.type === "notice" ? (
+      <AgentReply key={e.id} m={e.item.message} own={own} />
+    ) : (
+      <UpdateChip key={e.id} item={e.item} own={own} />
+    )
   return (
     <>
       {hidden > 0 && (
-        <button type="button" onClick={() => setLimit(limit + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier" title={`Show ${Math.min(hidden, EARLIER_STEP)} more`}>
+        <button type="button" onClick={() => setLimit(limit + EARLIER_STEP)} className={EARLIER} data-testid="card-earlier" title="Show more">
           <ChevronUp className="h-3 w-3" aria-hidden />
           {hidden} earlier
         </button>
       )}
-      {shown.map((e) =>
-        e.type === "message" ? (
-          <ChatLine key={e.id} m={e.message} sources={e.sources} next={e.id === next} inCard onFollowUp={onFollowUp} />
-        ) : answers.has(e.id) && e.item.type === "notice" ? (
-          <AgentReply key={e.id} m={e.item.message} />
+      {shown.map((p) =>
+        p.type === "digest" ? (
+          <EventDigest key={p.id} id={p.id} entries={p.entries} />
+        ) : own && p.entry.type === "message" && isEvent(p.entry, answers) ? (
+          // A lone event that's a message (a merge request): a quiet chip, like the rest.
+          <UpdateChip key={p.entry.id} item={{ type: "notice", id: p.entry.id, message: p.entry.message }} own />
         ) : (
-          <UpdateChip key={e.id} item={e.item} own={own} />
+          entry(p.entry)
         ),
       )}
     </>
   )
 }
+
+const digestKey = (id: string) => `digest:${id}`
+
+/**
+ * A task card's run of events as one quiet line: "Auto-merged as ff8fc23 · 3 events". A tap opens one chip per event
+ * under it (each opens to its whole text).
+ */
+const EventDigest = memo(function EventDigest({ id, entries }: { id: string; entries: readonly CardEntry[] }) {
+  const [open, toggle] = useChipOpen(digestKey(id))
+  const summary = useMemo(() => digestSummary(entries), [entries])
+  const newest = entries[entries.length - 1]!
+  return (
+    <div data-testid="event-digest" data-open={open || undefined}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        title={open ? "Hide these events" : entries.map(eventLine).join("\n")}
+        className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs text-zinc-500 hover:bg-zinc-900/70 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-11"
+      >
+        <ListChecks className="h-3.5 w-3.5 shrink-0 text-zinc-500" aria-hidden />
+        <span data-testid="event-digest-summary" className="min-w-0 truncate text-zinc-300">
+          {summary}
+        </span>
+        <span className="shrink-0">· {entries.length} events</span>
+        <span className="shrink-0 @max-[24rem]:hidden">
+          <TimeAgo ts={newest.at} />
+        </span>
+        <ChevronDown className={cx("ml-auto h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform motion-reduce:transition-none", open && "rotate-180")} aria-hidden />
+      </button>
+      {open && (
+        <div data-testid="event-digest-events" className="mt-0.5 ml-2.5 border-l border-zinc-800 pl-2">
+          {entries.map((e) => (
+            <UpdateChip key={e.id} item={e.type === "update" ? e.item : { type: "notice", id: e.id, message: e.message }} own />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+})
 
 /** A message in the cards list (not the side panel): its root, or an update chip's. */
 export function findInCards(id: string): Element | null {
@@ -1105,8 +1190,11 @@ function answersOf(entries: readonly CardEntry[]): Set<string> {
   return out
 }
 
-/** A task's agent answering Cody in its card: its tile and name, then its words from the turn's notice. */
-const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
+/**
+ * A task's agent answering Cody: its tile and name (not in its own card, whose header says them), then its words from
+ * the turn's notice.
+ */
+const AgentReply = memo(function AgentReply({ m, own }: { m: ChatMessage; own: boolean }) {
   const taskId = typeof m.meta?.taskId === "string" ? m.meta.taskId : null
   const projectId = typeof m.meta?.projectId === "string" ? m.meta.projectId : null
   const tile = useTaskTile(taskId)
@@ -1116,8 +1204,12 @@ const AgentReply = memo(function AgentReply({ m }: { m: ChatMessage }) {
   return (
     <div id={`chat-${m.id}`} data-chat-id={m.id} data-testid="agent-reply" className={cx(MESSAGE_BLOCK, "text-sm text-zinc-200")}>
       <div className="mb-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] text-zinc-500">
-        <TaskTile id={taskId} />
-        <span className="min-w-0 truncate font-medium text-zinc-300">{tile?.title ?? v.source?.label}</span>
+        {!own && (
+          <>
+            <TaskTile id={taskId} />
+            <span className="min-w-0 truncate font-medium text-zinc-300">{tile?.title ?? v.source?.label}</span>
+          </>
+        )}
         <Icon className={cx("h-3 w-3 shrink-0", className)} aria-label={label} />
         <span className="shrink-0">{v.verb}</span>
         <TimeAgo ts={m.createdAt} />
@@ -1185,8 +1277,8 @@ function CoordinatorHidden() {
   return <HiddenCard label="Coordinator card" onShow={() => setTasksOnly(false)} testId="coordinator-hidden" />
 }
 
-/** What the pill covers at the bottom of the chat: a card under it is still below. */
-const PILL_INSET = 48
+/** What covers the bottom of the chat: nothing, the pill sits in the line over the box. */
+const PILL_INSET = 0
 
 /**
  * Which way the card `key` is from what's on screen in its scroller (lib/cardJump.ts), kept up to date as the chat
@@ -1258,7 +1350,7 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
       data-direction={dir}
       data-target={target.key}
       title={more ? `Go to this card (${where}); click again for the next of ${fresh.length} cards with news` : `Go to this card (${where})`}
-      className="flex min-w-0 items-center gap-1.5 rounded-full border border-yard-400/50 bg-[#1c1708] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-yard-300 shadow-lg hover:bg-[#2a220b] pointer-coarse:py-2.5"
+      className="flex h-7 min-w-0 items-center gap-1.5 rounded-full border border-yard-400/50 bg-[#1c1708] px-2.5 text-xs font-medium whitespace-nowrap text-yard-300 hover:bg-[#2a220b] focus-visible:ring-2 focus-visible:ring-yard-500/50 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:px-3.5"
     >
       <Arrow className="h-3.5 w-3.5 shrink-0" aria-hidden />
       <span className="shrink-0">{total} new</span>
@@ -1275,13 +1367,13 @@ export const NewCardsPill = memo(function NewCardsPill({ cards }: { cards: reado
   )
 })
 
-/** The card the pill goes to: its icon and title, cut short. A phone has room for the icon only; the title is still read out. */
+/** The card the pill goes to: its icon and title, cut short. A narrow line has room for the icon only; the title is still read out. */
 function PillTarget({ card, where }: { card: ChatCard; where: string }) {
   const tile = useTaskTile(card.taskId)
   return (
     <span className="flex min-w-0 items-center gap-1" style={projectColorStyle(tile?.color)}>
       <TaskTile id={card.taskId} />
-      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 max-[26rem]:sr-only">
+      <span data-testid="new-cards-target" className="max-w-[16rem] min-w-0 truncate text-zinc-100 @max-[34rem]/dock:sr-only">
         {tile?.title ?? card.key}
       </span>
       <span className="sr-only">, {where}</span>
@@ -1290,7 +1382,7 @@ function PillTarget({ card, where }: { card: ChatCard; where: string }) {
 }
 
 const TOGGLE_BUTTON =
-  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-9 pointer-coarse:px-2.5"
+  "inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-xs focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:h-11 pointer-coarse:min-w-11 pointer-coarse:justify-center pointer-coarse:px-2.5"
 
 /**
  * "Tasks only", in the chat's header: hides the card under the task cards, the Coordinator's under "All" or the picked
@@ -1301,7 +1393,7 @@ export const TasksOnlyToggle = memo(function TasksOnlyToggle() {
   const tasksOnly = useTasksOnly(picked)
   const card = picked ? "the Captain card" : "the Coordinator card"
   return (
-    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5">
+    <div data-testid="tasks-only-toggle" className="flex shrink-0 items-center rounded-lg border border-zinc-800 p-0.5 pointer-coarse:border-0 pointer-coarse:p-0">
       <button
         type="button"
         aria-pressed={tasksOnly}

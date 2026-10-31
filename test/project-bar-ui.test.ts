@@ -99,23 +99,28 @@ describe("project bar", () => {
     expect(ids()).toEqual([LEVEL.id])
     expect(coordinator()).toBeNull()
     expect(text()).not.toContain("hook fired")
-    expect(host.querySelector('[data-testid="project-filter-banner"]')?.textContent).toContain("Only Map 3")
+    // One bar: no "Only Map 3 / Show all" banner under it; the picked chip's × is Show all.
+    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
+    expect(text()).not.toContain("Only Map 3")
+    expect(pill("Map 3").querySelector('[data-testid="project-unpin"]')).toBeNull()
     click(chip("box-yard"))
     expect(ids()).toEqual([LOGIN.id, CARDS.id])
     expect(text()).toContain("Coordinator cards")
     click(chip("box-yard"))
     expect(ids()).toEqual([LEVEL.id, LOGIN.id, CARDS.id])
     click(chip("Map 3"))
-    const showAll = [...host.querySelectorAll('[data-testid="project-filter-banner"] button')].find((b) => b.textContent?.includes("Show all"))!
+    const showAll = pill("Map 3").querySelector<HTMLElement>('[data-testid="project-clear"]')!
+    expect(showAll.getAttribute("aria-label")).toBe("Show all projects")
     click(showAll)
-    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
+    expect(allChip().getAttribute("aria-pressed")).toBe("true")
+    expect(pill("Map 3").querySelector('[data-testid="project-clear"]')).toBeNull()
     expect(coordinator()!.textContent).toContain("is asking you something")
   })
 
   it("leads task links with their tile, in their project's colour", () => {
     render(createElement(ChatPanel))
     // The reply's link, in the Coordinator card.
-    const links = [...host.querySelectorAll(`a[href="/tasks/${LEVEL.id}"]`)]
+    const links = [...host.querySelectorAll(`[data-testid="coordinator-card"] a[href="/tasks/${LEVEL.id}"]`)]
     expect(links).toHaveLength(1)
     for (const link of links) {
       const tile = link.querySelector('[data-testid="task-tile"]')!
@@ -234,6 +239,49 @@ describe("centring the picked chip", () => {
   })
 })
 
+describe("running elsewhere", () => {
+  const elsewhere = () => host.querySelector<HTMLElement>('[data-testid="bar-elsewhere"]')
+
+  /** React Query tells its observers on a timer. */
+  const setTasks = (list: Task[]) =>
+    act(async () => {
+      qc.setQueryData(keys.tasks, list)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+  it("with a project picked, All says how many tasks are running in the others, and tapping it shows them", async () => {
+    render(createElement(ChatPanel))
+    expect(elsewhere()).toBeNull()
+    click(chip("Map 3"))
+    // box-yard's working task is out of view, and its question: "active", in amber.
+    expect(allChip().textContent).toBe("All · 2 active elsewhere")
+    expect(elsewhere()!.className).toContain("text-amber-300")
+    await setTasks([{ ...LOGIN, status: "working" }, CARDS, LEVEL])
+    expect(allChip().textContent).toBe("All · 2 running elsewhere")
+    // A narrow bar centres the picked chip and scrolls All away: there it's a line of its own, which shows all too.
+    expect(elsewhere()!.className).toContain("@max-[30rem]/bar:hidden")
+    const line = host.querySelector<HTMLElement>('[data-testid="bar-elsewhere-line"]')!
+    expect(line.className).toContain("@min-[30rem]/bar:hidden")
+    expect(line.textContent).toBe("2 running elsewhere·Show all")
+    click(line)
+    expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
+    expect(allChip().textContent).toBe("All · 3 active")
+    const ids = [...host.querySelectorAll('[data-testid="chat-card"]')].map((c) => (c as HTMLElement).dataset.card)
+    expect(ids).toEqual([LEVEL.id, CARDS.id])
+  })
+
+  it("says nothing when the other projects are quiet", async () => {
+    render(createElement(ChatPanel))
+    click(chip("box-yard"))
+    expect(allChip().textContent).toBe("All · 1 running elsewhere")
+    await setTasks([LOGIN, CARDS, { ...LEVEL, status: "done" }])
+    expect(elsewhere()).toBeNull()
+    expect(host.querySelector('[data-testid="bar-elsewhere-line"]')).toBeNull()
+    // Back to the count of every project's (box-yard's two).
+    expect(allChip().textContent).toBe("All · 2 active")
+  })
+})
+
 describe("pinning and unpinning", () => {
   const names = () => chips().map((c) => c.textContent!.split(" · ")[0])
 
@@ -264,14 +312,15 @@ describe("pinning and unpinning", () => {
     expect(readPins()[MAP.id]).toBe("pinned")
   })
 
-  it("unpinning the project the chat shows switches to All", () => {
+  it("the picked chip's × shows everything again and keeps it on the bar, where it can be unpinned", () => {
     render(createElement(ChatPanel))
     click(chip("Map 3"))
     expect(chip("Map 3").getAttribute("aria-pressed")).toBe("true")
-    click(unpin("Map 3"))
+    click(pill("Map 3").querySelector<HTMLElement>('[data-testid="project-clear"]')!)
     expect(allChip().getAttribute("aria-pressed")).toBe("true")
+    expect(names()).toEqual(["box-yard", "Map 3"])
+    click(unpin("Map 3"))
     expect(names()).toEqual(["box-yard"])
-    expect(host.querySelector('[data-testid="project-filter-banner"]')).toBeNull()
   })
 
   it("a pinned project stays on the bar with nothing going on", () => {
