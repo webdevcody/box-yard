@@ -12,6 +12,7 @@ import { voiceChatBusy, voiceChatMessage, voiceChatTurn } from "./speech"
 import { loadTtsInfo, setTtsInfo } from "./tts"
 import { onResume } from "./resume"
 import { applyThreadEvent } from "./threads"
+import { staleAfterClose } from "./closedTasks"
 import type { AppNotification, Artifact, BoxInfo, CaptainMessage, ChatMessage, Project, Schedule, ScheduleRun, Task, TaskMessage, UiEvent } from "../../../shared/types"
 import type { RunPodStatus } from "../../../shared/runpod"
 import type { DockerStatus } from "../../../shared/docker"
@@ -108,6 +109,8 @@ export function useServerEvents(enabled: boolean): Connection {
       if (applyThreadEvent(qc, ev)) return
       switch (ev.type) {
         case "task":
+          // Sent before a close this browser made, and late: the task stays done.
+          if (staleAfterClose(ev.task)) break
           qc.setQueryData<Task[]>(keys.tasks, (list) => (list ? upsert(list, ev.task) : list))
           void qc.invalidateQueries({ queryKey: keys.usage })
           break

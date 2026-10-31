@@ -1451,10 +1451,16 @@ export class TaskManager {
     for (const m of this.store.dropInputs(taskId)) this.hub.broadcast({ type: "task.message", message: m })
   }
 
-  /** Finish a task: stop it, archive it, free its box folder. */
+  /**
+   * Finish a task: stop it, archive it, free its box folder. It's done (and broadcast) at once: stopping a running
+   * turn (a box call or two) and the archive go on after, so the task leaves every list without waiting on its box.
+   * The stopped turn's end keeps it done (finishTurn).
+   */
   async closeTask(taskId: string): Promise<Task> {
     const row = this.requireRow(taskId)
-    if (row.current_turn_id) await this.stopTask(taskId)
+    // stopTask settles a queued or starting task before its first await; only a working turn's kill is left running.
+    const stopping = row.current_turn_id ? this.stopTask(taskId) : null
+    void stopping?.catch((err) => console.warn(`[box-yard] stopping ${taskId} as it closed: ${errorMessage(err)}`))
     this.dropQueuedMessages(row.id)
     this.store.updateTask(row.id, { status: "done", question: null }, { quiet: true })
     this.addEvent(row.id, isLocalRunnerBox(row.box_id) ? "Closed. Its folder stays on this computer until the task is deleted or this computer's cleanup archives it (Settings › Boxes & limits › This computer and SSH machines)." : "Closed. Its workspace was archived and its box slot freed.")
@@ -5583,7 +5589,8 @@ export class TaskManager {
       this.store.finishTaskTurn(turnId, { status: stopped ? "stopped" : "failed", error: stopped ? null : message })
       const prev = current.compact_prev_status
       this.store.updateTask(taskId, {
-        status: wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : cancelled ? this.queuedFrom(taskId) : stopped ? "idle" : "failed",
+        // Closed as it started (closeTask marks it done first): it stays done.
+        status: stopped && current.status === "done" ? "done" : wasCompact ? (prev && !["queued", "starting", "working"].includes(prev) ? prev : "idle") : cancelled ? this.queuedFrom(taskId) : stopped ? "idle" : "failed",
         currentTurnId: null,
         compactPending: false,
         compacting: false,
@@ -6517,7 +6524,8 @@ export class TaskManager {
     let status: TaskStatus
     let mergedDone = false
     let error: string | null = null
-    if (stopped) status = openPr ? "pr_ready" : "idle"
+    // Closed while it ran (closeTask marks it done before the stop lands): it stays done.
+    if (stopped) status = row.status === "done" ? "done" : openPr ? "pr_ready" : "idle"
     else if (!ev.ok) {
       status = "failed"
       error = String(ev.error ?? "The agent exited with an error.")
@@ -6569,7 +6577,8 @@ export class TaskManager {
       this.addEvent(row.id, "Quiet run: the agent found nothing to do and changed nothing, so it's hidden from Recent and notifications.", { kind: "quiet" })
       this.store.dropTaskNotices(row.id)
     } else if (status === "needs_input") this.notice(`🙋 **${row.title}** needs you: ${flags.asked}`, { taskId: row.id })
-    else if (status === "done") this.finishedNotice(row, `✅ **${row.title}** is done: ${gist}`, agentWake)
+    // A turn stopped by a close says nothing: Cody closed it.
+    else if (status === "done" && !stopped) this.finishedNotice(row, `✅ **${row.title}** is done: ${gist}`, agentWake)
     else if (status === "failed") this.notice(`❌ **${row.title}** failed: ${preview(error ?? "", 300, "call get_task for the full error")}`, { taskId: row.id })
     else if (!stopped && !more && (status === "idle" || status === "pr_ready")) {
       this.finishedNotice(row, `💬 **${row.title}** finished its turn: ${gist || "(no reply)"}`, agentWake)
@@ -6792,7 +6801,8 @@ export class TaskManager {
     const stopped = Boolean(ev.stopped) || this.stopRequested.has(row.id)
     this.stopRequested.delete(row.id)
     const prev = row.compact_prev_status
-    let status: TaskStatus = prev && !["queued", "starting", "working"].includes(prev) ? prev : row.pr_url ? "pr_ready" : "idle"
+    // Closed while it compacted: it stays done.
+    let status: TaskStatus = stopped && row.status === "done" ? "done" : prev && !["queued", "starting", "working"].includes(prev) ? prev : row.pr_url ? "pr_ready" : "idle"
     // The PR may have been merged or closed while the compaction ran.
     if (status === "pr_ready" && isFinalPrState(row.pr_state)) status = row.pr_state === "merged" ? "done" : "idle"
     const usage = usageFields(ev.usage)

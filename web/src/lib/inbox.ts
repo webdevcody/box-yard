@@ -11,6 +11,7 @@ export const UNDO_MS = 5000
 
 let pending: ReadonlySet<string> = new Set()
 const timers = new Map<string, ReturnType<typeof setTimeout>>()
+const undos = new Map<string, () => void>()
 const listeners = new Set<() => void>()
 
 function setPending(next: Set<string>) {
@@ -29,14 +30,19 @@ export function inInbox(task: Task, closing: ReadonlySet<string> = pending): boo
   return INBOX_STATUSES.includes(task.status) && !isQuietRun(task) && !closing.has(task.id)
 }
 
-/** Hide the task from the inbox now and run `commit` after `delay` unless undone. Returns false if already pending. */
-export function deferClose(taskId: string, commit: () => Promise<unknown>, delay = UNDO_MS): boolean {
+/**
+ * Hide the task from the inbox now and run `commit` after `delay` unless undone (then `onUndo` runs). Returns false if
+ * already pending.
+ */
+export function deferClose(taskId: string, commit: () => Promise<unknown>, delay = UNDO_MS, onUndo?: () => void): boolean {
   if (pending.has(taskId)) return false
   setPending(new Set(pending).add(taskId))
+  if (onUndo) undos.set(taskId, onUndo)
   timers.set(
     taskId,
     setTimeout(() => {
       timers.delete(taskId)
+      undos.delete(taskId)
       // Stay hidden until the close lands (the task is then done) or fails (the card comes back).
       commit()
         .catch(() => {})
@@ -53,6 +59,9 @@ export function undoClose(taskId: string): boolean {
   clearTimeout(timer)
   timers.delete(taskId)
   release(taskId)
+  const onUndo = undos.get(taskId)
+  undos.delete(taskId)
+  onUndo?.()
   return true
 }
 
@@ -63,6 +72,7 @@ export function flushCloses(send: (taskId: string) => void) {
     send(taskId)
   }
   timers.clear()
+  undos.clear()
 }
 
 export function usePendingCloses(): ReadonlySet<string> {
