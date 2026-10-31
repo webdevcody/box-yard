@@ -21,6 +21,15 @@ import type { CaptainMessage } from "../../../shared/types"
 /** The bottom card folded to its header. */
 export const bottomCardFolded = localFlag("boxyard:bottom-card-folded")
 
+/**
+ * Cody sent the Coordinator (or with `project`, the picked project's Captain) a message: its card shows, unfolded and
+ * not hidden by "Tasks only", so the message and its answer are in view. Folding or hiding it again is up to Cody.
+ */
+export function showBottomCard(project = false) {
+  setTasksOnly(false, project)
+  bottomCardFolded.set(false)
+}
+
 const HIDDEN =
   "flex w-full min-w-0 items-center gap-2 rounded-[10px] border border-dashed border-zinc-800 px-2 py-1.5 text-left text-xs text-zinc-500 hover:text-zinc-300 focus-visible:ring-2 focus-visible:ring-yard-500/40 focus-visible:outline-none pointer-coarse:min-h-10"
 

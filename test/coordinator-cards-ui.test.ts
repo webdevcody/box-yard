@@ -814,6 +814,52 @@ describe("The bottom panel with a project picked", () => {
     expect(coordinator().querySelector('[data-testid="bottom-card-fold"]')!.getAttribute("aria-expanded")).toBe("false")
   })
 
+  it("unfolds the card a prompt goes to, even hidden by Tasks only, and lets Cody fold it again", async () => {
+    render()
+    const fold = (c: Element) => c.querySelector('[data-testid="bottom-card-fold"]') as HTMLElement
+    // Folded and hidden, under "All": a prompt to the Coordinator shows its card, open.
+    click(fold(coordinator()))
+    click(host.querySelector('[data-testid="tasks-only"]')!)
+    expect(coordinator()).toBeNull()
+    await send("What's left?")
+    expect(posts.at(-1)!.url).toBe("/api/chat")
+    expect(fold(coordinator()).getAttribute("aria-expanded")).toBe("true")
+    expect(coordinator().textContent).toContain("What's left?")
+    // Folding it again sticks until the next prompt.
+    click(fold(coordinator()))
+    await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(fold(coordinator()).getAttribute("aria-expanded")).toBe("false")
+    expect(localStorage.getItem("boxyard:bottom-card-folded")).toBe("1")
+
+    // With a project picked: the prompt goes to its Captain, and its card opens.
+    act(() => setChatProjectFilter(MAP.id))
+    click(host.querySelector('[data-testid="tasks-only"]')!)
+    expect(captainCard()).toBeNull()
+    await send("Shoot the dam at dusk")
+    expect(posts.at(-1)!.url).toBe(`/api/projects/${MAP.id}/captain/messages`)
+    expect(fold(captainCard()!).getAttribute("aria-expanded")).toBe("true")
+    expect(captainCard()!.textContent).toContain("Shoot the dam at dusk")
+    // "Tasks only" under "All" is its own choice: it stays off, as the first prompt left it.
+    expect(localStorage.getItem("boxyard:cards-tasks-only")).toBeNull()
+  })
+
+  it("leaves the bottom card folded when Cody replies to a task in its card", async () => {
+    render()
+    click(coordinator().querySelector('[data-testid="bottom-card-fold"]')!)
+    click(card(LOGIN.id).querySelector('[role="button"]')!)
+    const box = card(LOGIN.id).querySelector('[data-testid="card-composer"]')!
+    const textarea = box.querySelector("textarea")!
+    const set = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!
+    act(() => {
+      set.call(textarea, "The new one")
+      textarea.dispatchEvent(new Event("input", { bubbles: true }))
+    })
+    act(() => void box.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })))
+    for (let i = 0; i < 2; i++) await act(async () => await new Promise((r) => setTimeout(r, 0)))
+    expect(posts.at(-1)!.url).toBe(`/api/tasks/${LOGIN.id}/messages`)
+    expect(coordinator().querySelector('[data-testid="bottom-card-fold"]')!.getAttribute("aria-expanded")).toBe("false")
+  })
+
   it("goes back to the Coordinator from the chat switcher", () => {
     render()
     act(() => setChatProjectFilter(MAP.id))
