@@ -12,6 +12,8 @@ import { setChatProjectFilter } from "../web/src/lib/projectBar.js"
 import { resetCardsSeen } from "../web/src/lib/cardsSeen.js"
 import { resetChipState } from "../web/src/lib/chipState.js"
 import { keys } from "../web/src/lib/queries.js"
+import { useServerEvents } from "../web/src/lib/stream.js"
+import { resetClosedTasks } from "../web/src/lib/closedTasks.js"
 import { undoClose } from "../web/src/lib/inbox.js"
 import { stopSelecting } from "../web/src/lib/cardSelection.js"
 import { currentToasts, dismiss } from "../web/src/lib/toast.js"
@@ -1056,5 +1058,130 @@ describe("Finding your way in the cards", () => {
     expect(toggle().getAttribute("aria-pressed")).toBe("false")
     expect(toggle().getAttribute("aria-label")).toBe("Tasks only: hide the Captain card")
     expect(host.querySelector('[data-testid="captain-card"]')).not.toBeNull()
+  })
+})
+
+/** EventSource stand-in: `emit` delivers a server event as the stream would. */
+class FakeEventSource {
+  static last: FakeEventSource | null = null
+  onmessage: ((e: { data: string }) => void) | null = null
+  onerror: unknown = null
+  onopen: unknown = null
+  constructor() {
+    FakeEventSource.last = this
+  }
+  addEventListener() {}
+  removeEventListener() {}
+  close() {}
+}
+
+describe("Mark done is instant", () => {
+  let posts: string[]
+  /** The answers the test hands out: the close's and /api/tasks'. */
+  let answerClose: (res: Response) => void
+  let answerTasks: ((res: Response) => void) | null
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] })
+    posts = []
+    answerTasks = null
+    vi.stubGlobal("EventSource", FakeEventSource)
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") posts.push(url)
+      if (url.endsWith("/close")) return new Promise<Response>((r) => (answerClose = r))
+      if (url === "/api/tasks") return new Promise<Response>((r) => (answerTasks = r))
+      return new Promise(() => {})
+    })
+  })
+  afterEach(() => {
+    act(() => {
+      for (const t of TASKS) undoClose(t.id)
+      for (const t of currentToasts()) dismiss(t.id)
+    })
+    resetClosedTasks()
+    vi.useRealTimers()
+  })
+
+  function Live() {
+    useServerEvents(true)
+    return null
+  }
+  const renderLive = () => act(() => root.render(createElement(QueryClientProvider, { client: qc }, createElement(ChatPanel), createElement(Live))))
+  const live = () => cards().map((c) => c.dataset.card)
+  const cached = (id: string) => qc.getQueryData<Task[]>(keys.tasks)!.find((t) => t.id === id)!
+  /** Time passes (the undo window, a batch of SSE events, the cache's notify timer). */
+  const wait = (ms: number) => act(async () => void (await vi.advanceTimersByTimeAsync(ms)))
+  const sse = (t: Task) =>
+    act(async () => {
+      FakeEventSource.last!.onmessage!({ data: JSON.stringify({ type: "task", task: t }) })
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+  it("drops the card at the click, before the close goes out, and keeps it gone through a slow answer, late updates and a stale refetch", async () => {
+    renderLive()
+    expect(live()).toContain(CARDS.id)
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-check"]')!)
+    // Gone at once, and done in the cache, so every list, count and badge drops it too; nothing has been sent.
+    expect(live()).not.toContain(CARDS.id)
+    expect(cached(CARDS.id).status).toBe("done")
+    expect(posts).toEqual([])
+
+    // An update the server sent before the close arrives late: the card stays gone.
+    await sse({ ...CARDS, status: "pr_ready", updatedAt: 5 })
+    expect(live()).not.toContain(CARDS.id)
+    // A refetch (a reconnect) starts before the close and answers after it.
+    void qc.refetchQueries({ queryKey: keys.tasks })
+    await wait(0)
+    const stale = answerTasks!
+
+    // The undo window ends: the close goes out, and takes its time.
+    await wait(5000)
+    expect(posts).toEqual([`/api/tasks/${CARDS.id}/close`])
+    await wait(3000)
+    expect(live()).not.toContain(CARDS.id)
+
+    await act(async () => {
+      answerClose(json({ ...CARDS, status: "done", updatedAt: 10 }))
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    await act(async () => {
+      stale(json(TASKS.map((t) => (t.id === CARDS.id ? { ...t, updatedAt: 5 } : t))))
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    expect(cached(CARDS.id).status).toBe("done")
+    expect(live()).not.toContain(CARDS.id)
+    await sse({ ...CARDS, status: "pr_ready", updatedAt: 10 })
+    expect(live()).not.toContain(CARDS.id)
+
+    // Messaged after the close, it's back at work: that's news, and its card is back.
+    await sse({ ...CARDS, status: "queued", updatedAt: 20 })
+    expect(cached(CARDS.id).status).toBe("queued")
+    expect(live()).toContain(CARDS.id)
+  })
+
+  it("brings the card back with a toast when the close fails", async () => {
+    renderLive()
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-check"]')!)
+    expect(live()).not.toContain(CARDS.id)
+    await wait(5000)
+    expect(posts).toEqual([`/api/tasks/${CARDS.id}/close`])
+    await act(async () => {
+      answerClose(json({ error: "The box is gone" }, 500))
+      await vi.advanceTimersByTimeAsync(10)
+    })
+    expect(cached(CARDS.id).status).toBe("pr_ready")
+    expect(live()).toContain(CARDS.id)
+    expect(currentToasts().map((t) => t.title)).toContain("Couldn't close the task")
+  })
+
+  it("Undo puts the task back as it was and sends nothing", async () => {
+    renderLive()
+    click(card(CARDS.id).querySelector('[data-testid="chat-card-check"]')!)
+    expect(cached(CARDS.id).status).toBe("done")
+    act(() => currentToasts().at(-1)!.action!.onClick())
+    expect(cached(CARDS.id).status).toBe("pr_ready")
+    expect(live()).toContain(CARDS.id)
+    await wait(6000)
+    expect(posts).toEqual([])
   })
 })
