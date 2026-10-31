@@ -11,8 +11,7 @@ import { FileLink, PREVIEW_GROUP } from "./FileLink"
 import { TaskTile } from "./TaskIcon"
 import { clickImage, imageTarget, openLightbox } from "../lib/lightbox"
 import { openPreview } from "../lib/preview"
-import { api } from "../lib/api"
-import { keys } from "../lib/queries"
+import { fetchTasks, keys } from "../lib/queries"
 import { copyText } from "../lib/clipboard"
 import { toast } from "../lib/toast"
 import { prLabel, prStateOf, prTooltip, type BadgeStatus, type PrTask } from "../lib/prState"
@@ -558,7 +557,7 @@ export function NewTabLink({ onClick, mark = "glued", title, href, children, ...
 function usePrStateFor(url: string): PrState | "" {
   // A string, so the link re-renders only when that PR's state changes, not on every task update.
   const select = useCallback((tasks: Task[]) => prStateOfUrl(tasks, url) ?? "", [url])
-  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? ""
+  return useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select }).data ?? ""
 }
 
 /** PR_STYLE's link colors, `!` so they beat `.prose-chat a` (unlayered) and a caller's own color. */

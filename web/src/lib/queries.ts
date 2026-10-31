@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef } from "react"
-import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query"
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient, type QueryFunctionContext } from "@tanstack/react-query"
 import { ApiError, api, clientId } from "./api"
 import { toast } from "./toast"
 import { deferClose, undoClose, UNDO_MS } from "./inbox"
+import { closeFailed, closeLanded, closeSent, keepClosed } from "./closedTasks"
 import { withCleanup } from "./diskCleanup"
 import { announceResize, withResize } from "./boxResize"
 import type { ProjectSnapshotState } from "./projectSnapshot"
@@ -160,7 +161,9 @@ type Quiet = { notifyOnChangeProps?: ["status"] }
 export const QUIET: Quiet = { notifyOnChangeProps: ["status"] }
 
 export const useProjects = (o?: Quiet) => useQuery({ queryKey: keys.projects, queryFn: () => api<Project[]>("/api/projects"), notifyOnChangeProps: o?.notifyOnChangeProps })
-export const useTasks = (o?: Quiet) => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), notifyOnChangeProps: o?.notifyOnChangeProps })
+/** GET /api/tasks, with the tasks this browser just closed kept done against a fetch older than the close (lib/closedTasks.ts). */
+export const fetchTasks = ({ client }: QueryFunctionContext) => api<Task[]>("/api/tasks").then((list) => keepClosed(list, client.getQueryData<Task[]>(keys.tasks)))
+export const useTasks = (o?: Quiet) => useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, notifyOnChangeProps: o?.notifyOnChangeProps })
 /** The project's task whose turn is running (starting or working), as id and title. Re-renders only when that changes. */
 export function useRunningTask(projectId: string) {
   const select = useCallback(
@@ -170,22 +173,22 @@ export function useRunningTask(projectId: string) {
     },
     [projectId],
   )
-  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
+  return useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select }).data ?? null
 }
 
 /** One task from the shared list. Re-renders only when that task changes, not on every task update. */
 export function useTask(id: string) {
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id) ?? null, [id])
-  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
+  return useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select })
 }
 /** These tasks (a chat card's), in this order. Re-renders only when one of them changes. */
 export function useTasksIn(ids: readonly string[]) {
   const select = useCallback((list: Task[]) => ids.flatMap((id) => list.find((t) => t.id === id) ?? []), [ids])
-  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select })
+  return useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select })
 }
 const selectBadgeStatuses = (list: Task[]): Record<string, BadgeStatus> => Object.fromEntries(list.map((t) => [t.id, badgeStatus(t)]))
 /** Every task's status as its badge shows it (Merged once its PR merged), by id. Re-renders only when one changes. */
-export const useBadgeStatuses = () => useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select: selectBadgeStatuses })
+export const useBadgeStatuses = () => useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select: selectBadgeStatuses })
 /**
  * A task's queued messages (the task page's Queued rows). Refetched when the task's queueRev changes, which only
  * this hook's component reads, so live task updates don't re-render the transcript.
@@ -193,7 +196,7 @@ export const useBadgeStatuses = () => useQuery({ queryKey: keys.tasks, queryFn: 
 export function useTaskQueue(id: string) {
   const qc = useQueryClient()
   const select = useCallback((list: Task[]) => list.find((t) => t.id === id)?.queueRev ?? "", [id])
-  const rev = useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? ""
+  const rev = useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select }).data ?? ""
   const queue = useQuery({ queryKey: keys.taskQueue(id), queryFn: () => api<QueuedMessage[]>(`/api/tasks/${id}/queue`) })
   const seen = useRef<string | null>(null)
   useEffect(() => {
@@ -256,7 +259,7 @@ export function useSendNowState(id: string) {
     const running = t.status === "working" || t.status === "starting"
     return { running, compacting: t.compacting, mergingPr: running && t.mergeRequest?.deliveredAt ? t.mergeRequest.prNumber : null }
   }, [id])
-  return useQuery({ queryKey: keys.tasks, queryFn: () => api<Task[]>("/api/tasks"), select }).data ?? null
+  return useQuery({ queryKey: keys.tasks, queryFn: fetchTasks, select }).data ?? null
 }
 
 /** "Send now": stop the task's current turn (like Stop) so the next one delivers every queued message, in order. */
@@ -1073,21 +1076,37 @@ export function useForwardToCaptain(taskId: string) {
   })
 }
 
+/** Put a task back as it was before an optimistic change, and ask the server, which may have moved on since. */
+function restoreTask(qc: QueryClient, taskId: string, before: Task | undefined) {
+  if (before) qc.setQueryData<Task[]>(keys.tasks, (list) => list?.map((t) => (t.id === taskId ? before : t)))
+  void qc.invalidateQueries({ queryKey: keys.tasks })
+}
+
+/**
+ * Stop, Mark done (close) and Retry: the task changes in the cache at once. A failure puts that task back as it was
+ * (and asks the server, which may have moved on) with a toast. A close also keeps the task done against late SSE
+ * updates and fetches older than it (lib/closedTasks.ts).
+ */
 function useTaskAction(action: "stop" | "close" | "retry", optimistic: (t: Task) => Partial<Task>, label: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (taskId: string) => api<Task>(`/api/tasks/${taskId}/${action}`, { method: "POST" }),
-    onMutate: async (taskId) => {
-      const undo = snapshot<Task[]>(qc, keys.tasks)
-      const task = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.id === taskId)
-      if (task) patchTask(qc, taskId, optimistic(task))
-      return { undo }
+    onMutate: (taskId) => {
+      const before = qc.getQueryData<Task[]>(keys.tasks)?.find((t) => t.id === taskId)
+      if (action === "close") closeSent(taskId, before)
+      if (before) patchTask(qc, taskId, optimistic(before))
+      return { before }
     },
-    onError: (err, _v, ctx) => {
-      ctx?.undo()
+    onError: (err, taskId, ctx) => {
+      // A Mark done from a card was done in the cache since its click: that copy is the one to go back to.
+      const before = (action === "close" ? closeFailed(taskId) : undefined) ?? ctx?.before
+      restoreTask(qc, taskId, before)
       fail(`Couldn't ${label}`)(err)
     },
-    onSuccess: (task) => qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task)),
+    onSuccess: (task) => {
+      if (action === "close") closeLanded(task)
+      qc.setQueryData<Task[]>(keys.tasks, (list) => upsert(list, task))
+    },
   })
 }
 
@@ -1130,14 +1149,20 @@ export const useRetryTask = () => useTaskAction("retry", () => ({ status: "queue
 
 /**
  * "Mark done" for one task or several (the Cards view's selection, "Mark all idle as done"): the same close as the task
- * view's and close_task's, each sent after a short undo window. One toast, whose Undo takes them all back.
+ * view's and close_task's, each sent after a short undo window. The tasks are done in the cache from the click, so every
+ * list, count and badge drops them at once, not when the close goes out. One toast, whose Undo takes them all back.
  */
 export function useMarkTasksDone() {
+  const qc = useQueryClient()
   const { mutateAsync } = useCloseTask()
   return useCallback(
     (tasks: readonly Pick<Task, "id" | "title">[]) => {
-      const marked = tasks.filter((t) => deferClose(t.id, () => mutateAsync(t.id)))
+      const marked = tasks.filter((t) => deferClose(t.id, () => mutateAsync(t.id), UNDO_MS, () => restoreTask(qc, t.id, closeFailed(t.id))))
       if (!marked.length) return
+      for (const t of marked) {
+        closeSent(t.id, qc.getQueryData<Task[]>(keys.tasks)?.find((c) => c.id === t.id))
+        patchTask(qc, t.id, { status: "done", question: null })
+      }
       const undo = () => marked.forEach((t) => undoClose(t.id))
       const body = marked.length === 1 ? marked[0]!.title : "Messaging one picks it back up."
       toast.info(marked.length === 1 ? "Marked done" : `Marked ${marked.length} tasks done`, body, { action: { label: "Undo", onClick: undo }, duration: UNDO_MS })
